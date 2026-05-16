@@ -65,6 +65,7 @@
     color:var(--text-dim);font-weight:600;cursor:pointer;font-family:inherit;font-size:13px;text-align:center;transition:all .15s;}
   .seg .seg-btn:hover{color:var(--text);border-color:var(--accent)}
   .seg .seg-btn.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);}
+  .seg .seg-btn.disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
   .autocomplete-box{position:relative}
   .ac-results{position:absolute;top:100%;left:0;right:0;background:var(--bg-elev);border:1px solid var(--border);
     border-radius:10px;margin-top:4px;max-height:240px;overflow-y:auto;z-index:50;display:none;box-shadow:0 10px 40px rgba(0,0,0,.4);}
@@ -88,7 +89,7 @@
   .reparto-item .ri-value{font-size:22px;font-weight:700;font-family:var(--mono);}
   .reparto-item.centro .ri-value{color:var(--accent)}
   .reparto-item.prof .ri-value{color:var(--green)}
-  .reparto-item.moplex .ri-value{color:var(--purple)}
+  .reparto-item.moplex .ri-value{color:var(--red)}
   .reparto-note{margin-top:12px;padding-top:12px;border-top:1px solid var(--border-soft);font-size:11px;color:var(--text-mute);font-family:var(--mono);}
   .info-line{font-size:11px;color:var(--text-mute);margin-top:6px;font-family:var(--mono);}
   .info-line b{color:var(--text-dim)}
@@ -268,6 +269,68 @@ const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const COBRADORES = ['Centro/Recepción','Bruno','Male','Vero'];
 
+// Prácticas de consultorio de Especialidades / BiOLAB: SIEMPRE Particular, no se cobra por OS.
+const PRACTICAS_SOLO_PARTICULAR = [
+  'OSTEO',
+  'MASAJES_CC','MASAJES_EYC','MASAJES_PAK','MASAJES_R',
+  'TERAPIA_MANUAL',
+  'DRENAJE',     // DLM
+  'PUNC_SECA',
+  'MOPLEX',
+  'SARKMED_BL',  // Sarkmed BiOLAB
+  'SARKMED_PP',  // Sarkmed Piso Pélvico
+  'EVAL',        // Evaluaciones (parte de BiOLAB)
+];
+
+// Mapeo práctica → profesionales que la hacen (regla de negocio PuntoBiO)
+// Si la práctica tiene 1 prof → se auto-selecciona. Si tiene varios → dropdown filtrado.
+const PRACTICA_PROFS = {
+  'OSTEO': ['Jime'],
+  'FISIO': ['Bruno','Jime','Male'],
+  'FISIO_PQ': ['Bruno','Jime','Male'],
+  'EVAL': ['Bruno','Lu','Male'],
+  'MOPLEX': ['Bruno','Lu','Male'],
+  'SARKMED_BL': ['Bruno','Lu','Male'],
+  'SARKMED_PP': ['Jime'],
+  'TERAPIA_MANUAL': ['Lu'],
+  'MASAJES_CC': ['Vero'],
+  'MASAJES_EYC': ['Vero'],
+  'MASAJES_PAK': ['Vero'],
+  'MASAJES_R': ['Vero'],
+  'SUELO_PEL': ['Jime'],
+  'PUNC_SECA': ['Bruno'],
+  'DRENAJE': ['Male'],
+  // RPG y otros: si no está acá, se muestran todos
+};
+
+// Nombres lindos para mostrar en el select de prácticas
+const PRACTICA_LABELS = {
+  'FISIO': 'Fisio',
+  'FISIO_PQ': 'Fisio Postquirúrgico',
+  'FISIO_SC': 'Fisio Sin Coseguro',
+  'FISIO_PC': 'Fisio Práctica $0',
+  'FISIO_DESC': 'Fisio con Descuento (Apross)',
+  'EVAL': 'Evaluación',
+  'SARKMED_BL': 'Sarkmed BiOLAB',
+  'SARKMED_PP': 'Sarkmed Piso Pélvico',
+  'MOPLEX': 'Moplex',
+  'MASAJES_EYC': 'Masajes Espalda y Cuello',
+  'MASAJES_R': 'Masajes Regalo',
+  'MASAJES_CERO': 'Masajes (sin cobro)',
+  'MASAJES_CC': 'Masajes Cuerpo Completo',
+  'MASAJES_PAK': 'Masajes Pack (4 sesiones)',
+  'OSTEO': 'Osteopatía',
+  'OSTEO_C': 'Osteopatía Cortesía',
+  'SUELO_PEL': 'Suelo Pélvico',
+  'RPG': 'RPG',
+  'DRENAJE': 'Drenaje',
+  'PUNC_SECA': 'Punción Seca',
+  'TERAPIA_MANUAL': 'Terapia Manual',
+};
+function labelPractica(code){
+  return PRACTICA_LABELS[code] || code;
+}
+
 const state = {
   personas: [], splits: [], precios: [],
   obrasSociales: [], practicas: [], profesionales: [],
@@ -311,14 +374,27 @@ async function boot(){
     if(preciosResp.error) throw preciosResp.error;
     state.precios = preciosResp.data || [];
 
-    state.obrasSociales = [...new Set(state.precios.filter(p=>p.modalidad==='Obra Social').map(p=>p.obra_social))].sort();
-    state.practicas = [...new Set(state.precios.map(p=>p.practica_codigo))].sort();
+    state.obrasSociales = [...new Set(
+      state.precios
+        .filter(p => p.modalidad && p.modalidad !== 'Particular' && p.obra_social)
+        .map(p => p.obra_social)
+    )].sort();
+    console.log('[Caja] modalidades en precios:', [...new Set(state.precios.map(p => p.modalidad))]);
+    console.log('[Caja] obras sociales detectadas:', state.obrasSociales);
 
-    const profSet = new Set(state.splits.map(s=>s.profesional).filter(Boolean));
-    profSet.add('Lu'); profSet.add('Jime'); profSet.add('Bruno');
-    profSet.add('Male'); profSet.add('Vero'); profSet.add('Santi');
-    profSet.add('Lean'); profSet.add('Lauti');
-    state.profesionales = [...profSet].sort();
+    // Lista corta de prácticas visibles. Las variantes SC/PC/DESC se manejan con descuento libre.
+    // FISIO_PQ se incluye porque tiene precio distinto en el tarifario.
+    // RPG fue reemplazado por TERAPIA_MANUAL.
+    const PRACTICAS_VISIBLES = [
+      'DRENAJE','EVAL','FISIO','FISIO_PQ',
+      'MASAJES_CC','MASAJES_EYC','MASAJES_PAK','MASAJES_R',
+      'MOPLEX','OSTEO','PUNC_SECA','SARKMED_BL','SARKMED_PP','SUELO_PEL',
+      'TERAPIA_MANUAL'
+    ];
+    state.practicas = [...new Set(state.precios.map(p => p.practica_codigo))]
+      .filter(c => PRACTICAS_VISIBLES.includes(c))
+      .sort((a,b) => labelPractica(a).localeCompare(labelPractica(b)));
+    state.profesionales = ['Bruno','Jime','Lu','Male','Vero'];
 
     $('#metaPacientes').textContent = `${state.personas.length} pacientes`;
     $('#metaPracticas').textContent = `${state.practicas.length} prácticas`;
@@ -346,11 +422,99 @@ function fillObrasSociales(){
 function fillPracticas(){
   const sel = $('#practicaSelect');
   while(sel.options.length>1) sel.remove(1);
-  state.practicas.forEach(pr=>{const o=document.createElement('option');o.value=pr;o.textContent=pr;sel.appendChild(o);});
+  state.practicas.forEach(pr=>{
+    const o=document.createElement('option');
+    o.value=pr;
+    o.textContent=labelPractica(pr);
+    sel.appendChild(o);
+  });
 }
 function fillQuienCobro(){
   const sel = $('#quienCobroSelect'); sel.innerHTML = '';
   COBRADORES.forEach(c=>{const o=document.createElement('option');o.value=c;o.textContent=c;sel.appendChild(o);});
+}
+
+// Si la práctica tiene asignación de profesionales, filtra el dropdown.
+// Si la asignación es de 1 sólo prof, lo auto-selecciona.
+function actualizarProfesionalesParaPractica(){
+  const sel = $('#profesionalSelect');
+  const code = state.practica;
+  const allowed = PRACTICA_PROFS[code]; // puede ser undefined → mostrar todos
+
+  // Si no hay regla, mostrar todos los profesionales
+  const list = allowed && allowed.length > 0 ? allowed : state.profesionales;
+
+  // Reconstruir options
+  sel.innerHTML = '';
+  const optEmpty = document.createElement('option');
+  optEmpty.value = ''; optEmpty.textContent = '— Elegí —';
+  sel.appendChild(optEmpty);
+  list.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p; o.textContent = p;
+    sel.appendChild(o);
+  });
+
+  // Auto-seleccionar si es uno solo
+  if(allowed && allowed.length === 1){
+    sel.value = allowed[0];
+    state.profesional = allowed[0];
+  } else if(!list.includes(state.profesional)){
+    // si el profesional actual ya no está en la lista filtrada, limpiamos
+    sel.value = '';
+    state.profesional = '';
+  }
+}
+
+// Si el paciente tiene obra_social en la BD, auto-setea modalidad + OS.
+function autoSetOSdePaciente(){
+  if(!state.paciente) return;
+  // Si la práctica actual es "solo Particular", no cambiar nada.
+  if(state.practica && PRACTICAS_SOLO_PARTICULAR.includes(state.practica)) return;
+  const os = state.paciente.obra_social;
+  if(os && state.obrasSociales.includes(os)){
+    // Cambiar a modalidad OS
+    state.modalidad = 'Obra Social';
+    state.obraSocial = os;
+    [...$('#modalidadSeg').children].forEach(b => b.classList.toggle('active', b.dataset.modalidad === 'Obra Social'));
+    $('#osBlock').style.display = '';
+    $('#osSelect').value = os;
+  } else {
+    // Particular
+    state.modalidad = 'Particular';
+    state.obraSocial = '';
+    [...$('#modalidadSeg').children].forEach(b => b.classList.toggle('active', b.dataset.modalidad === 'Particular'));
+    $('#osBlock').style.display = 'none';
+    $('#osSelect').value = '';
+  }
+  recalcular();
+}
+
+// Si la práctica es de "consultorio especialidades", se fuerza Particular y se deshabilita el toggle de OS.
+function actualizarModalidadParaPractica(){
+  const segOS = [...$('#modalidadSeg').children].find(b => b.dataset.modalidad === 'Obra Social');
+  const segPart = [...$('#modalidadSeg').children].find(b => b.dataset.modalidad === 'Particular');
+  if(!segOS || !segPart) return;
+
+  const esSoloParticular = state.practica && PRACTICAS_SOLO_PARTICULAR.includes(state.practica);
+
+  if(esSoloParticular){
+    // Forzar Particular
+    state.modalidad = 'Particular';
+    state.obraSocial = '';
+    segPart.classList.add('active');
+    segOS.classList.remove('active');
+    segOS.classList.add('disabled');
+    $('#osBlock').style.display = 'none';
+    $('#osSelect').value = '';
+  } else {
+    // Habilitar Obra Social
+    segOS.classList.remove('disabled');
+    // Si el paciente tiene OS asociada y aún no estaba seteada, auto-set
+    if(state.paciente && state.paciente.obra_social && state.modalidad !== 'Obra Social'){
+      autoSetOSdePaciente();
+    }
+  }
 }
 
 function setupListeners(){
@@ -378,8 +542,9 @@ function setupListeners(){
           if(persona){
             state.paciente = persona;
             pInput.value = `${(persona.nombre||'').toUpperCase()}`;
-            $('#pacienteInfo').textContent = `ID: ${persona.id}` + (persona.email ? ` · ${persona.email}` : '');
+            $('#pacienteInfo').textContent = `ID: ${persona.id}` + (persona.email ? ` · ${persona.email}` : '') + (persona.obra_social ? ` · OS: ${persona.obra_social}` : '');
             $('#pacienteInfo').style.display = '';
+            autoSetOSdePaciente();
           }
           pResults.classList.remove('visible');
         });
@@ -392,6 +557,7 @@ function setupListeners(){
   $('#profesionalSelect').addEventListener('change', e => { state.profesional = e.target.value; recalcular(); });
   $('#modalidadSeg').addEventListener('click', e => {
     const btn = e.target.closest('.seg-btn'); if(!btn) return;
+    if(btn.classList.contains('disabled')) return; // ignorar deshabilitado
     state.modalidad = btn.dataset.modalidad;
     [...$('#modalidadSeg').children].forEach(b => b.classList.toggle('active', b === btn));
     $('#osBlock').style.display = state.modalidad === 'Obra Social' ? '' : 'none';
@@ -399,7 +565,12 @@ function setupListeners(){
     recalcular();
   });
   $('#osSelect').addEventListener('change', e => { state.obraSocial = e.target.value; recalcular(); });
-  $('#practicaSelect').addEventListener('change', e => { state.practica = e.target.value; recalcular(); });
+  $('#practicaSelect').addEventListener('change', e => {
+    state.practica = e.target.value;
+    actualizarProfesionalesParaPractica();
+    actualizarModalidadParaPractica();
+    recalcular();
+  });
   $('#tipoCobroSelect').addEventListener('change', e => { state.tipoCobro = e.target.value; recalcular(); });
   $('#descuentoInput').addEventListener('input', e => { state.descuento = Number(e.target.value)||0; recalcular(); });
   $('#descPctBtn').addEventListener('click', () => { state.descuentoTipo='pct'; $('#descPctBtn').classList.add('active'); $('#descFijoBtn').classList.remove('active'); recalcular(); });
@@ -424,7 +595,15 @@ function buscarPrecioLista(){
   if(state.modalidad === 'Particular'){
     row = state.precios.find(p => p.modalidad === 'Particular' && p.practica_codigo === state.practica);
   } else if(state.modalidad === 'Obra Social' && state.obraSocial){
-    row = state.precios.find(p => p.modalidad === 'Obra Social' && p.obra_social === state.obraSocial && p.practica_codigo === state.practica);
+    // Tolerante: cualquier modalidad distinta a Particular sirve si matchea OS + práctica
+    row = state.precios.find(p =>
+      p.modalidad && p.modalidad !== 'Particular' &&
+      p.obra_social === state.obraSocial &&
+      p.practica_codigo === state.practica
+    );
+  }
+  if(!row){
+    console.log('[Caja] precio NO encontrado para:', state.modalidad, state.obraSocial, state.practica);
   }
   return row ? Number(row.valor) : 0;
 }
