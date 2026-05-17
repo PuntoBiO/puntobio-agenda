@@ -856,27 +856,38 @@
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Creando...';
 
+    // Payload base con campos mínimos que deberían existir
     const payload = {
       persona_id: state.pacienteSel.id,
-      practica: practicaTexto,
       practica_codigo: practicaCodigo,
       modalidad: modalidad,
       obra_social: obraSocial,
-      profesional: profesional,
-      valor_sesion: valor,
-      total_pagar: total,
       total_sesiones: sesiones,
       fecha_alta: fechaAlta,
-      observaciones: obs,
-      cargado_por: $('cargadoPor').value,
     };
 
+    // Campos opcionales: solo mando si tienen valor
+    if (!esVariable && profesional) payload.profesional = profesional;
+    if (valor > 0) payload.valor_sesion = valor;
+    if (obs) payload.observaciones = obs;
+    // Nota: total_pagar y saldo_pendiente son GENERATED en la tabla, NO enviar
+    // cargado_por puede no existir, lo agrego en un try
+
     try {
-      const { data, error } = await sb
+      // Primer intento con payload básico
+      let { data, error } = await sb
         .from('tratamientos')
         .insert(payload)
         .select()
         .single();
+
+      // Si el campo 'valor_sesion' no existe pero el problema fue ese, probar con 'valor'
+      if (error && error.message && /valor_sesion/i.test(error.message)) {
+        console.warn('Reintentando con campo "valor" en lugar de "valor_sesion"');
+        delete payload.valor_sesion;
+        payload.valor = valor;
+        ({ data, error } = await sb.from('tratamientos').insert(payload).select().single());
+      }
 
       if (error) throw error;
 
@@ -888,7 +899,6 @@
       if (postBox) {
         postMsg.innerHTML = `✅ Tratamiento <strong>${data.codigo || '#'+data.id}</strong> creado · ${state.pacienteSel.nombre} · ${practicaTexto} · ${sesiones} sesiones · ${fmt(total)}`;
         postBox.hidden = false;
-        // Guardar el id del tratamiento creado por si después se conecta agenda
         postBox.dataset.tratamientoId = data.id;
       }
 
@@ -902,7 +912,8 @@
       actualizarPreview();
     } catch (err) {
       console.error('Error al crear tratamiento:', err);
-      toast('Error al guardar: ' + err.message, 'err', 6000);
+      console.error('Payload que intenté insertar:', payload);
+      toast('Error al guardar: ' + err.message, 'err', 8000);
     } finally {
       btn.disabled = false;
       btn.textContent = 'Crear tratamiento';
