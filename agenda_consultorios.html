@@ -432,14 +432,46 @@ function disponiblesEn(diaNumero, hora) {
 }
 
 // Si hay un filtro de práctica activo, devuelve los profesionales que pueden darla en ese slot
-// "__SOBRE_FISIO__" = FISIO pero solo si requiere sobreturno (no implementado en el filtro de UI todavía, queda igual a FISIO)
-function profesionalesParaPracticaEn(diaNumero, hora, practica) {
+// considerando también si ya están ocupados (regla INDIVIDUAL bloquea cualquier otro turno)
+function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
   if (!practica) return disponiblesEn(diaNumero, hora).map(d => d.profesional);
   const real = practica === '__SOBRE_FISIO__' ? 'FISIO' : practica;
+  const regla = REGLAS_PRACTICA[real];
+  if (!regla) return [];
+
+  const slotTurnos = fecha ? turnos.filter(t => t.fecha===fecha && parseInt(t.hora_inicio.slice(0,2),10)===hora && t.estado!=='CANCELADO') : [];
+
+  // Si la práctica nueva es INDIVIDUAL y ya hay alguien (compartiendo box) → no se puede (1 paciente por box)
+  // Si la práctica nueva es OSTEOPATIA o MASAJES y ya hay osteo/masaje en ese slot → no se puede (1 espacio único)
+  if (fecha) {
+    if (real==='OSTEOPATIA' || real==='MASAJES') {
+      const ocupadoEspec = slotTurnos.some(t => t.practica_codigo==='OSTEOPATIA' || t.practica_codigo==='MASAJES');
+      if (ocupadoEspec) return [];
+    }
+    // Para prácticas COMPARTIDAS, chequear cupo
+    if (regla.modalidad === 'COMPARTIDO') {
+      const sameCount = slotTurnos.filter(t => t.practica_codigo===real && t.estado!=='SOBRETURNO').length;
+      if (sameCount >= regla.cap_normal && !regla.permite_sobreturno) return [];
+      if (sameCount >= (regla.cap_max||regla.cap_normal)) return [];
+    }
+  }
+
   const out = [];
   for (const prof of PROFESIONALES) {
     const practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora] || [];
-    if (practicas.includes(real)) out.push(prof);
+    if (!practicas.includes(real)) continue;
+
+    if (fecha) {
+      // Chequear si el profesional ya tiene un turno en esta franja
+      const turnosDelProf = slotTurnos.filter(t => t.profesional === prof);
+      if (turnosDelProf.length > 0) {
+        const algunoIndividual = turnosDelProf.some(t => REGLAS_PRACTICA[t.practica_codigo]?.modalidad === 'INDIVIDUAL');
+        // Si el prof ya tiene un turno INDIVIDUAL, o la práctica nueva es INDIVIDUAL → no se puede
+        if (algunoIndividual || regla.modalidad === 'INDIVIDUAL') continue;
+      }
+    }
+
+    out.push(prof);
   }
   return out;
 }
@@ -612,10 +644,10 @@ function renderWeek(container) {
       const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
       const turnosHTML = slotTurnos.map(renderTurno).join('');
       const selCls = isSlotSelected(iso, h) ? 'is-multi-sel' : '';
-      // Si hay práctica filtrada, atenuar celdas donde nadie atiende esa práctica
+      // Si hay práctica filtrada, atenuar celdas donde nadie atiende esa práctica (considerando turnos existentes)
       let noDispCls = '';
       if (practicaFiltro) {
-        const profsCapaces = profesionalesParaPracticaEn(diaNumero, h, practicaFiltro);
+        const profsCapaces = profesionalesParaPracticaEn(diaNumero, h, practicaFiltro, iso);
         if (profsCapaces.length === 0) noDispCls = 'is-no-disp';
       }
       cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
@@ -666,7 +698,7 @@ function onCeldaClick(fecha, hora) {
   const diaNumero = f.getDay()===0 ? 7 : f.getDay();
   // Si hay filtro de práctica, chequear que la celda tenga disponibilidad
   if (practicaFiltro) {
-    const profs = profesionalesParaPracticaEn(diaNumero, hora, practicaFiltro);
+    const profs = profesionalesParaPracticaEn(diaNumero, hora, practicaFiltro, fecha);
     if (profs.length === 0) return; // celda atenuada, no permite
   }
   if (modoMulti) {
@@ -695,7 +727,7 @@ function abrirModalConSlots(slots) {
   slotsForm = slots.map(s => {
     let dispProfs;
     if (practicaFiltro) {
-      dispProfs = profesionalesParaPracticaEn(s.diaNumero, s.hora, practicaFiltro);
+      dispProfs = profesionalesParaPracticaEn(s.diaNumero, s.hora, practicaFiltro, s.fecha);
     } else {
       dispProfs = disponiblesEn(s.diaNumero, s.hora).map(d => d.profesional);
     }
@@ -1110,7 +1142,6 @@ function validarUnSlot(slot, datosForm) {
       profesional,
       practica_codigo: practica,
       tratamiento_id,
-      duracion_min: 60,
       estado: requiereSobre ? 'SOBRETURNO' : 'PENDIENTE',
       observaciones,
       creado_por: 'agenda_web'
