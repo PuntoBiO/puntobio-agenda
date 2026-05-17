@@ -339,8 +339,9 @@ async function loadPersonas() {
 }
 
 async function loadSesiones(fecha) {
-  // SELECT * para tolerar cualquier set de columnas
-  const { data, error } = await supa.from('sesiones').select('*').eq('fecha', fecha).order('hora_inicio', { ascending: true });
+  // SELECT * para tolerar cualquier set de columnas. NO usamos .order() para no
+  // referenciar columnas que pueden no existir; ordenamos del lado del cliente.
+  const { data, error } = await supa.from('sesiones').select('*').eq('fecha', fecha);
   if (error) throw error;
   sesiones = data || [];
 
@@ -352,13 +353,18 @@ async function loadSesiones(fecha) {
     console.log('[sesiones] sin registros para', fecha);
   }
 
-  // Cargar tratamientos referenciados (para codigo_id, total_sesiones, saldo)
+  // Cargar tratamientos referenciados (para codigo_id, persona_id, practica_codigo, modalidad, obra_social, total_sesiones, saldo)
   const tratIds = [...new Set(sesiones.map(s => s.tratamiento_id).filter(Boolean))];
   tratamientosMap.clear();
   if (tratIds.length > 0) {
     const { data: tdata, error: terr } = await supa.from('tratamientos').select('*').in('id', tratIds);
-    if (!terr && tdata) tdata.forEach(t => tratamientosMap.set(t.id, t));
-    else if (terr) console.warn('Error cargando tratamientos:', terr.message);
+    if (!terr && tdata) {
+      tdata.forEach(t => tratamientosMap.set(t.id, t));
+      if (tdata.length > 0) {
+        console.log('[tratamientos] columnas:', Object.keys(tdata[0]));
+        console.log('[tratamientos] primera fila:', tdata[0]);
+      }
+    } else if (terr) console.warn('Error cargando tratamientos:', terr.message);
   }
 }
 
@@ -383,11 +389,11 @@ function render() {
   const profFiltro = document.getElementById('filterProfesional').value;
   let filtered = sesiones.slice();
   if (profFiltro) filtered = filtered.filter(s => s.profesional === profFiltro);
-  if (practicaFiltro) filtered = filtered.filter(s => chipMatch(practicaFiltro, s.practica_codigo));
-  if (modalidadFiltro) filtered = filtered.filter(s => matchModalidad(s.modalidad, modalidadFiltro));
+  if (practicaFiltro) filtered = filtered.filter(s => chipMatch(practicaFiltro, getPracticaCodigo(s)));
+  if (modalidadFiltro) filtered = filtered.filter(s => matchModalidad(getModalidad(s), modalidadFiltro));
   if (pacienteSearch) {
     filtered = filtered.filter(s => {
-      const p = personasMap.get(s.persona_id);
+      const p = personasMap.get(getPersonaId(s));
       if (!p) return false;
       return (p.nombre || '').toLowerCase().includes(pacienteSearch) || String(p.dni || '').includes(pacienteSearch);
     });
@@ -431,37 +437,40 @@ function render() {
   html += `<th class="numeric ${sortCls('monto_profesional')}" data-sort="monto_profesional">$Profesional <span class="sort-ind">${sortInd('monto_profesional')}</span></th>`;
   html += `</tr></thead><tbody>`;
 
-  let totC = 0, totP = 0;
+  let totC = 0, totP = 0, totM = 0;
   const saldosVistos = new Map(); // dedup saldo por tratamiento_id
 
   filtered.forEach(s => {
-    const persona = personasMap.get(s.persona_id);
+    const personaId = getPersonaId(s);
+    const persona = personaId ? personasMap.get(personaId) : null;
     const trat = tratamientosMap.get(s.tratamiento_id);
-    const nombre = persona ? persona.nombre : `#${s.persona_id || '?'}`;
+    const nombre = persona ? persona.nombre : (personaId ? `#${personaId}` : '—');
     const dni = persona?.dni ? `DNI ${persona.dni}` : '';
-    const codigoTto = trat?.codigo_id || (s.tratamiento_id ? `#${s.tratamiento_id}` : '—');
-    const practCls = practicaColorCls(s.practica_codigo);
-    const practLbl = practicaLabel(s.practica_codigo);
-    const modal = (s.modalidad || '').toString();
+    const codigoTto = getCodigoTto(s);
+    const practCode = getPracticaCodigo(s);
+    const practCls = practicaColorCls(practCode);
+    const practLbl = practicaLabel(practCode);
+    const modal = (getModalidad(s) || '').toString();
     const modalShort = modal === 'O.S' ? 'O.S' : (modal === 'Particular' ? 'Part' : (modal || '—'));
     const modalCls = modal === 'O.S' ? 'is-os' : (modal === 'Particular' ? 'is-particular' : '');
-    const osTxt = s.obra_social || (persona?.obra_social) || '';
+    const osTxt = getObraSocial(s) || (persona?.obra_social) || '';
     const nSes = s.numero_sesion ?? '—';
-    const totSes = trat?.total_sesiones;
+    const totSes = getTotalSesiones(s);
     const restantes = (totSes != null && s.numero_sesion != null) ? Math.max(0, totSes - s.numero_sesion) : '—';
-    const saldoRaw = s.saldo_pendiente ?? s.saldo_al_momento ?? trat?.saldo_pendiente ?? 0;
-    const saldo = Number(saldoRaw) || 0;
-    const pctC = s.pct_centro != null ? Number(s.pct_centro) : null;
-    const pctP = s.pct_profesional != null ? Number(s.pct_profesional) : null;
+    const saldo = Number(getSaldoPendiente(s)) || 0;
+    const pctC = getPctCentro(s);
+    const pctP = getPctProf(s);
     const mC = Number(s.monto_centro || 0);
     const mP = Number(s.monto_profesional || 0);
+    const mM = Number(s.monto_moplex || 0);
     totC += mC;
     totP += mP;
+    totM += mM;
 
     html += `<tr>`;
-    html += `<td class="col-id">${s.persona_id ?? '—'}</td>`;
+    html += `<td class="col-id">${personaId ?? '—'}</td>`;
     html += `<td class="col-codigo">${escapeHtml(codigoTto)}</td>`;
-    html += `<td class="col-hora">${fmtHora(s.hora_inicio)}</td>`;
+    html += `<td class="col-hora">${fmtHora(getHora(s))}</td>`;
     html += `<td class="col-paciente" title="${escapeHtml(nombre)}${dni ? ' · ' + dni : ''}">${escapeHtml(nombre)}${dni ? `<div class="col-modalidad-meta">${dni}</div>` : ''}</td>`;
     html += `<td><span class="col-practica ${practCls}">${escapeHtml(practLbl)}</span></td>`;
     html += `<td><span class="col-modalidad ${modalCls}">${escapeHtml(modalShort)}</span>${osTxt && modal === 'O.S' ? `<div class="col-modalidad-meta">${escapeHtml(osTxt)}</div>` : ''}</td>`;
@@ -472,12 +481,12 @@ function render() {
     html += `<td class="numeric col-pct">${pctC != null ? fmtPct(pctC) : '—'}</td>`;
     html += `<td class="numeric col-pct">${pctP != null ? fmtPct(pctP) : '—'}</td>`;
     html += `<td class="numeric col-monto centro">${fmtMoney(mC)}</td>`;
-    html += `<td class="numeric col-monto prof">${fmtMoney(mP)}</td>`;
+    html += `<td class="numeric col-monto prof">${fmtMoney(mP)}${mM > 0 ? `<div class="col-modalidad-meta" title="Moplex: ${fmtMoney(mM)}">+M ${fmtMoney(mM)}</div>` : ''}</td>`;
     html += `</tr>`;
   });
 
   html += `</tbody><tfoot><tr>
-    <td colspan="12" style="text-align:right;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;font-size:10px">Totales (${filtered.length} sesiones):</td>
+    <td colspan="12" style="text-align:right;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;font-size:10px">Totales (${filtered.length} sesiones)${totM > 0 ? ` · Moplex: ${fmtMoney(totM)}` : ''}:</td>
     <td class="numeric col-monto centro">${fmtMoney(totC)}</td>
     <td class="numeric col-monto prof">${fmtMoney(totP)}</td>
   </tr></tfoot></table></div>`;
@@ -498,22 +507,26 @@ function render() {
 function renderStats(set) {
   const totC = set.reduce((a, s) => a + (Number(s.monto_centro) || 0), 0);
   const totP = set.reduce((a, s) => a + (Number(s.monto_profesional) || 0), 0);
-  const totBruto = totC + totP;
+  const totM = set.reduce((a, s) => a + (Number(s.monto_moplex) || 0), 0);
+  const totBruto = totC + totP + totM;
   // Saldo: deduplicado por tratamiento_id (no sumamos el mismo saldo dos veces)
   const seen = new Set();
   let totSaldo = 0;
   set.forEach(s => {
     if (s.tratamiento_id && !seen.has(s.tratamiento_id)) {
       seen.add(s.tratamiento_id);
-      const trat = tratamientosMap.get(s.tratamiento_id);
-      const saldo = Number(s.saldo_pendiente ?? s.saldo_al_momento ?? trat?.saldo_pendiente ?? 0);
+      const saldo = Number(getSaldoPendiente(s));
       if (saldo > 0) totSaldo += saldo;
     }
   });
+  const moplexCard = totM > 0
+    ? `<div class="stat-card is-bruto"><div class="stat-label">$ Moplex</div><div class="stat-value money">${fmtMoney(totM)}</div></div>`
+    : '';
   const html = `
     <div class="stat-card is-total"><div class="stat-label">Total sesiones</div><div class="stat-value">${set.length}</div></div>
     <div class="stat-card is-centro"><div class="stat-label">$ Centro</div><div class="stat-value money">${fmtMoney(totC)}</div></div>
     <div class="stat-card is-prof"><div class="stat-label">$ Profesional</div><div class="stat-value money">${fmtMoney(totP)}</div></div>
+    ${moplexCard}
     <div class="stat-card is-bruto"><div class="stat-label">$ Bruto del día</div><div class="stat-value money">${fmtMoney(totBruto)}</div></div>
     <div class="stat-card is-saldo"><div class="stat-label">Saldo pendiente</div><div class="stat-value money">${fmtMoney(totSaldo)}</div><div class="stat-sub">(${seen.size} tratamientos)</div></div>
   `;
@@ -531,17 +544,30 @@ function matchModalidad(stored, filtro) {
 function compareBy(a, b, key) {
   let va, vb;
   switch (key) {
+    case 'hora_inicio':
+      va = getHora(a) || ''; vb = getHora(b) || '';
+      return String(va).localeCompare(String(vb), 'es', { numeric: true });
     case 'paciente':
-      va = personasMap.get(a.persona_id)?.nombre || ''; vb = personasMap.get(b.persona_id)?.nombre || '';
+      va = personasMap.get(getPersonaId(a))?.nombre || ''; vb = personasMap.get(getPersonaId(b))?.nombre || '';
       return String(va).localeCompare(String(vb), 'es');
     case 'codigo_id':
-      va = tratamientosMap.get(a.tratamiento_id)?.codigo_id || ''; vb = tratamientosMap.get(b.tratamiento_id)?.codigo_id || '';
+      va = getCodigoTto(a) || ''; vb = getCodigoTto(b) || '';
       return String(va).localeCompare(String(vb), 'es', { numeric: true });
+    case 'practica_codigo':
+      va = getPracticaCodigo(a) || ''; vb = getPracticaCodigo(b) || '';
+      return String(va).localeCompare(String(vb), 'es');
+    case 'modalidad':
+      va = getModalidad(a) || ''; vb = getModalidad(b) || '';
+      return String(va).localeCompare(String(vb), 'es');
+    case 'persona_id':
+      va = Number(getPersonaId(a)) || 0; vb = Number(getPersonaId(b)) || 0;
+      return va - vb;
+    case 'saldo_pendiente':
+      va = Number(getSaldoPendiente(a)) || 0; vb = Number(getSaldoPendiente(b)) || 0;
+      return va - vb;
     case 'numero_sesion':
     case 'monto_centro':
     case 'monto_profesional':
-    case 'saldo_pendiente':
-    case 'persona_id':
       va = Number(a[key]) || 0; vb = Number(b[key]) || 0;
       return va - vb;
     default:
@@ -570,6 +596,50 @@ function toast(msg, type) {
 }
 
 // === HELPERS ===
+// Acceso tolerante a la columna "hora" (puede llamarse distinto)
+function getHora(s) {
+  if (!s) return null;
+  return s.hora_inicio ?? s.hora ?? s.turno_hora ?? s.hora_turno ?? null;
+}
+// Datos derivados de tratamientos (sesiones NO tiene estos campos directamente)
+function getPersonaId(s) {
+  return s.persona_id ?? tratamientosMap.get(s.tratamiento_id)?.persona_id ?? null;
+}
+function getPracticaCodigo(s) {
+  return s.practica_codigo ?? tratamientosMap.get(s.tratamiento_id)?.practica_codigo ?? null;
+}
+function getModalidad(s) {
+  return s.modalidad ?? tratamientosMap.get(s.tratamiento_id)?.modalidad ?? null;
+}
+function getObraSocial(s) {
+  return s.obra_social ?? tratamientosMap.get(s.tratamiento_id)?.obra_social ?? null;
+}
+function getCodigoTto(s) {
+  return tratamientosMap.get(s.tratamiento_id)?.codigo_id ?? (s.tratamiento_id ? `#${s.tratamiento_id}` : '—');
+}
+function getTotalSesiones(s) {
+  return tratamientosMap.get(s.tratamiento_id)?.total_sesiones ?? null;
+}
+function getSaldoPendiente(s) {
+  return s.saldo_pendiente ?? s.saldo_al_momento ?? tratamientosMap.get(s.tratamiento_id)?.saldo_pendiente ?? 0;
+}
+// Si pct_* no vienen, los calculamos a partir de los montos
+function getPctCentro(s) {
+  if (s.pct_centro != null) return Number(s.pct_centro);
+  const mC = Number(s.monto_centro) || 0;
+  const mP = Number(s.monto_profesional) || 0;
+  const mM = Number(s.monto_moplex) || 0;
+  const total = mC + mP + mM;
+  return total > 0 ? mC / total : null;
+}
+function getPctProf(s) {
+  if (s.pct_profesional != null) return Number(s.pct_profesional);
+  const mC = Number(s.monto_centro) || 0;
+  const mP = Number(s.monto_profesional) || 0;
+  const mM = Number(s.monto_moplex) || 0;
+  const total = mC + mP + mM;
+  return total > 0 ? mP / total : null;
+}
 function toISODate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function pad(n) { return String(n).padStart(2, '0'); }
 function fmtHora(h) {
