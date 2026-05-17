@@ -152,7 +152,7 @@
 
     const [insR, pagR, tarR] = await Promise.all([
       supa.from('inscripciones_tf')
-        .select('id, persona_id, plan, actividad, descuento_libre, dia_vencimiento, estado')
+        .select('id, persona_id, plan, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso')
         .eq('estado', 'ACTIVO')
         .neq('plan', 'COD0BON'),
       supa.from('pagos_tf')
@@ -208,8 +208,24 @@
     const precio = tarifario[`${insc.plan}__${insc.actividad}`] || 0;
     const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
 
-    const deudaActual = calcularDeudaMes(insc.id, mesActual, montoMensual);
-    const deudaAnt = calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual);
+    // Fecha de inicio del cobro: reingreso si hay, sino alta
+    const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;
+    const fechaInicio = fechaInicioStr ? new Date(fechaInicioStr + 'T00:00:00') : null;
+
+    // Helper: si el alumno empezó DESPUÉS del último día del mes, no debe ese mes
+    function debeEseMes(mesStr) {
+      if (!fechaInicio) return true;
+      const [y, m] = mesStr.split('-').map(Number);
+      const ultDiaMes = new Date(y, m, 0); // último día del mes
+      return fechaInicio <= ultDiaMes;
+    }
+
+    const deudaActual = debeEseMes(mesActual)
+      ? calcularDeudaMes(insc.id, mesActual, montoMensual)
+      : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
+    const deudaAnt = debeEseMes(mesAnterior(mesActual))
+      ? calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual)
+      : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
 
     const hoy = new Date();
     const esMesEnCurso = mesActual === calcMesActual();
@@ -221,25 +237,23 @@
     const debeArrastre = deudaAnt.debe;
     const debeTotal = debeActual + debeArrastre;
 
-    // Calcular días desde el vencimiento MÁS ANTIGUO (la deuda más vieja)
+    // Calcular días vencido desde la fecha más antigua aplicable
     let diasVencido = 0;
     if (debeArrastre > 0) {
-      // El más antiguo es el del mes anterior
       const [y, m] = mesActual.split('-').map(Number);
       let mesAnt = m - 1, anioAnt = y;
       if (mesAnt === 0) { mesAnt = 12; anioAnt--; }
-      const vencDate = new Date(anioAnt, mesAnt - 1, Number(insc.dia_vencimiento || 1));
+      let vencDate = new Date(anioAnt, mesAnt - 1, Number(insc.dia_vencimiento || 1));
+      // Si el alumno empezó después del vencimiento del mes anterior, usar fecha_inicio
+      if (fechaInicio && fechaInicio > vencDate) vencDate = fechaInicio;
       diasVencido = Math.floor((hoy - vencDate) / (1000 * 60 * 60 * 24));
     } else if (debeActual > 0) {
       const [y, m] = mesActual.split('-').map(Number);
-      const vencDate = new Date(y, m - 1, Number(insc.dia_vencimiento || 1));
+      let vencDate = new Date(y, m - 1, Number(insc.dia_vencimiento || 1));
+      if (fechaInicio && fechaInicio > vencDate) vencDate = fechaInicio;
       diasVencido = Math.floor((hoy - vencDate) / (1000 * 60 * 60 * 24));
     }
 
-    // Asignar bucket de aviso
-    // 0-1 días: aún no enviar nada
-    // 2-6 días: primer aviso (amable)
-    // 7+ días: segundo aviso (con recargo + amenaza baja)
     let bucket;
     if (diasVencido <= 1) bucket = 'recien';
     else if (diasVencido <= 6) bucket = 'primer_aviso';
@@ -256,7 +270,8 @@
       debeTotal,
       yaVencioMesActual,
       diasVencido,
-      bucket
+      bucket,
+      fechaInicio
     };
   }
 
