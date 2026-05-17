@@ -271,7 +271,7 @@
 
 <!-- MODAL REACTIVAR -->
 <div class="modal-backdrop" id="modalReactivar">
-  <div class="modal modal-sm">
+  <div class="modal modal-md">
     <div class="modal-header">
       <span class="modal-title modal-title-reactivar">↩️ Reactivar alumno</span>
       <button class="modal-close" onclick="cerrarModal('modalReactivar')">×</button>
@@ -282,8 +282,24 @@
         <strong>✓ Esta acción va a:</strong>
         1. Cambiar el estado a <strong style="color:var(--verde)">ACTIVO</strong><br>
         2. Registrar la fecha de reingreso<br>
-        3. Volver al padrón activo (los turnos se asignan después manualmente en Agenda)
+        3. Actualizar el plan si cambia<br>
+        4. Volver al padrón activo
       </div>
+
+      <div class="section-title" style="margin-top: 4px;">1. Elegir plan</div>
+      <div class="form-grid">
+        <div class="form-group"><label>Plan</label><select id="reactivarPlan"></select></div>
+        <div class="form-group"><label>Día de vencimiento (1-31)</label><input type="number" id="reactivarDiaVenc" min="1" max="31"></div>
+      </div>
+
+      <div class="section-title">2. Asignar turnos fijos</div>
+      <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg); border-radius: 8px; border: 1px dashed var(--border);">
+        <button class="btn-modal btn-cancelar" disabled style="opacity: 0.6; cursor: not-allowed;">📅 Asignar turnos fijos</button>
+        <span style="font-size: 11px; color: var(--text-dim); font-style: italic;">Próximamente — se va a integrar con el módulo Agenda</span>
+      </div>
+      <div style="font-size: 11px; color: var(--text-dim); margin-top: 6px;">Por ahora los turnos se asignan manualmente en Agenda después de reactivar.</div>
+
+      <div class="section-title">3. Motivo</div>
       <div class="form-group"><label>Motivo de reingreso</label><input type="text" id="reactivarMotivo" placeholder="Ej: Vuelve después de tratamiento médico"></div>
     </div>
     <div class="modal-footer">
@@ -860,7 +876,12 @@ window.confirmarBaja = async () => {
 // ===== MODAL REACTIVAR =====
 function abrirModalReactivar() {
   const f = alumnoActivo;
-  $('#reactivarInfo').innerHTML = `<strong>${f.persona.nombre}</strong> · #${f.persona.id} · ${f.inscripcion.plan}<br>Estado actual: <strong style="color:var(--rojo)">${f.estadoTF.replace('TF_','')}</strong>`;
+  const i = f.inscripcion;
+  $('#reactivarInfo').innerHTML = `<strong>${f.persona.nombre}</strong> · #${f.persona.id} · Plan previo: <strong>${i.plan}</strong><br>Estado actual: <strong style="color:var(--rojo)">${f.estadoTF.replace('TF_','')}</strong>`;
+  // Plan: poblar con el actual pre-seleccionado
+  $('#reactivarPlan').innerHTML = planesUnicos.map(pl => `<option value="${pl}"${pl===i.plan?' selected':''}>${pl}${tarifario[pl]?` — ${fmt$(tarifario[pl].valor_lista)}`:''}</option>`).join('');
+  // Día venc: mantener el actual o vacío
+  $('#reactivarDiaVenc').value = i.dia_vencimiento || '';
   $('#reactivarMotivo').value = '';
   $('#modalReactivar').classList.add('activo');
 }
@@ -869,18 +890,26 @@ window.confirmarReactivar = async () => {
   if (!alumnoActivo) return;
   const motivo = $('#reactivarMotivo').value.trim();
   if (!motivo) { toast('Indicá el motivo del reingreso', true); return; }
+  const planNuevo = $('#reactivarPlan').value;
+  const diaVencNuevo = parseInt($('#reactivarDiaVenc').value) || null;
   const btn = $('#btnConfirmarReactivar');
   btn.disabled = true; btn.textContent = 'Procesando...';
   try {
     const hoyISO = HOY.toISOString().split('T')[0];
+    // Detectar si el plan nuevo es bonificado
+    const esBonif = planNuevo === 'COD0BON' || (tarifario[planNuevo] && tarifario[planNuevo].valor_lista === 0);
+    const estadoFinal = esBonif ? 'BONIFICADO' : 'ACTIVO';
     const { error } = await sb.from('inscripciones_tf').update({
-      estado: 'ACTIVO',
+      estado: estadoFinal,
+      plan: planNuevo,
+      dia_vencimiento: diaVencNuevo,
       fecha_reingreso: hoyISO,
       motivo_reingreso: motivo,
       actualizado_en: new Date().toISOString()
     }).eq('id', alumnoActivo.inscripcion.id);
     if (error) throw error;
-    toast(`✓ ${alumnoActivo.persona.nombre} reactivado. Acordate de asignar turnos en Agenda.`);
+    const planMsg = planNuevo !== alumnoActivo.inscripcion.plan ? ` con plan ${planNuevo}` : '';
+    toast(`✓ ${alumnoActivo.persona.nombre} reactivado${planMsg}. Acordate de asignar turnos en Agenda.`);
     cerrarModal('modalReactivar');
     await cargarTodo();
   } catch (e) {
