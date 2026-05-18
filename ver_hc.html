@@ -18,6 +18,7 @@
     --text-dim: #64748b;
     --text-soft: #475569;
     --rojo: #dc2626;
+    --rojo-dark: #b91c1c;
     --rojo-soft: #fee2e2;
     --naranja: #d97706;
     --naranja-soft: #fef3c7;
@@ -93,6 +94,58 @@
   .hc-field-value.no { color: var(--text-dim); }
   .hc-chip { display: inline-block; background: var(--azul-soft); color: var(--azul); padding: 3px 10px; border-radius: 12px; font-size: 12px; margin: 2px 4px 2px 0; font-weight: 500; }
   .hc-chip.alert { background: var(--rojo-soft); color: var(--rojo); }
+
+  /* ============ MOPLEX (rojo) ============ */
+  .hc-section.moplex {
+    border-color: var(--rojo);
+    box-shadow: 0 0 0 1px var(--rojo-soft);
+  }
+  .hc-section.moplex .hc-section-header {
+    background: linear-gradient(135deg, var(--rojo) 0%, var(--rojo-dark) 100%);
+    color: white;
+    border-bottom-color: var(--rojo-dark);
+  }
+  .moplex-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--rojo-soft);
+    border-bottom: 1px solid var(--rojo);
+    flex-wrap: wrap;
+  }
+  .moplex-tab {
+    background: white;
+    border: 1px solid var(--rojo);
+    color: var(--rojo);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .moplex-tab.active { background: var(--rojo); color: white; }
+  .moplex-pill-revisada {
+    display: inline-block;
+    background: white;
+    color: var(--rojo);
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    margin-left: 6px;
+    border: 1px solid var(--rojo-soft);
+  }
+  .moplex-pill-nueva {
+    display: inline-block;
+    background: white;
+    color: var(--naranja);
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+    margin-left: 6px;
+    border: 1px solid var(--naranja-soft);
+  }
 
   .sin-hc {
     background: var(--naranja-soft);
@@ -196,7 +249,9 @@ const HC_ANTECEDENTES = [
 
 let persona = null;
 let hcs = [];
+let moplexEvals = [];
 let hcActivaIdx = 0;
+let moplexActivaIdx = 0;
 
 // Leer parámetro persona_id o dni de la URL
 const params = new URLSearchParams(window.location.search);
@@ -218,11 +273,22 @@ async function cargar() {
     if (!personas || !personas.length) throw new Error('Persona no encontrada');
     persona = personas[0];
 
-    // Buscar HCs
-    const { data: hcsData, error: hcErr } = await sb.from('historias_clinicas')
-      .select('*').eq('persona_id', persona.id).order('completado_en', { ascending: false });
-    if (hcErr) throw hcErr;
-    hcs = hcsData || [];
+    // Buscar HCs y MOPLEX en paralelo
+    const [hcRes, moplexRes] = await Promise.all([
+      sb.from('historias_clinicas').select('*').eq('persona_id', persona.id).order('completado_en', { ascending: false }),
+      sb.from('evaluaciones_moplex').select('*').eq('persona_id', persona.id).order('completado_en', { ascending: false })
+    ]);
+
+    if (hcRes.error) throw hcRes.error;
+    hcs = hcRes.data || [];
+
+    // MOPLEX puede fallar silenciosamente si la tabla no existe todavía
+    if (moplexRes.error) {
+      console.warn('No se pudo cargar MOPLEX:', moplexRes.error.message);
+      moplexEvals = [];
+    } else {
+      moplexEvals = moplexRes.data || [];
+    }
 
     renderHeader();
     renderContenido();
@@ -250,7 +316,8 @@ function renderHeader() {
 function renderContenido() {
   const cont = document.getElementById('contenedor');
 
-  if (!hcs.length) {
+  // Si NO tiene HC general pero SÍ tiene MOPLEX → mostrar igual MOPLEX
+  if (!hcs.length && !moplexEvals.length) {
     const num = (persona.celular || '').replace(/\D/g, '');
     cont.innerHTML = `
       <div class="sin-hc">
@@ -265,26 +332,51 @@ function renderContenido() {
     return;
   }
 
+  let html = '';
+
   // Tabs si hay más de una HC
-  const tabs = hcs.length > 1 ? `
-    <div class="historial-tabs">
-      ${hcs.map((h, idx) => `<div class="historial-tab${idx === hcActivaIdx ? ' active' : ''}" onclick="cambiarHC(${idx})">${fmtFecha(h.completado_en)}</div>`).join('')}
-    </div>
-  ` : '';
-
-  const hc = hcs[hcActivaIdx];
-  const reviewBar = `
-    <div class="review-bar">
-      <div>
-        ${hc.revisada_en
-          ? `<span class="pill-revisada">✓ Revisada</span> <span style="font-size:12px; color:var(--text-dim); margin-left:8px;">El ${fmtFecha(hc.revisada_en)}${hc.revisada_por ? ' por ' + hc.revisada_por : ''}</span>`
-          : `<span class="pill-nueva">🆕 Sin revisar</span>`}
+  if (hcs.length > 1) {
+    html += `
+      <div class="historial-tabs">
+        ${hcs.map((h, idx) => `<div class="historial-tab${idx === hcActivaIdx ? ' active' : ''}" onclick="cambiarHC(${idx})">${fmtFecha(h.completado_en)}</div>`).join('')}
       </div>
-      ${!hc.revisada_en ? `<button class="btn-review" onclick="marcarRevisada()">✓ Marcar como revisada</button>` : ''}
-    </div>
-  `;
+    `;
+  }
 
-  cont.innerHTML = tabs + reviewBar + renderHC(hc);
+  // Si hay HC general, mostrarla
+  if (hcs.length) {
+    const hc = hcs[hcActivaIdx];
+    html += `
+      <div class="review-bar">
+        <div>
+          ${hc.revisada_en
+            ? `<span class="pill-revisada">✓ Revisada</span> <span style="font-size:12px; color:var(--text-dim); margin-left:8px;">El ${fmtFecha(hc.revisada_en)}${hc.revisada_por ? ' por ' + hc.revisada_por : ''}</span>`
+            : `<span class="pill-nueva">🆕 Sin revisar</span>`}
+        </div>
+        ${!hc.revisada_en ? `<button class="btn-review" onclick="marcarRevisada()">✓ Marcar como revisada</button>` : ''}
+      </div>
+    `;
+    html += renderHC(hc);
+  } else {
+    // Si solo tiene MOPLEX pero no HC general, mostrar aviso
+    html += `
+      <div class="sin-hc" style="margin-bottom:16px;">
+        <h3>ℹ️ Sin HC general cargada</h3>
+        <p>Este paciente tiene una evaluación MOPLEX pero todavía no completó la historia clínica general.</p>
+        <div class="sin-hc-actions">
+          <button class="btn-copy" onclick="copiarLink()">📋 Copiar link HC</button>
+          ${persona.celular ? `<button class="btn-wsp" onclick="enviarWsp()">📱 Enviar por WhatsApp</button>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  // Si hay evaluaciones MOPLEX, agregarlas al final
+  if (moplexEvals.length) {
+    html += renderMoplexSection();
+  }
+
+  cont.innerHTML = html;
 }
 
 window.cambiarHC = (idx) => {
@@ -292,6 +384,115 @@ window.cambiarHC = (idx) => {
   renderContenido();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 };
+
+window.cambiarMoplex = (idx) => {
+  moplexActivaIdx = idx;
+  renderContenido();
+};
+
+function renderMoplexSection() {
+  const ev = moplexEvals[moplexActivaIdx];
+  if (!ev) return '';
+
+  const yn = v => v === true ? '<span class="hc-field-value yes">Sí</span>' :
+                   v === false ? '<span class="hc-field-value no">No</span>' :
+                   '<span class="hc-field-value empty">—</span>';
+  const txt = v => v ? `<span class="hc-field-value">${escapeHtml(toSentenceCaseGlobal(String(v)))}</span>` :
+                   '<span class="hc-field-value empty">—</span>';
+  const txtName = v => v ? `<span class="hc-field-value">${escapeHtml(String(v).trim().replace(/\s+/g,' ').toUpperCase())}</span>` :
+                   '<span class="hc-field-value empty">—</span>';
+  const num = v => (v !== null && v !== undefined && v !== '')
+    ? `<span class="hc-field-value">${v}</span>`
+    : '<span class="hc-field-value empty">—</span>';
+  const field = (lbl, html) => `<div class="hc-field"><div class="hc-field-label">${lbl}</div>${html}</div>`;
+
+  // Mapeo legible de como_llego
+  const COMO_LLEGO_LABEL = {
+    'redes': 'Redes sociales',
+    'derivacion_medica': 'Derivación médica',
+    'pase_y_lo_vi': 'Pasé y lo vi',
+    'recomendacion': 'Recomendación',
+    'otros': 'Otros'
+  };
+  const comoLlegoTxt = ev.como_llego ? (COMO_LLEGO_LABEL[ev.como_llego] || ev.como_llego) : null;
+
+  // Tabs si hay más de una evaluación MOPLEX
+  const tabs = moplexEvals.length > 1 ? `
+    <div class="moplex-tabs">
+      ${moplexEvals.map((e, idx) => `
+        <button class="moplex-tab${idx === moplexActivaIdx ? ' active' : ''}" onclick="cambiarMoplex(${idx})">
+          ${fmtFecha(e.completado_en)}
+        </button>
+      `).join('')}
+    </div>
+  ` : '';
+
+  // Estado revisada (chip al lado del título)
+  const estadoChip = ev.revisada_en
+    ? `<span class="moplex-pill-revisada">✓ Revisada ${fmtFecha(ev.revisada_en)}</span>`
+    : `<span class="moplex-pill-nueva">🆕 Sin revisar</span>`;
+
+  return `
+    <div class="hc-section moplex">
+      <div class="hc-section-header">
+        🦶 Evaluación MOPLEX ${estadoChip}
+      </div>
+      ${tabs}
+      <div class="hc-section-body">
+        ${field('Cargada el', `<span class="hc-field-value">${fmtFecha(ev.completado_en)}</span>`)}
+        ${field('Altura', txt(ev.altura))}
+        ${field('Peso', txt(ev.peso))}
+        ${field('Número de calzado', txt(ev.numero_calzado))}
+        ${field('Deporte profesional', yn(ev.deporte_profesional))}
+        ${field('Actividad física', txt(ev.actividad_fisica))}
+        ${field('Motivo del estudio', txt(ev.motivo_estudio))}
+        ${field('Derivado por profesional', yn(ev.derivado_profesional))}
+        ${ev.nombre_profesional_derivante ? field('Profesional derivante', txtName(ev.nombre_profesional_derivante)) : ''}
+        ${comoLlegoTxt ? field('Cómo llegó', `<span class="hc-field-value">${escapeHtml(comoLlegoTxt)}</span>`) : ''}
+      </div>
+      ${!ev.revisada_en ? `
+        <div style="padding:10px 14px; background:var(--rojo-soft); border-top:1px solid var(--rojo); text-align:right;">
+          <button class="btn-review" onclick="marcarMoplexRevisada(${ev.id})" style="background:var(--rojo);">✓ Marcar MOPLEX como revisada</button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+window.marcarMoplexRevisada = async (evalId) => {
+  try {
+    const ahora = new Date().toISOString();
+    const { error } = await sb.from('evaluaciones_moplex')
+      .update({ revisada_en: ahora, revisada_por: 'Admin' })
+      .eq('id', evalId);
+    if (error) throw error;
+    const ev = moplexEvals.find(e => e.id === evalId);
+    if (ev) {
+      ev.revisada_en = ahora;
+      ev.revisada_por = 'Admin';
+    }
+    showToast('✓ Evaluación MOPLEX marcada como revisada');
+    renderContenido();
+  } catch (err) {
+    showToast('Error: ' + err.message);
+  }
+};
+
+// Helper global para toSentenceCase (usado por renderMoplexSection y renderHC)
+function toSentenceCaseGlobal(text) {
+  const SIGLAS = ['LCA','LCM','LCL','ACL','PCL','ACV','TEP','DNI','OS','OSDE','OSEP','APROSS','MOPLEX','PB','TF','TFK','DLM','PSA','TAC','RMN','RM','ECG','PCR','IMC','VIH','DBT','HTA','HBP','EPOC','TBQ','TEC','TCE','TEPT','TDAH','PFC','PRP','VPH'];
+  if (text === null || text === undefined) return '';
+  const s = String(text).trim();
+  if (!s) return '';
+  if (s.length <= 4 && s === s.toUpperCase() && /[A-Z]/.test(s)) return s;
+  let r = s.toLowerCase();
+  r = r.replace(/(^|[.!?]\s+|\n\s*)([a-záéíóúñü])/g, (m, p, c) => p + c.toUpperCase());
+  SIGLAS.forEach(sigla => {
+    const re = new RegExp(`\\b${sigla}\\b`, 'gi');
+    r = r.replace(re, sigla);
+  });
+  return r;
+}
 
 function renderHC(hc) {
   // === HELPERS DE NORMALIZACIÓN ===
@@ -452,12 +653,12 @@ function renderHC(hc) {
       </div>
     </div>
 
-    <!-- PLACEHOLDER para futuras evaluaciones (BiOLAB, MOPLEX, SARKMED, archivos) -->
+    <!-- PLACEHOLDER para futuras evaluaciones (BiOLAB, SARKMED, archivos) -->
     <div class="hc-section">
       <div class="hc-section-header">📎 Evaluaciones e informes</div>
       <div class="hc-section-body">
         <div style="text-align:center; padding:14px; color:var(--text-dim); font-size:13px; font-style:italic;">
-          🚧 Próximamente: acá vas a poder cargar informes de BiOLAB, MOPLEX, SARKMED, evaluaciones de ingreso TF, y otros documentos adjuntos.
+          🚧 Próximamente: acá vas a poder cargar informes de BiOLAB, SARKMED, evaluaciones de ingreso TF, y otros documentos adjuntos.
         </div>
       </div>
     </div>
