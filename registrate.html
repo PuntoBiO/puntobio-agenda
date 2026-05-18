@@ -1115,6 +1115,48 @@ async function checkDNI() {
 /* =============================================================
    PASO 2: AUTO-LLENAR Y BLOQUEAR CAMPOS YA CARGADOS
 ============================================================= */
+// Normaliza un string para comparación: lowercase, sin tildes, sin espacios extra
+function _normObraSocial(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // saca tildes
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Setea el <select id="obra_social"> con tolerancia:
+// 1) match exacto → selecciona esa opción
+// 2) match tolerante (sin tildes/mayúsculas/espacios) → selecciona esa opción
+// 3) no matchea → agrega una <option> con el valor original y la selecciona
+function setObraSocialPrefill(val) {
+  if (val === null || val === undefined || val === '') return false;
+  const sel = document.getElementById('obra_social');
+  if (!sel) return false;
+
+  const target = _normObraSocial(val);
+  // Buscar primero match exacto, después tolerante
+  let opcionMatch = null;
+  for (const opt of sel.options) {
+    if (opt.value === val) { opcionMatch = opt; break; }
+  }
+  if (!opcionMatch) {
+    for (const opt of sel.options) {
+      if (opt.value && _normObraSocial(opt.value) === target) { opcionMatch = opt; break; }
+    }
+  }
+  if (opcionMatch) {
+    sel.value = opcionMatch.value;
+    return true;
+  }
+  // No matcheó: agregar opción dinámica con el valor original
+  const newOpt = document.createElement('option');
+  newOpt.value = val;
+  newOpt.textContent = val + ' (como lo tenés cargado)';
+  newOpt.selected = true;
+  sel.appendChild(newOpt);
+  return true;
+}
+
 function prefillStep2() {
   const desc = document.getElementById('step2desc');
   lockedFields = [];
@@ -1127,7 +1169,13 @@ function prefillStep2() {
       if (val !== null && val !== undefined && val !== '') {
         const input = document.getElementById(f);
         if (input) {
-          input.value = val;
+          // Caso especial: obra_social es un <select>, usar matching tolerante
+          if (f === 'obra_social') {
+            const ok = setObraSocialPrefill(val);
+            if (!ok) return;
+          } else {
+            input.value = val;
+          }
           input.disabled = true;
           lockedFields.push(f);
           const lockSpan = document.getElementById(`lock-${f}`);
