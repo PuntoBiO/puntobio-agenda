@@ -496,6 +496,39 @@ function fmtRango(){
 }
 
 /* ════════════════════════════════════════════════════════════════
+   CONTROL DE ROL: solo admin_general puede cargar turnos en el pasado
+   ════════════════════════════════════════════════════════════════ */
+let usuarioRol = null;
+async function cargarRolUsuario() {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) { usuarioRol = null; return; }
+    const { data: persona } = await sb
+      .from('personas')
+      .select('rol_principal')
+      .eq('auth_user_id', session.user.id)
+      .maybeSingle();
+    usuarioRol = persona?.rol_principal || null;
+  } catch (e) {
+    console.warn('No se pudo cargar el rol del usuario:', e);
+    usuarioRol = null;
+  }
+}
+function esAdminGeneral() { return usuarioRol === 'admin_general'; }
+// Devuelve true si se puede continuar (no es pasado, o es admin y confirmó)
+function validarSlotPasado(fecha, horaCero) {
+  const ahora = new Date();
+  const slotDate = new Date(`${fecha}T${horaCero}:00`);
+  if (slotDate >= ahora) return true;
+  const fechaTxt = fecha.split('-').reverse().join('/');
+  if (!esAdminGeneral()) {
+    alert(`${fechaTxt} ${horaCero} ya pasó. No se pueden cargar turnos en el pasado.`);
+    return false;
+  }
+  return confirm(`⚠️ Estás cargando un turno EN EL PASADO (${fechaTxt} ${horaCero}).\n\n¿Querés continuar?`);
+}
+
+/* ════════════════════════════════════════════════════════════════
    CARGA DE TURNOS
    ════════════════════════════════════════════════════════════════ */
 async function cargarTurnos(){
@@ -621,6 +654,7 @@ function render(){
       }
       slot.onclick = (ev) => {
         if(ev.target.closest('.turno')) return;
+        if (!validarSlotPasado(fStr, hora)) return;
         abrirNuevoDesdeSlot(fStr, hora, d, diaNum);
       };
       grid.appendChild(slot);
@@ -784,6 +818,7 @@ async function previewIdTratamiento(practica){
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  cargarRolUsuario();
   document.getElementById('sel-profesional').addEventListener('change', actualizarPracticasYHoras);
   document.getElementById('sel-practica').addEventListener('change', actualizarHorasExactas);
 
@@ -844,6 +879,15 @@ async function guardarTurnoNuevo(){
 
   if(!paciente || !personaId){ alertaEl.innerHTML='<div class="err-box">Seleccioná un paciente del listado.</div>'; return; }
   if(!profesional || !practica || !horaInicio){ alertaEl.innerHTML='<div class="err-box">Completá profesional, práctica y hora exacta.</div>'; return; }
+
+  // Bloquear turnos en el pasado (admin_general puede continuar)
+  const ahoraVal = new Date();
+  const slotDate = new Date(`${slotActual.fecha}T${horaInicio}:00`);
+  if (slotDate < ahoraVal && !esAdminGeneral()) {
+    const fechaTxt = slotActual.fecha.split('-').reverse().join('/');
+    alertaEl.innerHTML = `<div class="err-box">${fechaTxt} ${horaInicio} ya pasó. No se pueden cargar turnos en el pasado.</div>`;
+    return;
+  }
 
   const dur = duracionMin(practica, profesional);
   const horaFin = minH(hMin(horaInicio) + dur);

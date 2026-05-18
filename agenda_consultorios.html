@@ -495,6 +495,7 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
 }
 
 let supa = null;
+let usuarioRol = null;  // Se llena al iniciar con el rol del usuario logueado (admin_general / administrativa / ...)
 let currentView = 'week';
 let anchorDate = new Date();
 let turnos = [];
@@ -514,9 +515,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     anchorDate = lunesDe(new Date());
     bindEvents();
     initNuevoForm();
+    await cargarRolUsuario();
     await Promise.all([loadPersonas(), refresh()]);
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
 });
+
+// === CONTROL DE ROL: solo admin_general puede cargar turnos en el pasado ===
+async function cargarRolUsuario() {
+  try {
+    const { data: { session } } = await supa.auth.getSession();
+    if (!session) { usuarioRol = null; return; }
+    const { data: persona } = await supa
+      .from('personas')
+      .select('rol_principal')
+      .eq('auth_user_id', session.user.id)
+      .maybeSingle();
+    usuarioRol = persona?.rol_principal || null;
+  } catch (e) {
+    console.warn('No se pudo cargar el rol del usuario:', e);
+    usuarioRol = null;
+  }
+}
+function esAdminGeneral() { return usuarioRol === 'admin_general'; }
+// Devuelve true si se puede continuar (no es pasado, o es admin y confirmó)
+function validarSlotPasado(fecha, hora) {
+  const ahora = new Date();
+  const slotDate = new Date(`${fecha}T${pad(hora)}:00:00`);
+  if (slotDate >= ahora) return true; // no es pasado, todo ok
+  const fechaTxt = fecha.split('-').reverse().join('/');
+  if (!esAdminGeneral()) {
+    alert(`${fechaTxt} ${pad(hora)}:00 ya pasó. No se pueden cargar turnos en el pasado.`);
+    return false;
+  }
+  // Es admin → pedir confirmación
+  return confirm(`⚠️ Estás cargando un turno EN EL PASADO (${fechaTxt} ${pad(hora)}:00).\n\n¿Querés continuar?`);
+}
 
 function bindEvents() {
   document.getElementById('prevBtn').addEventListener('click', () => navigate(-1));
@@ -730,6 +763,8 @@ function showError(msg) { document.getElementById('agendaContainer').innerHTML =
 function onCeldaClick(fecha, hora) {
   const f = new Date(fecha + 'T00:00:00');
   const diaNumero = f.getDay()===0 ? 7 : f.getDay();
+  // Bloquear slots pasados (admin_general puede pasar con confirm)
+  if (!validarSlotPasado(fecha, hora)) return;
   // Si hay filtro de práctica, chequear que la celda tenga disponibilidad
   if (practicaFiltro) {
     const profs = profesionalesParaPracticaEn(diaNumero, hora, practicaFiltro, fecha);
@@ -1126,6 +1161,13 @@ function validarUnSlot(slot, datosForm) {
   const horaFin = `${pad(slot.hora + 1)}:00:00`;
 
   if (feriadosMap.has(slot.fecha)) return { ok:false, errores:[`${slot.fecha} es feriado.`] };
+  // Bloquear creación de turnos en el pasado (admin_general puede continuar)
+  const ahora = new Date();
+  const slotDate = new Date(`${slot.fecha}T${pad(slot.hora)}:00:00`);
+  if (slotDate < ahora && !esAdminGeneral()) {
+    const fechaTxt = slot.fecha.split('-').reverse().join('/');
+    return { ok:false, errores:[`${fechaTxt} ${pad(slot.hora)}:00 ya pasó. No se pueden cargar turnos en el pasado.`] };
+  }
   if (esBloqueoFijo(slot.diaNumero, slot.hora)) return { ok:false, errores:[`${slot.fecha} ${pad(slot.hora)}:00 está cerrado.`] };
 
   const practicasDisp = DISPONIBILIDAD[profesional]?.[slot.diaNumero]?.[slot.hora] || [];
