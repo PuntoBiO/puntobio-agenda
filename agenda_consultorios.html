@@ -689,9 +689,31 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
 }
 
 async function loadTratamientosPersona(personaId, practicaCodigo) {
-  const { data, error } = await supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones').eq('persona_id', personaId).eq('practica_codigo', practicaCodigo).order('fecha_alta', { ascending:false });
+  const { data, error } = await supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones, total_pagar, saldo_pendiente, fecha_alta').eq('persona_id', personaId).eq('practica_codigo', practicaCodigo).order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
-  return (data||[]).filter(t => !t.estado || (t.estado||'').toUpperCase()==='ACTIVO');
+  // Filtrar anulados/cancelados (estados reales: Pendiente / Parcial / Saldado / No aplica)
+  const vivos = (data||[]).filter(t => {
+    const est = (t.estado || '').toLowerCase();
+    return !est.includes('anulad') && !est.includes('cancelad');
+  });
+  if (vivos.length === 0) return [];
+  // Contar turnos NO cancelados por tratamiento (PENDIENTE/PRESENTE/AUSENTE/SOBRETURNO consumen sesión)
+  const trataIds = vivos.map(t => t.id);
+  const usadas = {};
+  try {
+    const { data: turData } = await supa
+      .from('turnos_consultorio')
+      .select('tratamiento_id')
+      .in('tratamiento_id', trataIds)
+      .neq('estado', 'CANCELADO');
+    (turData || []).forEach(t => {
+      usadas[t.tratamiento_id] = (usadas[t.tratamiento_id] || 0) + 1;
+    });
+  } catch (e) { console.warn('No se pudieron contar turnos por tratamiento:', e.message); }
+  // Solo dejamos los tratamientos con sesiones aún disponibles (evita confusión al elegir)
+  return vivos
+    .map(t => ({ ...t, sesiones_usadas: usadas[t.id] || 0 }))
+    .filter(t => t.sesiones_usadas < (t.total_sesiones || 1));
 }
 
 function renderGrid() {
@@ -1106,7 +1128,13 @@ async function refrescarTratamientos(personaId, practica) {
   tratamientosPersona.forEach(t => {
     const o = document.createElement('option');
     o.value = t.id;
-    o.textContent = `${t.codigo_id || '#'+t.id}${t.estado?' · '+t.estado:''}${t.total_sesiones?' · '+t.total_sesiones+' ses.':''}`;
+    const totalSes = t.total_sesiones || 1;
+    const usadas = t.sesiones_usadas || 0;
+    const ses = `${usadas}/${totalSes} ses`;
+    const est = t.estado || '';
+    const saldo = (t.saldo_pendiente && parseFloat(t.saldo_pendiente) > 0) ? `saldo $${Math.round(parseFloat(t.saldo_pendiente)).toLocaleString('es-AR')}` : '';
+    const parts = [t.codigo_id || '#'+t.id, ses, est, saldo].filter(x => x);
+    o.textContent = parts.join(' · ');
     sel.appendChild(o);
   });
   const oNuevo = document.createElement('option');
@@ -1254,7 +1282,7 @@ async function onCrearTratamiento() {
       total_sesiones: totalSes,
       valor_sesion: valor,
       modalidad,
-      estado: 'ACTIVO'
+      estado: 'Pendiente'  // valores válidos en PuntoBiO: Pendiente / Parcial / Saldado / No aplica
     };
     if (obraSocial) payload.obra_social = obraSocial;
     const { data, error } = await supa.from('tratamientos').insert([payload]).select().single();

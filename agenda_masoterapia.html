@@ -662,12 +662,29 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
   }
   const { data, error } = await q.order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
-  // Estados reales en PuntoBiO: Saldado / Parcial / Pendiente / No aplica.
-  // Mostramos todos los que NO estén anulados (excluimos solo si estado contiene "anulad" o "cancelad").
-  return (data||[]).filter(t => {
+  // Filtrar anulados/cancelados (estado contiene "anulad" o "cancelad")
+  const vivos = (data||[]).filter(t => {
     const est = (t.estado || '').toLowerCase();
     return !est.includes('anulad') && !est.includes('cancelad');
   });
+  if (vivos.length === 0) return [];
+  // Contar turnos NO cancelados por tratamiento (PENDIENTE/PRESENTE/AUSENTE/SOBRETURNO consumen sesión)
+  const trataIds = vivos.map(t => t.id);
+  const usadas = {};
+  try {
+    const { data: turData } = await supa
+      .from('turnos_masoterapia')
+      .select('tratamiento_id')
+      .in('tratamiento_id', trataIds)
+      .neq('estado', 'CANCELADO');
+    (turData || []).forEach(t => {
+      usadas[t.tratamiento_id] = (usadas[t.tratamiento_id] || 0) + 1;
+    });
+  } catch (e) { console.warn('No se pudieron contar turnos por tratamiento:', e.message); }
+  // Solo dejamos los tratamientos con sesiones aún disponibles
+  return vivos
+    .map(t => ({ ...t, sesiones_usadas: usadas[t.id] || 0 }))
+    .filter(t => t.sesiones_usadas < (t.total_sesiones || 1));
 }
 
 function renderGrid() {
@@ -1026,7 +1043,9 @@ async function refrescarTratamientos(personaId, practica) {
     const o = document.createElement('option');
     o.value = t.id;
     const tipo = TIPOS_LBL[t.practica_codigo] || t.practica_codigo || '';
-    const ses = t.total_sesiones ? `${t.total_sesiones} ses` : '';
+    const totalSes = t.total_sesiones || 1;
+    const usadas = t.sesiones_usadas || 0;
+    const ses = `${usadas}/${totalSes} ses`;
     const est = t.estado || '';
     const saldo = (t.saldo_pendiente && parseFloat(t.saldo_pendiente) > 0) ? `saldo $${Math.round(parseFloat(t.saldo_pendiente)).toLocaleString('es-AR')}` : '';
     const parts = [t.codigo_id || '#'+t.id, tipo, ses, est, saldo].filter(x => x);
