@@ -1833,15 +1833,91 @@ window.cerrarSesion = async function() {
 // ======================
 // BUSCADOR
 // ======================
+let buscadorTimer = null
+
 window.abrirBuscador = function() {
   document.getElementById('search-modal-overlay').classList.add('open')
-  setTimeout(() => document.getElementById('search-input').focus(), 50)
+  const input = document.getElementById('search-input')
+  setTimeout(() => input.focus(), 50)
 }
 
 window.cerrarBuscador = function(e) {
   if (!e || e.target.id === 'search-modal-overlay') {
     document.getElementById('search-modal-overlay').classList.remove('open')
   }
+}
+
+// Listener input → buscar en Supabase con debounce
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('search-input')
+  if (!input) return
+  input.addEventListener('input', e => {
+    clearTimeout(buscadorTimer)
+    const q = e.target.value.trim()
+    const cont = document.getElementById('search-results')
+    if (q.length < 2) {
+      cont.innerHTML = `<div class="search-empty">Escribí al menos 2 caracteres para buscar personas.</div>`
+      return
+    }
+    cont.innerHTML = `<div class="search-empty">Buscando "${q}"...</div>`
+    buscadorTimer = setTimeout(() => buscadorEjecutar(q), 220)
+  })
+})
+
+async function buscadorEjecutar(q) {
+  const cont = document.getElementById('search-results')
+  try {
+    // Buscar por nombre, dni o id (si es numérico)
+    const filtros = [`nombre.ilike.%${q}%`, `dni.ilike.%${q}%`]
+    if (/^\d+$/.test(q)) filtros.push(`id.eq.${q}`)
+    const { data, error } = await supabase
+      .from('personas')
+      .select('id, nombre, dni, celular, telefono, obra_social, estado, es_equipo')
+      .or(filtros.join(','))
+      .order('nombre')
+      .limit(12)
+    if (error) throw error
+    if (!data || data.length === 0) {
+      cont.innerHTML = `<div class="search-empty">Sin resultados para "${q}".</div>`
+      return
+    }
+    cont.innerHTML = data.map(p => {
+      const tel = p.celular || p.telefono || ''
+      const equipo = p.es_equipo ? ' · <span style="color:var(--purple)">EQUIPO</span>' : ''
+      const os = p.obra_social ? ` · ${escapeHtml(p.obra_social)}` : ''
+      return `<div class="search-result-item" data-id="${p.id}" data-nombre="${encodeURIComponent(p.nombre || '')}" style="padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <div style="font-weight:600; color:var(--text);">${escapeHtml(p.nombre || '(sin nombre)')}</div>
+          <div style="font-size:12px; color:var(--text-dim); margin-top:2px;">
+            #${p.id}${p.dni ? ' · DNI ' + escapeHtml(p.dni) : ''}${tel ? ' · ' + escapeHtml(tel) : ''}${os}${equipo}
+          </div>
+        </div>
+        <div style="font-size:11px; color:var(--turquoise); font-family:'JetBrains Mono',monospace;">ABRIR →</div>
+      </div>`
+    }).join('')
+    cont.querySelectorAll('.search-result-item').forEach(el => {
+      el.addEventListener('mouseenter', () => el.style.background = 'var(--bg-soft)')
+      el.addEventListener('mouseleave', () => el.style.background = '')
+      el.addEventListener('click', () => {
+        const nombre = decodeURIComponent(el.dataset.nombre)
+        // Guardar búsqueda y cerrar modal
+        try { localStorage.setItem('padronSearch', nombre) } catch(e){}
+        cerrarBuscador()
+        // Navegar al Padrón
+        const padronNav = Array.from(document.querySelectorAll('.nav-item'))
+          .find(n => (n.getAttribute('onclick') || '').includes("irA('padron')"))
+        if (padronNav) padronNav.click()
+        else irA('padron')
+      })
+    })
+  } catch (err) {
+    console.error('buscador error', err)
+    cont.innerHTML = `<div class="search-empty">Error al buscar: ${err.message || err}</div>`
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 }
 
 document.addEventListener('keydown', (e) => {
