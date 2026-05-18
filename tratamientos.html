@@ -819,12 +819,28 @@ function renderTabla() {
 }
 
 // ===== DETALLE =====
-window.verDetalle = function(ttoId) {
+window.verDetalle = async function(ttoId) {
   const t = estado.tratamientos.find(x => x.id === ttoId)
   if (!t) return
   estado.ttoSeleccionado = t
   const pInfo = practicaInfo(t.practica_codigo)
   const persona = estado.personasMap[t.persona_id] || '(sin nombre)'
+
+  // Cargar pagos y sesiones asociados al tto
+  let pagosAsoc = []
+  let sesionesAsoc = []
+  try {
+    const [pRes, sRes] = await Promise.all([
+      sb.from('pagos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
+      sb.from('sesiones').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false })
+    ])
+    pagosAsoc = pRes.data || []
+    sesionesAsoc = sRes.data || []
+  } catch (e) {
+    console.warn('No se pudieron cargar pagos/sesiones:', e)
+  }
+  estado.pagosAsoc = pagosAsoc
+  estado.sesionesAsoc = sesionesAsoc
 
   $('detalle-titulo').textContent = `${pInfo.label} · #${t.id}`
   $('detalle-sub').textContent = persona
@@ -862,6 +878,46 @@ window.verDetalle = function(ttoId) {
   // JSON debug (todos los campos)
   const debug = JSON.stringify(t, null, 2)
 
+  // ===== Secciones pagos y sesiones asociadas =====
+  let pagosHtml = ''
+  if (pagosAsoc.length === 0) {
+    pagosHtml = `<div style="padding: 12px; color: var(--text-dim); font-size: 13px;">Sin pagos asociados.</div>`
+  } else {
+    const sumaPagos = pagosAsoc.reduce((acc, p) => acc + Number(p.importe || 0), 0)
+    pagosHtml = `
+      <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">
+        ${pagosAsoc.length} pago(s) · Suma: <strong style="color: var(--green);">${fmt(sumaPagos)}</strong>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${pagosAsoc.map(p => `
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
+            <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${p.id}</span>
+            <span style="flex: 1;">${fmtFecha(p.fecha)} · <strong>${fmt(p.importe)}</strong> · ${p.medio_pago || '—'} · ${p.quien_cobro || '—'} ${p.tipo_cobro && p.tipo_cobro !== 'NORMAL' ? `· <span style="color: var(--amber);">${p.tipo_cobro}</span>` : ''}</span>
+            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarPago(${p.id})">🗑️</button>
+          </div>
+        `).join('')}
+      </div>
+    `
+  }
+
+  let sesionesHtml = ''
+  if (sesionesAsoc.length === 0) {
+    sesionesHtml = `<div style="padding: 12px; color: var(--text-dim); font-size: 13px;">Sin sesiones asociadas.</div>`
+  } else {
+    sesionesHtml = `
+      <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">${sesionesAsoc.length} sesión(es) realizada(s)</div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${sesionesAsoc.map(s => `
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
+            <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${s.id}</span>
+            <span style="flex: 1;">${fmtFecha(s.fecha)} ${s.hora ? '· ' + s.hora : ''} ${s.profesional ? '· ' + s.profesional : ''} ${s.estado ? '· <strong>' + s.estado + '</strong>' : ''}</span>
+            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarSesion(${s.id})">🗑️</button>
+          </div>
+        `).join('')}
+      </div>
+    `
+  }
+
   $('detalle-contenido').innerHTML = `
     <div style="margin-bottom: 16px; padding: 14px 16px; background: var(--bg-soft); border-radius: 10px; border: 1px solid var(--border);">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -878,6 +934,14 @@ window.verDetalle = function(ttoId) {
     </div>
     <div class="detalle-grid">${principales}</div>
     <div class="detalle-section">
+      <div class="detalle-section-title">💰 Pagos asociados</div>
+      ${pagosHtml}
+    </div>
+    <div class="detalle-section">
+      <div class="detalle-section-title">📝 Sesiones asociadas</div>
+      ${sesionesHtml}
+    </div>
+    <div class="detalle-section">
       <div class="detalle-section-title">🔍 Todos los campos (debug)</div>
       <div class="json-debug">${debug}</div>
     </div>
@@ -888,6 +952,45 @@ window.verDetalle = function(ttoId) {
 
 window.cerrarDetalle = function() {
   $('modal-detalle').classList.remove('is-open')
+}
+
+// ===== BORRAR PAGO ASOCIADO =====
+window.borrarPago = async function(pagoId) {
+  const p = (estado.pagosAsoc || []).find(x => x.id === pagoId)
+  if (!p) return
+  const msg = `¿Borrar pago #${pagoId}?\n\nImporte: $${Number(p.importe||0).toLocaleString('es-AR')}\nFecha: ${p.fecha}\nMedio: ${p.medio_pago || '—'}\n\nEsto NO se puede deshacer.`
+  if (!confirm(msg)) return
+  try {
+    const { error } = await sb.from('pagos_consultorio').delete().eq('id', pagoId)
+    if (error) throw error
+    toast(`✓ Pago #${pagoId} borrado`, 'ok')
+    // Recargar el modal detalle (vuelve a abrirlo con datos frescos)
+    const ttoId = estado.ttoSeleccionado?.id
+    await cargarDatos()
+    if (ttoId) await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error borrando pago: ' + err.message, 'err', 6000)
+  }
+}
+
+// ===== BORRAR SESIÓN ASOCIADA =====
+window.borrarSesion = async function(sesId) {
+  const s = (estado.sesionesAsoc || []).find(x => x.id === sesId)
+  if (!s) return
+  const msg = `¿Borrar sesión #${sesId}?\n\nFecha: ${s.fecha || '—'}\nProfesional: ${s.profesional || '—'}\nEstado: ${s.estado || '—'}\n\nEsto NO se puede deshacer.`
+  if (!confirm(msg)) return
+  try {
+    const { error } = await sb.from('sesiones').delete().eq('id', sesId)
+    if (error) throw error
+    toast(`✓ Sesión #${sesId} borrada`, 'ok')
+    const ttoId = estado.ttoSeleccionado?.id
+    await cargarDatos()
+    if (ttoId) await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error borrando sesión: ' + err.message, 'err', 6000)
+  }
 }
 
 // ===== EDITAR =====
