@@ -279,6 +279,14 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
         <select class="form-select" id="fNT_practica" disabled><option value="">— Asigná profesionales primero —</option></select>
       </div>
 
+      <div class="form-row" id="fNT_areaWrap" style="display:none">
+        <label class="form-label">Área <span style="font-weight:400;color:var(--text-dim)">(define el lugar y la modalidad)</span></label>
+        <select class="form-select" id="fNT_area">
+          <option value="CONSULTORIOS">Consultorio (individual)</option>
+          <option value="SALA_TERAPIA_FISICA">Sala Terapia Física – REHAB (compartido)</option>
+        </select>
+      </div>
+
       <div class="form-row paciente-search-wrap">
         <label class="form-label">Paciente</label>
         <input type="text" class="form-input" id="fNT_paciente_search" placeholder="Buscar por nombre o DNI…" autocomplete="off">
@@ -812,15 +820,17 @@ function renderTurno(t) {
   const pCls = `p-${(t.practica_codigo||'').toLowerCase()}`;
   const eCls = `e-${(t.estado||'').toLowerCase()}`;
   const sCls = t.estado==='SOBRETURNO' ? 'is-sobreturno' : '';
-  // Si el turno está asignado a SALA_TF → Rehab Física (sobreturno autorizado), pintar amarillo
-  const bCls = (t.box||'').toUpperCase()==='SALA_TF' ? 'box-sala_tf' : '';
+  // REHAB FÍSICA: si el AREA es SALA_TERAPIA_FISICA (o variantes), pintar amarillo
+  const areaNorm = (t.area||'').toUpperCase().replace(/\s+/g,'_');
+  const esRehab = areaNorm==='SALA_TERAPIA_FISICA' || areaNorm==='SALA_TF';
+  const bCls = esRehab ? 'box-sala_tf' : '';
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
   // Fallback: cache de nombre (turnos migrados) → persona → #id
   const nombre = (persona && persona.nombre) || t.paciente_nombre || `#${t.persona_id}`;
   // Mostrar número de sesión si está cargado
   const sesionTxt = t.numero_sesion ? ` · S${t.numero_sesion}` : '';
-  return `<div class="turno ${pCls} ${eCls} ${sCls} ${bCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo}${sesionTxt} · ${horaTxt}${bCls?' · REHAB FÍSICA':''}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}${sesionTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+  return `<div class="turno ${pCls} ${eCls} ${sCls} ${bCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo}${sesionTxt} · ${horaTxt}${esRehab?' · REHAB FÍSICA':''}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}${sesionTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
 }
 
 function renderMonth(container) {
@@ -1132,6 +1142,8 @@ function resetForm() {
   document.getElementById('nuevoAlert').innerHTML = '';
   document.getElementById('fNT_practica').innerHTML = '<option value="">— Asigná profesionales primero —</option>';
   document.getElementById('fNT_practica').disabled = true;
+  document.getElementById('fNT_areaWrap').style.display = 'none';
+  document.getElementById('fNT_area').value = 'CONSULTORIOS';
   document.getElementById('fNT_paciente_search').value = '';
   document.getElementById('fNT_paciente_search').style.display = '';
   document.getElementById('fNT_persona_id').value = '';
@@ -1155,7 +1167,12 @@ function resetForm() {
 }
 
 async function onPracticaChange() {
-  await refrescarTratamientos(document.getElementById('fNT_persona_id').value, document.getElementById('fNT_practica').value);
+  const practica = document.getElementById('fNT_practica').value;
+  // Mostrar selector de Área solo para prácticas que pueden ir en consultorio o sala TF
+  const tieneAreas = ['FISIO','FISIO_PQ','SUELO_PELVICO'].includes(practica);
+  document.getElementById('fNT_areaWrap').style.display = tieneAreas ? '' : 'none';
+  if (!tieneAreas) document.getElementById('fNT_area').value = 'CONSULTORIOS';
+  await refrescarTratamientos(document.getElementById('fNT_persona_id').value, practica);
 }
 
 async function refrescarTratamientos(personaId, practica) {
@@ -1407,6 +1424,7 @@ function validarUnSlot(slot, datosForm) {
       hora_inicio: horaIni,
       hora_fin: horaFin,
       box,
+      area: datosForm.area || 'CONSULTORIOS',
       persona_id,
       profesional,
       practica_codigo: practica,
@@ -1433,6 +1451,7 @@ async function onGuardarTurno() {
     practica: prac,
     persona_id: parseInt(pid,10),
     tratamiento_id: (document.getElementById('fNT_tratamiento').value && document.getElementById('fNT_tratamiento').value !== '__NUEVO__') ? parseInt(document.getElementById('fNT_tratamiento').value,10) : null,
+    area: document.getElementById('fNT_area').value || 'CONSULTORIOS',
     observaciones: document.getElementById('fNT_observaciones').value.trim() || null
   };
 
@@ -1523,12 +1542,18 @@ function onTurnoClick(turnoId) {
   const sesionRow = t.numero_sesion
     ? `<div class="label">Sesión</div><div class="value" style="font-weight:700;color:var(--accent)">${t.numero_sesion}${t.tratamiento_id ? '' : ''}</div>`
     : '';
+  // Fila Área: mostrar SALA TERAPIA FÍSICA en amarillo, resto normal
+  const areaNorm = (t.area||'').toUpperCase().replace(/\s+/g,'_');
+  const esRehab = areaNorm==='SALA_TERAPIA_FISICA' || areaNorm==='SALA_TF';
+  const areaTxt = esRehab ? 'Sala Terapia Física (Rehab)' : (t.area || '—').replace(/_/g,' ');
+  const areaRow = `<div class="label">Área</div><div class="value" style="${esRehab?'color:#fde047;font-weight:700':''}">${escapeHtml(areaTxt)}</div>`;
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
       <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
       <div class="label">DNI</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>
       <div class="label">Profesional</div><div class="value">${escapeHtml(t.profesional)}</div>
       <div class="label">Práctica</div><div class="value">${escapeHtml(regla?.label||t.practica_codigo)}</div>
+      ${areaRow}
       ${sesionRow}
       <div class="label">Box</div><div class="value">${escapeHtml(t.box||'—')}</div>
       <div class="label">Fecha</div><div class="value">${escapeHtml(t.fecha)}</div>
