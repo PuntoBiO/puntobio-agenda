@@ -647,7 +647,7 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
 async function loadTratamientosPersona(personaId, practicaCodigo) {
   // Maso: los tratamientos tienen practica_codigo MASAJES_EYC/CC/PAK/R/CERO, no 'MASAJES'
   // Buscamos cualquiera que empiece con MASAJES%
-  let q = supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones').eq('persona_id', personaId);
+  let q = supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones, total_pagar, saldo_pendiente, fecha_alta').eq('persona_id', personaId);
   if (practicaCodigo === 'MASAJES') {
     q = q.like('practica_codigo', 'MASAJES%');
   } else {
@@ -655,7 +655,12 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
   }
   const { data, error } = await q.order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
-  return (data||[]).filter(t => !t.estado || (t.estado||'').toUpperCase()==='ACTIVO');
+  // Estados reales en PuntoBiO: Saldado / Parcial / Pendiente / No aplica.
+  // Mostramos todos los que NO estén anulados (excluimos solo si estado contiene "anulad" o "cancelad").
+  return (data||[]).filter(t => {
+    const est = (t.estado || '').toLowerCase();
+    return !est.includes('anulad') && !est.includes('cancelad');
+  });
 }
 
 function renderGrid() {
@@ -1009,10 +1014,16 @@ async function refrescarTratamientos(personaId, practica) {
   document.getElementById('inlineCrearTratamiento').style.display = 'none';
   if (!personaId || !practica) return;
   tratamientosPersona = await loadTratamientosPersona(parseInt(personaId,10), practica);
+  const TIPOS_LBL = { MASAJES_EYC:'EyC', MASAJES_CC:'CC', MASAJES_PAK:'PAK', MASAJES_R:'Regalo', MASAJES_CERO:'Sin cargo' };
   tratamientosPersona.forEach(t => {
     const o = document.createElement('option');
     o.value = t.id;
-    o.textContent = `${t.codigo_id || '#'+t.id}${t.estado?' · '+t.estado:''}${t.total_sesiones?' · '+t.total_sesiones+' ses.':''}`;
+    const tipo = TIPOS_LBL[t.practica_codigo] || t.practica_codigo || '';
+    const ses = t.total_sesiones ? `${t.total_sesiones} ses` : '';
+    const est = t.estado || '';
+    const saldo = (t.saldo_pendiente && parseFloat(t.saldo_pendiente) > 0) ? `saldo $${Math.round(parseFloat(t.saldo_pendiente)).toLocaleString('es-AR')}` : '';
+    const parts = [t.codigo_id || '#'+t.id, tipo, ses, est, saldo].filter(x => x);
+    o.textContent = parts.join(' · ');
     sel.appendChild(o);
   });
   const oNuevo = document.createElement('option');
