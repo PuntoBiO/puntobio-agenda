@@ -298,6 +298,15 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
         </div>
       </div>
 
+      <div class="form-row" id="beneficiarioWrap" style="display:none">
+        <label class="form-label">🎁 Beneficiario de esta sesión <span style="color:var(--text-dim);font-weight:400">(opcional)</span></label>
+        <input type="text" class="form-input" id="fNT_beneficiario" placeholder="Ej: Marido de Viki, María García, etc.">
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4">
+          Solo si el masaje es para otra persona distinta al titular del Pack/Regalo.<br>
+          <strong>Aplica a cada turno por separado</strong> — podés asignar cada sesión a una persona diferente.
+        </div>
+      </div>
+
       <div class="form-row">
         <label class="form-label">Observaciones</label>
         <textarea class="form-textarea" id="fNT_observaciones" placeholder="Notas opcionales…"></textarea>
@@ -717,7 +726,13 @@ function renderTurno(t) {
   const sCls = t.estado==='SOBRETURNO' ? 'is-sobreturno' : '';
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
-  const nombre = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
+  const titular = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
+  // Si hay beneficiario distinto, mostrar "Beneficiario (TitularPrimerNombre)"
+  let nombreMostrar = titular;
+  if (t.beneficiario_nombre && t.beneficiario_nombre.trim()) {
+    const titularCorto = String(titular).split(/\s+/)[0]; // primer nombre/palabra
+    nombreMostrar = `${t.beneficiario_nombre} (${titularCorto})`;
+  }
   // Sesión X/total (solo si hay tratamiento con >1 sesión y conocemos el ordinal)
   let sesionTxt = '';
   if (t.tratamiento_id) {
@@ -727,7 +742,7 @@ function renderTurno(t) {
       sesionTxt = ` · S${ord}/${tto.total_sesiones}`;
     }
   }
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${tipoLabel}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}${sesionTxt}</span><span>${horaTxt}</span></div></div>`;
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombreMostrar)} · ${tipoLabel}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombreMostrar)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}${sesionTxt}</span><span>${horaTxt}</span></div></div>`;
 }
 
 function renderMonth(container) {
@@ -928,7 +943,31 @@ function initNuevoForm() {
     if (precio !== null && precio !== undefined) {
       document.getElementById('ct_valor_sesion').value = precio;
     }
+    actualizarVisibilidadBeneficiario();
   });
+  document.getElementById('fNT_tratamiento').addEventListener('change', actualizarVisibilidadBeneficiario);
+}
+
+// Maso: el campo Beneficiario solo aparece para Packs y Regalos (los tipos que pueden compartirse/regalarse).
+function actualizarVisibilidadBeneficiario() {
+  const wrap = document.getElementById('beneficiarioWrap');
+  if (!wrap) return;
+  let codigo = null;
+  // Si hay un tratamiento seleccionado, usar su practica_codigo
+  const ttoId = document.getElementById('fNT_tratamiento').value;
+  if (ttoId && ttoId !== '__NUEVO__') {
+    const tto = tratamientosPersona.find(t => t.id === parseInt(ttoId, 10));
+    if (tto && tto.practica_codigo) codigo = tto.practica_codigo;
+  }
+  // Si no, usar el tipo elegido para crear tratamiento nuevo
+  if (!codigo) {
+    codigo = document.getElementById('ct_tipo_masaje')?.value || null;
+  }
+  const aplica = codigo === 'MASAJES_PAK' || codigo === 'MASAJES_R';
+  wrap.style.display = aplica ? '' : 'none';
+  if (!aplica) {
+    document.getElementById('fNT_beneficiario').value = '';
+  }
 }
 
 function resetForm() {
@@ -943,6 +982,8 @@ function resetForm() {
   document.getElementById('fNT_tratamiento').innerHTML = '<option value="">— Sin tratamiento (sesión suelta) —</option>';
   document.getElementById('fNT_tratamiento').disabled = true;
   document.getElementById('fNT_observaciones').value = '';
+  const benefIn = document.getElementById('fNT_beneficiario'); if (benefIn) benefIn.value = '';
+  const benefWrap = document.getElementById('beneficiarioWrap'); if (benefWrap) benefWrap.style.display = 'none';
   document.getElementById('inlineCrearPaciente').style.display = 'none';
   document.getElementById('inlineCrearTratamiento').style.display = 'none';
   document.getElementById('cp_nombre').value = '';
@@ -1150,6 +1191,8 @@ function validarUnSlot(slot, datosForm) {
   }
   const tipoMasajeLabel = TIPOS_MASAJE_LABEL[subtipoMasaje] || 'EyC';
   const pacienteNombre = (personas.find(p => p.id === datosForm.persona_id)?.nombre) || null;
+  // Maso: beneficiario opcional (Pack/Regalo) — texto libre
+  const beneficiarioNombre = document.getElementById('fNT_beneficiario')?.value?.trim() || null;
   const { practica, persona_id, tratamiento_id, observaciones } = datosForm;
   const regla = REGLAS_PRACTICA[practica];
   if (!regla) return { ok:false, errores:['Práctica desconocida.'] };
@@ -1229,6 +1272,7 @@ function validarUnSlot(slot, datosForm) {
       tratamiento_id,
       estado: requiereSobre ? 'SOBRETURNO' : 'PENDIENTE',
       observaciones,
+      beneficiario_nombre: beneficiarioNombre,
       creado_por: 'agenda_maso_web'
     }
   };
@@ -1307,7 +1351,8 @@ function onTurnoClick(turnoId) {
   const t = turnos.find(x => String(x.id)===String(turnoId));
   if (!t) return;
   const persona = personas.find(p => p.id===t.persona_id);
-  const nombre = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
+  const titular = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
+  const tieneBenef = !!(t.beneficiario_nombre && t.beneficiario_nombre.trim());
   const TIPOS_MASAJE_LABEL = { MASAJES_EYC:'Espalda y Cuello (EyC)', MASAJES_CC:'Cuerpo Completo (CC)', MASAJES_PAK:'Pack 4 masajes (Pak)', MASAJES_R:'Regalo', MASAJES_CERO:'Sin cargo' };
   const practicaLabel = TIPOS_MASAJE_LABEL[t.practica_codigo] || REGLAS_PRACTICA[normalizarPracticaParaRegla(t.practica_codigo)]?.label || t.practica_codigo;
   // Sesión X de N (si tiene tratamiento con más de 1 sesión)
@@ -1319,10 +1364,16 @@ function onTurnoClick(turnoId) {
       sesionRow = `<div class="label">Sesión</div><div class="value" style="font-weight:700;color:var(--accent)">${ord} de ${tto.total_sesiones}</div>`;
     }
   }
+  // Si hay beneficiario distinto, mostrar dos filas: Beneficiario + Titular del Pack
+  const pacienteRows = tieneBenef
+    ? `<div class="label">🎁 Beneficiario</div><div class="value" style="font-weight:700;color:var(--accent)">${escapeHtml(t.beneficiario_nombre)}</div>
+       <div class="label">Titular Pack</div><div class="value">${escapeHtml(titular)}</div>
+       <div class="label">DNI titular</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>`
+    : `<div class="label">Paciente</div><div class="value">${escapeHtml(titular)}</div>
+       <div class="label">DNI</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>`;
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
-      <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
-      <div class="label">DNI</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>
+      ${pacienteRows}
       <div class="label">Profesional</div><div class="value">${escapeHtml(t.profesional)}</div>
       <div class="label">Tipo</div><div class="value">${escapeHtml(practicaLabel)}</div>
       ${sesionRow}
