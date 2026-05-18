@@ -826,21 +826,25 @@ window.verDetalle = async function(ttoId) {
   const pInfo = practicaInfo(t.practica_codigo)
   const persona = estado.personasMap[t.persona_id] || '(sin nombre)'
 
-  // Cargar pagos y sesiones asociados al tto
+  // Cargar pagos, sesiones y turnos asociados al tto
   let pagosAsoc = []
   let sesionesAsoc = []
+  let turnosAsoc = []
   try {
-    const [pRes, sRes] = await Promise.all([
+    const [pRes, sRes, tRes] = await Promise.all([
       sb.from('pagos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
-      sb.from('sesiones').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false })
+      sb.from('sesiones').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
+      sb.from('turnos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false })
     ])
     pagosAsoc = pRes.data || []
     sesionesAsoc = sRes.data || []
+    turnosAsoc = tRes.data || []
   } catch (e) {
-    console.warn('No se pudieron cargar pagos/sesiones:', e)
+    console.warn('No se pudieron cargar pagos/sesiones/turnos:', e)
   }
   estado.pagosAsoc = pagosAsoc
   estado.sesionesAsoc = sesionesAsoc
+  estado.turnosAsoc = turnosAsoc
 
   $('detalle-titulo').textContent = `${pInfo.label} · #${t.id}`
   $('detalle-sub').textContent = persona
@@ -918,6 +922,24 @@ window.verDetalle = async function(ttoId) {
     `
   }
 
+  let turnosHtml = ''
+  if (turnosAsoc.length === 0) {
+    turnosHtml = `<div style="padding: 12px; color: var(--text-dim); font-size: 13px;">Sin turnos asociados.</div>`
+  } else {
+    turnosHtml = `
+      <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">${turnosAsoc.length} turno(s) en agenda</div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${turnosAsoc.map(tu => `
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
+            <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${tu.id}</span>
+            <span style="flex: 1;">${fmtFecha(tu.fecha)} ${tu.hora ? '· ' + tu.hora : ''} ${tu.profesional ? '· ' + tu.profesional : ''} ${tu.estado ? '· <strong>' + tu.estado + '</strong>' : ''}</span>
+            <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarTurno(${tu.id})">🗑️</button>
+          </div>
+        `).join('')}
+      </div>
+    `
+  }
+
   $('detalle-contenido').innerHTML = `
     <div style="margin-bottom: 16px; padding: 14px 16px; background: var(--bg-soft); border-radius: 10px; border: 1px solid var(--border);">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -936,6 +958,10 @@ window.verDetalle = async function(ttoId) {
     <div class="detalle-section">
       <div class="detalle-section-title">💰 Pagos asociados</div>
       ${pagosHtml}
+    </div>
+    <div class="detalle-section">
+      <div class="detalle-section-title">📅 Turnos asociados (Agenda)</div>
+      ${turnosHtml}
     </div>
     <div class="detalle-section">
       <div class="detalle-section-title">📝 Sesiones asociadas</div>
@@ -990,6 +1016,25 @@ window.borrarSesion = async function(sesId) {
   } catch (err) {
     console.error(err)
     toast('Error borrando sesión: ' + err.message, 'err', 6000)
+  }
+}
+
+// ===== BORRAR TURNO ASOCIADO =====
+window.borrarTurno = async function(turnoId) {
+  const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
+  if (!tu) return
+  const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
+  if (!confirm(msg)) return
+  try {
+    const { error } = await sb.from('turnos_consultorio').delete().eq('id', turnoId)
+    if (error) throw error
+    toast(`✓ Turno #${turnoId} borrado de la agenda`, 'ok')
+    const ttoId = estado.ttoSeleccionado?.id
+    await cargarDatos()
+    if (ttoId) await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error borrando turno: ' + err.message, 'err', 6000)
   }
 }
 
@@ -1090,10 +1135,15 @@ window.confirmarBorrar = async function() {
   } catch (err) {
     console.error('Error borrando:', err)
     let msgErr = err.message
-    if (msgErr.includes('foreign key') || msgErr.includes('violates')) {
-      msgErr = 'No se puede borrar: hay pagos o sesiones que dependen de este tratamiento. Borrá primero los pagos asociados.'
+    let detalle = err.details || ''
+    if (msgErr.includes('foreign key') || msgErr.includes('violates') || detalle.includes('still referenced')) {
+      // Detectar qué tabla está bloqueando
+      let tabla = 'otra tabla'
+      const m = (msgErr + ' ' + detalle).match(/table "(\w+)"/i)
+      if (m) tabla = m[1]
+      msgErr = `No se puede borrar el tratamiento porque sigue referenciado por la tabla "${tabla}". Borrá primero los registros de esa tabla desde las secciones de Pagos, Turnos o Sesiones de este modal.`
     }
-    toast('❌ ' + msgErr, 'err', 8000)
+    toast('❌ ' + msgErr, 'err', 10000)
   }
 }
 
