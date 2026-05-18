@@ -689,7 +689,13 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
 }
 
 async function loadTratamientosPersona(personaId, practicaCodigo) {
-  const { data, error } = await supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones, total_pagar, saldo_pendiente, fecha_alta').eq('persona_id', personaId).eq('practica_codigo', practicaCodigo).order('fecha_alta', { ascending:false });
+  // Aceptamos tratamientos guardados con el código del front (DLM, OSTEOPATIA, etc)
+  // o con el código del tarifario (DRENAJE, OSTEO, etc).
+  const codigoMapeado = MAP_PRACTICA_TARIFARIO[practicaCodigo];
+  const codigos = codigoMapeado && codigoMapeado !== practicaCodigo
+    ? [practicaCodigo, codigoMapeado]
+    : [practicaCodigo];
+  const { data, error } = await supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones, total_pagar, saldo_pendiente, fecha_alta').eq('persona_id', personaId).in('practica_codigo', codigos).order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
   // Filtrar anulados/cancelados (estados reales: Pendiente / Parcial / Saldado / No aplica)
   const vivos = (data||[]).filter(t => {
@@ -803,8 +809,11 @@ function renderTurno(t) {
   const sCls = t.estado==='SOBRETURNO' ? 'is-sobreturno' : '';
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
-  const nombre = persona ? persona.nombre : `#${t.persona_id}`;
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+  // Fallback: cache de nombre (turnos migrados) → persona → #id
+  const nombre = (persona && persona.nombre) || t.paciente_nombre || `#${t.persona_id}`;
+  // Mostrar número de sesión si está cargado
+  const sesionTxt = t.numero_sesion ? ` · S${t.numero_sesion}` : '';
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}${sesionTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
 }
 
 function renderMonth(container) {
@@ -1292,6 +1301,10 @@ async function onCrearTratamiento() {
   const modalidad = document.getElementById('ct_modalidad').value;
   const obraSocial = document.getElementById('ct_obra_social').value.trim();
   if (!totalSes || totalSes < 1) { document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Total de sesiones inválido.</div>`; return; }
+  // Algunas prácticas tienen un código en el front (DLM, OSTEOPATIA, PUNCION_SECA, etc)
+  // distinto al de la tabla tarifario_precios (DRENAJE, OSTEO, PUNC_SECA, ...).
+  // El FK tratamientos.practica_codigo apunta a tarifario_precios, así que usamos el mapeado.
+  const practicaCodigoBD = MAP_PRACTICA_TARIFARIO[practica] || practica;
   const btn = document.getElementById('ctCreate');
   btn.disabled = true; btn.textContent = 'Creando…';
   try {
@@ -1300,7 +1313,7 @@ async function onCrearTratamiento() {
     const codigoId = `${prefix}${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}${pad(ts.getHours())}${pad(ts.getMinutes())}`;
     const payload = {
       persona_id: parseInt(personaId, 10),
-      practica_codigo: practica,
+      practica_codigo: practicaCodigoBD,
       codigo_id: codigoId,
       fecha_alta: toISODate(new Date()),
       total_sesiones: totalSes,
@@ -1497,14 +1510,19 @@ function onTurnoClick(turnoId) {
   const t = turnos.find(x => String(x.id)===String(turnoId));
   if (!t) return;
   const persona = personas.find(p => p.id===t.persona_id);
-  const nombre = persona ? persona.nombre : `#${t.persona_id}`;
+  const nombre = (persona && persona.nombre) || t.paciente_nombre || `#${t.persona_id}`;
   const regla = REGLAS_PRACTICA[t.practica_codigo];
+  // Fila Sesión: si turno trae numero_sesion (migrado o calculado)
+  const sesionRow = t.numero_sesion
+    ? `<div class="label">Sesión</div><div class="value" style="font-weight:700;color:var(--accent)">${t.numero_sesion}${t.tratamiento_id ? '' : ''}</div>`
+    : '';
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
       <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
       <div class="label">DNI</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>
       <div class="label">Profesional</div><div class="value">${escapeHtml(t.profesional)}</div>
       <div class="label">Práctica</div><div class="value">${escapeHtml(regla?.label||t.practica_codigo)}</div>
+      ${sesionRow}
       <div class="label">Box</div><div class="value">${escapeHtml(t.box||'—')}</div>
       <div class="label">Fecha</div><div class="value">${escapeHtml(t.fecha)}</div>
       <div class="label">Hora</div><div class="value">${escapeHtml(t.hora_inicio.slice(0,5))} – ${escapeHtml(t.hora_fin.slice(0,5))}</div>
