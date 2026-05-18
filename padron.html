@@ -87,6 +87,9 @@
   .btn-baja:hover { background: var(--rojo); color: white; }
   .btn-reactivar { background: var(--verde-soft); color: var(--verde); border: 1px solid var(--verde); }
   .btn-reactivar:hover { background: var(--verde); color: white; }
+  .btn-borrar { background: #1a0a0a; color: var(--rojo); border: 1px solid var(--rojo); }
+  .btn-borrar:hover { background: var(--rojo); color: white; }
+  .badge-admin { display: inline-block; padding: 3px 10px; border-radius: 999px; background: rgba(167,139,250,0.18); color: var(--violeta); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; margin-left: 10px; vertical-align: middle; }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
   .modal-backdrop.activo { display: flex; }
   .modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
@@ -401,6 +404,34 @@
   </div>
 </div>
 
+<!-- MODAL BORRAR PERSONA (ADMIN ONLY) -->
+<div class="modal-backdrop" id="modalBorrar">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title" style="color: var(--rojo)">🗑️ Borrar persona del padrón</span>
+      <button class="modal-close" onclick="cerrarModal('modalBorrar')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-warning">
+        <strong>⚠️ ATENCIÓN — Esta acción es PERMANENTE</strong>
+        Se va a borrar la persona del sistema. <strong style="color:var(--rojo)">No se puede deshacer.</strong><br><br>
+        Si la persona tiene <strong>turnos, pagos, sesiones o tratamientos</strong> registrados, la base de datos va a bloquear el borrado automáticamente (no se pierde nada).<br><br>
+        Para alumnos TF activos, lo correcto es <strong>"Dar de baja"</strong> (mantiene el histórico), no borrar.
+      </div>
+      <div id="borrarInfo" style="margin-bottom: 16px"></div>
+      <div class="form-group">
+        <label>Para confirmar, escribí el nombre exacto: <strong id="borrarNombreExpected" style="color:var(--rojo)"></strong></label>
+        <input type="text" id="borrarConfirmInput" class="uppercase-input" placeholder="Escribí el nombre completo" autocomplete="off">
+      </div>
+      <div id="borrarAlert" style="margin-top: 14px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalBorrar')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-baja" id="btnConfirmarBorrar" onclick="confirmarBorrar()" disabled>🗑️ Borrar permanentemente</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script type="module">
@@ -420,6 +451,8 @@ let filtroPlan = '';
 let filtroDia = '';
 let textoBusqueda = '';
 let alumnoActivo = null; // fila activa en modales
+let esAdmin = false;     // true si el usuario logueado tiene admin_total
+let usuarioEmail = '';   // email del usuario logueado (info para mostrar)
 
 const HOY = new Date();
 const MES_ACTUAL = `${HOY.getFullYear()}-${String(HOY.getMonth()+1).padStart(2,'0')}`;
@@ -633,6 +666,7 @@ function renderTabla(lista) {
       ${esActivoTF ? `<button class="btn-accion btn-cobrar" data-idx="${idx}" data-accion="cobrar" title="Cobrar TF">💵</button>` : ''}
       ${esActivoTF ? `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="baja" title="Baja TF">❌</button>` : ''}
       ${esBajaTF ? `<button class="btn-accion btn-reactivar" data-idx="${idx}" data-accion="reactivar" title="Reactivar TF">↩️</button>` : ''}
+      ${esAdmin ? `<button class="btn-accion btn-borrar" data-idx="${idx}" data-accion="borrar" title="Borrar (solo admin)">🗑️</button>` : ''}
     `;
     html += `<tr class="row" data-idx="${idx}">
       <td><strong>${f.persona.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${f.persona.id}</span>${f.persona.dni?`<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">DNI ${f.persona.dni}</div>`:''}</td>
@@ -659,6 +693,7 @@ function renderTabla(lista) {
       else if (accion === 'cobrar') abrirModalCobrar();
       else if (accion === 'baja') abrirModalBaja();
       else if (accion === 'reactivar') abrirModalReactivar();
+      else if (accion === 'borrar') abrirModalBorrar();
     });
   });
   listaFiltradaCache = lista;
@@ -1215,6 +1250,121 @@ window.recargarPostNueva = async () => {
   await cargarTodo();
 };
 
+// ===== DETECCIÓN DE ADMIN =====
+// Solo el usuario admin puede borrar personas del padrón.
+// Se verifica vía Supabase Auth + tabla permisos_equipo (campo admin_total).
+async function checkAdmin() {
+  try {
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) { esAdmin = false; return; }
+    usuarioEmail = user.email || '';
+    // Buscar en permisos_equipo por auth_user_id
+    const { data: permisos, error } = await sb.from('permisos_equipo')
+      .select('admin_total')
+      .eq('auth_user_id', user.id)
+      .maybeSingle();
+    if (!error && permisos && permisos.admin_total === true) {
+      esAdmin = true;
+    } else if (usuarioEmail === 'liclucianavelaz@gmail.com') {
+      // Fallback: si por algún motivo no hay registro en permisos_equipo pero
+      // el email es el admin conocido (Lu), se permite igual.
+      esAdmin = true;
+    } else {
+      esAdmin = false;
+    }
+    // Si es admin, mostrar badge en el header
+    if (esAdmin) {
+      const h1 = document.querySelector('.page-header h1');
+      if (h1 && !h1.querySelector('.badge-admin')) {
+        const badge = document.createElement('span');
+        badge.className = 'badge-admin';
+        badge.textContent = '🔑 admin';
+        badge.title = `Modo administrador (${usuarioEmail})`;
+        h1.appendChild(badge);
+      }
+    }
+  } catch (e) {
+    console.warn('checkAdmin error:', e);
+    esAdmin = false;
+  }
+}
+
+// ===== BORRAR PERSONA (ADMIN ONLY) =====
+window.abrirModalBorrar = () => {
+  if (!esAdmin) { toast('No tenés permisos para borrar', true); return; }
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  const tieneInsc = alumnoActivo.cantInscripciones > 0;
+  $('#borrarInfo').innerHTML = `
+    <div class="info-list">
+      <div class="info-item"><div class="info-item-label">Nombre</div><div class="info-item-value">${p.nombre || '—'}</div></div>
+      <div class="info-item"><div class="info-item-label">ID</div><div class="info-item-value">#${p.id}</div></div>
+      <div class="info-item"><div class="info-item-label">DNI</div><div class="info-item-value">${p.dni || '—'}</div></div>
+      <div class="info-item"><div class="info-item-label">Inscripciones TF</div><div class="info-item-value">${tieneInsc ? alumnoActivo.cantInscripciones + ' (van a impedir el borrado)' : 'ninguna'}</div></div>
+    </div>
+  `;
+  $('#borrarNombreExpected').textContent = (p.nombre || '').toUpperCase();
+  $('#borrarConfirmInput').value = '';
+  $('#borrarAlert').innerHTML = '';
+  $('#btnConfirmarBorrar').disabled = true;
+  $('#modalBorrar').classList.add('activo');
+  setTimeout(() => $('#borrarConfirmInput').focus(), 100);
+};
+
+// Mientras escribe, comparar con el nombre esperado para habilitar el botón
+document.addEventListener('input', e => {
+  if (e.target && e.target.id === 'borrarConfirmInput') {
+    const pos = e.target.selectionStart;
+    e.target.value = e.target.value.toUpperCase();
+    e.target.setSelectionRange(pos, pos);
+    const esperado = $('#borrarNombreExpected').textContent.trim();
+    $('#btnConfirmarBorrar').disabled = e.target.value.trim() !== esperado;
+  }
+});
+
+window.confirmarBorrar = async () => {
+  if (!esAdmin) { toast('No tenés permisos para borrar', true); return; }
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  const esperado = $('#borrarNombreExpected').textContent.trim();
+  if ($('#borrarConfirmInput').value.trim() !== esperado) {
+    $('#borrarAlert').innerHTML = '<div class="modal-warning"><strong>El nombre no coincide</strong>Escribilo exactamente igual para confirmar.</div>';
+    return;
+  }
+  const btn = $('#btnConfirmarBorrar');
+  btn.disabled = true;
+  btn.textContent = 'Borrando…';
+  try {
+    const { error } = await sb.from('personas').delete().eq('id', p.id);
+    if (error) {
+      // Detectar error de foreign key (la persona tiene turnos, pagos, etc.)
+      const msg = (error.message || '').toLowerCase();
+      if (msg.includes('foreign key') || msg.includes('violates') || error.code === '23503') {
+        $('#borrarAlert').innerHTML = `
+          <div class="modal-warning">
+            <strong>No se puede borrar</strong>
+            La persona tiene registros vinculados (turnos, pagos, sesiones o tratamientos).<br>
+            En vez de borrar, considerá <strong>dar de baja</strong> (preserva el histórico).<br><br>
+            <span style="font-size:11px;opacity:0.7">Detalle técnico: ${error.message}</span>
+          </div>
+        `;
+        btn.disabled = false;
+        btn.textContent = '🗑️ Borrar permanentemente';
+        return;
+      }
+      throw error;
+    }
+    toast(`✓ ${p.nombre} borrada del padrón`);
+    cerrarModal('modalBorrar');
+    await cargarTodo();
+  } catch (e) {
+    console.error('Borrar error:', e);
+    $('#borrarAlert').innerHTML = `<div class="modal-warning"><strong>Error</strong>${e.message || e}</div>`;
+    btn.disabled = false;
+    btn.textContent = '🗑️ Borrar permanentemente';
+  }
+};
+
 // ===== CERRAR MODALES =====
 window.cerrarModal = (id) => { $('#' + id).classList.remove('activo'); };
 document.querySelectorAll('.modal-backdrop').forEach(b => {
@@ -1225,7 +1375,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ===== ARRANQUE =====
-cargarTodo();
+checkAdmin().finally(() => cargarTodo());
 </script>
 </body>
 </html>
