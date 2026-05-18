@@ -417,21 +417,25 @@ tbody tr:last-child td { border-bottom: 0; }
 
       <div class="form-field">
         <label class="form-label">Total sesiones</label>
-        <input type="number" id="nuevo-sesiones" class="form-input" value="10" min="1">
+        <input type="number" id="nuevo-sesiones" class="form-input" value="10" min="1" onchange="recalcularTotal()">
       </div>
       <div class="form-field">
-        <label class="form-label">Total a pagar ($)</label>
+        <label class="form-label">Valor por sesión ($)</label>
+        <input type="number" id="nuevo-valor-sesion" class="form-input" value="0" min="0" step="0.01" onchange="recalcularTotal()">
+      </div>
+
+      <div class="form-field span-2">
+        <label class="form-label">Total a pagar ($) <span style="color:var(--text-faint);font-weight:400;text-transform:none;letter-spacing:0;">— se calcula auto, podés ajustarlo</span></label>
         <input type="number" id="nuevo-total" class="form-input" value="0" min="0" step="0.01">
       </div>
 
       <div class="form-field span-2">
-        <label class="form-label">Profesional</label>
-        <select id="nuevo-profesional" class="form-select">
-          <option value="Lu">Lu</option>
-          <option value="Jime">Jime</option>
-          <option value="Bruno">Bruno</option>
-          <option value="Male">Male</option>
-          <option value="Vero">Vero</option>
+        <label class="form-label">Tipo de cobro</label>
+        <select id="nuevo-tipo-cobro" class="form-select">
+          <option value="NORMAL">Normal (aplica tarifario)</option>
+          <option value="MANUAL">Manual (monto libre)</option>
+          <option value="SOLO_COSEGURO">Solo coseguro</option>
+          <option value="CORTESIA">Cortesía</option>
         </select>
       </div>
     </div>
@@ -537,7 +541,16 @@ function badgeArea(area) {
 }
 
 function badgeEstado(t) {
+  const estadoStr = String(t.estado || '').toUpperCase()
   const saldo = Number(t.saldo_pendiente || 0)
+  // Priorizar el campo estado de la BD; si no, deducir del saldo
+  if (estadoStr === 'PENDIENTE' || estadoStr === 'ACTIVO') {
+    return `<span class="badge badge-activo">${t.estado}</span>`
+  }
+  if (estadoStr === 'PARCIAL') return `<span class="badge badge-parcial">Parcial</span>`
+  if (estadoStr === 'FINALIZADO' || estadoStr === 'CERRADO') return `<span class="badge badge-finalizado">${t.estado}</span>`
+  if (estadoStr === 'BAJA' || estadoStr === 'CANCELADO') return `<span class="badge badge-baja">${t.estado}</span>`
+  // Fallback por saldo
   if (saldo <= 0) return `<span class="badge badge-finalizado">Finalizado</span>`
   if (Number(t.total_abonado || 0) > 0) return `<span class="badge badge-parcial">Parcial</span>`
   return `<span class="badge badge-activo">Activo</span>`
@@ -619,7 +632,11 @@ function renderKPIs() {
   const total = estado.tratamientos.length
   const conSaldo = estado.tratamientos.filter(t => Number(t.saldo_pendiente || 0) > 0).length
   const finalizados = estado.tratamientos.filter(t => Number(t.saldo_pendiente || 0) <= 0).length
-  const saldoTotal = estado.tratamientos.reduce((acc, t) => acc + Number(t.saldo_pendiente || 0), 0)
+  // Solo sumar saldos positivos (los negativos son créditos, no deuda)
+  const saldoTotal = estado.tratamientos.reduce((acc, t) => {
+    const s = Number(t.saldo_pendiente || 0)
+    return acc + (s > 0 ? s : 0)
+  }, 0)
   $('kpi-total').textContent = total
   $('kpi-saldo').textContent = conSaldo
   $('kpi-fin').textContent = finalizados
@@ -697,16 +714,19 @@ window.verDetalle = function(ttoId) {
   // Mostrar TODOS los campos del tto para debug + lo más relevante destacado
   const camposPrincipales = [
     ['Paciente', persona],
+    ['Código', t.codigo_id || '—'],
     ['Práctica', `${pInfo.label} (${t.practica_codigo})`],
     ['Estado', t.estado || '—'],
     ['Modalidad', t.modalidad || '—'],
     ['Obra Social', t.obra_social || '—'],
-    ['Profesional', t.profesional || '—'],
     ['Sesiones totales', t.total_sesiones || '—'],
+    ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
     ['Total a pagar', fmt(t.total_pagar)],
     ['Total abonado', fmt(t.total_abonado)],
     ['Saldo pendiente', fmt(t.saldo_pendiente)],
+    ['Tipo de cobro', t.tipo_cobro || '—'],
+    ['Descuento', fmt(t.descuento_monto)],
   ]
   const principales = camposPrincipales.map(([l, v]) => `
     <div class="detalle-row">
@@ -830,6 +850,14 @@ function poblarPracticasSelect() {
 
 $('nuevo-area').addEventListener('change', poblarPracticasSelect)
 
+window.recalcularTotal = function() {
+  const ses = Number($('nuevo-sesiones').value) || 0
+  const vs = Number($('nuevo-valor-sesion').value) || 0
+  if (ses > 0 && vs > 0) {
+    $('nuevo-total').value = ses * vs
+  }
+}
+
 window.crearTratamiento = async function() {
   if (!estado.pacienteSel) {
     toast('Elegí un paciente primero', 'err')
@@ -839,24 +867,30 @@ window.crearTratamiento = async function() {
   btn.disabled = true
   btn.textContent = 'Creando...'
 
-  const pInfo = practicaInfo($('nuevo-practica').value)
+  const valorSesion = Number($('nuevo-valor-sesion').value) || 0
+  const totalPagar  = Number($('nuevo-total').value) || 0
+  const obraSocial  = $('nuevo-obra').value
+  const modalidad   = $('nuevo-modalidad').value
+
   const payload = {
     persona_id: estado.pacienteSel.id,
     practica_codigo: $('nuevo-practica').value,
-    modalidad: $('nuevo-modalidad').value,
-    obra_social: $('nuevo-obra').value,
+    modalidad: modalidad,
+    obra_social: obraSocial === 'PARTICULAR' ? null : obraSocial,
     total_sesiones: Number($('nuevo-sesiones').value) || 1,
-    total_pagar: Number($('nuevo-total').value) || 0,
+    valor_sesion: valorSesion,
+    total_pagar: totalPagar,
     total_abonado: 0,
-    profesional: $('nuevo-profesional').value,
-    estado: 'ACTIVO',
+    descuento_monto: 0,
+    tipo_cobro: $('nuevo-tipo-cobro').value,
+    estado: 'Pendiente',
     fecha_alta: new Date().toISOString().slice(0, 10),
   }
 
   try {
     const { data, error } = await sb.from('tratamientos').insert(payload).select().single()
     if (error) throw error
-    toast(`✓ Tratamiento #${data.id} creado`, 'ok')
+    toast(`✓ Tratamiento #${data.id} creado (${data.codigo_id || '—'})`, 'ok')
     cerrarNuevo()
     await cargarDatos()
   } catch (err) {
