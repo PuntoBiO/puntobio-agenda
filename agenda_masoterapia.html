@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agenda Masoterapia · PuntoBiO</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#f4f5f7; --bg-elev:#fff; --bg-elev-2:#eef0f3;
+  --border:#d8dde3; --border-light:#c5cbd2;
+  --text:#1a1d21; --text-dim:#5a6068; --text-muted:#9097a0;
+  --accent:#1e9fe0; --accent-dim:#1782b5; --accent-bg:#e0f1fb;
+  --maso:#b7791f; --maso-bg:#fdf3df; --maso-dark:#8a5612;
+  --s-presente:#4caf50; --s-ausente:#d63838; --s-pendiente:#9097a0;
+  --s-sobre:#c79c00;
+  --feriado-bg:#fde0e0; --feriado-text:#b04040;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;font-size:13px;line-height:1.4;min-height:100vh;padding-bottom:60px}
+.shell{max-width:1400px;margin:0 auto;padding:16px 20px 40px}
+
+.header{display:flex;align-items:center;justify-content:space-between;padding:12px 0 16px;border-bottom:1px solid var(--border);margin-bottom:16px;gap:12px;flex-wrap:wrap}
+.header-left h1{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;letter-spacing:.08em;color:var(--maso);margin-bottom:4px}
+.header-left h1::before{content:"💆  ";font-size:18px}
+.period{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em}
+
+.controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--border)}
+.nav-btns{display:flex;gap:4px}
+.btn{background:var(--bg-elev);border:1px solid var(--border);color:var(--text);padding:7px 13px;border-radius:5px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.04em;transition:all .15s}
+.btn:hover{background:var(--bg-elev-2);border-color:var(--maso)}
+.btn-primary{background:var(--maso);color:#fff;border-color:var(--maso)}
+.btn-primary:hover{background:var(--maso-dark);border-color:var(--maso-dark);color:#fff}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.view-toggle{display:flex;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;overflow:hidden}
+.view-btn{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.05em;padding:7px 14px;background:transparent;color:var(--text-dim);border:none;cursor:pointer}
+.view-btn.active{background:var(--maso);color:#fff}
+
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-left:auto}
+.stat{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);background:var(--bg-elev);border:1px solid var(--border);padding:5px 10px;border-radius:5px}
+.stat strong{color:var(--text);font-weight:700;margin-left:4px}
+
+.grid-week{display:grid;grid-template-columns:60px repeat(5,1fr);border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--bg-elev)}
+.grid-cell{border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:4px;min-height:60px;position:relative;display:flex;flex-direction:column;gap:3px}
+.grid-cell:nth-child(6n){border-right:none}
+.grid-header{background:var(--bg-elev-2);font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-dim);text-transform:uppercase;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:48px;padding:6px}
+.grid-header .day-name{color:var(--maso);font-weight:700}
+.grid-header.is-today{background:var(--maso-bg)}
+.grid-header.is-today .day-name{color:var(--maso-dark)}
+.grid-header .day-date{font-size:10px;color:var(--text-muted);margin-top:2px}
+.grid-hour{background:var(--bg-elev-2);font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);display:flex;align-items:flex-start;justify-content:center;padding-top:6px}
+
+.cell-libre{cursor:pointer;transition:background .15s}
+.cell-libre:hover{background:var(--maso-bg)}
+.cell-libre::before{content:"+ Nuevo";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-muted);opacity:0;transition:opacity .15s;letter-spacing:.05em}
+.cell-libre:hover::before{opacity:1}
+.cell-cerrado{background:var(--bg-elev-2);color:var(--text-muted);font-family:'JetBrains Mono',monospace;font-size:10px;align-items:center;justify-content:center;cursor:default}
+.cell-feriado{background:var(--feriado-bg);color:var(--feriado-text);font-size:10px;align-items:center;justify-content:center;cursor:default;font-weight:600}
+
+.turno{background:var(--maso-bg);border:1px solid var(--maso);color:var(--maso-dark);padding:4px 6px;border-radius:4px;font-size:11px;line-height:1.25;cursor:pointer;transition:all .12s;position:relative}
+.turno:hover{transform:translateY(-1px);box-shadow:0 3px 8px rgba(0,0,0,.1)}
+.turno-paciente{font-weight:700;display:block}
+.turno-info{font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--maso-dark);opacity:.8;letter-spacing:.03em}
+.turno.e-presente{background:#dcedc8;border-color:var(--s-presente);color:#2e5d2f}
+.turno.e-presente .turno-paciente::before{content:"✓ ";color:var(--s-presente);font-weight:700}
+.turno.e-ausente{background:#ffd6d6;border-color:var(--s-ausente);color:#7a1c1c;text-decoration:line-through}
+.turno.e-sobreturno{background:#fff5cc;border-color:var(--s-sobre);color:#7a5a00}
+.turno.e-sobreturno .turno-paciente::after{content:" ⚡";color:var(--s-sobre)}
+
+.month-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.month-cell{background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;padding:6px;min-height:80px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column}
+.month-cell:hover{border-color:var(--maso)}
+.month-cell .day-num{font-family:'JetBrains Mono',monospace;font-weight:700;color:var(--text);font-size:13px;margin-bottom:4px}
+.month-cell.is-today{background:var(--maso-bg);border-color:var(--maso)}
+.month-cell.is-feriado{background:var(--feriado-bg)}
+.month-cell.out{opacity:.35}
+.month-count{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--maso-dark);background:var(--maso-bg);padding:2px 6px;border-radius:3px;align-self:flex-start;margin-top:auto;font-weight:700}
+.month-head{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:6px}
+.month-head div{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-dim);text-align:center;text-transform:uppercase;letter-spacing:.05em;padding:6px 0}
+
+.loader{padding:40px;text-align:center;color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:12px}
+.alert{padding:10px 14px;border-radius:5px;font-size:12px;margin:10px 0}
+.alert.error{background:#fce0e0;border:1px solid #d63838;color:#7a1c1c}
+.alert.ok{background:#dcedc8;border:1px solid var(--s-presente);color:#2e5d2f}
+.alert.info{background:var(--accent-bg);border:1px solid var(--accent);color:var(--accent-dim)}
+
+/* Modal */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);z-index:1000;display:none;align-items:center;justify-content:center;padding:20px}
+.modal-bg.open{display:flex}
+.modal{background:var(--bg-elev);border-radius:10px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,.3)}
+.modal-head{padding:18px 22px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start}
+.modal-title{font-size:16px;font-weight:700;color:var(--text)}
+.modal-sub{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:4px;letter-spacing:.04em}
+.modal-close{background:none;border:none;font-size:22px;color:var(--text-dim);cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--text)}
+.modal-body{padding:18px 22px}
+.modal-foot{padding:14px 22px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+
+.form-row{margin-bottom:14px}
+.form-row label{display:block;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.form-row select, .form-row input, .form-row textarea{width:100%;background:var(--bg-elev);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:5px;font-family:inherit;font-size:13px}
+.form-row select:focus, .form-row input:focus, .form-row textarea:focus{outline:none;border-color:var(--maso)}
+.form-row textarea{min-height:60px;resize:vertical}
+
+.estado-pills{display:flex;gap:6px;flex-wrap:wrap}
+.estado-pill{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.05em;padding:6px 12px;border-radius:4px;border:1px solid var(--border);background:var(--bg-elev);color:var(--text-dim);cursor:pointer}
+.estado-pill:hover{border-color:var(--maso)}
+.estado-pill.is-active{background:var(--maso);color:#fff;border-color:var(--maso)}
+
+.detalle-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+.detalle-row:last-child{border-bottom:none}
+.detalle-row .l{color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.detalle-row .v{color:var(--text);font-weight:600;text-align:right}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <div class="header">
+    <div class="header-left">
+      <h1>AGENDA MASOTERAPIA</h1>
+      <div class="period" id="periodLabel">—</div>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="controls">
+    <div class="nav-btns">
+      <button class="btn" id="navPrev">← Anterior</button>
+      <button class="btn" id="navHoy">Hoy</button>
+      <button class="btn" id="navNext">Siguiente →</button>
+    </div>
+    <div class="view-toggle">
+      <button class="view-btn active" data-view="week">Semana</button>
+      <button class="view-btn" data-view="month">Mes</button>
+    </div>
+    <button class="btn btn-primary" id="btnNuevo" style="margin-left:auto">+ Nuevo turno</button>
+  </div>
+
+  <div id="alertBox"></div>
+  <div id="gridContainer"><div class="loader">Cargando turnos…</div></div>
+</div>
+
+<!-- MODAL NUEVO TURNO -->
+<div class="modal-bg" id="modalNuevo">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Nuevo turno de masaje</div>
+        <div class="modal-sub" id="nuevoSubtitulo">Vero · CONSULTORIO_ESPECIALIDADES</div>
+      </div>
+      <button class="modal-close" onclick="closeModal('modalNuevo')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="nuevoAlert"></div>
+      <div class="form-row">
+        <label>Fecha</label>
+        <input type="date" id="fN_fecha">
+      </div>
+      <div class="form-row">
+        <label>Hora</label>
+        <select id="fN_hora"></select>
+      </div>
+      <div class="form-row">
+        <label>Tipo de masaje</label>
+        <select id="fN_tipo">
+          <option value="MASAJES_EYC">Espalda y Cuello (EyC)</option>
+          <option value="MASAJES_CC">Cuerpo Completo (CC)</option>
+          <option value="MASAJES_PAK">Pack 4 masajes (Pak)</option>
+          <option value="MASAJES_R">Regalo (R)</option>
+          <option value="MASAJES_CERO">Sin cargo (C)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Paciente</label>
+        <select id="fN_persona"><option value="">— Elegí paciente —</option></select>
+      </div>
+      <div class="form-row">
+        <label>Observaciones (opcional)</label>
+        <textarea id="fN_obs" placeholder="Ej: pedido especial, alergias, etc"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modalNuevo')">Cancelar</button>
+      <button class="btn btn-primary" id="btnGuardar">Guardar turno</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL DETALLE/EDITAR TURNO -->
+<div class="modal-bg" id="modalDetalle">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Detalle del turno</div>
+        <div class="modal-sub" id="detalleSubtitulo">—</div>
+      </div>
+      <button class="modal-close" onclick="closeModal('modalDetalle')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="detalleAlert"></div>
+      <div id="detalleInfo"></div>
+      <div class="form-row" style="margin-top:14px">
+        <label>Cambiar estado</label>
+        <div class="estado-pills">
+          <button class="estado-pill" data-estado="PENDIENTE">Pendiente</button>
+          <button class="estado-pill" data-estado="PRESENTE">Presente</button>
+          <button class="estado-pill" data-estado="AUSENTE">Ausente</button>
+          <button class="estado-pill" data-estado="CANCELADO">Cancelado</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modalDetalle')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// CONFIG SUPABASE
+// ============================================================
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+
+let supa = null;
+
+// ============================================================
+// CONFIG DOMINIO
+// ============================================================
+const PROFESIONAL = 'Vero';
+
+// Disponibilidad de Vero (sacada de agenda_consultorios.html)
+// Estructura: { diaNumero(1=lunes): [horas] }
+const DISPONIBILIDAD = {
+  1: [11, 12, 15, 18, 19],
+  2: [10, 11, 16, 18, 20],
+  3: [11, 12, 15, 18, 19],
+  4: [10, 11, 16, 18, 20],
+  5: [11, 12, 16, 17, 18]
+};
+
+const HORAS = [8,9,10,11,12,13,14,15,16,17,18,19,20];
+const DIAS = ['LUNES','MARTES','MIERCOLES','JUEVES','VIERNES'];
+const NOMBRES_MES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+const TIPOS_MASAJE = {
+  MASAJES_EYC: 'EyC',
+  MASAJES_CC: 'CC',
+  MASAJES_PAK: 'PAK',
+  MASAJES_R: 'Regalo',
+  MASAJES_CERO: 'Sin cargo'
+};
+
+// ============================================================
+// ESTADO
+// ============================================================
+let turnos = [];
+let personas = [];
+let feriadosMap = new Map();
+let anchorDate = new Date();
+let currentView = 'week';
+let turnoSeleccionado = null;
+
+// ============================================================
+// INIT
+// ============================================================
+async function init() {
+  try {
+    supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    bindEvents();
+    await loadPersonas();
+    await refresh();
+  } catch (e) {
+    showError('Error inicial: ' + (e.message || e));
+    console.error(e);
+  }
+}
+
+function bindEvents() {
+  document.getElementById('navPrev').addEventListener('click', () => navegar(-1));
+  document.getElementById('navNext').addEventListener('click', () => navegar(1));
+  document.getElementById('navHoy').addEventListener('click', () => { anchorDate = new Date(); refresh(); });
+
+  document.querySelectorAll('.view-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.view-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      currentView = b.dataset.view;
+      refresh();
+    });
+  });
+
+  document.getElementById('btnNuevo').addEventListener('click', () => openNuevoTurno(null, null));
+  document.getElementById('btnGuardar').addEventListener('click', onGuardarTurno);
+
+  document.getElementById('modalNuevo').addEventListener('click', (e) => {
+    if (e.target.id === 'modalNuevo') closeModal('modalNuevo');
+  });
+  document.getElementById('modalDetalle').addEventListener('click', (e) => {
+    if (e.target.id === 'modalDetalle') closeModal('modalDetalle');
+  });
+
+  document.querySelectorAll('#modalDetalle .estado-pill').forEach(b => {
+    b.addEventListener('click', () => cambiarEstado(b.dataset.estado));
+  });
+}
+
+function navegar(dir) {
+  if (currentView === 'week') {
+    anchorDate = addDays(anchorDate, 7 * dir);
+  } else {
+    anchorDate = new Date(anchorDate.getFullYear(), anchorDate.getMonth() + dir, 1);
+  }
+  refresh();
+}
+
+// ============================================================
+// CARGA DE DATOS
+// ============================================================
+async function refresh() {
+  showLoading();
+  try {
+    const { from, to } = rangoVisible();
+    await Promise.all([loadFeriados(from, to), loadTurnos(from, to)]);
+    renderUI();
+  } catch (e) {
+    showError(e.message || 'Error cargando');
+    console.error(e);
+  }
+}
+
+async function loadTurnos(from, to) {
+  const { data, error } = await supa
+    .from('turnos_masoterapia')
+    .select('*')
+    .gte('fecha', toISODate(from))
+    .lte('fecha', toISODate(to))
+    .neq('estado', 'CANCELADO');
+  if (error) throw error;
+  turnos = data || [];
+}
+
+async function loadFeriados(from, to) {
+  try {
+    const { data, error } = await supa
+      .from('feriados')
+      .select('*')
+      .gte('fecha', toISODate(from))
+      .lte('fecha', toISODate(to));
+    if (error) throw error;
+    feriadosMap.clear();
+    (data || []).forEach(f => feriadosMap.set(f.fecha, f.motivo));
+  } catch (e) {
+    console.warn('No se pudo cargar feriados:', e.message);
+  }
+}
+
+async function loadPersonas() {
+  const { data, error } = await supa
+    .from('personas')
+    .select('id, nombre, dni, obra_social')
+    .order('nombre', { ascending: true });
+  if (error) throw error;
+  personas = data || [];
+
+  const sel = document.getElementById('fN_persona');
+  sel.innerHTML = '<option value="">— Elegí paciente —</option>' +
+    personas.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}${p.dni ? ' · ' + p.dni : ''}</option>`).join('');
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+function renderUI() {
+  updatePeriod();
+  updateStats();
+  if (currentView === 'week') renderSemana();
+  else renderMes();
+}
+
+function updatePeriod() {
+  const { from, to } = rangoVisible();
+  if (currentView === 'week') {
+    document.getElementById('periodLabel').textContent =
+      `Semana del ${from.getDate()}/${from.getMonth()+1} al ${to.getDate()}/${to.getMonth()+1}/${to.getFullYear()}`;
+  } else {
+    document.getElementById('periodLabel').textContent =
+      `${NOMBRES_MES[anchorDate.getMonth()]} ${anchorDate.getFullYear()}`;
+  }
+}
+
+function updateStats() {
+  const total = turnos.length;
+  const pres = turnos.filter(t => t.estado === 'PRESENTE').length;
+  const pend = turnos.filter(t => t.estado === 'PENDIENTE').length;
+  const aus = turnos.filter(t => t.estado === 'AUSENTE').length;
+  document.getElementById('stats').innerHTML = `
+    <div class="stat">Total<strong>${total}</strong></div>
+    <div class="stat" style="color:var(--s-presente)">Presentes<strong>${pres}</strong></div>
+    <div class="stat" style="color:var(--text-dim)">Pendientes<strong>${pend}</strong></div>
+    <div class="stat" style="color:var(--s-ausente)">Ausentes<strong>${aus}</strong></div>
+  `;
+}
+
+function renderSemana() {
+  const inicio = lunesDe(anchorDate);
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+
+  let html = '<div class="grid-week">';
+  html += '<div class="grid-cell grid-header"><div style="font-size:10px">HORA</div></div>';
+  for (let i = 0; i < 5; i++) {
+    const d = addDays(inicio, i);
+    const isToday = mismoDia(d, hoy);
+    html += `<div class="grid-cell grid-header ${isToday ? 'is-today' : ''}">
+      <div class="day-name">${DIAS[i]}</div>
+      <div class="day-date">${d.getDate()}/${d.getMonth()+1}</div>
+    </div>`;
+  }
+
+  for (const hora of HORAS) {
+    html += `<div class="grid-cell grid-hour">${pad(hora)}:00</div>`;
+    for (let i = 0; i < 5; i++) {
+      const d = addDays(inicio, i);
+      const iso = toISODate(d);
+      const diaNum = i + 1;
+
+      const feriado = feriadosMap.get(iso);
+      if (feriado) {
+        html += `<div class="grid-cell cell-feriado" title="${escapeHtml(feriado)}">FERIADO</div>`;
+        continue;
+      }
+
+      const disponible = DISPONIBILIDAD[diaNum]?.includes(hora);
+      const turnosSlot = turnos.filter(t =>
+        t.fecha === iso && parseInt(t.hora_inicio.slice(0,2), 10) === hora
+      );
+
+      if (turnosSlot.length > 0) {
+        html += `<div class="grid-cell">${turnosSlot.map(t => renderTurno(t)).join('')}</div>`;
+      } else if (disponible) {
+        html += `<div class="grid-cell cell-libre" data-fecha="${iso}" data-hora="${hora}"></div>`;
+      } else {
+        html += `<div class="grid-cell cell-cerrado">—</div>`;
+      }
+    }
+  }
+  html += '</div>';
+
+  document.getElementById('gridContainer').innerHTML = html;
+
+  document.querySelectorAll('.cell-libre').forEach(c => {
+    c.addEventListener('click', () => openNuevoTurno(c.dataset.fecha, parseInt(c.dataset.hora, 10)));
+  });
+  document.querySelectorAll('.turno').forEach(t => {
+    t.addEventListener('click', () => abrirDetalle(parseInt(t.dataset.id, 10)));
+  });
+}
+
+function renderTurno(t) {
+  const persona = personas.find(p => p.id === t.persona_id);
+  const nombre = t.paciente_nombre || persona?.nombre || `Persona #${t.persona_id || '?'}`;
+  const tipo = TIPOS_MASAJE[t.practica_codigo] || t.practica_codigo || 'Masaje';
+  const estadoClass = `e-${(t.estado || 'pendiente').toLowerCase()}`;
+  return `<div class="turno ${estadoClass}" data-id="${t.id}">
+    <span class="turno-paciente">${escapeHtml(nombre)}</span>
+    <span class="turno-info">${escapeHtml(tipo)} · ${t.hora_inicio.slice(0,5)}</span>
+  </div>`;
+}
+
+function renderMes() {
+  const primero = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), 1);
+  const ultimo = new Date(anchorDate.getFullYear(), anchorDate.getMonth() + 1, 0);
+  const lunesPrimero = lunesDe(primero);
+
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  const turnosPorFecha = {};
+  turnos.forEach(t => {
+    turnosPorFecha[t.fecha] = (turnosPorFecha[t.fecha] || 0) + 1;
+  });
+
+  let html = '<div class="month-head">' +
+    ['LUN','MAR','MIE','JUE','VIE','SAB','DOM'].map(d => `<div>${d}</div>`).join('') +
+    '</div><div class="month-grid">';
+
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(lunesPrimero, i);
+    const iso = toISODate(d);
+    const out = d.getMonth() !== anchorDate.getMonth();
+    const isToday = mismoDia(d, hoy);
+    const feriado = feriadosMap.get(iso);
+    const count = turnosPorFecha[iso] || 0;
+
+    html += `<div class="month-cell ${out ? 'out' : ''} ${isToday ? 'is-today' : ''} ${feriado ? 'is-feriado' : ''}" data-fecha="${iso}">
+      <div class="day-num">${d.getDate()}</div>
+      ${feriado ? `<div style="font-size:10px;color:var(--feriado-text)">${escapeHtml(feriado)}</div>` : ''}
+      ${count > 0 ? `<div class="month-count">${count} turno${count!==1?'s':''}</div>` : ''}
+    </div>`;
+  }
+  html += '</div>';
+
+  document.getElementById('gridContainer').innerHTML = html;
+
+  document.querySelectorAll('.month-cell').forEach(c => {
+    c.addEventListener('click', () => {
+      anchorDate = new Date(c.dataset.fecha + 'T12:00:00');
+      currentView = 'week';
+      document.querySelectorAll('.view-btn').forEach(x => x.classList.toggle('active', x.dataset.view === 'week'));
+      refresh();
+    });
+  });
+}
+
+// ============================================================
+// CREAR / EDITAR TURNO
+// ============================================================
+function openNuevoTurno(fechaISO, hora) {
+  document.getElementById('nuevoAlert').innerHTML = '';
+  const hoy = new Date();
+  document.getElementById('fN_fecha').value = fechaISO || toISODate(hoy);
+  document.getElementById('fN_persona').value = '';
+  document.getElementById('fN_obs').value = '';
+  document.getElementById('fN_tipo').value = 'MASAJES_EYC';
+
+  // Pre-cargar horas según disponibilidad del día seleccionado
+  refrescarHorasDisponibles();
+  if (hora != null) {
+    document.getElementById('fN_hora').value = pad(hora) + ':00';
+  }
+
+  document.getElementById('fN_fecha').addEventListener('change', refrescarHorasDisponibles);
+  openModal('modalNuevo');
+}
+
+function refrescarHorasDisponibles() {
+  const fechaISO = document.getElementById('fN_fecha').value;
+  if (!fechaISO) return;
+  const d = new Date(fechaISO + 'T12:00:00');
+  const dia = d.getDay() === 0 ? 7 : d.getDay();
+  const horasDispo = DISPONIBILIDAD[dia] || [];
+  const ocupadas = new Set(
+    turnos
+      .filter(t => t.fecha === fechaISO && t.estado !== 'CANCELADO')
+      .map(t => parseInt(t.hora_inicio.slice(0,2), 10))
+  );
+  const libres = horasDispo.filter(h => !ocupadas.has(h));
+  const sel = document.getElementById('fN_hora');
+  if (libres.length === 0) {
+    sel.innerHTML = '<option value="">No hay horarios libres ese día</option>';
+  } else {
+    sel.innerHTML = libres.map(h => `<option value="${pad(h)}:00">${pad(h)}:00</option>`).join('');
+  }
+}
+
+async function onGuardarTurno() {
+  const btn = document.getElementById('btnGuardar');
+  const fecha = document.getElementById('fN_fecha').value;
+  const hora = document.getElementById('fN_hora').value;
+  const tipo = document.getElementById('fN_tipo').value;
+  const personaId = document.getElementById('fN_persona').value;
+  const obs = document.getElementById('fN_obs').value.trim();
+
+  const errs = [];
+  if (!fecha) errs.push('Falta la fecha.');
+  if (!hora) errs.push('Falta la hora.');
+  if (!personaId) errs.push('Falta el paciente.');
+  if (errs.length) { mostrarAlert('nuevoAlert', errs.join(' · '), 'error'); return; }
+
+  const persona = personas.find(p => p.id === parseInt(personaId, 10));
+
+  const payload = {
+    fecha,
+    hora_inicio: hora,
+    hora_fin: pad(parseInt(hora.slice(0,2), 10) + 1) + ':00',
+    persona_id: parseInt(personaId, 10),
+    paciente_nombre: persona?.nombre || null,
+    profesional: PROFESIONAL,
+    practica_codigo: tipo,
+    tipo_masaje: TIPOS_MASAJE[tipo] || null,
+    estado: 'PENDIENTE',
+    observaciones: obs || null,
+    creado_por: 'agenda_maso_web'
+  };
+
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  try {
+    const { error } = await supa.from('turnos_masoterapia').insert(payload).select();
+    if (error) throw error;
+    closeModal('modalNuevo');
+    await refresh();
+  } catch (e) {
+    mostrarAlert('nuevoAlert', 'Error al guardar: ' + (e.message || e), 'error');
+    console.error(e);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Guardar turno';
+  }
+}
+
+function abrirDetalle(id) {
+  const t = turnos.find(x => x.id === id);
+  if (!t) return;
+  turnoSeleccionado = t;
+  const persona = personas.find(p => p.id === t.persona_id);
+  const nombre = t.paciente_nombre || persona?.nombre || `Persona #${t.persona_id}`;
+  document.getElementById('detalleSubtitulo').textContent = `${t.fecha} · ${t.hora_inicio.slice(0,5)}`;
+  document.getElementById('detalleInfo').innerHTML = `
+    <div class="detalle-row"><span class="l">Paciente</span><span class="v">${escapeHtml(nombre)}</span></div>
+    <div class="detalle-row"><span class="l">Tipo</span><span class="v">${escapeHtml(TIPOS_MASAJE[t.practica_codigo] || t.practica_codigo)}</span></div>
+    <div class="detalle-row"><span class="l">Profesional</span><span class="v">${escapeHtml(t.profesional)}</span></div>
+    <div class="detalle-row"><span class="l">Estado actual</span><span class="v">${escapeHtml(t.estado)}</span></div>
+    ${t.observaciones ? `<div class="detalle-row"><span class="l">Observaciones</span><span class="v">${escapeHtml(t.observaciones)}</span></div>` : ''}
+  `;
+  document.querySelectorAll('#modalDetalle .estado-pill').forEach(b => {
+    b.classList.toggle('is-active', b.dataset.estado === t.estado);
+  });
+  document.getElementById('detalleAlert').innerHTML = '';
+  openModal('modalDetalle');
+}
+
+async function cambiarEstado(nuevoEstado) {
+  if (!turnoSeleccionado) return;
+  if (nuevoEstado === turnoSeleccionado.estado) return;
+  try {
+    const { error } = await supa
+      .from('turnos_masoterapia')
+      .update({
+        estado: nuevoEstado,
+        modificado_en: new Date().toISOString(),
+        modificado_por: 'agenda_maso_web'
+      })
+      .eq('id', turnoSeleccionado.id);
+    if (error) throw error;
+    mostrarAlert('detalleAlert', `Estado actualizado a ${nuevoEstado}`, 'ok');
+    turnoSeleccionado.estado = nuevoEstado;
+    document.querySelectorAll('#modalDetalle .estado-pill').forEach(b => {
+      b.classList.toggle('is-active', b.dataset.estado === nuevoEstado);
+    });
+    await refresh();
+  } catch (e) {
+    mostrarAlert('detalleAlert', 'Error: ' + (e.message || e), 'error');
+  }
+}
+
+// ============================================================
+// UTILS
+// ============================================================
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function showLoading() { document.getElementById('gridContainer').innerHTML = '<div class="loader">Cargando turnos…</div>'; }
+function showError(msg) { document.getElementById('alertBox').innerHTML = `<div class="alert error">${escapeHtml(msg)}</div>`; }
+function mostrarAlert(id, msg, type) {
+  document.getElementById(id).innerHTML = `<div class="alert ${type}">${escapeHtml(msg)}</div>`;
+}
+
+function lunesDe(date) {
+  const d = new Date(date); d.setHours(0,0,0,0);
+  const dow = d.getDay() === 0 ? 7 : d.getDay();
+  d.setDate(d.getDate() - (dow - 1));
+  return d;
+}
+function addDays(date, n) { const d = new Date(date); d.setDate(d.getDate() + n); return d; }
+function toISODate(d) { return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+function pad(n) { return String(n).padStart(2, '0'); }
+function mismoDia(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function rangoVisible() {
+  if (currentView === 'week') {
+    const inicio = lunesDe(anchorDate);
+    return { from: inicio, to: addDays(inicio, 4) };
+  }
+  const inicioMes = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), 1);
+  const finMes = new Date(anchorDate.getFullYear(), anchorDate.getMonth() + 1, 0);
+  return { from: lunesDe(inicioMes), to: addDays(lunesDe(inicioMes), 41) };
+}
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+init();
+</script>
+</body>
+</html>
