@@ -597,6 +597,7 @@ let estado = {
   pacienteSel: null, // { id, nombre } para nuevo tto
   todosPacientes: [],
   ttoSeleccionado: null, // tto del modal detalle/editar
+  sesionesPorTto: {},    // tratamiento_id → cantidad de sesiones realizadas
 }
 
 // ===== HELPERS =====
@@ -672,6 +673,25 @@ async function cargarDatos() {
         .in('id', personaIds)
       estado.personasMap = {}
       ;(pers || []).forEach(p => estado.personasMap[p.id] = p.nombre)
+    }
+
+    // 3) Cargar conteo de sesiones por tratamiento
+    const ttoIds = estado.tratamientos.map(t => t.id).filter(Boolean)
+    estado.sesionesPorTto = {}
+    if (ttoIds.length > 0) {
+      try {
+        const { data: sesData } = await sb
+          .from('sesiones')
+          .select('id, tratamiento_id')
+          .in('tratamiento_id', ttoIds)
+        ;(sesData || []).forEach(s => {
+          if (s.tratamiento_id) {
+            estado.sesionesPorTto[s.tratamiento_id] = (estado.sesionesPorTto[s.tratamiento_id] || 0) + 1
+          }
+        })
+      } catch (e) {
+        console.warn('No se pudieron cargar sesiones:', e)
+      }
     }
 
     renderTodo()
@@ -755,6 +775,10 @@ function renderTabla() {
     const pInfo = practicaInfo(t.practica_codigo)
     const persona = estado.personasMap[t.persona_id] || '(sin nombre)'
     const saldo = Number(t.saldo_pendiente || 0)
+    const sesReal = estado.sesionesPorTto[t.id] || 0
+    const sesTotal = Number(t.total_sesiones || 0)
+    const sesCompleto = sesTotal > 0 && sesReal >= sesTotal
+    const sesColor = sesCompleto ? 'var(--green)' : (sesReal > 0 ? 'var(--turquoise)' : 'var(--text-dim)')
     return `
       <tr onclick="verDetalle(${t.id})">
         <td><span class="cell-id">#${t.id}</span></td>
@@ -765,7 +789,7 @@ function renderTabla() {
         <td class="cell-monto">${fmt(t.total_pagar)}</td>
         <td class="cell-monto" style="color:var(--green);">${fmt(t.total_abonado)}</td>
         <td class="cell-saldo ${saldo > 0 ? 'tiene-saldo' : 'sin-saldo'}">${fmt(saldo)}</td>
-        <td>${t.total_sesiones || '—'}</td>
+        <td style="font-weight:700;color:${sesColor};font-variant-numeric:tabular-nums;">${sesReal}/${sesTotal || '—'}</td>
         <td>${fmtFecha(t.fecha_alta)}</td>
       </tr>
     `
@@ -806,6 +830,11 @@ window.verDetalle = function(ttoId) {
   $('detalle-sub').textContent = persona
 
   // Mostrar TODOS los campos del tto para debug + lo más relevante destacado
+  const sesReal = estado.sesionesPorTto[t.id] || 0
+  const sesTotal = Number(t.total_sesiones || 0)
+  const sesRestantes = Math.max(0, sesTotal - sesReal)
+  const pctProgreso = sesTotal > 0 ? Math.min(100, Math.round((sesReal / sesTotal) * 100)) : 0
+
   const camposPrincipales = [
     ['Paciente', persona],
     ['Código', t.codigo_id || '—'],
@@ -813,7 +842,8 @@ window.verDetalle = function(ttoId) {
     ['Estado', t.estado || '—'],
     ['Modalidad', t.modalidad || '—'],
     ['Obra Social', t.obra_social || '—'],
-    ['Sesiones totales', t.total_sesiones || '—'],
+    ['Sesiones totales', sesTotal || '—'],
+    ['Sesiones realizadas', `<strong style="color:var(--turquoise);">${sesReal}</strong> de ${sesTotal || '—'} <span style="color:var(--text-faint);">· quedan ${sesRestantes}</span>`],
     ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
     ['Total a pagar', fmt(t.total_pagar)],
@@ -833,6 +863,19 @@ window.verDetalle = function(ttoId) {
   const debug = JSON.stringify(t, null, 2)
 
   $('detalle-contenido').innerHTML = `
+    <div style="margin-bottom: 16px; padding: 14px 16px; background: var(--bg-soft); border-radius: 10px; border: 1px solid var(--border);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); font-weight: 700;">📊 Progreso del tratamiento</span>
+        <span style="font-size: 18px; font-weight: 800; color: var(--turquoise); font-variant-numeric: tabular-nums;">${sesReal} / ${sesTotal || '—'} sesiones</span>
+      </div>
+      <div style="height: 8px; background: var(--bg-card); border-radius: 99px; overflow: hidden; border: 1px solid var(--border);">
+        <div style="height: 100%; width: ${pctProgreso}%; background: linear-gradient(90deg, var(--turquoise), var(--green)); border-radius: 99px; transition: width 0.4s;"></div>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--text-dim);">
+        <span>${pctProgreso}% completado</span>
+        <span>${sesRestantes} sesiones restantes</span>
+      </div>
+    </div>
     <div class="detalle-grid">${principales}</div>
     <div class="detalle-section">
       <div class="detalle-section-title">🔍 Todos los campos (debug)</div>
