@@ -394,7 +394,14 @@ function esTurnoMasajes(practicaCodigo) {
   return practicaCodigo === 'MASAJES' || (typeof practicaCodigo === 'string' && practicaCodigo.startsWith('MASAJES_'));
 }
 
-const PRACTICA_PREFIX = { MASAJES:'MASR' };
+const PRACTICA_PREFIX = {
+  MASAJES: 'MAS',          // genérico (fallback)
+  MASAJES_EYC: 'MASEYC',
+  MASAJES_CC: 'MASCC',
+  MASAJES_PAK: 'MASPAK',
+  MASAJES_R: 'MASR',
+  MASAJES_CERO: 'MASCERO'
+};
 
 // Solo estas prácticas pueden cubrirse por Obra Social. El resto siempre Particular.
 const PRACTICAS_CON_OS = []; // Masajes siempre Particular
@@ -1157,21 +1164,27 @@ async function onCrearTratamiento() {
   const modalidad = document.getElementById('ct_modalidad').value;
   const obraSocial = document.getElementById('ct_obra_social').value.trim();
   if (!totalSes || totalSes < 1) { document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Total de sesiones inválido.</div>`; return; }
+  // Maso: el practica_codigo guardado debe ser el subtipo (MASAJES_EYC/CC/PAK/R/CERO), NO 'MASAJES'.
+  // El FK tratamientos_practica_codigo_fkey referencia los códigos reales del tarifario.
+  let practicaCodigoBD = practica;
+  if (practica === 'MASAJES') {
+    practicaCodigoBD = document.getElementById('ct_tipo_masaje')?.value || 'MASAJES_EYC';
+  }
   const btn = document.getElementById('ctCreate');
   btn.disabled = true; btn.textContent = 'Creando…';
   try {
-    const prefix = PRACTICA_PREFIX[practica] || practica.slice(0,4);
+    const prefix = PRACTICA_PREFIX[practicaCodigoBD] || PRACTICA_PREFIX[practica] || practicaCodigoBD.slice(0,4);
     const ts = new Date();
     const codigoId = `${prefix}${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}${pad(ts.getHours())}${pad(ts.getMinutes())}`;
     const payload = {
       persona_id: parseInt(personaId, 10),
-      practica_codigo: practica,
+      practica_codigo: practicaCodigoBD,
       codigo_id: codigoId,
       fecha_alta: toISODate(new Date()),
       total_sesiones: totalSes,
       valor_sesion: valor,
       modalidad,
-      estado: 'ACTIVO'
+      estado: 'Pendiente'  // valores válidos en PuntoBiO: Pendiente / Parcial / Saldado / No aplica
     };
     if (obraSocial) payload.obra_social = obraSocial;
     const { data, error } = await supa.from('tratamientos').insert([payload]).select().single();
@@ -1179,6 +1192,7 @@ async function onCrearTratamiento() {
     document.getElementById('inlineCrearTratamiento').style.display = 'none';
     await refrescarTratamientos(personaId, practica);
     document.getElementById('fNT_tratamiento').value = data.id;
+    actualizarVisibilidadBeneficiario(); // por si el nuevo es PAK o R
   } catch (e) {
     document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
     console.error(e);
