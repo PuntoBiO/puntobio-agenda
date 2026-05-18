@@ -318,7 +318,7 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
     </div>
     <div class="modal-body">
       <p id="sobreTxt" style="font-size:13px;line-height:1.5">—</p>
-      <p style="margin-top:14px;font-weight:600">¿Confirmaste con el profesional?</p>
+      <p style="margin-top:14px;font-weight:600">¿Vero autoriza este sobreturno?</p>
     </div>
     <div class="modal-footer">
       <button class="btn" data-close="modalSobreturno">No, cancelar</button>
@@ -470,8 +470,10 @@ let turnos = [];
 let feriadosMap = new Map();
 let personas = [];
 let tratamientosPersona = [];
+let tratamientosCache = new Map();   // id -> {total_sesiones, codigo_id, practica_codigo, ...}
+let turnoOrdinalMap = new Map();      // turno_id -> ordinal (1-based) dentro de su tratamiento
 let modoMulti = false;
-let practicaFiltro = ''; // '' = todas, 'FISIO', 'DLM', etc. '__SOBRE_FISIO__' = solo sobreturno FISIO
+let practicaFiltro = ''; // '' = todas, 'MASAJES_EYC', etc.
 let slotsSel = [];
 // slotsForm: [{fecha, hora, diaNumero, profesional, profesionalesDisp[]}]
 let slotsForm = [];
@@ -540,6 +542,7 @@ async function refresh() {
   try {
     const { from, to } = rangoVisible();
     await Promise.all([loadFeriados(from,to), loadTurnos(from,to)]);
+    await calcularOrdinalesYTratamientos();
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
 }
@@ -548,6 +551,45 @@ async function loadTurnos(from, to) {
   const { data, error } = await supa.from('turnos_masoterapia').select('*').gte('fecha', toISODate(from)).lte('fecha', toISODate(to)).neq('estado','CANCELADO');
   if (error) throw error;
   turnos = data || [];
+}
+
+// Maso: para cada turno con tratamiento_id, calcular su posición ordinal dentro del tratamiento
+// (ej: "sesión 2 de 4"). Para esto:
+// 1) cargamos los tratamientos referenciados (con total_sesiones)
+// 2) cargamos TODOS los turnos no cancelados de esos tratamientos (no solo los del rango visible)
+// 3) los ordenamos por fecha+hora y asignamos ordinal 1, 2, 3, ...
+async function calcularOrdinalesYTratamientos() {
+  const trataIds = [...new Set(turnos.filter(t => t.tratamiento_id).map(t => t.tratamiento_id))];
+  turnoOrdinalMap.clear();
+  if (trataIds.length === 0) return;
+  // Carga tratamientos
+  try {
+    const { data: ttoData, error: e1 } = await supa.from('tratamientos')
+      .select('id, codigo_id, practica_codigo, total_sesiones, persona_id')
+      .in('id', trataIds);
+    if (e1) throw e1;
+    tratamientosCache.clear();
+    (ttoData || []).forEach(t => tratamientosCache.set(t.id, t));
+  } catch (e) { console.warn('No se pudieron cargar tratamientos:', e.message); }
+
+  // Carga TODOS los turnos no cancelados de los tratamientos visibles, ordenados
+  try {
+    const { data: turData, error: e2 } = await supa.from('turnos_masoterapia')
+      .select('id, tratamiento_id, fecha, hora_inicio, estado')
+      .in('tratamiento_id', trataIds)
+      .neq('estado', 'CANCELADO')
+      .order('fecha', { ascending: true })
+      .order('hora_inicio', { ascending: true });
+    if (e2) throw e2;
+    const grouped = {};
+    (turData || []).forEach(t => {
+      if (!grouped[t.tratamiento_id]) grouped[t.tratamiento_id] = [];
+      grouped[t.tratamiento_id].push(t.id);
+    });
+    Object.values(grouped).forEach(ids => {
+      ids.forEach((id, idx) => turnoOrdinalMap.set(id, idx + 1));
+    });
+  } catch (e) { console.warn('No se pudieron calcular ordinales:', e.message); }
 }
 
 async function loadFeriados(from, to) {
@@ -674,7 +716,16 @@ function renderTurno(t) {
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
   const nombre = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${tipoLabel} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}</span><span>${horaTxt}</span></div></div>`;
+  // Sesión X/total (solo si hay tratamiento con >1 sesión y conocemos el ordinal)
+  let sesionTxt = '';
+  if (t.tratamiento_id) {
+    const tto = tratamientosCache.get(t.tratamiento_id);
+    const ord = turnoOrdinalMap.get(t.id);
+    if (tto && tto.total_sesiones > 1 && ord) {
+      sesionTxt = ` · S${ord}/${tto.total_sesiones}`;
+    }
+  }
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${tipoLabel}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}${sesionTxt}</span><span>${horaTxt}</span></div></div>`;
 }
 
 function renderMonth(container) {
@@ -1126,6 +1177,22 @@ function validarUnSlot(slot, datosForm) {
   const sameCount = slotTurnos.filter(t => normalizarPracticaParaRegla(t.practica_codigo)===practica && t.estado!=='SOBRETURNO').length;
   let requiereSobre = false, box = null;
 
+  // Maso: regla diaria. Vero da 4 turnos por día. El 5to requiere autorización (sobreturno).
+  // No se permiten más de 5 en un día.
+  if (practica === 'MASAJES') {
+    const turnosDelDia = turnos.filter(t =>
+      t.fecha === slot.fecha &&
+      t.profesional === profesional &&
+      t.estado !== 'CANCELADO'
+    ).length;
+    if (turnosDelDia >= 5) {
+      return { ok:false, errores:[`Vero ya tiene 5 turnos el ${slot.fecha}. No se permiten más turnos ese día.`] };
+    }
+    if (turnosDelDia >= 4) {
+      requiereSobre = true; // el 5to del día → sobreturno con autorización
+    }
+  }
+
   if (regla.modalidad==='COMPARTIDO') {
     if (sameCount < regla.cap_normal) {
       const ocup = slotTurnos.map(t => t.box);
@@ -1194,7 +1261,7 @@ async function onGuardarTurno() {
   }
 
   if (sobres.length > 0) {
-    document.getElementById('sobreTxt').innerHTML = `Hay <strong>${sobres.length}</strong> turno(s) que requieren SOBRETURNO en SALA_TF.`;
+    document.getElementById('sobreTxt').innerHTML = `Hay <strong>${sobres.length}</strong> turno(s) que serán el 5to del día. Vero ya tiene 4 turnos cargados — el 5to requiere su autorización.`;
     pendienteSobre = validaciones.map(v => v.payload);
     openModal('modalSobreturno');
     return;
@@ -1241,12 +1308,22 @@ function onTurnoClick(turnoId) {
   const nombre = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
   const TIPOS_MASAJE_LABEL = { MASAJES_EYC:'Espalda y Cuello (EyC)', MASAJES_CC:'Cuerpo Completo (CC)', MASAJES_PAK:'Pack 4 masajes (Pak)', MASAJES_R:'Regalo', MASAJES_CERO:'Sin cargo' };
   const practicaLabel = TIPOS_MASAJE_LABEL[t.practica_codigo] || REGLAS_PRACTICA[normalizarPracticaParaRegla(t.practica_codigo)]?.label || t.practica_codigo;
+  // Sesión X de N (si tiene tratamiento con más de 1 sesión)
+  let sesionRow = '';
+  if (t.tratamiento_id) {
+    const tto = tratamientosCache.get(t.tratamiento_id);
+    const ord = turnoOrdinalMap.get(t.id);
+    if (tto && tto.total_sesiones > 1 && ord) {
+      sesionRow = `<div class="label">Sesión</div><div class="value" style="font-weight:700;color:var(--accent)">${ord} de ${tto.total_sesiones}</div>`;
+    }
+  }
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
       <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
       <div class="label">DNI</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>
       <div class="label">Profesional</div><div class="value">${escapeHtml(t.profesional)}</div>
       <div class="label">Tipo</div><div class="value">${escapeHtml(practicaLabel)}</div>
+      ${sesionRow}
       <div class="label">Fecha</div><div class="value">${escapeHtml(t.fecha)}</div>
       <div class="label">Hora</div><div class="value">${escapeHtml(t.hora_inicio.slice(0,5))} – ${escapeHtml(t.hora_fin.slice(0,5))}</div>
       <div class="label">Tto. ID</div><div class="value">${t.tratamiento_id ? '#'+t.tratamiento_id : '— sin tratamiento —'}</div>
