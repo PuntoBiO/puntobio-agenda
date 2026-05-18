@@ -623,10 +623,23 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
 }
 
 async function loadTratamientosPersona(personaId, practicaCodigo) {
-  const { data, error } = await supa.from('tratamientos').select('id, codigo_id, practica_codigo, estado, total_sesiones').eq('persona_id', personaId).eq('practica_codigo', practicaCodigo).order('fecha_alta', { ascending:false });
+  // FIX BUG: el módulo tratamientos.html guarda con códigos cortos (OSTEO, PUNC_SECA, DRENAJE, etc.)
+  // mientras que la agenda usa códigos largos (OSTEOPATIA, PUNCION_SECA, DLM, etc.)
+  // Buscamos por AMBOS códigos para que aparezcan los ttos creados desde cualquier lugar.
+  const codigoAlt = MAP_PRACTICA_TARIFARIO[practicaCodigo]; // ej OSTEOPATIA -> OSTEO
+  const codigosBusqueda = codigoAlt && codigoAlt !== practicaCodigo
+    ? [practicaCodigo, codigoAlt]
+    : [practicaCodigo];
+
+  const { data, error } = await supa
+    .from('tratamientos')
+    .select('id, codigo_id, practica_codigo, estado, total_sesiones')
+    .eq('persona_id', personaId)
+    .in('practica_codigo', codigosBusqueda)
+    .order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
   // Aceptar todos los ttos "vivos" (ACTIVO, Pendiente, En curso, etc.)
-  // Solo excluir los terminados explícitamente: FINALIZADO, CANCELADO, BAJA, COMPLETADO
+  // Solo excluir los terminados explícitamente.
   const ESTADOS_EXCLUIDOS = ['FINALIZADO', 'CANCELADO', 'BAJA', 'COMPLETADO'];
   return (data||[]).filter(t => !t.estado || !ESTADOS_EXCLUIDOS.includes((t.estado||'').toUpperCase()));
 }
