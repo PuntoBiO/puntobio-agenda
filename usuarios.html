@@ -609,7 +609,27 @@
       </div>
 
       <div class="toggles-section">
-        <h4>Restricción adicional</h4>
+        <h4>Restricciones de acción</h4>
+        <div class="toggle-row">
+          <div class="label-info">
+            <div class="label">Puede ver caja</div>
+            <div class="desc">Si no, no puede acceder a las cajas (consultorio, fisio, maso, biolab, general).</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="t-puede_ver_caja">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <div class="label-info">
+            <div class="label">Puede editar paciente</div>
+            <div class="desc">Si no, ve historia clínica pero no puede modificar datos del paciente.</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="t-puede_editar_paciente">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
         <div class="toggle-row">
           <div class="label-info">
             <div class="label">Solo lo mío</div>
@@ -650,35 +670,63 @@ let equipo = []             // lista del equipo cargada
 
 // ============ INIT ============
 async function init() {
+  console.log('🔍 [usuarios] init()')
+
   // 1. Verificar sesión
   const { data: { session } } = await supabase.auth.getSession()
   if (!session) {
+    console.log('❌ No hay sesión, redirigiendo a login')
     window.location.href = 'login.html'
     return
   }
   currentUser = session.user
+  console.log('✅ Email logueado:', currentUser.email)
 
-  // 2. Buscar la persona del usuario logueado + sus permisos
-  const { data: personaActual, error: err1 } = await supabase
+  // 2. Buscar la persona por email (query simple)
+  const { data: persona, error: err1 } = await supabase
     .from('personas')
-    .select('id, nombre, email, permisos_equipo!inner(admin_total, operativo_general)')
-    .eq('email', currentUser.email)
+    .select('id, nombre, email')
+    .ilike('email', currentUser.email)
     .maybeSingle()
 
-  if (err1 || !personaActual) {
-    mostrarNoAcceso('No se encontraron tus permisos.')
+  console.log('🔍 Persona encontrada:', persona, 'Error:', err1)
+
+  if (err1) {
+    mostrarNoAcceso('Error consultando personas: ' + err1.message)
+    return
+  }
+  if (!persona) {
+    mostrarNoAcceso('No encontramos tu persona con email ' + currentUser.email + '. Revisá que el email en la tabla personas coincida exactamente.')
     return
   }
 
-  currentPersona = personaActual
-  const esAdmin = personaActual.permisos_equipo.admin_total === true
+  currentPersona = persona
 
-  if (!esAdmin) {
+  // 3. Buscar permisos de esa persona (query separada)
+  const { data: permisos, error: err2 } = await supabase
+    .from('permisos_equipo')
+    .select('admin_total, operativo_general')
+    .eq('persona_id', persona.id)
+    .maybeSingle()
+
+  console.log('🔍 Permisos:', permisos, 'Error:', err2)
+
+  if (err2) {
+    mostrarNoAcceso('Error consultando permisos: ' + err2.message)
+    return
+  }
+  if (!permisos) {
+    mostrarNoAcceso('Tu persona (' + persona.nombre + ', id ' + persona.id + ') no tiene fila en permisos_equipo.')
+    return
+  }
+
+  if (!permisos.admin_total) {
     mostrarNoAcceso()
     return
   }
 
-  // 3. Cargar todo el equipo
+  console.log('✅ Sos admin, cargando equipo...')
+  // 4. Cargar todo el equipo
   await cargarEquipo()
 }
 
@@ -692,22 +740,40 @@ function mostrarNoAcceso(msg) {
 }
 
 async function cargarEquipo() {
-  const { data, error } = await supabase
+  // Paso 1: traer todos los permisos
+  const { data: permisos, error: errP } = await supabase
     .from('permisos_equipo')
-    .select(`
-      id, persona_id, admin_total, operativo_general,
-      ve_terapia_fisica, ve_consultorios, ve_especialidades,
-      ve_biolab, ve_masoterapia, solo_lo_mio, observaciones,
-      personas!inner(id, nombre, email, celular, direccion)
-    `)
+    .select('*')
     .order('persona_id')
 
-  if (error) {
-    document.getElementById('loading').innerHTML = '<p style="color:#c0392b;">Error: ' + error.message + '</p>'
+  if (errP) {
+    console.error('Error permisos:', errP)
+    document.getElementById('loading').innerHTML = '<p style="color:#c0392b;">Error: ' + errP.message + '</p>'
     return
   }
 
-  equipo = data
+  // Paso 2: traer todas las personas correspondientes
+  const personaIds = permisos.map(p => p.persona_id)
+  const { data: personas, error: errPers } = await supabase
+    .from('personas')
+    .select('id, nombre, email, celular, direccion')
+    .in('id', personaIds)
+
+  if (errPers) {
+    console.error('Error personas:', errPers)
+    document.getElementById('loading').innerHTML = '<p style="color:#c0392b;">Error: ' + errPers.message + '</p>'
+    return
+  }
+
+  // Paso 3: combinar
+  const personasMap = {}
+  personas.forEach(pers => { personasMap[pers.id] = pers })
+
+  equipo = permisos.map(p => ({
+    ...p,
+    personas: personasMap[p.persona_id] || { id: p.persona_id, nombre: '(sin nombre)', email: null, celular: null, direccion: null }
+  }))
+
   document.getElementById('loading').style.display = 'none'
   document.getElementById('grid').style.display = 'grid'
   document.getElementById('badge-count').textContent = equipo.length + ' personas'
@@ -752,6 +818,8 @@ function renderGrid() {
         ${renderPermiso('Especialidades', p.ve_especialidades)}
         ${renderPermiso('Biolab', p.ve_biolab)}
         ${renderPermiso('Masoterapia', p.ve_masoterapia)}
+        ${renderPermiso('Ver caja', p.puede_ver_caja)}
+        ${renderPermiso('Editar paciente', p.puede_editar_paciente)}
         ${renderPermiso('Solo lo mío', p.solo_lo_mio)}
       </div>
 
@@ -849,6 +917,8 @@ window.abrirEditarPermisos = async function(permisoId) {
   document.getElementById('t-ve_especialidades').checked = p.ve_especialidades === true
   document.getElementById('t-ve_biolab').checked = p.ve_biolab === true
   document.getElementById('t-ve_masoterapia').checked = p.ve_masoterapia === true
+  document.getElementById('t-puede_ver_caja').checked = p.puede_ver_caja === true
+  document.getElementById('t-puede_editar_paciente').checked = p.puede_editar_paciente === true
   document.getElementById('t-solo_lo_mio').checked = p.solo_lo_mio === true
   document.getElementById('t-observaciones').value = p.observaciones || ''
   document.getElementById('alert-permisos').innerHTML = ''
@@ -861,14 +931,15 @@ window.aplicarRol = function() {
 
   // Reset
   const ids = ['admin_total', 'operativo_general', 've_terapia_fisica', 've_consultorios',
-               've_especialidades', 've_biolab', 've_masoterapia', 'solo_lo_mio']
+               've_especialidades', 've_biolab', 've_masoterapia',
+               'puede_ver_caja', 'puede_editar_paciente', 'solo_lo_mio']
   ids.forEach(id => document.getElementById('t-' + id).checked = false)
 
   const presets = {
-    admin: ['admin_total', 'operativo_general', 've_terapia_fisica', 've_consultorios', 've_especialidades', 've_biolab', 've_masoterapia'],
-    operativo: ['operativo_general', 've_terapia_fisica', 've_consultorios', 've_especialidades', 've_biolab', 've_masoterapia'],
+    admin: ['admin_total', 'operativo_general', 've_terapia_fisica', 've_consultorios', 've_especialidades', 've_biolab', 've_masoterapia', 'puede_ver_caja', 'puede_editar_paciente'],
+    operativo: ['operativo_general', 've_terapia_fisica', 've_consultorios', 've_especialidades', 've_biolab', 've_masoterapia', 'puede_ver_caja', 'puede_editar_paciente'],
     kine_tf: ['ve_terapia_fisica'],
-    kine_consultorio: ['ve_consultorios', 've_biolab'],
+    kine_consultorio: ['ve_consultorios', 've_biolab', 'solo_lo_mio'],
     kine_hibrida: ['ve_terapia_fisica', 've_consultorios', 've_biolab', 'solo_lo_mio'],
     masoterapista: ['ve_masoterapia', 'solo_lo_mio'],
     instructor_tf: ['ve_terapia_fisica', 'solo_lo_mio']
@@ -889,6 +960,8 @@ window.guardarPermisos = async function() {
     ve_especialidades: document.getElementById('t-ve_especialidades').checked,
     ve_biolab: document.getElementById('t-ve_biolab').checked,
     ve_masoterapia: document.getElementById('t-ve_masoterapia').checked,
+    puede_ver_caja: document.getElementById('t-puede_ver_caja').checked,
+    puede_editar_paciente: document.getElementById('t-puede_editar_paciente').checked,
     solo_lo_mio: document.getElementById('t-solo_lo_mio').checked,
     observaciones: document.getElementById('t-observaciones').value.trim() || null,
     updated_at: new Date().toISOString()
