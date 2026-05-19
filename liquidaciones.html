@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="UTF-8">
+<title>Liquidaciones — PuntoBiO</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f7f9fc;color:#111;padding:24px}
+  .container{max-width:1400px;margin:0 auto}
+  h1{font-size:28px;margin-bottom:4px;color:#111}
+  .subtitle{color:#666;margin-bottom:24px;font-size:14px}
+  
+  .controls{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .control-group{display:flex;flex-direction:column;gap:4px}
+  .control-group label{font-size:11px;text-transform:uppercase;color:#666;font-weight:600;letter-spacing:.5px}
+  select,input{padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;background:#fff;cursor:pointer;font-family:inherit}
+  select:focus,input:focus{outline:2px solid #1e9fe0;outline-offset:-1px}
+  .btn{padding:9px 16px;background:#1e9fe0;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600;font-family:inherit}
+  .btn:hover{background:#1789c6}
+  .btn-export{background:#10b981;margin-left:auto}
+  .btn-export:hover{background:#0ea674}
+  
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:18px}
+  .card-label{font-size:11px;text-transform:uppercase;color:#666;font-weight:600;letter-spacing:.5px;margin-bottom:6px}
+  .card-value{font-size:24px;font-weight:700;color:#111}
+  .card-sub{font-size:12px;color:#666;margin-top:4px}
+  .card.bruto{border-top:4px solid #1e9fe0}
+  .card.prof{border-top:4px solid #f59e0b}
+  .card.centro{border-top:4px solid #10b981}
+  .card.cant{border-top:4px solid #6b7280}
+  
+  table{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden}
+  thead{background:#111;color:#fff}
+  th{padding:12px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  th.num{text-align:right}
+  td{padding:12px;border-top:1px solid #f3f4f6;font-size:14px}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.prof-row{cursor:pointer;transition:background .15s}
+  tr.prof-row:hover{background:#f9fafb}
+  tr.prof-row.expanded{background:#f3f4f6;font-weight:600}
+  tr.detail-row{background:#fafbfc}
+  tr.detail-row td{padding:0}
+  .detail-content{padding:16px}
+  .detail-content table{border:none;background:transparent}
+  .detail-content th{background:#e5e7eb;color:#111;font-size:11px;padding:8px}
+  .detail-content td{font-size:13px;padding:8px}
+  tfoot{background:#1e9fe0;color:#fff;font-weight:700}
+  tfoot td{padding:14px 12px;border-top:none}
+  
+  .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+  .badge-bruno{background:#dbeafe;color:#1e40af}
+  .badge-male{background:#fef3c7;color:#92400e}
+  .badge-vero{background:#fce7f3;color:#9d174d}
+  .badge-jime{background:#d1fae5;color:#065f46}
+  .badge-lu{background:#ede9fe;color:#5b21b6}
+  
+  .empty{text-align:center;padding:60px;color:#666;background:#fff;border:1px solid #e5e7eb;border-radius:12px}
+  .loading{text-align:center;padding:40px;color:#1e9fe0;font-size:16px}
+  .arrow{display:inline-block;transition:transform .2s;margin-right:4px}
+  .arrow.open{transform:rotate(90deg)}
+  
+  @media(max-width:768px){
+    .cards{grid-template-columns:repeat(2,1fr)}
+    .controls{flex-direction:column;align-items:stretch}
+    table{font-size:12px}
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>💰 Liquidaciones</h1>
+  <p class="subtitle">Liquidación mensual por profesional · basada en pagos cobrados</p>
+
+  <div class="controls">
+    <div class="control-group">
+      <label>Mes</label>
+      <input type="month" id="mes" value="2026-05">
+    </div>
+    <div class="control-group">
+      <label>Profesional</label>
+      <select id="filtroProf">
+        <option value="">Todos</option>
+        <option value="Bruno">Bruno</option>
+        <option value="Male">Male</option>
+        <option value="Vero">Vero</option>
+        <option value="Jime">Jime</option>
+        <option value="Lu">Lu</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label>Modalidad</label>
+      <select id="filtroMod">
+        <option value="">Todas</option>
+        <option value="PART">Particular</option>
+        <option value="O.S">Obra Social</option>
+      </select>
+    </div>
+    <button class="btn" onclick="cargar()">🔄 Recalcular</button>
+    <button class="btn btn-export" onclick="exportarExcel()">📊 Exportar Excel</button>
+  </div>
+
+  <div id="resultado"></div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_KEY = 'TU_ANON_KEY_ACA'; // REEMPLAZAR con la anon key real
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const fmt = n => '$' + (Number(n)||0).toLocaleString('es-AR',{maximumFractionDigits:0});
+const fmtNum = n => (Number(n)||0).toLocaleString('es-AR');
+const badge = (prof) => {
+  const cls = {'Bruno':'bruno','Male':'male','Vero':'vero','Jime':'jime','Lu':'lu'}[prof] || 'bruno';
+  return `<span class="badge badge-${cls}">${prof}</span>`;
+};
+
+let DATA = null; // guarda los pagos crudos para detalles + export
+
+async function cargar(){
+  const mes = document.getElementById('mes').value; // "2026-05"
+  const filtroProf = document.getElementById('filtroProf').value;
+  document.getElementById('resultado').innerHTML = '<div class="loading">⏳ Cargando pagos...</div>';
+
+  const [year, month] = mes.split('-');
+  const desde = `${year}-${month}-01`;
+  const hasta = new Date(year, parseInt(month), 0).toISOString().split('T')[0]; // último día del mes
+
+  // Traemos pagos del mes con su tratamiento y persona
+  let q = sb.from('pagos_consultorio')
+    .select(`
+      id, fecha, importe, medio_pago, profesional, tipo_cobro,
+      monto_centro, monto_profesional, monto_moplex,
+      tratamientos (
+        id, codigo_id, practica_codigo, modalidad, obra_social,
+        personas ( id, nombre )
+      )
+    `)
+    .gte('fecha', desde)
+    .lte('fecha', hasta)
+    .order('fecha');
+
+  if (filtroProf) q = q.eq('profesional', filtroProf);
+
+  const { data, error } = await q;
+  if (error) {
+    document.getElementById('resultado').innerHTML = `<div class="empty">❌ Error: ${error.message}</div>`;
+    return;
+  }
+  if (!data || data.length === 0) {
+    document.getElementById('resultado').innerHTML = `<div class="empty">📭 Sin pagos en ${mes}</div>`;
+    return;
+  }
+  DATA = data;
+  render(data);
+}
+
+function render(pagos){
+  // agrupar por profesional
+  const grupos = {};
+  let totalBruto = 0, totalProf = 0, totalCentro = 0, totalMoplex = 0;
+
+  for (const p of pagos){
+    const prof = p.profesional || 'Sin asignar';
+    if (!grupos[prof]) grupos[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, pagos:[]};
+    const g = grupos[prof];
+    const importe = Number(p.importe) || 0;
+    const mProf = Number(p.monto_profesional) || 0;
+    const mCentro = Number(p.monto_centro) || 0;
+    const mMoplex = Number(p.monto_moplex) || 0;
+    g.cant++;
+    g.bruto += importe;
+    g.prof += mProf;
+    g.centro += mCentro;
+    g.moplex += mMoplex;
+    g.pagos.push(p);
+    totalBruto += importe;
+    totalProf += mProf;
+    totalCentro += mCentro;
+    totalMoplex += mMoplex;
+  }
+
+  const orden = ['Bruno','Male','Vero','Jime','Lu'];
+  const profs = Object.keys(grupos).sort((a,b) => {
+    const ia = orden.indexOf(a), ib = orden.indexOf(b);
+    return (ia===-1?99:ia) - (ib===-1?99:ib);
+  });
+
+  let html = `
+    <div class="cards">
+      <div class="card cant">
+        <div class="card-label">Cant. pagos</div>
+        <div class="card-value">${fmtNum(pagos.length)}</div>
+        <div class="card-sub">${profs.length} profesionales</div>
+      </div>
+      <div class="card bruto">
+        <div class="card-label">Total bruto cobrado</div>
+        <div class="card-value">${fmt(totalBruto)}</div>
+      </div>
+      <div class="card prof">
+        <div class="card-label">A liquidar profesionales</div>
+        <div class="card-value">${fmt(totalProf)}</div>
+        <div class="card-sub">${(totalProf/totalBruto*100||0).toFixed(1)}% del bruto</div>
+      </div>
+      <div class="card centro">
+        <div class="card-label">Queda al centro</div>
+        <div class="card-value">${fmt(totalCentro)}</div>
+        <div class="card-sub">${(totalCentro/totalBruto*100||0).toFixed(1)}% del bruto</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>Profesional</th>
+          <th class="num">Cant pagos</th>
+          <th class="num">Bruto cobrado</th>
+          <th class="num">$ Profesional</th>
+          <th class="num">$ Centro</th>
+          <th class="num">% Prof</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const prof of profs){
+    const g = grupos[prof];
+    const pctProf = g.bruto > 0 ? (g.prof/g.bruto*100) : 0;
+    html += `
+      <tr class="prof-row" onclick="toggleDetalle('${prof}')">
+        <td><span class="arrow" id="arr-${prof}">▶</span></td>
+        <td>${badge(prof)}</td>
+        <td class="num">${fmtNum(g.cant)}</td>
+        <td class="num">${fmt(g.bruto)}</td>
+        <td class="num"><b>${fmt(g.prof)}</b></td>
+        <td class="num">${fmt(g.centro)}</td>
+        <td class="num">${pctProf.toFixed(1)}%</td>
+      </tr>
+      <tr class="detail-row" id="det-${prof}" style="display:none">
+        <td colspan="7">
+          <div class="detail-content" id="det-content-${prof}"></div>
+        </td>
+      </tr>
+    `;
+  }
+
+  html += `
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="2">TOTAL</td>
+          <td class="num">${fmtNum(pagos.length)}</td>
+          <td class="num">${fmt(totalBruto)}</td>
+          <td class="num">${fmt(totalProf)}</td>
+          <td class="num">${fmt(totalCentro)}</td>
+          <td class="num">${(totalProf/totalBruto*100||0).toFixed(1)}%</td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
+
+  document.getElementById('resultado').innerHTML = html;
+  window._grupos = grupos;
+}
+
+function toggleDetalle(prof){
+  const row = document.getElementById(`det-${prof}`);
+  const arr = document.getElementById(`arr-${prof}`);
+  const content = document.getElementById(`det-content-${prof}`);
+  const profRow = arr.closest('tr');
+
+  if (row.style.display === 'none'){
+    // generar contenido detalle
+    const g = window._grupos[prof];
+    let html = `<table><thead><tr>
+      <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Mod</th>
+      <th>Medio</th><th class="num">Bruto</th><th class="num">$ Prof</th><th class="num">$ Centro</th>
+    </tr></thead><tbody>`;
+    for (const p of g.pagos){
+      const t = p.tratamientos || {};
+      const per = (t.personas || {});
+      html += `<tr>
+        <td>${p.fecha}</td>
+        <td>${per.nombre || '-'}</td>
+        <td>${t.codigo_id || '-'}</td>
+        <td>${t.practica_codigo || '-'}</td>
+        <td>${t.modalidad || '-'}</td>
+        <td>${p.medio_pago || '-'}</td>
+        <td class="num">${fmt(p.importe)}</td>
+        <td class="num">${fmt(p.monto_profesional)}</td>
+        <td class="num">${fmt(p.monto_centro)}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+    content.innerHTML = html;
+    row.style.display = '';
+    arr.classList.add('open');
+    profRow.classList.add('expanded');
+  } else {
+    row.style.display = 'none';
+    arr.classList.remove('open');
+    profRow.classList.remove('expanded');
+  }
+}
+
+function exportarExcel(){
+  if (!DATA) { alert('Primero cargá los datos'); return; }
+  const mes = document.getElementById('mes').value;
+  const wb = XLSX.utils.book_new();
+
+  // Hoja 1: RESUMEN
+  const g = window._grupos;
+  const resumen = [
+    ['Profesional','Cant pagos','Bruto cobrado','$ Profesional','$ Centro','% Prof']
+  ];
+  let tCant=0, tBruto=0, tProf=0, tCentro=0;
+  const orden = ['Bruno','Male','Vero','Jime','Lu'];
+  const profs = Object.keys(g).sort((a,b)=>{const ia=orden.indexOf(a),ib=orden.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
+  for (const p of profs){
+    const r = g[p];
+    resumen.push([p, r.cant, r.bruto, r.prof, r.centro, (r.bruto>0?r.prof/r.bruto:0)]);
+    tCant+=r.cant; tBruto+=r.bruto; tProf+=r.prof; tCentro+=r.centro;
+  }
+  resumen.push(['TOTAL', tCant, tBruto, tProf, tCentro, (tBruto>0?tProf/tBruto:0)]);
+  const ws1 = XLSX.utils.aoa_to_sheet(resumen);
+  XLSX.utils.book_append_sheet(wb, ws1, 'Resumen');
+
+  // Hoja 2: DETALLE TODOS LOS PAGOS
+  const detalle = [
+    ['Fecha','Profesional','Paciente','Tratamiento','Práctica','Modalidad','Obra Social','Medio','Tipo cobro','Bruto','$ Prof','$ Centro','$ Moplex']
+  ];
+  for (const p of DATA){
+    const t = p.tratamientos || {};
+    const per = (t.personas || {});
+    detalle.push([
+      p.fecha, p.profesional || '', per.nombre || '', t.codigo_id || '',
+      t.practica_codigo || '', t.modalidad || '', t.obra_social || '',
+      p.medio_pago || '', p.tipo_cobro || '',
+      Number(p.importe)||0, Number(p.monto_profesional)||0,
+      Number(p.monto_centro)||0, Number(p.monto_moplex)||0
+    ]);
+  }
+  const ws2 = XLSX.utils.aoa_to_sheet(detalle);
+  XLSX.utils.book_append_sheet(wb, ws2, 'Detalle');
+
+  XLSX.writeFile(wb, `Liquidacion_${mes}.xlsx`);
+}
+
+// Cargar al inicio
+cargar();
+</script>
+</body>
+</html>
