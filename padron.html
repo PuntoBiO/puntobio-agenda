@@ -264,13 +264,20 @@
       </div>
 
       <div id="seccionInscTF">
-      <div class="section-title">Inscripción TF</div>
+      <div class="section-title" id="tituloInscTF">Inscripción TF</div>
+      <div id="sinInscTF" style="display:none; background:#fef3c7; border:1px solid #d97706; border-radius:8px; padding:12px; margin-bottom:12px; font-size:13px; color:#92400e;">
+        ⚠️ Este alumno todavía no tiene una inscripción en Terapia Física. Completá el plan y guardá para asignársela.
+      </div>
       <div class="form-grid">
         <div class="form-group"><label>Plan</label><select id="edPlan"></select></div>
         <div class="form-group"><label>Actividad</label><select id="edActividad"><option value="TERAPIA_FISICA">TERAPIA_FISICA</option></select></div>
         <div class="form-group"><label>Día de vencimiento (1-31)</label><input type="number" id="edDiaVenc" min="1" max="31"></div>
         <div class="form-group"><label>Descuento libre ($)</label><input type="number" id="edDescuento" min="0" step="500"></div>
         <div class="form-group form-grid-full"><label>Observaciones de la inscripción</label><textarea id="edObsInsc"></textarea></div>
+      </div>
+      <div id="zonaEliminarInsc" style="display:none; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);">
+        <button type="button" id="btnEliminarInsc" onclick="eliminarInscTF()" style="background:#fee2e2; color:#dc2626; border:1px solid #dc2626; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;">🗑️ Eliminar inscripción TF</button>
+        <span style="margin-left:10px; font-size:12px; color:var(--text-dim);">Esto da de baja la inscripción del alumno</span>
       </div>
       </div>
     </div>
@@ -827,18 +834,33 @@ function abrirModalEditar() {
   $('#edRecomendo').value = p.quien_recomendo || '';
   $('#edObsAdmin').value = p.observaciones_admin || '';
 
-  // Sección TF — solo si tiene inscripción
+  // Sección TF — siempre visible. Si tiene inscripción, precarga datos; si no, queda vacía para crearla.
   const secInsc = document.getElementById('seccionInscTF');
+  const avisoSin = document.getElementById('sinInscTF');
+  const zonaElim = document.getElementById('zonaEliminarInsc');
+  const titulo = document.getElementById('tituloInscTF');
+  if (secInsc) secInsc.style.display = '';
+  const selPlan = $('#edPlan');
   if (i) {
-    if (secInsc) secInsc.style.display = '';
-    const selPlan = $('#edPlan');
+    // Tiene inscripción → editar
+    if (avisoSin) avisoSin.style.display = 'none';
+    if (zonaElim) zonaElim.style.display = '';
+    if (titulo) titulo.textContent = 'Inscripción TF';
     selPlan.innerHTML = planesUnicos.map(pl => `<option value="${pl}"${pl===i.plan?' selected':''}>${pl}${tarifario[pl]?` — ${fmt$(tarifario[pl].valor_lista)}`:''}</option>`).join('');
     $('#edActividad').value = i.actividad || 'TERAPIA_FISICA';
     $('#edDiaVenc').value = i.dia_vencimiento || '';
     $('#edDescuento').value = i.descuento_libre || 0;
     $('#edObsInsc').value = i.observaciones || '';
   } else {
-    if (secInsc) secInsc.style.display = 'none';
+    // No tiene inscripción → mostrar aviso y formulario vacío para crear
+    if (avisoSin) avisoSin.style.display = '';
+    if (zonaElim) zonaElim.style.display = 'none';
+    if (titulo) titulo.textContent = '➕ Asignar plan TF';
+    selPlan.innerHTML = '<option value="">— Elegí un plan —</option>' + planesUnicos.map(pl => `<option value="${pl}">${pl}${tarifario[pl]?` — ${fmt$(tarifario[pl].valor_lista)}`:''}</option>`).join('');
+    $('#edActividad').value = 'TERAPIA_FISICA';
+    $('#edDiaVenc').value = '';
+    $('#edDescuento').value = 0;
+    $('#edObsInsc').value = '';
   }
 
   $('#modalEditar').classList.add('activo');
@@ -871,10 +893,12 @@ window.confirmarEditar = async () => {
     const { error: errPer } = await sb.from('personas').update(personaUpdate).eq('id', p.id);
     if (errPer) throw errPer;
 
-    // 2. UPDATE inscripciones_tf (solo si tiene inscripción)
+    // 2. Inscripciones TF: UPDATE si existe, INSERT si no
+    const planSeleccionado = $('#edPlan').value;
     if (i) {
+      // Editar inscripción existente
       const inscUpdate = {
-        plan: $('#edPlan').value,
+        plan: planSeleccionado,
         actividad: $('#edActividad').value,
         dia_vencimiento: parseInt($('#edDiaVenc').value) || null,
         descuento_libre: parseFloat($('#edDescuento').value) || 0,
@@ -883,6 +907,20 @@ window.confirmarEditar = async () => {
       };
       const { error: errIns } = await sb.from('inscripciones_tf').update(inscUpdate).eq('id', i.id);
       if (errIns) throw errIns;
+    } else if (planSeleccionado) {
+      // Crear nueva inscripción (solo si eligió un plan)
+      const inscInsert = {
+        persona_id: p.id,
+        plan: planSeleccionado,
+        actividad: $('#edActividad').value || 'TERAPIA_FISICA',
+        dia_vencimiento: parseInt($('#edDiaVenc').value) || 1,
+        descuento_libre: parseFloat($('#edDescuento').value) || 0,
+        observaciones: $('#edObsInsc').value.trim() || null,
+        estado: 'ACTIVO',
+        fecha_alta: new Date().toISOString().split('T')[0]
+      };
+      const { error: errInsNew } = await sb.from('inscripciones_tf').insert(inscInsert);
+      if (errInsNew) throw errInsNew;
     }
 
     toast(`✓ Cambios guardados para ${personaUpdate.nombre}`);
@@ -893,6 +931,39 @@ window.confirmarEditar = async () => {
     toast('Error al guardar: ' + e.message, true);
   } finally {
     btn.disabled = false; btn.textContent = 'Guardar cambios';
+  }
+};
+
+// ===== ELIMINAR INSCRIPCIÓN TF =====
+window.eliminarInscTF = async () => {
+  if (!alumnoActivo || !alumnoActivo.inscripcion) return;
+  const p = alumnoActivo.persona;
+  const i = alumnoActivo.inscripcion;
+  const confirma = confirm(`¿Seguro querés ELIMINAR la inscripción TF de ${p.nombre}?\n\nPlan actual: ${i.plan}\n\nEsto va a:\n- Marcar la inscripción como BAJA\n- Liberar todos los turnos fijos del alumno\n\nNo se puede deshacer fácilmente.`);
+  if (!confirma) return;
+  const btn = document.getElementById('btnEliminarInsc');
+  if (btn) { btn.disabled = true; btn.textContent = 'Eliminando...'; }
+  try {
+    const hoyISO = new Date().toISOString().split('T')[0];
+    const { error: errInsc } = await sb.from('inscripciones_tf').update({
+      estado: 'BAJA',
+      fecha_baja: hoyISO,
+      motivo_baja: 'Eliminada desde Padrón',
+      actualizado_en: new Date().toISOString()
+    }).eq('id', i.id);
+    if (errInsc) throw errInsc;
+    // Liberar turnos
+    const { count: turnosLib } = await sb.from('turno_alumnos')
+      .delete({ count: 'exact' })
+      .eq('persona_id', p.id);
+    toast(`✓ Inscripción de ${p.nombre} eliminada${turnosLib ? `. Se liberaron ${turnosLib} turnos.` : '.'}`);
+    cerrarModal('modalEditar');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al eliminar inscripción: ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🗑️ Eliminar inscripción TF'; }
   }
 };
 
