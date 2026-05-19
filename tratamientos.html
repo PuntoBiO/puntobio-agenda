@@ -831,14 +831,24 @@ window.verDetalle = async function(ttoId) {
   let sesionesAsoc = []
   let turnosAsoc = []
   try {
-    const [pRes, sRes, tRes] = await Promise.all([
+    const [pRes, sRes, tConsRes, tMasoRes, tBioRes, tAlumRes] = await Promise.all([
       sb.from('pagos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
       sb.from('sesiones').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
-      sb.from('turnos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false })
+      sb.from('turnos_consultorio').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
+      sb.from('turnos_masoterapia').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
+      sb.from('turnos_biolab').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false }),
+      sb.from('turno_alumnos').select('*').eq('tratamiento_id', t.id).order('fecha', { ascending: false })
     ])
     pagosAsoc = pRes.data || []
     sesionesAsoc = sRes.data || []
-    turnosAsoc = tRes.data || []
+    // Unimos los turnos de las 4 tablas marcando de qué tabla vienen (para poder borrar el correcto)
+    const marcar = (arr, tabla) => (arr || []).map(x => ({ ...x, _tabla: tabla }))
+    turnosAsoc = [
+      ...marcar(tConsRes.data, 'turnos_consultorio'),
+      ...marcar(tMasoRes.data, 'turnos_masoterapia'),
+      ...marcar(tBioRes.data, 'turnos_biolab'),
+      ...marcar(tAlumRes.data, 'turno_alumnos')
+    ].sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''))
   } catch (e) {
     console.warn('No se pudieron cargar pagos/sesiones/turnos:', e)
   }
@@ -932,7 +942,7 @@ window.verDetalle = async function(ttoId) {
         ${turnosAsoc.map(tu => `
           <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
             <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${tu.id}</span>
-            <span style="flex: 1;">${fmtFecha(tu.fecha)} ${tu.hora ? '· ' + tu.hora : ''} ${tu.profesional ? '· ' + tu.profesional : ''} ${tu.estado ? '· <strong>' + tu.estado + '</strong>' : ''}</span>
+            <span style="flex: 1;">${fmtFecha(tu.fecha)} ${(tu.hora_inicio || tu.hora) ? '· ' + String(tu.hora_inicio || tu.hora).slice(0,5) : ''} ${tu.profesional ? '· ' + tu.profesional : ''} ${tu.estado ? '· <strong>' + tu.estado + '</strong>' : ''} <span style="font-size: 10px; color: var(--text-dim); margin-left: 6px; padding: 2px 6px; background: var(--bg-card); border-radius: 4px;">${(tu._tabla || '').replace('turnos_','').replace('turno_','')}</span></span>
             <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarTurno(${tu.id})">🗑️</button>
           </div>
         `).join('')}
@@ -1023,10 +1033,11 @@ window.borrarSesion = async function(sesId) {
 window.borrarTurno = async function(turnoId) {
   const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
   if (!tu) return
-  const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
+  const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora_inicio || tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
   if (!confirm(msg)) return
   try {
-    const { error } = await sb.from('turnos_consultorio').delete().eq('id', turnoId)
+    const tabla = tu._tabla || 'turnos_consultorio'
+    const { error } = await sb.from(tabla).delete().eq('id', turnoId)
     if (error) throw error
     toast(`✓ Turno #${turnoId} borrado de la agenda`, 'ok')
     const ttoId = estado.ttoSeleccionado?.id
