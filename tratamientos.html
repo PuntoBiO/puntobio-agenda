@@ -675,20 +675,29 @@ async function cargarDatos() {
       ;(pers || []).forEach(p => estado.personasMap[p.id] = p.nombre)
     }
 
-    // 3) Cargar conteo de sesiones por tratamiento
+    // 3) Cargar conteo de sesiones por tratamiento (paginado para evitar el límite de 1000)
     const ttoIds = estado.tratamientos.map(t => t.id).filter(Boolean)
     estado.sesionesPorTto = {}
     if (ttoIds.length > 0) {
       try {
-        const { data: sesData } = await sb
-          .from('sesiones')
-          .select('id, tratamiento_id')
-          .in('tratamiento_id', ttoIds)
-        ;(sesData || []).forEach(s => {
-          if (s.tratamiento_id) {
-            estado.sesionesPorTto[s.tratamiento_id] = (estado.sesionesPorTto[s.tratamiento_id] || 0) + 1
-          }
-        })
+        const PAGE = 1000
+        let desde = 0
+        while (true) {
+          const { data: sesData, error } = await sb
+            .from('sesiones')
+            .select('id, tratamiento_id')
+            .in('tratamiento_id', ttoIds)
+            .range(desde, desde + PAGE - 1)
+          if (error) throw error
+          if (!sesData || sesData.length === 0) break
+          sesData.forEach(s => {
+            if (s.tratamiento_id) {
+              estado.sesionesPorTto[s.tratamiento_id] = (estado.sesionesPorTto[s.tratamiento_id] || 0) + 1
+            }
+          })
+          if (sesData.length < PAGE) break
+          desde += PAGE
+        }
       } catch (e) {
         console.warn('No se pudieron cargar sesiones:', e)
       }
