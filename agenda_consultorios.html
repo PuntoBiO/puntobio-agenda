@@ -1321,10 +1321,25 @@ async function guardarLote(payloads) {
   try {
     const { error } = await supa.from('turnos_consultorio').insert(payloads).select();
     if (error) throw error;
+    // === Guardar info para el modal WhatsApp ANTES de cerrar el modal ===
+    const personaIdGuardado = payloads[0]?.persona_id;
+    const personaGuardada = personaIdGuardado ? personas.find(p => p.id === personaIdGuardado) : null;
+    const turnosGuardados = payloads.map(p => ({
+      fecha: p.fecha,
+      hora_inicio: p.hora_inicio,
+      profesional: p.profesional,
+      practica_codigo: p.practica_codigo,
+      estado: p.estado
+    }));
+    // === Fin captura datos ===
     closeModal('modalNuevo');
     slotsSel = []; slotsForm = [];
     refreshMultiBar();
     await refresh();
+    // === Disparar modal de WhatsApp después del refresh ===
+    if (personaGuardada && turnosGuardados.length > 0) {
+      mostrarModalWhatsAppTurnos(personaGuardada, turnosGuardados);
+    }
   } catch (e) {
     mostrarAlerta('nuevoAlert', 'Error al guardar: ' + (e.message||e), 'error');
     console.error(e);
@@ -1588,6 +1603,162 @@ function rangoVisible() {
 function escapeHtml(s) {
   return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// =====================================================
+// MÓDULO WHATSAPP TURNOS - PuntoBiO
+// =====================================================
+// Normaliza el celular al formato 549XXXXXXXXXX (lo que pide wa.me)
+function limpiarCelularWA(cel) {
+  if (!cel) return null;
+  let num = cel.toString().replace(/\D/g, '');
+  if (!num) return null;
+  if (num.startsWith('549') && num.length >= 12) return num;
+  if (num.startsWith('54') && num.length >= 11) return '549' + num.substring(2);
+  if (num.length === 10) return '549' + num;          // 3515123456 → 5493515123456
+  if (num.length === 8)  return '549351' + num;       // 5123456    → 5493515123456 (Córdoba)
+  return num;
+}
+
+// Día de la semana en español a partir de fecha YYYY-MM-DD
+const _DIAS_SEM = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+const _MESES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+function fechaABonita(fechaISO) {
+  // fechaISO = '2026-05-25' → { dia:'Lunes', fechaCorta:'25/05', fechaLarga:'Lun 25 May' }
+  const [a,m,d] = fechaISO.split('-').map(n => parseInt(n,10));
+  const dt = new Date(a, m-1, d);
+  const diaSem = _DIAS_SEM[dt.getDay()];
+  const fechaCorta = `${pad(d)}/${pad(m)}`;
+  const fechaLarga = `${diaSem.substring(0,3)} ${pad(d)} ${_MESES[m-1]}`;
+  return { diaSem, fechaCorta, fechaLarga };
+}
+
+function nombrePractica(codigo) {
+  return REGLAS_PRACTICA[codigo]?.label || codigo;
+}
+
+// Arma el mensaje de texto para WhatsApp
+function armarMensajeWA(paciente, turnos) {
+  const primerNombre = (paciente.nombre || '').split(' ')[0] || '';
+  let msg = `Hola ${primerNombre}! 👋\n`;
+  msg += `Te confirmamos tus turnos en *PuntoBiO*:\n\n`;
+  // Ordenar por fecha + hora
+  const turnosOrd = [...turnos].sort((a,b) => {
+    if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
+    return a.hora_inicio < b.hora_inicio ? -1 : 1;
+  });
+  turnosOrd.forEach(t => {
+    const f = fechaABonita(t.fecha);
+    const hora = t.hora_inicio.substring(0,5); // '09:00:00' → '09:00'
+    const sobreTxt = t.estado === 'SOBRETURNO' ? ' (sobreturno)' : '';
+    msg += `📅 ${f.diaSem} ${f.fechaCorta} · ${hora}hs${sobreTxt}\n`;
+    msg += `   ${nombrePractica(t.practica_codigo)} con ${t.profesional}\n\n`;
+  });
+  msg += `📍 Libertad 1549, Bº Gral Paz\n`;
+  msg += `Si no podés venir, avisanos con 24hs de anticipación ✅`;
+  return msg;
+}
+
+// Abre WhatsApp Web/App con el mensaje pre-armado
+function enviarPorWhatsApp(paciente, turnos) {
+  const tel = limpiarCelularWA(paciente.celular);
+  if (!tel) {
+    alert('⚠️ El paciente no tiene celular cargado en el Padrón.\n\nCargalo en la ficha del paciente para poder enviar por WhatsApp.');
+    return false;
+  }
+  if (!turnos || turnos.length === 0) {
+    alert('⚠️ No hay turnos para enviar.');
+    return false;
+  }
+  const mensaje = armarMensajeWA(paciente, turnos);
+  const url = `https://wa.me/${tel}?text=${encodeURIComponent(mensaje)}`;
+  window.open(url, '_blank');
+  return true;
+}
+
+// Modal post-guardado
+function mostrarModalWhatsAppTurnos(paciente, turnos) {
+  const viejo = document.getElementById('pb-modal-wa');
+  if (viejo) viejo.remove();
+
+  const turnosOrd = [...turnos].sort((a,b) => {
+    if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
+    return a.hora_inicio < b.hora_inicio ? -1 : 1;
+  });
+
+  const turnosHTML = turnosOrd.map(t => {
+    const f = fechaABonita(t.fecha);
+    const hora = t.hora_inicio.substring(0,5);
+    const sobre = t.estado === 'SOBRETURNO' ? '<span style="background:#ffe0b2;color:#7a4a00;padding:2px 8px;border-radius:10px;font-size:11px;margin-left:6px;">SOBRETURNO</span>' : '';
+    return `
+      <div style="padding:12px 14px;border-left:4px solid #1e9fe0;background:#f5f9fc;margin-bottom:8px;border-radius:6px;">
+        <div style="font-weight:600;color:#111;font-size:15px;">
+          📅 ${f.diaSem} ${f.fechaCorta} · ${hora}hs ${sobre}
+        </div>
+        <div style="font-size:13px;color:#555;margin-top:4px;">
+          ${escapeHtml(nombrePractica(t.practica_codigo))} con <strong>${escapeHtml(t.profesional)}</strong>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  const tieneTel = !!limpiarCelularWA(paciente.celular);
+  const avisoTel = tieneTel ? '' : `
+    <div style="background:#fff4e5;border:1px solid #ffb74d;color:#7a4a00;padding:10px 12px;border-radius:6px;margin-bottom:15px;font-size:13px;">
+      ⚠️ El paciente no tiene celular cargado en el Padrón. Cargalo para poder enviar por WhatsApp.
+    </div>
+  `;
+
+  const modal = document.createElement('div');
+  modal.id = 'pb-modal-wa';
+  modal.style.cssText = `
+    position:fixed;top:0;left:0;right:0;bottom:0;
+    background:rgba(0,0,0,0.65);display:flex;align-items:center;
+    justify-content:center;z-index:99999;padding:20px;
+    font-family:'Manrope',-apple-system,sans-serif;
+  `;
+  modal.innerHTML = `
+    <div style="background:white;border-radius:14px;max-width:520px;width:100%;padding:26px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.35);">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <span style="font-size:28px;">✅</span>
+        <h2 style="margin:0;color:#111;font-size:20px;font-weight:700;">Turnos guardados</h2>
+      </div>
+      <p style="margin:0 0 18px 38px;color:#666;font-size:14px;">
+        ${escapeHtml(paciente.nombre || '')}
+      </p>
+      ${avisoTel}
+      <div style="margin-bottom:20px;">
+        ${turnosHTML}
+      </div>
+      <div style="display:flex;gap:10px;">
+        <button id="pb-wa-send" ${tieneTel ? '' : 'disabled'} style="
+          flex:1;background:${tieneTel ? '#25D366' : '#bbb'};color:white;border:none;
+          padding:14px;border-radius:8px;font-size:15px;font-weight:600;
+          cursor:${tieneTel ? 'pointer' : 'not-allowed'};display:flex;
+          align-items:center;justify-content:center;gap:8px;
+        ">
+          <span style="font-size:20px;">💚</span> Enviar por WhatsApp
+        </button>
+        <button id="pb-wa-close" style="
+          background:#eee;color:#333;border:none;padding:14px 22px;
+          border-radius:8px;font-size:15px;cursor:pointer;font-weight:500;
+        ">Cerrar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  document.getElementById('pb-wa-close').onclick = () => modal.remove();
+  if (tieneTel) {
+    document.getElementById('pb-wa-send').onclick = () => {
+      enviarPorWhatsApp(paciente, turnos);
+      modal.remove();
+    };
+  }
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+}
+// =====================================================
+// FIN MÓDULO WHATSAPP TURNOS
+// =====================================================
 </script>
 </body>
 </html>
