@@ -87,6 +87,9 @@
   .turno-pick-tit { font-size: 13px; font-weight: 600; }
   .turno-pick-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .turno-pick-cupo { font-size: 11px; font-family: 'DM Mono', monospace; font-weight: 600; }
+  .filtro-turno { border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.12s; }
+  .filtro-turno:hover { border-color: var(--azul); color: var(--azul); }
+  .filtro-turno.active { background: var(--azul-soft); color: var(--azul); border-color: var(--azul); }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
   .modal-backdrop.activo { display: flex; }
   .modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(15, 23, 42, 0.15); }
@@ -349,7 +352,7 @@
         <div class="modal-info" id="altaInfo"></div>
         <div class="form-grid">
           <div class="form-group"><label>Plan / Código</label><select id="altaPlan"></select></div>
-          <div class="form-group"><label>Actividad</label><select id="altaActividad"><option value="TERAPIA_FISICA">TERAPIA_FISICA</option></select></div>
+          <div class="form-group"><label>Área / Actividad</label><select id="altaActividad"><option value="ENTRENAMIENTO">Entrenamiento</option><option value="KINEFILAXIA">Kinefilaxia</option><option value="AMBOS">Ambos (Entrenamiento + Kinefilaxia)</option></select></div>
           <div class="form-group"><label>Día de vencimiento (1-31)</label><input type="number" id="altaDiaVenc" min="1" max="31" value="1"></div>
           <div class="form-group"><label>Descuento libre ($)</label><input type="number" id="altaDescuento" min="0" step="500" value="0"></div>
           <div class="form-group"><label>Fecha de alta</label><input type="date" id="altaFecha"></div>
@@ -361,9 +364,19 @@
       <!-- PASO 2: TURNOS -->
       <div class="wiz-pane" id="wizPane2">
         <div class="aviso-amarillo" style="background:#dbeafe;border-color:var(--azul);color:#1e3a5f;">
-          📅 Tildá los turnos fijos que va a tener este alumno cada semana. <strong>Es opcional</strong> — si no asignás ahora, podés hacerlo después en la Agenda TF.
+          📅 Tocá los turnos fijos que va a tener cada semana. <strong>Es opcional</strong> — si no asignás ahora, lo hacés después en la Agenda TF.
         </div>
-        <div id="altaTurnosList" style="max-height:340px;overflow-y:auto;margin-top:10px;">
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px;">
+          <button type="button" class="filtro-turno active" data-ftservicio="todos" onclick="setFiltroTurno('servicio','todos',this)">Todos</button>
+          <button type="button" class="filtro-turno" data-ftservicio="Entrenamiento" onclick="setFiltroTurno('servicio','Entrenamiento',this)">🏋️ Entrenamiento</button>
+          <button type="button" class="filtro-turno" data-ftservicio="Kinefilaxia" onclick="setFiltroTurno('servicio','Kinefilaxia',this)">🧘 Kinefilaxia</button>
+          <span style="width:1px; background:var(--border); margin:0 4px;"></span>
+          <button type="button" class="filtro-turno active" data-ftcupo="todos" onclick="setFiltroTurno('cupo','todos',this)">Cupo: todos</button>
+          <button type="button" class="filtro-turno" data-ftcupo="vacante" onclick="setFiltroTurno('cupo','vacante',this)">Con vacante</button>
+          <button type="button" class="filtro-turno" data-ftcupo="lleno" onclick="setFiltroTurno('cupo','lleno',this)">Completos</button>
+        </div>
+        <div id="wizTurnosSelResumen" style="font-size:12px; color:var(--verde); font-weight:600; margin:6px 0;"></div>
+        <div id="altaTurnosList" style="max-height:320px;overflow-y:auto;margin-top:6px;">
           <div class="empty" style="padding:14px;">Cargando turnos disponibles...</div>
         </div>
       </div>
@@ -1167,7 +1180,7 @@ window.abrirAltaTF = () => {
   $('#altaInfo').innerHTML = `<strong>${p.nombre}</strong> · #${p.id}${p.dni ? ' · DNI ' + p.dni : ''}<br>Esta persona pasa de <em>Sin actividad</em> a <strong>TF Activo</strong>.`;
   // Plan
   $('#altaPlan').innerHTML = '<option value="">— Elegí un plan —</option>' + planesUnicos.map(pl => `<option value="${pl}">${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}</option>`).join('');
-  $('#altaActividad').value = 'TERAPIA_FISICA';
+  $('#altaActividad').value = 'ENTRENAMIENTO';
   $('#altaDiaVenc').value = 1;
   $('#altaDescuento').value = 0;
   $('#altaFecha').value = HOY.toISOString().split('T')[0];
@@ -1261,6 +1274,19 @@ async function cargarTurnosWiz() {
       profes: mapaProfe[t.id] || [],
       ocupados: conteo[t.id] || 0
     }));
+    // Pre-filtrar según el área elegida en el paso 1
+    const act = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.actividad) || '';
+    if (act === 'ENTRENAMIENTO') filtroTurnoServicio = 'Entrenamiento';
+    else if (act === 'KINEFILAXIA') filtroTurnoServicio = 'Kinefilaxia';
+    else filtroTurnoServicio = 'todos';
+    filtroTurnoCupo = 'todos';
+    // sincronizar estado visual de los botones de filtro
+    document.querySelectorAll('.filtro-turno[data-ftservicio]').forEach(b => {
+      b.classList.toggle('active', b.dataset.ftservicio === filtroTurnoServicio);
+    });
+    document.querySelectorAll('.filtro-turno[data-ftcupo]').forEach(b => {
+      b.classList.toggle('active', b.dataset.ftcupo === 'todos');
+    });
     renderTurnosWiz();
   } catch (e) {
     console.error(e);
@@ -1270,37 +1296,85 @@ async function cargarTurnosWiz() {
 }
 
 const ORDEN_DIAS = { 'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':7 };
+let filtroTurnoServicio = 'todos';
+let filtroTurnoCupo = 'todos';
+
+// Normaliza el servicio de un turno a 'Entrenamiento' / 'Kinefilaxia'
+function normServicio(s) {
+  const x = String(s || '').trim().toLowerCase();
+  if (x.startsWith('entren')) return 'Entrenamiento';
+  if (x.startsWith('kine')) return 'Kinefilaxia';
+  return s || '';
+}
+
+window.setFiltroTurno = (tipo, valor, btn) => {
+  if (tipo === 'servicio') {
+    filtroTurnoServicio = valor;
+    document.querySelectorAll('.filtro-turno[data-ftservicio]').forEach(b => b.classList.remove('active'));
+  } else {
+    filtroTurnoCupo = valor;
+    document.querySelectorAll('.filtro-turno[data-ftcupo]').forEach(b => b.classList.remove('active'));
+  }
+  if (btn) btn.classList.add('active');
+  renderTurnosWiz();
+};
+
 function renderTurnosWiz() {
+  // resumen de seleccionados (siempre visible aunque estén filtrados)
+  $('#wizTurnosSelResumen').textContent = wizTurnosSel.size
+    ? `✓ ${wizTurnosSel.size} turno(s) seleccionado(s)`
+    : '';
+
   if (!wizTurnosCache.length) {
     $('#altaTurnosList').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos cargados en la agenda todavía. Podés finalizar y asignarlos después.</div>';
     return;
   }
-  const orden = [...wizTurnosCache].sort((a, b) => {
+
+  let lista = [...wizTurnosCache];
+  // filtro por servicio
+  if (filtroTurnoServicio !== 'todos') {
+    lista = lista.filter(t => normServicio(t.servicio) === filtroTurnoServicio);
+  }
+  // filtro por cupo
+  if (filtroTurnoCupo === 'vacante') {
+    lista = lista.filter(t => !t.capacidad || t.ocupados < t.capacidad);
+  } else if (filtroTurnoCupo === 'lleno') {
+    lista = lista.filter(t => t.capacidad && t.ocupados >= t.capacidad);
+  }
+
+  lista.sort((a, b) => {
     const da = ORDEN_DIAS[a.dia] || 9, db = ORDEN_DIAS[b.dia] || 9;
     if (da !== db) return da - db;
     return String(a.hora).localeCompare(String(b.hora));
   });
-  $('#altaTurnosList').innerHTML = orden.map(t => {
+
+  if (!lista.length) {
+    $('#altaTurnosList').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos que coincidan con el filtro.</div>';
+    return;
+  }
+
+  $('#altaTurnosList').innerHTML = lista.map(t => {
     const lleno = t.capacidad && t.ocupados >= t.capacidad;
     const sel = wizTurnosSel.has(t.id);
     const cupoTxt = t.capacidad ? `${t.ocupados}/${t.capacidad}` : `${t.ocupados}`;
     const cupoColor = lleno ? 'var(--rojo)' : 'var(--verde)';
+    const srv = normServicio(t.servicio);
+    const srvIcon = srv === 'Entrenamiento' ? '🏋️' : srv === 'Kinefilaxia' ? '🧘' : '';
     return `
-      <label class="turno-pick ${sel ? 'sel' : ''} ${lleno && !sel ? 'lleno' : ''}">
-        <input type="checkbox" ${sel ? 'checked' : ''} ${lleno && !sel ? 'disabled' : ''} onchange="toggleTurnoWiz(${t.id}, this.checked)">
+      <div class="turno-pick ${sel ? 'sel' : ''} ${lleno && !sel ? 'lleno' : ''}" onclick="${lleno && !sel ? '' : `toggleTurnoWiz(${t.id})`}">
+        <input type="checkbox" ${sel ? 'checked' : ''} ${lleno && !sel ? 'disabled' : ''} style="pointer-events:none;">
         <div class="turno-pick-info">
-          <div class="turno-pick-tit">${t.dia} · ${t.hora} · ${t.servicio || 'TF'}</div>
-          <div class="turno-pick-sub">${t.profes.length ? t.profes.join(', ') : 'Sin profe asignado'}</div>
+          <div class="turno-pick-tit">${srvIcon} ${t.dia} · ${t.hora}</div>
+          <div class="turno-pick-sub">${srv} · ${t.profes.length ? t.profes.join(', ') : 'Sin profe asignado'}</div>
         </div>
         <div class="turno-pick-cupo" style="color:${cupoColor}">${cupoTxt}${lleno ? ' · LLENO' : ''}</div>
-      </label>`;
+      </div>`;
   }).join('');
 }
 
-window.toggleTurnoWiz = (turnoId, checked) => {
-  if (checked) wizTurnosSel.add(turnoId);
-  else wizTurnosSel.delete(turnoId);
-  // refrescar solo clases sin recargar
+window.toggleTurnoWiz = (turnoId) => {
+  if (wizTurnosSel.has(turnoId)) wizTurnosSel.delete(turnoId);
+  else wizTurnosSel.add(turnoId);
   renderTurnosWiz();
 };
 
@@ -1365,7 +1439,14 @@ window.wizFinalizarConCobro = async () => {
 };
 
 window.wizFinalizarSinCobro = async () => {
-  toast(`✓ Alta creada para ${alumnoActivo.persona.nombre} (sin cobro registrado)`);
+  const ok = confirm(
+    '⚠️ ATENCIÓN: vas a finalizar el alta SIN registrar el cobro.\n\n' +
+    'Esto genera un SALDO DEUDOR para el alumno.\n' +
+    'Acordate de controlar el abono correspondiente y registrar el pago cuando abone.\n\n' +
+    '¿Confirmás el alta sin cobro?'
+  );
+  if (!ok) return;
+  toast(`✓ Alta creada para ${alumnoActivo.persona.nombre} · ⚠️ queda con saldo deudor`);
   cerrarModal('modalAltaTF');
   await cargarTodo();
 };
