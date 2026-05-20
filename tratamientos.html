@@ -299,6 +299,21 @@ tbody tr:last-child td { border-bottom: 0; }
   font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
   max-height: 200px; overflow: auto; white-space: pre;
 }
+.cobro-previa {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.cobro-previa.is-normal   { background: var(--blue-bg);  border-color: #bfdbfe; color: #1e3a8a; }
+.cobro-previa.is-coseguro { background: var(--amber-bg); border-color: #fde68a; color: #92400e; }
+.cobro-previa.is-cortesia { background: var(--green-bg); border-color: #bbf7d0; color: #166534; }
+.cobro-previa.is-manual   { background: var(--purple-bg);border-color: #e9d5ff; color: #6b21a8; }
+.cobro-previa b { font-weight: 700; }
 </style>
 </head>
 <body>
@@ -423,6 +438,7 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="SOLO_COSEGURO">Solo coseguro</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
+        <div id="nuevo-cobro-previa" class="cobro-previa"></div>
       </div>
     </div>
 
@@ -503,6 +519,7 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="SOLO_COSEGURO">Solo coseguro</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
+        <div id="ed-cobro-previa" class="cobro-previa"></div>
       </div>
       <div class="form-field">
         <label class="form-label">Estado</label>
@@ -1102,6 +1119,7 @@ window.abrirEditar = function() {
   $('ed-estado').value = t.estado || 'Pendiente'
   $('ed-observaciones').value = t.observaciones || ''
   toggleObraSocial('ed-modalidad', 'ed-obra-field')
+  actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa')
   // Cerramos detalle, abrimos editar
   $('modal-detalle').classList.remove('is-open')
   $('modal-editar').classList.add('is-open')
@@ -1293,7 +1311,7 @@ function poblarPracticasSelect() {
   ).join('')
 }
 
-$('nuevo-area').addEventListener('change', poblarPracticasSelect)
+$('nuevo-area').addEventListener('change', () => { poblarPracticasSelect(); autocompletarPrecioNuevo() })
 
 window.recalcularTotal = function() {
   const ses = Number($('nuevo-sesiones').value) || 0
@@ -1395,14 +1413,109 @@ function toggleObraSocial(modalidadSelId, fieldId) {
   field.style.display = (mod === 'PARTICULAR') ? 'none' : ''
 }
 
-$('nuevo-modalidad').addEventListener('change', () => toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'))
-$('ed-modalidad').addEventListener('change', () => toggleObraSocial('ed-modalidad', 'ed-obra-field'))
+// ===== AUTO-COMPLETAR VALOR POR SESIÓN DESDE EL TARIFARIO =====
+// Busca el precio en tarifario_precios según práctica + modalidad + obra social.
+// Los códigos de práctica del form (FISIO, OSTEO, DRENAJE, MASAJES_EYC...) coinciden
+// directo con la tabla, así que el match es directo.
+async function buscarPrecioTarifario(practicaCodigo, modalidad, obraSocial) {
+  try {
+    let q = sb.from('tarifario_precios').select('valor, vigente_desde, vigente_hasta')
+      .eq('practica_codigo', practicaCodigo)
+    if (modalidad === 'OBRA_SOCIAL' && obraSocial) {
+      q = q.eq('modalidad', 'O.S').eq('obra_social', obraSocial)
+    } else {
+      q = q.eq('modalidad', 'Particular')
+    }
+    const { data, error } = await q.order('vigente_desde', { ascending: false })
+    if (error) { console.warn('No se pudo buscar tarifario:', error.message); return null }
+    if (!data || data.length === 0) return null
+    const hoy = new Date().toISOString().slice(0, 10)
+    const vigente = data.find(r => !r.vigente_hasta || r.vigente_hasta >= hoy) || data[0]
+    return vigente.valor
+  } catch (e) {
+    console.warn('Error buscando tarifario:', e)
+    return null
+  }
+}
+
+// Auto-completa el valor por sesión del formulario de ALTA
+async function autocompletarPrecioNuevo() {
+  const tipoCobro = $('nuevo-tipo-cobro')?.value
+  // Si es manual o cortesía, no pisar el valor (el usuario lo carga a mano)
+  if (tipoCobro === 'MANUAL' || tipoCobro === 'CORTESIA') return
+  const practica = $('nuevo-practica')?.value
+  const modalidad = $('nuevo-modalidad')?.value
+  const obraSocial = $('nuevo-obra')?.value
+  if (!practica) return
+  const precio = await buscarPrecioTarifario(practica, modalidad, obraSocial)
+  if (precio !== null && precio !== undefined) {
+    $('nuevo-valor-sesion').value = precio
+    recalcularTotal()
+  }
+}
+
+// Auto-completa el valor por sesión del formulario de EDICIÓN
+async function autocompletarPrecioEd() {
+  const tipoCobro = $('ed-tipo-cobro')?.value
+  if (tipoCobro === 'MANUAL' || tipoCobro === 'CORTESIA') return
+  const t = estado.ttoSeleccionado
+  const practica = t?.practica_codigo
+  const modalidad = $('ed-modalidad')?.value
+  const obraSocial = $('ed-obra')?.value
+  if (!practica) return
+  const precio = await buscarPrecioTarifario(practica, modalidad, obraSocial)
+  if (precio !== null && precio !== undefined) {
+    $('ed-valor-sesion').value = precio
+    ed_recalcular()
+  }
+}
+
+// ===== PREVIA DEL SPLIT SEGÚN TIPO DE COBRO =====
+// El split exacto depende del profesional (se define en la agenda), así que acá
+// mostramos la regla general según el tipo de cobro elegido.
+const PREVIA_COBRO = {
+  NORMAL: {
+    cls: 'is-normal',
+    html: '📋 <b>Normal:</b> aplica precio de lista del tarifario. El reparto centro/profesional se calcula según el profesional cuando se asigna el turno en la agenda.'
+  },
+  SOLO_COSEGURO: {
+    cls: 'is-coseguro',
+    html: '🏥 <b>Solo coseguro:</b> el centro se queda el 100% del precio de lista. El profesional cobra $0.'
+  },
+  CORTESIA: {
+    cls: 'is-cortesia',
+    html: '🎁 <b>Cortesía:</b> nadie cobra. Centro $0 · Profesional $0.'
+  },
+  MANUAL: {
+    cls: 'is-manual',
+    html: '✏️ <b>Manual:</b> monto libre. Cargás vos el valor por sesión y el reparto se calcula sobre ese monto.'
+  }
+}
+
+function actualizarPreviaCobro(tipoCobroSelId, previaId) {
+  const tipo = $(tipoCobroSelId)?.value
+  const el = $(previaId)
+  if (!el) return
+  const info = PREVIA_COBRO[tipo] || PREVIA_COBRO.NORMAL
+  el.className = 'cobro-previa ' + info.cls
+  el.innerHTML = info.html
+}
+
+$('nuevo-modalidad').addEventListener('change', () => { toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'); autocompletarPrecioNuevo() })
+$('ed-modalidad').addEventListener('change', () => { toggleObraSocial('ed-modalidad', 'ed-obra-field'); autocompletarPrecioEd() })
+$('nuevo-practica').addEventListener('change', autocompletarPrecioNuevo)
+$('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
+$('ed-obra').addEventListener('change', autocompletarPrecioEd)
+const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
+const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEventListener('change', () => { autocompletarPrecioEd(); actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa') })
 
 // Init
 poblarPracticasSelect()
 cargarObrasSociales()
 toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field')
 toggleObraSocial('ed-modalidad', 'ed-obra-field')
+actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa')
+actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa')
 cargarDatos()
 </script>
 </body>
