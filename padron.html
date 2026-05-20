@@ -321,14 +321,88 @@
         <div class="form-group form-grid-full"><label>Observaciones de la inscripción</label><textarea id="edObsInsc"></textarea></div>
       </div>
       <div id="zonaEliminarInsc" style="display:none; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);">
+        <button type="button" id="btnCambiarPlan" onclick="abrirCambioPlan()" style="background:#dbeafe; color:#1e40af; border:1px solid #1e9fe0; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; margin-right:8px;">🔄 Cambiar plan (con proporcional)</button>
         <button type="button" id="btnEliminarInsc" onclick="eliminarInscTF()" style="background:#fee2e2; color:#dc2626; border:1px solid #dc2626; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;">🗑️ Eliminar inscripción TF</button>
-        <span style="margin-left:10px; font-size:12px; color:var(--text-dim);">Esto da de baja la inscripción del alumno</span>
+        <span style="display:block; margin-top:8px; font-size:12px; color:var(--text-dim);">Usá "Cambiar plan" para subir/bajar de código a mitad de mes: el sistema calcula el proporcional y programa el plan nuevo para el mes que viene. El botón rojo da de baja la inscripción.</span>
       </div>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalEditar')">Cancelar</button>
       <button class="btn-modal btn-confirmar-editar" id="btnConfirmarEditar" onclick="confirmarEditar()">Guardar cambios</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL CAMBIO DE PLAN CON PROPORCIONAL ===== -->
+<div class="modal-backdrop" id="modalCambioPlan">
+  <div class="modal modal-lg" id="modalCambioPlanBox">
+    <div class="modal-header">
+      <span class="modal-title" id="cpTitulo">🔄 Cambiar plan</span>
+      <button class="modal-close" onclick="cerrarModal('modalCambioPlan')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="cpInfo" class="modal-info" style="border-left-color:var(--azul);"></div>
+
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Plan nuevo</label>
+          <select id="cpPlanNuevo"></select>
+        </div>
+        <div class="form-group">
+          <label>Fecha del cambio</label>
+          <input type="date" id="cpFecha">
+        </div>
+      </div>
+
+      <!-- Cálculo del proporcional -->
+      <div id="cpCalculo" style="background:#f0f9ff; border:1px solid #1e9fe0; border-radius:8px; padding:14px; margin:10px 0; font-size:13px;"></div>
+
+      <!-- Cobro del proporcional -->
+      <div id="cpZonaCobro">
+        <div class="section-title">Cobro del proporcional (mes actual)</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Importe a cobrar ahora</label>
+            <input type="number" id="cpImporte" min="0" step="100">
+          </div>
+          <div class="form-group">
+            <label>Medio de pago</label>
+            <select id="cpMedio">
+              <option value="TRANSFERENCIA">Transferencia</option>
+              <option value="EFECTIVO">Efectivo</option>
+              <option value="DEBITO">Débito</option>
+              <option value="CREDITO">Crédito</option>
+            </select>
+          </div>
+          <div class="form-group form-grid-full">
+            <label>Observaciones del cobro (opcional)</label>
+            <input type="text" id="cpObs" placeholder="Opcional...">
+          </div>
+        </div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:4px;">
+          <input type="checkbox" id="cpSinCobro"> No cobrar ahora (queda como saldo del proporcional)
+        </label>
+      </div>
+
+      <!-- Clases extra -->
+      <div id="cpZonaClases" style="margin-top:14px;">
+        <div class="section-title">Clases extra a agregar a la agenda (permanentes)</div>
+        <div id="cpClasesResumen" style="font-size:13px; margin-bottom:8px;"></div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
+          <button type="button" class="filtro-turno" data-cpserv="todos" onclick="cpSetFiltro('servicio','todos',this)">Todos</button>
+          <button type="button" class="filtro-turno" data-cpserv="Entrenamiento" onclick="cpSetFiltro('servicio','Entrenamiento',this)">🏋️ Entrenamiento</button>
+          <button type="button" class="filtro-turno" data-cpserv="Kinefilaxia" onclick="cpSetFiltro('servicio','Kinefilaxia',this)">🧘 Kinefilaxia</button>
+          <span style="width:14px;"></span>
+          <button type="button" class="filtro-turno" data-cpcupo="todos" onclick="cpSetFiltro('cupo','todos',this)">Todos los cupos</button>
+          <button type="button" class="filtro-turno" data-cpcupo="vacante" onclick="cpSetFiltro('cupo','vacante',this)">Con lugar</button>
+        </div>
+        <div id="cpTurnosList"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCambioPlan')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-editar" id="cpBtnConfirmar" onclick="confirmarCambioPlan()">Confirmar cambio de plan</button>
     </div>
   </div>
 </div>
@@ -1092,6 +1166,316 @@ window.confirmarEditar = async () => {
     btn.disabled = false; btn.textContent = 'Guardar cambios';
   }
 };
+
+// ===== CAMBIO DE PLAN CON PROPORCIONAL =====
+// Estado del modal de cambio de plan
+let cpTurnosCache = [];
+let cpTurnosSel = new Set();
+let cpFiltroServicio = 'todos';
+let cpFiltroCupo = 'todos';
+
+// Clases por semana reales para el proporcional.
+// COD1..COD7 = número del código. ROT usa solo el número (COD2ROT=2, COD3ROT=3).
+// COD8DIS y COD0BON = ilimitado/tarifa plana → null (no se prorratea por clases).
+function clasesSemanaPlan(plan) {
+  const p = String(plan || '').toUpperCase();
+  if (p.includes('DIS') || p.includes('BON')) return null; // tarifa plana / ilimitado
+  const m = p.match(/COD\s*(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+// ¿Es un plan de tarifa plana / sin proporcional automático? (online o bonificado)
+function esPlanPlano(plan) {
+  const p = String(plan || '').toUpperCase();
+  return p.includes('DIS') || p.includes('BON');
+}
+// Días del mes de una fecha y cuántos quedan (incluyendo el día del cambio)
+function diasMes(fecha) {
+  const y = fecha.getFullYear(), m = fecha.getMonth();
+  const total = new Date(y, m + 1, 0).getDate();
+  const restantes = total - fecha.getDate() + 1; // incluye hoy
+  return { total, restantes };
+}
+// Mes siguiente en formato YYYY-MM a partir de una fecha
+function mesSiguienteStr(fecha) {
+  const d = new Date(fecha.getFullYear(), fecha.getMonth() + 1, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function nombreMes(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
+}
+
+window.abrirCambioPlan = () => {
+  if (!alumnoActivo || !alumnoActivo.inscripcion) {
+    toast('Esta persona no tiene una inscripción activa para cambiar de plan.', true);
+    return;
+  }
+  const p = alumnoActivo.persona;
+  const i = alumnoActivo.inscripcion;
+  cpTurnosSel = new Set();
+  cpFiltroServicio = 'todos';
+  cpFiltroCupo = 'todos';
+
+  $('#cpTitulo').textContent = `🔄 Cambiar plan — ${p.nombre}`;
+  const tarActual = tarifario[i.plan] ? (tarifario[i.plan].valor_lista || 0) : 0;
+  $('#cpInfo').innerHTML = `<strong>${p.nombre}</strong> · #${p.id}<br>Plan actual: <strong>${i.plan}</strong> (${fmt$(tarActual)})`;
+
+  // Plan nuevo: todos menos el actual
+  $('#cpPlanNuevo').innerHTML = '<option value="">— Elegí el plan nuevo —</option>' +
+    planesUnicos.filter(pl => pl !== i.plan)
+      .map(pl => `<option value="${pl}">${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}</option>`).join('');
+
+  $('#cpFecha').value = HOY.toISOString().split('T')[0];
+  $('#cpImporte').value = 0;
+  $('#cpMedio').value = 'TRANSFERENCIA';
+  $('#cpObs').value = '';
+  $('#cpSinCobro').checked = false;
+  $('#cpCalculo').innerHTML = '<span style="color:var(--text-dim)">Elegí el plan nuevo para ver el cálculo del proporcional.</span>';
+  $('#cpClasesResumen').innerHTML = '';
+  $('#cpTurnosList').innerHTML = '';
+
+  cpCargarTurnos();
+  $('#modalCambioPlan').classList.add('activo');
+};
+
+// Recalcula proporcional cuando cambia el plan nuevo o la fecha
+function cpRecalcular() {
+  const i = alumnoActivo.inscripcion;
+  const planViejo = i.plan;
+  const planNuevo = $('#cpPlanNuevo').value;
+  const calc = $('#cpCalculo');
+  if (!planNuevo) {
+    calc.innerHTML = '<span style="color:var(--text-dim)">Elegí el plan nuevo para ver el cálculo del proporcional.</span>';
+    $('#cpImporte').value = 0;
+    return null;
+  }
+  const fecha = $('#cpFecha').value ? new Date($('#cpFecha').value + 'T00:00:00') : HOY;
+  const cuotaVieja = tarifario[planViejo] ? (tarifario[planViejo].valor_lista || 0) : 0;
+  const cuotaNueva = tarifario[planNuevo] ? (tarifario[planNuevo].valor_lista || 0) : 0;
+  const diff = cuotaNueva - cuotaVieja;
+  const { total, restantes } = diasMes(fecha);
+  const mesQueViene = mesSiguienteStr(fecha);
+
+  // Caso tarifa plana: no se prorratea automático
+  if (esPlanPlano(planNuevo) || esPlanPlano(planViejo)) {
+    calc.innerHTML = `
+      <div style="font-weight:600; color:var(--naranja); margin-bottom:6px;">⚠️ Plan de tarifa plana (online/bonificado)</div>
+      Este cambio involucra un plan de tarifa plana (COD8DIS / COD0BON). El proporcional <strong>no se calcula automático</strong>;
+      cargá a mano el importe que corresponda en el campo de abajo (o dejalo en 0 si no cobrás proporcional).<br>
+      <span style="color:var(--text-dim)">El plan nuevo igual queda programado para ${nombreMes(mesQueViene)}.</span>`;
+    return { planViejo, planNuevo, diff, total, restantes, proporcional: 0, mesQueViene, plano: true };
+  }
+
+  // Proporcional = diferencia de cuota × (días restantes / días del mes)
+  const proporcional = Math.max(0, Math.round(diff * (restantes / total)));
+  const signo = diff >= 0 ? 'sube' : 'baja';
+  const colorDiff = diff >= 0 ? 'var(--azul)' : 'var(--verde)';
+
+  calc.innerHTML = `
+    <div style="font-weight:600; margin-bottom:6px;">Cálculo del proporcional</div>
+    <table style="width:100%; font-size:13px; border-collapse:collapse;">
+      <tr><td>Cuota ${planViejo}</td><td style="text-align:right">${fmt$(cuotaVieja)}</td></tr>
+      <tr><td>Cuota ${planNuevo}</td><td style="text-align:right">${fmt$(cuotaNueva)}</td></tr>
+      <tr style="border-top:1px solid #cbd5e1;"><td>Diferencia de cuota (${signo})</td><td style="text-align:right; color:${colorDiff}; font-weight:600;">${fmt$(diff)}</td></tr>
+      <tr><td>Días que quedan del mes</td><td style="text-align:right">${restantes} de ${total}</td></tr>
+      <tr style="border-top:2px solid var(--azul);"><td style="font-weight:700;">Proporcional a cobrar ahora</td><td style="text-align:right; font-weight:700; font-size:15px; color:var(--azul);">${fmt$(proporcional)}</td></tr>
+    </table>
+    <div style="margin-top:8px; color:var(--text-dim); font-size:12px;">
+      ${diff < 0 ? '⚠️ Bajó de plan: la diferencia es a favor del alumno, normalmente no se cobra proporcional (queda en $0).' : ''}
+      El plan nuevo <strong>${planNuevo}</strong> arranca completo en ${nombreMes(mesQueViene)}. Este mes mantiene <strong>${planViejo}</strong>.
+    </div>`;
+
+  $('#cpImporte').value = diff > 0 ? proporcional : 0;
+  return { planViejo, planNuevo, diff, total, restantes, proporcional: diff > 0 ? proporcional : 0, mesQueViene, plano: false };
+}
+
+// Cargar turnos (reusa la misma estructura que el wizard de alta)
+async function cpCargarTurnos() {
+  $('#cpTurnosList').innerHTML = '<div class="empty" style="padding:14px;">Cargando turnos disponibles...</div>';
+  try {
+    const [{ data: turnos, error: e1 }, { data: profes }, { data: ocup }] = await Promise.all([
+      sb.from('turnos').select('*').order('dia').order('hora'),
+      sb.from('turno_profes').select('turno_id, nombre_profe'),
+      sb.from('turno_alumnos').select('turno_id').eq('activo', true)
+    ]);
+    if (e1) throw e1;
+    const mapaProfe = {};
+    (profes || []).forEach(p => { (mapaProfe[p.turno_id] = mapaProfe[p.turno_id] || []).push(p.nombre_profe); });
+    const conteo = {};
+    (ocup || []).forEach(o => { conteo[o.turno_id] = (conteo[o.turno_id] || 0) + 1; });
+    cpTurnosCache = (turnos || []).map(t => ({ ...t, profes: mapaProfe[t.id] || [], ocupados: conteo[t.id] || 0 }));
+    cpRenderTurnos();
+  } catch (e) {
+    console.error(e);
+    $('#cpTurnosList').innerHTML = `<div class="aviso-amarillo">No se pudieron cargar los turnos (${e.message}). Podés confirmar el cambio igual y asignar las clases después en la Agenda TF.</div>`;
+    cpTurnosCache = [];
+  }
+}
+
+window.cpSetFiltro = (tipo, valor, btn) => {
+  if (tipo === 'servicio') {
+    cpFiltroServicio = valor;
+    document.querySelectorAll('.filtro-turno[data-cpserv]').forEach(b => b.classList.remove('active'));
+  } else {
+    cpFiltroCupo = valor;
+    document.querySelectorAll('.filtro-turno[data-cpcupo]').forEach(b => b.classList.remove('active'));
+  }
+  if (btn) btn.classList.add('active');
+  cpRenderTurnos();
+};
+
+function cpRenderTurnos() {
+  const planNuevo = $('#cpPlanNuevo').value || alumnoActivo.inscripcion.plan;
+  const maxNuevo = clasesMaxPlan(planNuevo);
+  const extraSel = cpTurnosSel.size;
+  let resumen = `<strong>Plan nuevo ${planNuevo || '—'}</strong>`;
+  if (maxNuevo > 0) {
+    resumen += ` permite hasta <strong>${maxNuevo}</strong> turno(s)/semana. Estás agregando <strong>${extraSel}</strong> clase(s) extra.`;
+  } else {
+    resumen += ` · ${extraSel} clase(s) extra seleccionada(s).`;
+  }
+  $('#cpClasesResumen').innerHTML = resumen;
+
+  if (!cpTurnosCache.length) {
+    $('#cpTurnosList').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos cargados en la agenda. Podés confirmar igual y asignarlos después.</div>';
+    return;
+  }
+  let lista = [...cpTurnosCache];
+  if (cpFiltroServicio !== 'todos') lista = lista.filter(t => normServicio(t.servicio) === cpFiltroServicio);
+  if (cpFiltroCupo === 'vacante') lista = lista.filter(t => !t.capacidad || t.ocupados < t.capacidad);
+  if (!lista.length) { $('#cpTurnosList').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos que coincidan con el filtro.</div>'; return; }
+
+  const dias = [...new Set(lista.map(t => t.dia))].sort((a, b) => (ORDEN_DIAS[a] || 9) - (ORDEN_DIAS[b] || 9));
+  const horas = [...new Set(lista.map(t => String(t.hora)))].sort((a, b) => a.localeCompare(b));
+  const idx = {};
+  lista.forEach(t => { const k = `${t.dia}|${t.hora}`; (idx[k] = idx[k] || []).push(t); });
+
+  const leyenda = `<div class="grilla-leyenda">
+      <span><i class="leyenda-box" style="background:#dcfce7"></i> Con lugar</span>
+      <span><i class="leyenda-box" style="background:#fee2e2"></i> Completo</span>
+      <span><i class="leyenda-box" style="background:#bfdbfe;border:2px solid var(--azul)"></i> Elegido</span>
+      <span style="margin-left:auto">🏋️ Entrenamiento · 🧘 Kinefilaxia</span>
+    </div>`;
+  let html = leyenda + '<div style="overflow-x:auto;"><table class="grilla-turnos"><thead><tr><th></th>' +
+    dias.map(d => `<th>${d}</th>`).join('') + '</tr></thead><tbody>';
+  horas.forEach(h => {
+    html += `<tr><td class="hora-col">${h}</td>`;
+    dias.forEach(d => {
+      const cell = idx[`${d}|${h}`] || [];
+      if (!cell.length) { html += `<td class="celda"><div class="celda-vacia"></div></td>`; return; }
+      html += '<td class="celda">' + cell.map(t => {
+        const lleno = t.capacidad && t.ocupados >= t.capacidad;
+        const sel = cpTurnosSel.has(t.id);
+        const cupoTxt = t.capacidad ? `${t.ocupados}/${t.capacidad}` : `${t.ocupados}`;
+        const srv = normServicio(t.servicio);
+        const srvIcon = srv === 'Entrenamiento' ? '🏋️' : srv === 'Kinefilaxia' ? '🧘' : '';
+        const cls = sel ? 'sel' : (lleno ? 'lleno' : 'libre');
+        const onclick = (lleno && !sel) ? '' : `onclick="cpToggleTurno(${t.id})"`;
+        const profe = t.profes.length ? t.profes.join(', ') : '';
+        return `<div class="turno-cell ${cls}" ${onclick} title="${srv} ${d} ${h} · ${profe || 'Sin profe'} · ${cupoTxt}">
+          <div class="turno-cell-srv">${srvIcon} ${sel ? '✓' : ''}</div>
+          <div class="turno-cell-cupo">${cupoTxt}${lleno ? ' lleno' : ''}</div>
+          ${profe ? `<div class="turno-cell-profe">${profe}</div>` : ''}
+        </div>`;
+      }).join('') + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  $('#cpTurnosList').innerHTML = html;
+}
+
+window.cpToggleTurno = (turnoId) => {
+  if (cpTurnosSel.has(turnoId)) cpTurnosSel.delete(turnoId);
+  else cpTurnosSel.add(turnoId);
+  cpRenderTurnos();
+};
+
+window.confirmarCambioPlan = async () => {
+  const i = alumnoActivo.inscripcion;
+  const p = alumnoActivo.persona;
+  const datos = cpRecalcular();
+  if (!datos) { toast('Elegí el plan nuevo primero.', true); return; }
+  const { planNuevo, mesQueViene, plano } = datos;
+
+  const importe = parseFloat($('#cpImporte').value) || 0;
+  const sinCobro = $('#cpSinCobro').checked;
+  const fechaCambio = $('#cpFecha').value || HOY.toISOString().split('T')[0];
+
+  const resumenClases = cpTurnosSel.size
+    ? `Se agregarán ${cpTurnosSel.size} clase(s) extra a la agenda (permanentes).`
+    : 'No se agregan clases extra ahora.';
+  const resumenCobro = sinCobro
+    ? '⚠️ NO se cobra el proporcional ahora (queda como saldo).'
+    : (importe > 0 ? `Se cobra proporcional de ${fmt$(importe)} (mes actual).` : 'No se cobra proporcional (importe en $0).');
+
+  const ok = confirm(
+    `Confirmá el cambio de plan de ${p.nombre}:\n\n` +
+    `• Plan actual ${i.plan} → se mantiene este mes.\n` +
+    `• Plan nuevo ${planNuevo} → arranca en ${nombreMes(mesQueViene)}.\n` +
+    `• ${resumenCobro}\n` +
+    `• ${resumenClases}\n\n` +
+    `¿Confirmás?`
+  );
+  if (!ok) return;
+
+  const btn = $('#cpBtnConfirmar');
+  btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    // 1) Programar el plan futuro SIN pisar el plan actual
+    const { error: errInsc } = await sb.from('inscripciones_tf').update({
+      plan_futuro: planNuevo,
+      mes_aplica_plan: mesQueViene,
+      observaciones: ((i.observaciones || '') + ` [Cambio programado: ${i.plan}→${planNuevo} desde ${mesQueViene}]`).trim(),
+      actualizado_en: new Date().toISOString()
+    }).eq('id', i.id);
+    if (errInsc) throw errInsc;
+
+    // 2) Registrar el cobro del proporcional (si corresponde)
+    if (!sinCobro && importe > 0) {
+      const { error: errPago } = await sb.from('pagos_tf').insert({
+        inscripcion_id: i.id,
+        mes_imputado: MES_ACTUAL,
+        fecha: fechaCambio,
+        importe: importe,
+        medio: $('#cpMedio').value,
+        tipo_cobro: 'NORMAL',
+        observaciones: `PROPORCIONAL cambio de plan ${i.plan}→${planNuevo}` + ($('#cpObs').value.trim() ? ` · ${$('#cpObs').value.trim()}` : ''),
+        cargado_por: 'padron_cambio_plan'
+      });
+      if (errPago) throw errPago;
+    }
+
+    // 3) Agregar las clases extra elegidas a la agenda (permanentes)
+    if (cpTurnosSel.size > 0) {
+      const filas = [...cpTurnosSel].map(turnoId => ({ turno_id: turnoId, persona_id: p.id, activo: true }));
+      const { error: errTurnos } = await sb.from('turno_alumnos').insert(filas);
+      if (errTurnos) throw errTurnos;
+    }
+
+    let msg = `✓ Cambio programado: ${i.plan}→${planNuevo} desde ${nombreMes(mesQueViene)}`;
+    if (!sinCobro && importe > 0) msg += ` · cobrado ${fmt$(importe)}`;
+    if (cpTurnosSel.size > 0) msg += ` · ${cpTurnosSel.size} clase(s) agregada(s)`;
+    toast(msg);
+    cerrarModal('modalCambioPlan');
+    cerrarModal('modalEditar');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al cambiar el plan: ' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirmar cambio de plan';
+  }
+};
+
+// Listeners de recálculo
+document.addEventListener('DOMContentLoaded', () => {
+  const selPN = $('#cpPlanNuevo'); if (selPN) selPN.addEventListener('change', () => { cpRecalcular(); cpRenderTurnos(); });
+  const fch = $('#cpFecha'); if (fch) fch.addEventListener('change', cpRecalcular);
+  const sc = $('#cpSinCobro'); if (sc) sc.addEventListener('change', () => {
+    $('#cpImporte').disabled = sc.checked;
+  });
+});
 
 // ===== ELIMINAR INSCRIPCIÓN TF =====
 window.eliminarInscTF = async () => {
