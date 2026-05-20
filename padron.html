@@ -730,6 +730,44 @@ const toast = (msg, esError=false) => {
 };
 
 // ===== CARGA INICIAL =====
+// Efectiviza los cambios de plan programados cuyo mes_aplica_plan ya llegó (o pasó).
+// Recibe el array de inscripciones recién cargado y lo muta in-place tras actualizar la base,
+// así el render de esta misma carga ya muestra el plan nuevo. Misma lógica que morosos_tf.html.
+async function efectivizarCambiosDePlanPadron(inscData) {
+  const mesHoy = MES_ACTUAL; // ya está en formato YYYY-MM
+  const aEfectivizar = (inscData || []).filter(i =>
+    i.plan_futuro &&
+    i.mes_aplica_plan &&
+    String(i.mes_aplica_plan) <= mesHoy
+  );
+  if (aEfectivizar.length === 0) return;
+
+  for (const i of aEfectivizar) {
+    const planNuevo = i.plan_futuro;
+    try {
+      const obsLimpia = (i.observaciones || '').replace(/\s*\[Cambio programado:[^\]]*\]/g, '').trim();
+      const { error } = await sb.from('inscripciones_tf').update({
+        plan: planNuevo,
+        plan_futuro: null,
+        mes_aplica_plan: null,
+        observaciones: obsLimpia || null,
+        actualizado_en: new Date().toISOString()
+      }).eq('id', i.id);
+      if (error) {
+        console.error(`No se pudo efectivizar el cambio de plan de inscripción ${i.id}:`, error.message);
+        continue; // si falla uno, seguimos con el resto sin romper la pantalla
+      }
+      // Mutar en memoria para que esta misma carga ya use el plan nuevo
+      i.plan = planNuevo;
+      i.plan_futuro = null;
+      i.mes_aplica_plan = null;
+      i.observaciones = obsLimpia || null;
+    } catch (e) {
+      console.error(`Error efectivizando inscripción ${i.id}:`, e.message);
+    }
+  }
+}
+
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
@@ -743,6 +781,13 @@ async function cargarTodo() {
     if (insR.error) throw insR.error;
     if (pagosR.error) throw pagosR.error;
     if (tarR.error) throw tarR.error;
+
+    // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
+    // Misma lógica que morosos_tf.html: si un alumno tiene un cambio programado
+    // (plan_futuro + mes_aplica_plan) y ya llegó o pasó ese mes, se efectiviza.
+    // Red de seguridad adicional: así el cambio dispara al abrir Padrón o Morosos.
+    // Idempotente: una vez efectivizado (campos en NULL), no vuelve a entrar.
+    await efectivizarCambiosDePlanPadron(insR.data || []);
 
     // Tarifario indexado por plan
     tarifario = {};
