@@ -623,6 +623,21 @@ async function calcularOrdinalesYTratamientos() {
     (ttoData || []).forEach(t => tratamientosCache.set(t.id, t));
   } catch (e) { console.warn('No se pudieron cargar tratamientos:', e.message); }
 
+  // Carga TODAS las sesiones YA CUMPLIDAS de esos tratamientos (tabla sesiones).
+  // Incluye las migradas del Excel (que tienen turno_id NULL) y las nuevas (PRESENTE).
+  // Estas marcan el "piso": un turno PENDIENTE futuro arranca después de todas ellas.
+  const sesionesPorTto = {};      // tratamiento_id -> [ {fecha, hora, turno_id} ... ]
+  try {
+    const { data: sesData, error: eS } = await supa.from('sesiones')
+      .select('tratamiento_id, fecha, hora, turno_id')
+      .in('tratamiento_id', trataIds);
+    if (eS) throw eS;
+    (sesData || []).forEach(s => {
+      if (!sesionesPorTto[s.tratamiento_id]) sesionesPorTto[s.tratamiento_id] = [];
+      sesionesPorTto[s.tratamiento_id].push(s);
+    });
+  } catch (e) { console.warn('No se pudieron cargar sesiones cumplidas:', e.message); }
+
   // Carga TODOS los turnos no cancelados de los tratamientos visibles, ordenados
   try {
     const { data: turData, error: e2 } = await supa.from('turnos_masoterapia')
@@ -635,10 +650,41 @@ async function calcularOrdinalesYTratamientos() {
     const grouped = {};
     (turData || []).forEach(t => {
       if (!grouped[t.tratamiento_id]) grouped[t.tratamiento_id] = [];
-      grouped[t.tratamiento_id].push(t.id);
+      grouped[t.tratamiento_id].push(t);
     });
-    Object.values(grouped).forEach(ids => {
-      ids.forEach((id, idx) => turnoOrdinalMap.set(id, idx + 1));
+
+    Object.entries(grouped).forEach(([ttoId, turnosTto]) => {
+      const sesiones = (sesionesPorTto[ttoId] || []).slice();
+      const totalCumplidas = sesiones.length;
+      // sesiones ordenadas por fecha+hora (para saber qué número tiene cada una)
+      const ordenadas = sesiones.slice().sort((a,b) =>
+        (a.fecha||'').localeCompare(b.fecha||'') || String(a.hora||'').localeCompare(String(b.hora||'')));
+
+      // posición para los turnos PENDIENTE/SOBRETURNO: arrancan después de las cumplidas
+      let posPendiente = 0;
+      turnosTto.forEach(t => {
+        const est = (t.estado || '').toUpperCase();
+        if (est === 'PRESENTE') {
+          // Un turno PRESENTE ya generó una sesión cumplida.
+          // (A) match directo por turno_id
+          let matchSes = sesiones.find(s => s.turno_id === t.id);
+          // (B) si la sesión vino del Excel (sin turno_id), matchear por fecha (+hora si existe)
+          if (!matchSes) {
+            matchSes = sesiones.find(s => !s.turno_id && s.fecha === t.fecha &&
+              (!s.hora || !t.hora_inicio || String(s.hora).slice(0,5) === String(t.hora_inicio).slice(0,5)));
+          }
+          if (!matchSes) {
+            matchSes = sesiones.find(s => !s.turno_id && s.fecha === t.fecha);
+          }
+          // su número = posición de esa sesión dentro de las cumplidas (ordenadas por fecha)
+          const num = matchSes ? (ordenadas.indexOf(matchSes) + 1) : totalCumplidas;
+          turnoOrdinalMap.set(t.id, num);
+        } else {
+          // PENDIENTE / SOBRETURNO: después de TODAS las cumplidas
+          posPendiente += 1;
+          turnoOrdinalMap.set(t.id, totalCumplidas + posPendiente);
+        }
+      });
     });
   } catch (e) { console.warn('No se pudieron calcular ordinales:', e.message); }
 }
