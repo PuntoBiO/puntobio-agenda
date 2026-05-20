@@ -390,28 +390,14 @@ tbody tr:last-child td { border-bottom: 0; }
         <label class="form-label">Modalidad</label>
         <select id="nuevo-modalidad" class="form-select">
           <option value="PARTICULAR">Particular</option>
-          <option value="OBRA_SOCIAL">Obra Social directa</option>
-          <option value="OS_REINTEGRO">OS con reintegro</option>
+          <option value="OBRA_SOCIAL">Obra Social</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
       </div>
-      <div class="form-field">
+      <div class="form-field" id="nuevo-obra-field">
         <label class="form-label">Obra Social</label>
         <select id="nuevo-obra" class="form-select">
-          <option value="PARTICULAR">PARTICULAR</option>
-          <option value="APROSS">APROSS</option>
-          <option value="OSDE">OSDE</option>
-          <option value="SWISS_MEDICAL">SWISS MEDICAL</option>
-          <option value="GALENO">GALENO</option>
-          <option value="IOMA">IOMA</option>
-          <option value="PAMI">PAMI</option>
-          <option value="IPAM">IPAM</option>
-          <option value="AMUR">AMUR</option>
-          <option value="COVIVO">COVIVO</option>
-          <option value="YANOVER">YANOVER</option>
-          <option value="OSDIPP">OSDIPP</option>
-          <option value="OSPRERA">OSPRERA</option>
-          <option value="OTROS">OTROS</option>
+          <option value="">(elegí una)</option>
         </select>
       </div>
 
@@ -498,28 +484,14 @@ tbody tr:last-child td { border-bottom: 0; }
         <label class="form-label">Modalidad</label>
         <select id="ed-modalidad" class="form-select">
           <option value="PARTICULAR">Particular</option>
-          <option value="OBRA_SOCIAL">Obra Social directa</option>
-          <option value="OS_REINTEGRO">OS con reintegro</option>
+          <option value="OBRA_SOCIAL">Obra Social</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
       </div>
-      <div class="form-field">
+      <div class="form-field" id="ed-obra-field">
         <label class="form-label">Obra Social</label>
         <select id="ed-obra" class="form-select">
           <option value="">(ninguna)</option>
-          <option value="APROSS">APROSS</option>
-          <option value="OSDE">OSDE</option>
-          <option value="SWISS_MEDICAL">SWISS MEDICAL</option>
-          <option value="GALENO">GALENO</option>
-          <option value="IOMA">IOMA</option>
-          <option value="PAMI">PAMI</option>
-          <option value="IPAM">IPAM</option>
-          <option value="AMUR">AMUR</option>
-          <option value="COVIVO">COVIVO</option>
-          <option value="YANOVER">YANOVER</option>
-          <option value="OSDIPP">OSDIPP</option>
-          <option value="OSPRERA">OSPRERA</option>
-          <option value="OTROS">OTROS</option>
         </select>
       </div>
 
@@ -1121,11 +1093,15 @@ window.abrirEditar = function() {
   $('ed-sesiones').value = t.total_sesiones || 1
   $('ed-valor-sesion').value = t.valor_sesion || 0
   $('ed-total').value = t.total_pagar || 0
-  $('ed-modalidad').value = t.modalidad || 'PARTICULAR'
+  // Modalidades viejas (OS_REINTEGRO) se mapean a OBRA_SOCIAL
+  let mod = t.modalidad || 'PARTICULAR'
+  if (mod === 'OS_REINTEGRO') mod = 'OBRA_SOCIAL'
+  $('ed-modalidad').value = mod
   $('ed-obra').value = t.obra_social || ''
   $('ed-tipo-cobro').value = t.tipo_cobro || 'NORMAL'
   $('ed-estado').value = t.estado || 'Pendiente'
   $('ed-observaciones').value = t.observaciones || ''
+  toggleObraSocial('ed-modalidad', 'ed-obra-field')
   // Cerramos detalle, abrimos editar
   $('modal-detalle').classList.remove('is-open')
   $('modal-editar').classList.add('is-open')
@@ -1150,12 +1126,14 @@ window.guardarEdicion = async function() {
   btn.disabled = true
   btn.textContent = 'Guardando...'
 
-  const obraSocial = $('ed-obra').value
+  const mod = $('ed-modalidad').value
+  // Solo guardamos obra social si la modalidad es Obra Social
+  const obraSocial = (mod === 'OBRA_SOCIAL') ? ($('ed-obra').value || null) : null
   const payload = {
     total_sesiones: Number($('ed-sesiones').value) || 1,
     valor_sesion: Number($('ed-valor-sesion').value) || 0,
-    modalidad: $('ed-modalidad').value,
-    obra_social: obraSocial || null,
+    modalidad: mod,
+    obra_social: obraSocial,
     tipo_cobro: $('ed-tipo-cobro').value,
     estado: $('ed-estado').value,
     observaciones: $('ed-observaciones').value.trim() || null,
@@ -1336,14 +1314,15 @@ window.crearTratamiento = async function() {
 
   const valorSesion = Number($('nuevo-valor-sesion').value) || 0
   const totalPagar  = Number($('nuevo-total').value) || 0
-  const obraSocial  = $('nuevo-obra').value
   const modalidad   = $('nuevo-modalidad').value
+  // Solo guardamos obra social si la modalidad es Obra Social
+  const obraSocial  = (modalidad === 'OBRA_SOCIAL') ? ($('nuevo-obra').value || null) : null
 
   const payload = {
     persona_id: estado.pacienteSel.id,
     practica_codigo: $('nuevo-practica').value,
     modalidad: modalidad,
-    obra_social: obraSocial === 'PARTICULAR' ? null : obraSocial,
+    obra_social: obraSocial,
     total_sesiones: Number($('nuevo-sesiones').value) || 1,
     valor_sesion: valorSesion,
     total_abonado: 0,
@@ -1373,8 +1352,57 @@ $('search').addEventListener('input', renderTabla)
 $('filtroArea').addEventListener('change', renderTabla)
 $('filtroEstado').addEventListener('change', renderTabla)
 
+// ===== OBRAS SOCIALES (se leen de tarifario_precios, no hardcodeadas) =====
+// Lista de respaldo por si falla la consulta a Supabase.
+const OS_RESPALDO = ['Apross','Avalian','Boreal','Caja de abogados','Ciencias económicas',
+  'Daspu','Dasuten','Federada Salud','Iosfa','Jerarquicos Salud','Medicus','Medifé',
+  'OSDE','Osseg','Prevención Salud','Sancor Salud','Unimed']
+let LISTA_OS = OS_RESPALDO.slice()
+
+async function cargarObrasSociales() {
+  try {
+    const { data, error } = await sb.from('tarifario_precios')
+      .select('obra_social')
+      .eq('modalidad', 'O.S')
+      .not('obra_social', 'is', null)
+    if (error) throw error
+    const set = new Set((data || []).map(r => (r.obra_social || '').trim()).filter(Boolean))
+    if (set.size > 0) {
+      LISTA_OS = [...set].sort((a, b) => a.localeCompare(b, 'es'))
+    }
+  } catch (e) {
+    console.warn('No se pudieron cargar OS del tarifario, uso respaldo:', e.message)
+    LISTA_OS = OS_RESPALDO.slice()
+  }
+  poblarSelectsOS()
+}
+
+function poblarSelectsOS() {
+  const opts = LISTA_OS.map(os => `<option value="${os}">${os}</option>`).join('')
+  // Alta: primera opción "elegí una"
+  const selN = $('nuevo-obra')
+  if (selN) selN.innerHTML = `<option value="">(elegí una)</option>` + opts
+  // Edición: primera opción "(ninguna)"
+  const selE = $('ed-obra')
+  if (selE) selE.innerHTML = `<option value="">(ninguna)</option>` + opts
+}
+
+// Mostrar/ocultar el campo Obra Social según la modalidad (Particular = oculto)
+function toggleObraSocial(modalidadSelId, fieldId) {
+  const mod = $(modalidadSelId)?.value
+  const field = $(fieldId)
+  if (!field) return
+  field.style.display = (mod === 'PARTICULAR') ? 'none' : ''
+}
+
+$('nuevo-modalidad').addEventListener('change', () => toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'))
+$('ed-modalidad').addEventListener('change', () => toggleObraSocial('ed-modalidad', 'ed-obra-field'))
+
 // Init
 poblarPracticasSelect()
+cargarObrasSociales()
+toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field')
+toggleObraSocial('ed-modalidad', 'ed-obra-field')
 cargarDatos()
 </script>
 </body>
