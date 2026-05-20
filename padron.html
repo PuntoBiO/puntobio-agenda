@@ -352,7 +352,8 @@
         <div class="modal-info" id="altaInfo"></div>
         <div class="form-grid">
           <div class="form-group"><label>Plan / Código</label><select id="altaPlan"></select></div>
-          <div class="form-group"><label>Área / Actividad</label><select id="altaActividad"><option value="ENTRENAMIENTO">Entrenamiento</option><option value="KINEFILAXIA">Kinefilaxia</option><option value="AMBOS">Ambos (Entrenamiento + Kinefilaxia)</option></select></div>
+          <div class="form-group"><label>Área</label><input type="text" id="altaArea" value="TERAPIA_FISICA" disabled style="background:var(--bg);"></div>
+          <div class="form-group"><label>Actividad</label><select id="altaActividad"><option value="ENTRENAMIENTO">Entrenamiento</option><option value="KINEFILAXIA">Kinefilaxia</option><option value="AMBOS">Ambos (Entrenamiento + Kinefilaxia)</option></select></div>
           <div class="form-group"><label>Día de vencimiento (1-31)</label><input type="number" id="altaDiaVenc" min="1" max="31" value="1"></div>
           <div class="form-group"><label>Descuento libre ($)</label><input type="number" id="altaDescuento" min="0" step="500" value="0"></div>
           <div class="form-group"><label>Fecha de alta</label><input type="date" id="altaFecha"></div>
@@ -1185,7 +1186,15 @@ window.abrirAltaTF = () => {
   // Plan (preseleccionar el anterior si es reingreso)
   const planPrev = esReingreso ? (i.plan || '') : '';
   $('#altaPlan').innerHTML = '<option value="">— Elegí un plan —</option>' + planesUnicos.map(pl => `<option value="${pl}"${pl === planPrev ? ' selected' : ''}>${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}</option>`).join('');
-  $('#altaActividad').value = (esReingreso && ['ENTRENAMIENTO','KINEFILAXIA','AMBOS'].includes(i.actividad)) ? i.actividad : 'ENTRENAMIENTO';
+  // Detectar área previa desde observaciones (etiqueta [Área: ...]) si es reingreso
+  let areaPrev = 'ENTRENAMIENTO';
+  if (esReingreso && i.observaciones) {
+    const o = i.observaciones.toLowerCase();
+    if (o.includes('entrenamiento') && o.includes('kinefilaxia')) areaPrev = 'AMBOS';
+    else if (o.includes('kinefilaxia')) areaPrev = 'KINEFILAXIA';
+    else if (o.includes('entrenamiento')) areaPrev = 'ENTRENAMIENTO';
+  }
+  $('#altaActividad').value = areaPrev;
   $('#altaDiaVenc').value = esReingreso && i.dia_vencimiento ? i.dia_vencimiento : 1;
   $('#altaDescuento').value = esReingreso && i.descuento_libre ? i.descuento_libre : 0;
   $('#altaFecha').value = HOY.toISOString().split('T')[0];
@@ -1217,12 +1226,19 @@ window.wizSiguiente = async () => {
     const btn = $('#wizBtnSiguiente');
     btn.disabled = true; btn.textContent = 'Creando...';
     try {
+      // El área (Entrenamiento/Kinefilaxia/Ambos) NO es la 'actividad' del tarifario.
+      // El FK exige actividad='TERAPIA_FISICA'; el área la guardamos como etiqueta en observaciones.
+      const areaSel = $('#altaActividad').value || 'ENTRENAMIENTO';
+      const areaLabel = areaSel === 'AMBOS' ? 'Entrenamiento + Kinefilaxia'
+                      : areaSel === 'KINEFILAXIA' ? 'Kinefilaxia' : 'Entrenamiento';
+      const obsUsuario = $('#altaObs').value.trim();
+      const obsFinal = `[Área: ${areaLabel}]${obsUsuario ? ' ' + obsUsuario : ''}`;
       const datos = {
         plan: plan,
-        actividad: $('#altaActividad').value || 'ENTRENAMIENTO',
+        actividad: 'TERAPIA_FISICA',
         dia_vencimiento: parseInt($('#altaDiaVenc').value) || 1,
         descuento_libre: parseFloat($('#altaDescuento').value) || 0,
-        observaciones: $('#altaObs').value.trim() || null,
+        observaciones: obsFinal,
         estado: 'ACTIVO',
         fecha_alta: $('#altaFecha').value || HOY.toISOString().split('T')[0]
       };
