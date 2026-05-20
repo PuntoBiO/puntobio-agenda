@@ -834,23 +834,55 @@ function renderWeek(container) {
 function calcularNumeroSesion(t) {
   if (!t.tratamiento_id) return t.numero_sesion || null;
   const sesiones = sesionesPorTto.get(t.tratamiento_id) || [];
-  // Caso A: ya existe una sesión con este turno_id → usar su numero_sesion
-  // (típico para turnos PRESENTE que ya generaron una sesión cumplida)
-  const match = sesiones.find(s => s.turno_id === t.id);
-  if (match) return match.numero_sesion;
-  // Caso B: no hay sesión registrada para este turno. Calcular:
-  //   (max numero_sesion ya cumplida del tto)
-  //   + posición cronológica entre los turnos VÁLIDOS no cumplidos del tto,
-  //     mirando TODAS las fechas (no solo la semana visible).
-  // Turnos VÁLIDOS = PENDIENTE o SOBRETURNO (no cancelado, no ausente, no presente-ya-procesado)
+
+  // ---- Caso A: el turno ya tiene una sesión cumplida ----
+  // A1: por turno_id explícito (caso ideal)
+  const matchPorId = sesiones.find(s => s.turno_id === t.id);
+  if (matchPorId) return matchPorId.numero_sesion;
+  // A2: por fecha+hora si la sesión tiene hora; o solo por fecha si la sesión NO tiene hora
+  // (sesiones migradas del Excel viejo donde la hora vino null).
+  if (t.estado === 'PRESENTE') {
+    const matchPorFechaHora = sesiones.find(s =>
+      !s.turno_id &&
+      s.fecha === t.fecha && (
+        // a) coincide fecha + hora
+        (s.hora && t.hora_inicio && s.hora.slice(0,5) === t.hora_inicio.slice(0,5))
+        // b) la sesión no tiene hora cargada → matchear solo por fecha
+        || !s.hora
+      )
+    );
+    if (matchPorFechaHora) return matchPorFechaHora.numero_sesion;
+    // Si es PRESENTE pero no hay sesión vinculada (caso raro), devuelvo null para no inflar
+    return null;
+  }
+
+  // ---- Caso B: turno pendiente sin sesión cumplida ----
+  // Número = (max sesión cumplida) + (posición del turno entre los pendientes válidos)
+  // Pendientes válidos = ni cancelado, ni ausente, ni sobreturno, ni presente (ya procesados)
+  // Y que NO tengan ya una sesión vinculada (por id o por fecha+hora).
   const maxSesionRegistrada = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
   const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
+  const fechaHoraConSesion = new Set(
+    sesiones
+      .filter(s => !s.turno_id && s.fecha && s.hora)
+      .map(s => `${s.fecha}|${s.hora.slice(0,5)}`)
+  );
+  // Set de fechas (sin hora) donde hay sesión sin turno_id y sin hora cargada.
+  // Sirve para descartar turnos pendientes cuya sesión ya existe en formato viejo.
+  const fechasConSesionSinHora = new Set(
+    sesiones
+      .filter(s => !s.turno_id && s.fecha && !s.hora)
+      .map(s => s.fecha)
+  );
   const todosLosTurnosDelTto = turnosPorTto.get(t.tratamiento_id) || [];
   const turnosValidos = todosLosTurnosDelTto.filter(x =>
     x.estado !== 'CANCELADO' &&
     x.estado !== 'AUSENTE' &&
     x.estado !== 'SOBRETURNO' &&
-    !turnIdsConSesion.has(x.id)
+    x.estado !== 'PRESENTE' &&  // los PRESENTE ya generaron sesión, no deben contar acá
+    !turnIdsConSesion.has(x.id) &&
+    !fechaHoraConSesion.has(`${x.fecha}|${(x.hora_inicio||'').slice(0,5)}`) &&
+    !fechasConSesionSinHora.has(x.fecha)
   );
   // turnosValidos ya viene ordenado por fecha+hora desde loadTurnosDeTratamientos
   const posicion = turnosValidos.findIndex(x => x.id === t.id) + 1;
@@ -866,13 +898,26 @@ function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
   const sesiones = sesionesPorTto.get(tratamientoId) || [];
   const cumplidas = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
   const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
+  const fechaHoraConSesion = new Set(
+    sesiones
+      .filter(s => !s.turno_id && s.fecha && s.hora)
+      .map(s => `${s.fecha}|${s.hora.slice(0,5)}`)
+  );
+  const fechasConSesionSinHora = new Set(
+    sesiones
+      .filter(s => !s.turno_id && s.fecha && !s.hora)
+      .map(s => s.fecha)
+  );
   const todos = turnosPorTto.get(tratamientoId) || [];
-  // Cuento turnos válidos pendientes (que van a contar como sesión cuando se cumplan)
+  // Cuento solo turnos pendientes que van a sumar una sesión nueva
   const futurasValidas = todos.filter(x =>
     x.estado !== 'CANCELADO' &&
     x.estado !== 'AUSENTE' &&
     x.estado !== 'SOBRETURNO' &&
-    !turnIdsConSesion.has(x.id)
+    x.estado !== 'PRESENTE' &&
+    !turnIdsConSesion.has(x.id) &&
+    !fechaHoraConSesion.has(`${x.fecha}|${(x.hora_inicio||'').slice(0,5)}`) &&
+    !fechasConSesionSinHora.has(x.fecha)
   ).length;
   const totalPrevisto = cumplidas + futurasValidas;
   const faltantes = totalSesiones - totalPrevisto;
