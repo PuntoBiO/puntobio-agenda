@@ -127,6 +127,17 @@
       <div class="form-group"><label>Importe a cobrar</label><input type="number" id="cobrarImporte" step="500" min="0"><div class="form-hint" id="cobrarHint"></div></div>
       <div class="form-group"><label>Mes a imputar</label><select id="cobrarMesImputado"></select></div>
       <div class="form-group"><label>Medio de pago</label><select id="cobrarMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
+      <div class="form-group" style="background:#fef3c7;border:1px solid #d97706;border-radius:8px;padding:10px 12px;">
+        <label style="display:flex;align-items:center;gap:8px;color:#92400e;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="cobrarParcial" style="width:16px;height:16px;cursor:pointer;" onchange="togglePagoParcial()">
+          Pago parcial (queda saldo pendiente)
+        </label>
+        <div id="cobrarParcialBox" style="display:none;margin-top:8px;">
+          <label style="color:#92400e;">Saldo que queda debiendo</label>
+          <input type="number" id="cobrarSaldoPendiente" step="500" min="0" placeholder="0" style="width:100%;margin-top:4px;">
+          <div class="form-hint" id="cobrarParcialHint" style="color:#92400e;"></div>
+        </div>
+      </div>
       <div class="form-group"><label>Observaciones (opcional)</label><textarea id="cobrarObs" placeholder="Notas sobre el cobro..."></textarea></div>
     </div>
     <div class="modal-footer">
@@ -231,7 +242,7 @@
     const mesAnt = mesAnterior(mesActual);
     const [insR, pagR, tarR] = await Promise.all([
       supa.from('inscripciones_tf').select('id, persona_id, plan, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
-      supa.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro').in('mes_imputado', [mesActual, mesAnt]),
+      supa.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
       supa.from('tarifario_tf').select('plan, actividad, valor_lista')
     ]);
     if (insR.error || pagR.error || tarR.error) {
@@ -256,13 +267,39 @@
     render();
   }
 
-  function calcularDeudaMes(inscripcionId, mes, montoMensual) {
+  // Un pago se considera PARCIAL (deja saldo) si sus observaciones empiezan con "PARCIAL".
+  // Ese texto lo escribe el modal de cobro cuando se tilda "pago parcial", e incluye el saldo: "PARCIAL|saldo=65000|..."
+  function saldoParcial(p) {
+    const obs = (p.observaciones || '').trim();
+    if (!obs.toUpperCase().startsWith('PARCIAL')) return null;
+    const m = obs.match(/saldo=(\d+)/i);
+    return m ? Number(m[1]) : 0;
+  }
+
+  // mes: el mes a evaluar. montoMensual: cuota actual del plan. esMesAnterior: true para meses ya pasados.
+  // Para meses YA PASADOS, un pago NORMAL (no parcial) salda el mes sin importar el monto,
+  // porque ese pago se cobró en su momento con el plan que la persona tenía entonces.
+  // Esto evita deudas falsas cuando alguien cambió de plan (la cuota de hoy != la de ese mes).
+  // Si el pago se marcó como PARCIAL, se respeta el saldo que quedó debiendo.
+  function calcularDeudaMes(inscripcionId, mes, montoMensual, esMesAnterior) {
     const pagosMes = pagos.filter(p => p.inscripcion_id === inscripcionId && p.mes_imputado === mes);
     if (pagosMes.length === 0) return { pagado: 0, descuento: 0, cortesia: false, debe: montoMensual };
     const cortesia = pagosMes.some(p => p.tipo_cobro === 'CORTESIA');
     if (cortesia) return { pagado: 0, descuento: 0, cortesia: true, debe: 0 };
     const pagado = pagosMes.reduce((s, p) => s + Number(p.importe || 0), 0);
     const descuento = pagosMes.reduce((s, p) => s + Number(p.descuento_temporal || 0), 0);
+    // ¿Hay algún pago marcado como parcial este mes?
+    const saldosParciales = pagosMes.map(saldoParcial).filter(s => s !== null);
+    if (saldosParciales.length > 0) {
+      // Pago parcial explícito: debe el saldo que se cargó al cobrar.
+      const debeParcial = saldosParciales.reduce((s, v) => s + v, 0);
+      return { pagado, descuento, cortesia: false, debe: Math.max(0, debeParcial) };
+    }
+    if (esMesAnterior) {
+      // Mes pasado con pago NORMAL y sin marca de parcial => saldado (pagó lo de su plan de entonces).
+      return { pagado, descuento, cortesia: false, debe: 0 };
+    }
+    // Mes en curso: se calcula contra la cuota actual del plan (que es la correcta para hoy).
     return { pagado, descuento, cortesia: false, debe: Math.max(0, montoMensual - pagado - descuento) };
   }
 
@@ -277,8 +314,8 @@
       const ultDiaMes = new Date(y, m, 0);
       return fechaInicio <= ultDiaMes;
     }
-    const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, montoMensual) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
-    const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
+    const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, montoMensual, false) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
+    const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual, true) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
     const hoy = new Date();
     const esMesEnCurso = mesActual === calcMesActual();
     const yaVencioMesActual = esMesEnCurso ? hoy.getDate() > Number(insc.dia_vencimiento || 1) : true;
@@ -430,8 +467,26 @@
     $('cobrarMesImputado').innerHTML = opciones.join('');
     $('cobrarMedio').value = 'TRANSFERENCIA';
     $('cobrarObs').value = '';
+    $('cobrarParcial').checked = false;
+    $('cobrarSaldoPendiente').value = '';
+    $('cobrarParcialBox').style.display = 'none';
+    $('cobrarParcialHint').textContent = '';
     $('modalCobrar').classList.add('activo');
     setTimeout(() => $('cobrarImporte').focus(), 50);
+  };
+
+  window.togglePagoParcial = function() {
+    const on = $('cobrarParcial').checked;
+    $('cobrarParcialBox').style.display = on ? 'block' : 'none';
+    if (on && inscripcionEnAccion) {
+      const c = inscripcionEnAccion;
+      const importe = Number($('cobrarImporte').value || 0);
+      // Saldo sugerido = lo que el sistema cree que debe ese mes, menos lo que se está cobrando ahora.
+      const cuotaMes = c.montoMensual || 0;
+      const saldoSug = Math.max(0, cuotaMes - importe);
+      $('cobrarSaldoPendiente').value = saldoSug;
+      $('cobrarParcialHint').textContent = `Cuota del mes: ${fmt(cuotaMes)}. Cobrando ${fmt(importe)}, queda ${fmt(saldoSug)}.`;
+    }
   };
 
   window.confirmarCobro = async function() {
@@ -439,6 +494,15 @@
     const c = inscripcionEnAccion;
     const importe = Number($('cobrarImporte').value || 0);
     if (!importe || importe <= 0) { mostrarToast('El importe debe ser mayor a 0', 'error'); return; }
+    const esParcial = $('cobrarParcial').checked;
+    const obsManual = $('cobrarObs').value.trim();
+    let observaciones = obsManual || null;
+    if (esParcial) {
+      const saldo = Number($('cobrarSaldoPendiente').value || 0);
+      if (!saldo || saldo <= 0) { mostrarToast('Cargá el saldo que queda debiendo', 'error'); return; }
+      // La marca PARCIAL|saldo=XXXX la lee el cálculo de morosos para mantener la deuda.
+      observaciones = `PARCIAL|saldo=${saldo}` + (obsManual ? ' | ' + obsManual : '');
+    }
     const btn = $('btnConfirmarCobro');
     btn.disabled = true; btn.textContent = 'Guardando...';
     const { error } = await supa.from('pagos_tf').insert({
@@ -448,7 +512,7 @@
       importe: importe,
       medio: $('cobrarMedio').value,
       tipo_cobro: 'NORMAL',
-      observaciones: $('cobrarObs').value.trim() || null
+      observaciones: observaciones
     });
     btn.disabled = false; btn.textContent = 'Confirmar cobro';
     if (error) { mostrarToast('❌ Error: ' + error.message, 'error'); return; }
