@@ -110,6 +110,8 @@
   .pago-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: var(--bg); border-radius: 6px; border: 1px solid var(--border); font-size: 13px; }
   .pago-fecha { color: var(--text-dim); font-size: 12px; }
   .pago-monto { color: var(--verde); font-weight: 600; }
+  .btn-editar-pago { background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; cursor: pointer; font-size: 13px; line-height: 1; transition: all .15s; }
+  .btn-editar-pago:hover { border-color: var(--azul); background: var(--bg-card); }
   .modal-footer { padding: 16px 22px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; position: sticky; bottom: 0; background: var(--bg-card); }
   .btn-modal { border: none; padding: 9px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; transition: all 0.15s; }
   .btn-cancelar { background: var(--bg-hover); color: var(--text); border: 1px solid var(--border); }
@@ -305,6 +307,25 @@
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCobrar')">Cancelar</button>
       <button class="btn-modal btn-confirmar-cobro" id="btnConfirmarCobro" onclick="confirmarCobro()">Confirmar cobro</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL EDITAR PAGO -->
+<div class="modal-backdrop" id="modalEditarPago">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <span class="modal-title modal-title-cobrar">✏️ Editar pago</span>
+      <button class="modal-close" onclick="cerrarModal('modalEditarPago')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="editarPagoInfo"></div>
+      <div class="form-group"><label>Importe</label><input type="number" id="editarPagoImporte" step="500" min="0"></div>
+      <div class="form-group" style="margin-top:14px;"><label>Medio de pago</label><select id="editarPagoMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA">Transferencia</option><option value="DEBITO">Débito</option></select></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalEditarPago')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-cobro" id="btnGuardarEditarPago" onclick="guardarEditarPago()">Guardar cambios</button>
     </div>
   </div>
 </div>
@@ -753,7 +774,10 @@ async function abrirModalVer() {
         <div class="pago-fecha">${fmtFechaArg(pg.fecha)} · ${pg.medio || '—'}</div>
         <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">Imputado: ${pg.mes_imputado || '—'} ${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? '· ' + pg.tipo_cobro : ''}</div>
       </div>
-      <div class="pago-monto">${fmt$(pg.importe)}</div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="pago-monto">${fmt$(pg.importe)}</div>
+        <button class="btn-editar-pago" title="Editar monto y medio de pago" onclick='abrirEditarPago(${JSON.stringify(pg).replace(/'/g, "&#39;")})'>✏️</button>
+      </div>
     </div>
   `).join('') + '</div>';
 
@@ -1023,6 +1047,44 @@ window.confirmarCobro = async () => {
     toast('Error al guardar el cobro: ' + e.message, true);
   } finally {
     btn.disabled = false; btn.textContent = 'Confirmar cobro';
+  }
+};
+
+// ===== EDITAR PAGO (corregir monto y medio de pago) =====
+let pagoEnEdicion = null;
+
+window.abrirEditarPago = (pg) => {
+  pagoEnEdicion = pg;
+  $('#editarPagoInfo').innerHTML = `
+    <div style="font-size:13px; line-height:1.6;">
+      <strong>Pago del ${fmtFechaArg(pg.fecha)}</strong><br>
+      Imputado: ${pg.mes_imputado || '—'}
+    </div>`;
+  $('#editarPagoImporte').value = pg.importe || 0;
+  $('#editarPagoMedio').value = pg.medio || 'TRANSFERENCIA';
+  $('#modalEditarPago').classList.add('activo');
+};
+
+window.guardarEditarPago = async () => {
+  if (!pagoEnEdicion) return;
+  const importe = parseFloat($('#editarPagoImporte').value);
+  if (!importe || importe <= 0) { toast('Ingresá un importe válido', true); return; }
+  const medio = $('#editarPagoMedio').value;
+  const btn = $('#btnGuardarEditarPago');
+  btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    const { error } = await sb.from('pagos_tf')
+      .update({ importe: importe, medio: medio })
+      .eq('id', pagoEnEdicion.id);
+    if (error) throw error;
+    toast(`✓ Pago actualizado: ${fmt$(importe)} · ${medio}`);
+    cerrarModal('modalEditarPago');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al guardar los cambios: ' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Guardar cambios';
   }
 };
 
