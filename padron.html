@@ -428,6 +428,21 @@
   </div>
 </div>
 
+<!-- MODAL RESUMEN ALTA + WHATSAPP -->
+<div class="modal-backdrop" id="modalResumenAlta">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <span class="modal-title modal-title-ver">✅ Alta confirmada</span>
+      <button class="modal-close" onclick="cerrarModal('modalResumenAlta')">×</button>
+    </div>
+    <div class="modal-body" id="resumenAltaBody"></div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalResumenAlta')">Cerrar</button>
+      <button class="btn-modal btn-confirmar-cobro" id="resumenWaBtn" style="background:#25D366;">💬 Enviar por WhatsApp</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL EDITAR PAGO -->
 <div class="modal-backdrop" id="modalEditarPago">
   <div class="modal modal-sm">
@@ -1179,6 +1194,16 @@ const ORDEN_DIAS = { 'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':
 let filtroTurnoServicio = 'todos';
 let filtroTurnoCupo = 'todos';
 
+// Máximo de turnos/clases por semana según el código del plan.
+// El número pegado a "COD" = clases (COD1=1, COD2=2, COD3DES4=3...). BON = pase libre (5).
+function clasesMaxPlan(plan) {
+  if (!plan) return 0;
+  const p = String(plan).toUpperCase();
+  if (p.includes('BON')) return 5;                 // bonificado = pase libre, hasta 5
+  const m = p.match(/COD\s*(\d+)/);                 // primer número después de COD
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 function wizSetPaso(n) {
   wizPaso = n;
   for (let i = 1; i <= 3; i++) {
@@ -1376,10 +1401,19 @@ window.setFiltroTurno = (tipo, valor, btn) => {
 };
 
 function renderTurnosWiz() {
-  // resumen de seleccionados (siempre visible aunque estén filtrados)
-  $('#wizTurnosSelResumen').textContent = wizTurnosSel.size
-    ? `✓ ${wizTurnosSel.size} turno(s) seleccionado(s)`
-    : '';
+  // resumen: plan, límite de clases y cuántos lleva
+  const planActual = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.plan) || '';
+  const maxClases = clasesMaxPlan(planActual);
+  const esBon = String(planActual).toUpperCase().includes('BON');
+  const sel = wizTurnosSel.size;
+  let resumen = `<strong>Plan ${planActual || '—'}</strong>`;
+  if (maxClases > 0) {
+    const color = sel > maxClases ? 'var(--rojo)' : (sel === maxClases ? 'var(--naranja)' : 'var(--verde)');
+    resumen += ` · podés elegir hasta <strong>${maxClases}</strong> turno(s)${esBon ? ' (pase libre)' : ''} · <span style="color:${color}">llevás ${sel}/${maxClases}</span>`;
+  } else {
+    resumen += ` · ${sel} turno(s) seleccionado(s)`;
+  }
+  $('#wizTurnosSelResumen').innerHTML = resumen;
 
   if (!wizTurnosCache.length) {
     $('#altaTurnosList').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos cargados en la agenda todavía. Podés finalizar y asignarlos después.</div>';
@@ -1455,8 +1489,19 @@ function renderTurnosWiz() {
 }
 
 window.toggleTurnoWiz = (turnoId) => {
-  if (wizTurnosSel.has(turnoId)) wizTurnosSel.delete(turnoId);
-  else wizTurnosSel.add(turnoId);
+  if (wizTurnosSel.has(turnoId)) {
+    wizTurnosSel.delete(turnoId);
+  } else {
+    // Validar límite de clases del plan antes de agregar
+    const plan = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.plan) || '';
+    const max = clasesMaxPlan(plan);
+    if (max > 0 && wizTurnosSel.size >= max) {
+      const esBon = String(plan).toUpperCase().includes('BON');
+      toast(`El plan ${plan} permite ${max} turno(s) por semana${esBon ? ' (pase libre)' : ''}. Quitá uno o cambiá de plan.`, true);
+      return;
+    }
+    wizTurnosSel.add(turnoId);
+  }
   renderTurnosWiz();
 };
 
@@ -1473,18 +1518,42 @@ async function guardarTurnosWiz() {
   toast(`✓ ${filas.length} turno(s) fijo(s) asignado(s)`);
 }
 
+// Devuelve los turnos seleccionados como objetos {dia, hora, servicio}, ordenados
+function turnosSeleccionadosDetalle() {
+  const arr = [...wizTurnosSel]
+    .map(id => wizTurnosCache.find(t => t.id === id))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const da = ORDEN_DIAS[a.dia] || 9, db = ORDEN_DIAS[b.dia] || 9;
+      return da !== db ? da - db : String(a.hora).localeCompare(String(b.hora));
+    });
+  return arr;
+}
+
 function prepararPasoCobro() {
-  // Aviso si no asignó turnos
-  if (wizTurnosSel.size === 0) {
-    $('#altaAvisoSinTurnos').innerHTML = `<div class="aviso-amarillo">⚠️ No le asignaste turnos fijos. Acordate de hacerlo después en la <strong>Agenda TF</strong>.</div>`;
-  } else {
-    $('#altaAvisoSinTurnos').innerHTML = '';
-  }
-  // Importe sugerido = cuota del plan
   const plan = alumnoActivo.inscripcion.plan;
   const base = tarifario[plan] ? (tarifario[plan].valor_lista || 0) : 0;
   const desc = parseFloat(alumnoActivo.inscripcion.descuento_libre) || 0;
-  $('#altaCobrarImporte').value = Math.max(0, base - desc);
+  const neto = Math.max(0, base - desc);
+
+  // Resumen de plan + turnos elegidos
+  const elegidos = turnosSeleccionadosDetalle();
+  let resumenHtml = `<div class="modal-info" style="border-left-color:var(--verde);">
+    <strong>Plan ${plan}</strong> · Cuota ${fmt$(neto)}${desc ? ` (lista ${fmt$(base)} − desc. ${fmt$(desc)})` : ''}<br>`;
+  if (elegidos.length) {
+    resumenHtml += `Turnos elegidos (${elegidos.length}): ` + elegidos.map(t => `${normServicio(t.servicio) === 'Kinefilaxia' ? '🧘' : '🏋️'} ${t.dia} ${t.hora}`).join(' · ');
+  } else {
+    resumenHtml += `<span style="color:var(--naranja)">Sin turnos asignados</span>`;
+  }
+  resumenHtml += '</div>';
+
+  // Aviso si no asignó turnos
+  const aviso = wizTurnosSel.size === 0
+    ? `<div class="aviso-amarillo">⚠️ No le asignaste turnos fijos. Acordate de hacerlo después en la <strong>Agenda TF</strong>.</div>`
+    : '';
+  $('#altaAvisoSinTurnos').innerHTML = resumenHtml + aviso;
+
+  $('#altaCobrarImporte').value = neto;
   $('#altaCobrarMes').innerHTML = `
     <option value="${MES_ACTUAL}" selected>${MES_ACTUAL} (mes actual)</option>
     <option value="${MES_ANTERIOR}">${MES_ANTERIOR} (mes anterior)</option>`;
@@ -1510,7 +1579,7 @@ window.wizFinalizarConCobro = async () => {
     });
     if (error) throw error;
     toast(`✓ Alta completa: ${alumnoActivo.persona.nombre} · cobro ${fmt$(importe)}`);
-    cerrarModal('modalAltaTF');
+    mostrarResumenAlta(importe);
     await cargarTodo();
   } catch (e) {
     console.error(e);
@@ -1529,9 +1598,83 @@ window.wizFinalizarSinCobro = async () => {
   );
   if (!ok) return;
   toast(`✓ Alta creada para ${alumnoActivo.persona.nombre} · ⚠️ queda con saldo deudor`);
-  cerrarModal('modalAltaTF');
+  mostrarResumenAlta(0);
   await cargarTodo();
 };
+
+// ===== RESUMEN FINAL + WHATSAPP =====
+function fechaVencimientoStr() {
+  // Vence el mismo día del mes siguiente a la fecha de alta (o el día_vencimiento del plan)
+  const i = alumnoActivo.inscripcion;
+  const alta = i.fecha_alta ? new Date(i.fecha_alta + 'T00:00:00') : new Date();
+  const venc = new Date(alta);
+  venc.setMonth(venc.getMonth() + 1);
+  return venc.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function armarMensajeWhatsApp(importe) {
+  const p = alumnoActivo.persona;
+  const i = alumnoActivo.inscripcion;
+  const elegidos = turnosSeleccionadosDetalle();
+  const primerNombre = (p.nombre || '').split(' ')[0] || p.nombre;
+  const fechaInicio = i.fecha_alta
+    ? new Date(i.fecha_alta + 'T00:00:00').toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    : HOY.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+  let msg = `Hola ${primerNombre}! 👋 Te confirmamos tu inscripción en PuntoBiO:\n\n`;
+  msg += `📋 Plan: ${i.plan}\n`;
+  if (elegidos.length) {
+    msg += `📅 Turnos fijos:\n`;
+    elegidos.forEach(t => {
+      const srv = normServicio(t.servicio);
+      msg += `   • ${t.dia} ${t.hora} (${srv})\n`;
+    });
+  } else {
+    msg += `📅 Turnos: a coordinar\n`;
+  }
+  if (importe > 0) msg += `💵 Abonado: ${fmt$(importe)}\n`;
+  else msg += `💵 Pago: pendiente\n`;
+  msg += `🗓️ Inicio: ${fechaInicio}\n`;
+  msg += `🗓️ Vencimiento: ${fechaVencimientoStr()}\n\n`;
+  msg += `⚠️ Importante: pasados 7 días sin comunicación, respuesta o pago, los turnos se dan de baja del sistema.\n\n`;
+  msg += `📍 PuntoBiO · Te esperamos! 💪`;
+  return msg;
+}
+
+function mostrarResumenAlta(importe) {
+  const p = alumnoActivo.persona;
+  const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
+  const msg = armarMensajeWhatsApp(importe);
+  let waUrl = '';
+  if (tel) {
+    const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
+    waUrl = `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
+  }
+  const elegidos = turnosSeleccionadosDetalle();
+  const i = alumnoActivo.inscripcion;
+  $('#resumenAltaBody').innerHTML = `
+    <div class="modal-success">
+      <strong>✓ Alta completa para ${p.nombre}</strong>
+      Plan <strong>${i.plan}</strong> · ${importe > 0 ? `Abonado ${fmt$(importe)}` : '<span style="color:var(--naranja)">Pago pendiente (saldo deudor)</span>'}<br>
+      Inicio: ${i.fecha_alta ? fmtFechaArg(i.fecha_alta) : fmtFechaArg(HOY.toISOString())} · Vence: ${fechaVencimientoStr()}
+    </div>
+    <div class="section-title">Turnos asignados</div>
+    ${elegidos.length
+      ? '<div class="pagos-list">' + elegidos.map(t => `<div class="pago-row"><div class="pago-fecha">${normServicio(t.servicio) === 'Kinefilaxia' ? '🧘' : '🏋️'} ${t.dia} · ${t.hora}</div><div style="font-size:12px;color:var(--text-dim);">${normServicio(t.servicio)}</div></div>`).join('') + '</div>'
+      : '<div class="aviso-amarillo">Sin turnos asignados todavía. Asignalos en la Agenda TF.</div>'}
+    <div class="section-title">Mensaje para el alumno</div>
+    <textarea id="resumenWaMsg" style="width:100%;min-height:180px;font-size:12px;font-family:inherit;">${msg}</textarea>
+    ${!tel ? '<div class="aviso-amarillo" style="margin-top:8px;">⚠️ Esta persona no tiene celular cargado. Cargá el número para poder enviar por WhatsApp.</div>' : ''}
+  `;
+  $('#resumenWaBtn').style.display = tel ? '' : 'none';
+  $('#resumenWaBtn').onclick = () => {
+    const texto = $('#resumenWaMsg').value;
+    const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
+    window.open(`https://wa.me/${telFull}?text=${encodeURIComponent(texto)}`, '_blank');
+  };
+  cerrarModal('modalAltaTF');
+  $('#modalResumenAlta').classList.add('activo');
+}
 
 // ===== EDITAR PAGO (corregir monto y medio de pago) =====
 let pagoEnEdicion = null;
