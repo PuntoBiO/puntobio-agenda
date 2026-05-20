@@ -642,6 +642,13 @@ function badgeEstado(t) {
     return `<span class="badge badge-activo">${t.estado}</span>`
   }
   if (estadoStr === 'PARCIAL') return `<span class="badge badge-parcial">Parcial</span>`
+  if (estadoStr === 'SALDADO') {
+    // Saldado pero con saldo != 0 → mostrar alerta para que el usuario revise
+    if (saldo !== 0) {
+      return `<span class="badge badge-finalizado">Saldado</span> <span title="Verificar saldo pendiente" style="background:#fff4d6;color:#7a5a00;border:1px solid #e0b800;border-radius:6px;padding:2px 6px;font-size:11px;font-weight:700;margin-left:4px">⚠ VERIFICAR</span>`
+    }
+    return `<span class="badge badge-finalizado">Saldado</span>`
+  }
   if (estadoStr === 'FINALIZADO' || estadoStr === 'CERRADO') return `<span class="badge badge-finalizado">${t.estado}</span>`
   if (estadoStr === 'BAJA' || estadoStr === 'CANCELADO') return `<span class="badge badge-baja">${t.estado}</span>`
   // Fallback por saldo
@@ -959,7 +966,30 @@ window.verDetalle = async function(ttoId) {
     `
   }
 
+  // Alerta de verificación de saldo: si el tto está SALDADO pero saldo_pendiente != 0
+  const estadoUp = String(t.estado || '').toUpperCase()
+  const saldoAlerta = Number(t.saldo_pendiente || 0)
+  let alertaSaldoHtml = ''
+  if (estadoUp === 'SALDADO' && saldoAlerta !== 0) {
+    const tipo = saldoAlerta > 0 ? 'deuda' : 'pago de más'
+    const monto = Math.abs(saldoAlerta)
+    alertaSaldoHtml = `
+      <div style="margin-bottom: 16px; padding: 14px 16px; background: #fff4d6; border-radius: 10px; border: 2px solid #e0b800;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+          <span style="font-size: 22px;">⚠️</span>
+          <span style="font-size: 14px; font-weight: 700; color: #7a5a00; text-transform: uppercase; letter-spacing: 0.05em;">Verificar saldo pendiente</span>
+        </div>
+        <div style="color: #7a5a00; font-size: 13px; line-height: 1.5; margin-bottom: 10px;">
+          Este tratamiento está finalizado pero figura con <strong>${tipo} de $${monto.toLocaleString('es-AR')}</strong>.
+          Verificá con el paciente si realmente tiene esa diferencia. Si fue un error de migración o ya se regularizó, podés limpiarlo.
+        </div>
+        <button class="btn" style="background:#7a5a00;color:#fff;border-color:#7a5a00;padding:8px 14px;font-size:13px;font-weight:700" onclick="limpiarSaldo(${t.id})">✓ Limpiar saldo (poner en \$0)</button>
+      </div>
+    `
+  }
+
   $('detalle-contenido').innerHTML = `
+    ${alertaSaldoHtml}
     <div style="margin-bottom: 16px; padding: 14px 16px; background: var(--bg-soft); border-radius: 10px; border: 1px solid var(--border);">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <span style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); font-weight: 700;">📊 Progreso del tratamiento</span>
@@ -997,6 +1027,30 @@ window.verDetalle = async function(ttoId) {
 
 window.cerrarDetalle = function() {
   $('modal-detalle').classList.remove('is-open')
+}
+
+// ===== LIMPIAR SALDO (para SALDADO con saldo != 0) =====
+window.limpiarSaldo = async function(ttoId) {
+  const t = (estado.tratamientos || []).find(x => x.id === ttoId)
+  if (!t) return
+  const saldo = Number(t.saldo_pendiente || 0)
+  const tipo = saldo > 0 ? 'deuda' : 'pago de más'
+  const monto = Math.abs(saldo)
+  const msg = `¿Limpiar el saldo del tratamiento #${ttoId}?\n\nFigura ${tipo} de $${monto.toLocaleString('es-AR')}.\n\nEsto va a poner Total abonado = Total a pagar para que el saldo quede en $0.\n\nUsalo solo si verificaste que el saldo es un error de migración o ya se regularizó.`
+  if (!confirm(msg)) return
+  try {
+    const nuevoAbonado = Number(t.total_pagar || 0)
+    const { error } = await sb.from('tratamientos')
+      .update({ total_abonado: nuevoAbonado })
+      .eq('id', ttoId)
+    if (error) throw error
+    toast(`✓ Saldo del tratamiento #${ttoId} limpiado`, 'ok')
+    await cargarDatos()
+    await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error limpiando saldo: ' + err.message, 'err', 6000)
+  }
 }
 
 // ===== BORRAR PAGO ASOCIADO =====
