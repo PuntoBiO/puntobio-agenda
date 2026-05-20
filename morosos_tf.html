@@ -365,10 +365,18 @@
     const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, montoMensual, false) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
     const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual, true) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
     const hoy = new Date();
-    const esMesEnCurso = mesActual === calcMesActual();
-    const yaVencioMesActual = esMesEnCurso ? hoy.getDate() > Number(insc.dia_vencimiento || 1) : true;
+    const mesHoyStr = calcMesActual();
+    // Clasificar el mes elegido en el selector respecto al mes real de hoy (comparación YYYY-MM).
+    const esMesEnCurso = mesActual === mesHoyStr;
+    const esMesFuturo = mesActual > mesHoyStr;   // el mes elegido todavía no empezó
+    // Un mes FUTURO nunca está vencido: la cuota no se puede deber si el mes no llegó.
+    // Mes en curso: vencido solo si ya pasó el día de vencimiento. Mes pasado: vencido.
+    const yaVencioMesActual = esMesFuturo ? false
+      : (esMesEnCurso ? hoy.getDate() > Number(insc.dia_vencimiento || 1) : true);
     const debeActual = yaVencioMesActual ? deudaActual.debe : 0;
-    const debeArrastre = deudaAnt.debe;
+    // Si el mes elegido es futuro, el "mes anterior" del selector también puede ser futuro o el actual:
+    // solo contamos arrastre real de meses que ya vencieron de verdad.
+    const debeArrastre = esMesFuturo ? 0 : deudaAnt.debe;
     const debeTotal = debeActual + debeArrastre;
     let diasVencido = 0;
     if (debeArrastre > 0) {
@@ -384,6 +392,8 @@
       if (fechaInicio && fechaInicio > vencDate) vencDate = fechaInicio;
       diasVencido = Math.floor((hoy - vencDate) / 86400000);
     }
+    // Resguardo final: nunca mostrar días vencidos negativos (no tiene sentido "vencido hace -N días").
+    if (diasVencido < 0) diasVencido = 0;
     let bucket;
     if (diasVencido <= 1) bucket = 'recien';
     else if (diasVencido <= 6) bucket = 'primer_aviso';
@@ -430,9 +440,12 @@
       : `Mostrando ${visibles.length} de ${clasif.length} morosos`;
 
     if (visibles.length === 0) {
+      const esFuturo = mesActual > calcMesActual();
       $('tabla-wrap').innerHTML = q
         ? `<div class="empty">🔍 Ningún moroso coincide con "${busquedaTexto.trim()}"</div>`
-        : '<div class="empty">🎉 No hay morosos con este filtro</div>';
+        : (esFuturo
+            ? `<div class="empty">📅 ${nombreMes(mesActual)} todavía no empezó — no hay deuda para reclamar (las cuotas no vencieron aún).</div>`
+            : '<div class="empty">🎉 No hay morosos con este filtro</div>');
       return;
     }
     visibles.sort((a, b) => b.diasVencido - a.diasVencido);
