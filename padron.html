@@ -788,13 +788,13 @@ function renderTabla(lista) {
     const esActivoTF = f.estadoTF === 'TF_ACTIVO' || f.estadoTF === 'TF_BONIF';
     const esBajaTF = f.estadoTF === 'TF_BAJA';
     const sinTF = f.estadoTF === 'SIN_TF';
+    const puedeAltaTF = sinTF || esBajaTF; // dar alta a quien no está activo
     const acciones = `
       <button class="btn-accion btn-ver" data-idx="${idx}" data-accion="ver" title="Ver detalle">📋</button>
       <button class="btn-accion btn-editar" data-idx="${idx}" data-accion="editar" title="Editar">✏️</button>
-      ${sinTF ? `<button class="btn-accion btn-altatf" data-idx="${idx}" data-accion="altatf" title="Dar alta en TF">➕</button>` : ''}
+      ${puedeAltaTF ? `<button class="btn-accion btn-altatf" data-idx="${idx}" data-accion="altatf" title="Dar alta en TF">➕</button>` : ''}
       ${esActivoTF ? `<button class="btn-accion btn-cobrar" data-idx="${idx}" data-accion="cobrar" title="Cobrar TF">💵</button>` : ''}
       ${esActivoTF ? `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="baja" title="Baja TF">❌</button>` : ''}
-      ${esBajaTF ? `<button class="btn-accion btn-reactivar" data-idx="${idx}" data-accion="reactivar" title="Reactivar TF">↩️</button>` : ''}
     `;
     html += `<tr class="row" data-idx="${idx}">
       <td><strong>${f.persona.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${f.persona.id}</span>${f.persona.dni?`<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">DNI ${f.persona.dni}</div>`:''}</td>
@@ -1173,19 +1173,24 @@ function wizSetPaso(n) {
 window.abrirAltaTF = () => {
   const f = alumnoActivo;
   const p = f.persona;
+  const i = f.inscripcion; // puede existir si viene de una baja
+  const esReingreso = !!(i && i.id);
   wizPaso = 1;
   wizTurnosSel = new Set();
   wizNuevaInscId = null;
   $('#altaTitulo').textContent = `➕ Dar alta en TF — ${p.nombre} (#${p.id})`;
-  $('#altaInfo').innerHTML = `<strong>${p.nombre}</strong> · #${p.id}${p.dni ? ' · DNI ' + p.dni : ''}<br>Esta persona pasa de <em>Sin actividad</em> a <strong>TF Activo</strong>.`;
-  // Plan
-  $('#altaPlan').innerHTML = '<option value="">— Elegí un plan —</option>' + planesUnicos.map(pl => `<option value="${pl}">${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}</option>`).join('');
-  $('#altaActividad').value = 'ENTRENAMIENTO';
-  $('#altaDiaVenc').value = 1;
-  $('#altaDescuento').value = 0;
+  $('#altaInfo').innerHTML = esReingreso
+    ? `<strong>${p.nombre}</strong> · #${p.id}${p.dni ? ' · DNI ' + p.dni : ''}<br>↩️ Reingreso: estuvo dado de baja. Se reactiva su inscripción con los datos nuevos.`
+    : `<strong>${p.nombre}</strong> · #${p.id}${p.dni ? ' · DNI ' + p.dni : ''}<br>Esta persona pasa de <em>Sin actividad</em> a <strong>TF Activo</strong>.`;
+  // Plan (preseleccionar el anterior si es reingreso)
+  const planPrev = esReingreso ? (i.plan || '') : '';
+  $('#altaPlan').innerHTML = '<option value="">— Elegí un plan —</option>' + planesUnicos.map(pl => `<option value="${pl}"${pl === planPrev ? ' selected' : ''}>${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}</option>`).join('');
+  $('#altaActividad').value = (esReingreso && ['ENTRENAMIENTO','KINEFILAXIA','AMBOS'].includes(i.actividad)) ? i.actividad : 'ENTRENAMIENTO';
+  $('#altaDiaVenc').value = esReingreso && i.dia_vencimiento ? i.dia_vencimiento : 1;
+  $('#altaDescuento').value = esReingreso && i.descuento_libre ? i.descuento_libre : 0;
   $('#altaFecha').value = HOY.toISOString().split('T')[0];
-  $('#altaCuotaPreview').value = '—';
   $('#altaObs').value = '';
+  wizActualizarCuota();
   wizSetPaso(1);
   $('#modalAltaTF').classList.add('activo');
 };
@@ -1206,35 +1211,45 @@ window.wizAtras = () => { if (wizPaso > 1) wizSetPaso(wizPaso - 1); };
 
 window.wizSiguiente = async () => {
   if (wizPaso === 1) {
-    // Validar y crear la inscripción
+    // Validar y crear/reactivar la inscripción
     const plan = $('#altaPlan').value;
     if (!plan) { toast('Elegí un plan para continuar', true); return; }
     const btn = $('#wizBtnSiguiente');
     btn.disabled = true; btn.textContent = 'Creando...';
     try {
       const esBonif = plan === 'COD0BON' || (tarifario[plan] && tarifario[plan].valor_lista === 0);
-      const inscInsert = {
-        persona_id: alumnoActivo.persona.id,
+      const datos = {
         plan: plan,
-        actividad: $('#altaActividad').value || 'TERAPIA_FISICA',
+        actividad: $('#altaActividad').value || 'ENTRENAMIENTO',
         dia_vencimiento: parseInt($('#altaDiaVenc').value) || 1,
         descuento_libre: parseFloat($('#altaDescuento').value) || 0,
         observaciones: $('#altaObs').value.trim() || null,
         estado: esBonif ? 'BONIFICADO' : 'ACTIVO',
         fecha_alta: $('#altaFecha').value || HOY.toISOString().split('T')[0]
       };
-      const { data, error } = await sb.from('inscripciones_tf').insert(inscInsert).select().single();
-      if (error) throw error;
+      // Si ya tiene una inscripción (p.ej. dada de baja), la reactivamos en vez de duplicar
+      const inscExistente = alumnoActivo.inscripcion;
+      let data;
+      if (inscExistente && inscExistente.id) {
+        const upd = { ...datos, fecha_reingreso: HOY.toISOString().split('T')[0], fecha_baja: null, motivo_baja: null };
+        const r = await sb.from('inscripciones_tf').update(upd).eq('id', inscExistente.id).select().single();
+        if (r.error) throw r.error;
+        data = r.data;
+        toast(`✓ Inscripción reactivada (${plan})`);
+      } else {
+        const r = await sb.from('inscripciones_tf').insert({ persona_id: alumnoActivo.persona.id, ...datos }).select().single();
+        if (r.error) throw r.error;
+        data = r.data;
+        toast(`✓ Inscripción creada (${plan})`);
+      }
       wizNuevaInscId = data.id;
-      // refrescar caché local de cuota para el paso de cobro
       alumnoActivo.inscripcion = data;
       alumnoActivo.cuota = (tarifario[plan] ? tarifario[plan].valor_lista : 0);
-      toast(`✓ Inscripción creada (${plan})`);
       await cargarTurnosWiz();
       wizSetPaso(2);
     } catch (e) {
       console.error(e);
-      toast('Error al crear la inscripción: ' + e.message, true);
+      toast('Error al dar el alta: ' + e.message, true);
     } finally {
       btn.disabled = false; btn.textContent = 'Siguiente →';
     }
