@@ -545,6 +545,7 @@ let turnos = [];
 let feriadosMap = new Map();
 let personas = [];
 let sesionesPorTto = new Map(); // tratamiento_id => [{fecha, hora, numero_sesion, turno_id}]
+let turnosPorTto = new Map(); // tratamiento_id => [todos los turnos no-cancelados del tto, de cualquier fecha]
 let tratamientosPersona = [];
 let modoMulti = false;
 let practicaFiltro = ''; // '' = todas, 'FISIO', 'DLM', etc. '__SOBRE_FISIO__' = solo sobreturno FISIO
@@ -648,7 +649,7 @@ async function refresh() {
   try {
     const { from, to } = rangoVisible();
     await Promise.all([loadFeriados(from,to), loadTurnos(from,to)]);
-    await loadSesionesDeTurnos();
+    await Promise.all([loadSesionesDeTurnos(), loadTurnosDeTratamientos()]);
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
 }
@@ -657,6 +658,34 @@ async function loadTurnos(from, to) {
   const { data, error } = await supa.from('turnos_consultorio').select('*').gte('fecha', toISODate(from)).lte('fecha', toISODate(to)).neq('estado','CANCELADO');
   if (error) throw error;
   turnos = data || [];
+}
+
+// Carga TODOS los turnos no-cancelados de los tratamientos visibles, sin filtro de fecha.
+// Necesario para calcular el número de sesión correcto cuando un tratamiento abarca
+// varias semanas: la posición de cada turno depende de cuántos hermanos hay antes,
+// incluyendo los de semanas pasadas o futuras que no están en la vista actual.
+async function loadTurnosDeTratamientos() {
+  turnosPorTto.clear();
+  const ttoIds = [...new Set(turnos.map(t => t.tratamiento_id).filter(Boolean))];
+  if (ttoIds.length === 0) return;
+  try {
+    const { data, error } = await supa
+      .from('turnos_consultorio')
+      .select('id, tratamiento_id, fecha, hora_inicio, estado')
+      .in('tratamiento_id', ttoIds)
+      .neq('estado', 'CANCELADO');
+    if (error) { console.warn('No se pudo cargar turnos completos:', error.message); return; }
+    (data || []).forEach(t => {
+      if (!turnosPorTto.has(t.tratamiento_id)) turnosPorTto.set(t.tratamiento_id, []);
+      turnosPorTto.get(t.tratamiento_id).push(t);
+    });
+    // Ordenar cada lista por fecha+hora
+    turnosPorTto.forEach((arr) => {
+      arr.sort((a,b) => (a.fecha + a.hora_inicio).localeCompare(b.fecha + b.hora_inicio));
+    });
+  } catch (e) {
+    console.warn('Error cargando turnos de tratamientos:', e);
+  }
 }
 
 // Carga las sesiones históricas de los tratamientos que aparecen en la vista actual.
@@ -805,23 +834,49 @@ function renderWeek(container) {
 function calcularNumeroSesion(t) {
   if (!t.tratamiento_id) return t.numero_sesion || null;
   const sesiones = sesionesPorTto.get(t.tratamiento_id) || [];
-  // Caso A: ya existe una sesión con este turno_id → usar su numero_sesion (caso pacientes migrados o ya procesados)
+  // Caso A: ya existe una sesión con este turno_id → usar su numero_sesion
+  // (típico para turnos PRESENTE que ya generaron una sesión cumplida)
   const match = sesiones.find(s => s.turno_id === t.id);
   if (match) return match.numero_sesion;
   // Caso B: no hay sesión registrada para este turno. Calcular:
-  //   (max numero_sesion ya registrado para el tto)
-  //   + posición cronológica de este turno entre los turnos NO procesados (sin sesión en tabla `sesiones`).
+  //   (max numero_sesion ya cumplida del tto)
+  //   + posición cronológica entre los turnos VÁLIDOS no cumplidos del tto,
+  //     mirando TODAS las fechas (no solo la semana visible).
+  // Turnos VÁLIDOS = PENDIENTE o SOBRETURNO (no cancelado, no ausente, no presente-ya-procesado)
   const maxSesionRegistrada = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
   const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
-  const turnosNoProcesados = turnos.filter(x =>
-    x.tratamiento_id === t.tratamiento_id &&
+  const todosLosTurnosDelTto = turnosPorTto.get(t.tratamiento_id) || [];
+  const turnosValidos = todosLosTurnosDelTto.filter(x =>
     x.estado !== 'CANCELADO' &&
+    x.estado !== 'AUSENTE' &&
     x.estado !== 'SOBRETURNO' &&
     !turnIdsConSesion.has(x.id)
-  ).sort((a,b) => (a.fecha+a.hora_inicio).localeCompare(b.fecha+b.hora_inicio));
-  const posicion = turnosNoProcesados.findIndex(x => x.id === t.id) + 1;
+  );
+  // turnosValidos ya viene ordenado por fecha+hora desde loadTurnosDeTratamientos
+  const posicion = turnosValidos.findIndex(x => x.id === t.id) + 1;
   if (posicion === 0) return null;
   return maxSesionRegistrada + posicion;
+}
+
+// Calcula cuántos turnos faltan asignar para completar un tratamiento.
+// Útil para avisar a la secretaria que tiene que reagendar sesiones canceladas o ausentes.
+// Devuelve { faltantes, totalEsperado, cumplidas, futurasValidas } o null si no aplica.
+function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
+  if (!tratamientoId || !totalSesiones) return null;
+  const sesiones = sesionesPorTto.get(tratamientoId) || [];
+  const cumplidas = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
+  const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
+  const todos = turnosPorTto.get(tratamientoId) || [];
+  // Cuento turnos válidos pendientes (que van a contar como sesión cuando se cumplan)
+  const futurasValidas = todos.filter(x =>
+    x.estado !== 'CANCELADO' &&
+    x.estado !== 'AUSENTE' &&
+    x.estado !== 'SOBRETURNO' &&
+    !turnIdsConSesion.has(x.id)
+  ).length;
+  const totalPrevisto = cumplidas + futurasValidas;
+  const faltantes = totalSesiones - totalPrevisto;
+  return { faltantes, totalEsperado: totalSesiones, cumplidas, futurasValidas };
 }
 
 function renderTurno(t) {
@@ -1424,6 +1479,18 @@ async function onTurnoClick(turnoId) {
     ? (tratInfo?.codigo_id ? `${tratInfo.codigo_id} (#${t.tratamiento_id})` : `#${t.tratamiento_id}`)
     : '— sin tratamiento —';
 
+  // Calcular si faltan turnos por asignar para completar el tratamiento
+  let avisoFaltantes = '';
+  if (t.tratamiento_id && tratInfo && tratInfo.total_sesiones) {
+    const info = calcularTurnosFaltantes(t.tratamiento_id, tratInfo.total_sesiones);
+    if (info && info.faltantes > 0) {
+      avisoFaltantes = `
+        <div style="margin-top:10px;padding:10px 12px;background:#fff4d6;border:1px solid #e0b800;border-radius:6px;color:#7a5a00;font-size:13px;font-weight:600">
+          ⚠️ Faltan asignar <strong>${info.faltantes}</strong> ${info.faltantes === 1 ? 'sesión' : 'sesiones'} para completar el tratamiento (${info.cumplidas} cumplidas + ${info.futurasValidas} agendadas de ${info.totalEsperado}).
+        </div>`;
+    }
+  }
+
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
       <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
@@ -1438,6 +1505,7 @@ async function onTurnoClick(turnoId) {
       <div class="label">Estado</div><div class="value" style="font-weight:700">${escapeHtml(t.estado)}</div>
       ${t.observaciones?`<div class="label">Obs.</div><div class="value">${escapeHtml(t.observaciones)}</div>`:''}
     </div>
+    ${avisoFaltantes}
     <div id="detalleAlert"></div>
   `;
   const footer = document.getElementById('detalleFooter');
