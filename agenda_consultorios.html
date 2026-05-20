@@ -544,6 +544,7 @@ let anchorDate = new Date();
 let turnos = [];
 let feriadosMap = new Map();
 let personas = [];
+let sesionesPorTto = new Map(); // tratamiento_id => [{fecha, hora, numero_sesion, turno_id}]
 let tratamientosPersona = [];
 let modoMulti = false;
 let practicaFiltro = ''; // '' = todas, 'FISIO', 'DLM', etc. '__SOBRE_FISIO__' = solo sobreturno FISIO
@@ -647,6 +648,7 @@ async function refresh() {
   try {
     const { from, to } = rangoVisible();
     await Promise.all([loadFeriados(from,to), loadTurnos(from,to)]);
+    await loadSesionesDeTurnos();
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
 }
@@ -655,6 +657,30 @@ async function loadTurnos(from, to) {
   const { data, error } = await supa.from('turnos_consultorio').select('*').gte('fecha', toISODate(from)).lte('fecha', toISODate(to)).neq('estado','CANCELADO');
   if (error) throw error;
   turnos = data || [];
+}
+
+// Carga las sesiones históricas de los tratamientos que aparecen en la vista actual.
+// Esto permite calcular el número de sesión correcto incluso para pacientes
+// migrados del Excel que tienen sesiones cumplidas registradas en `sesiones`
+// pero no en `turnos_consultorio`.
+async function loadSesionesDeTurnos() {
+  sesionesPorTto.clear();
+  const ttoIds = [...new Set(turnos.map(t => t.tratamiento_id).filter(Boolean))];
+  if (ttoIds.length === 0) return;
+  try {
+    const { data, error } = await supa
+      .from('sesiones')
+      .select('tratamiento_id, fecha, hora, numero_sesion, turno_id')
+      .in('tratamiento_id', ttoIds)
+      .order('fecha', { ascending: true });
+    if (error) { console.warn('No se pudo cargar sesiones:', error.message); return; }
+    (data || []).forEach(s => {
+      if (!sesionesPorTto.has(s.tratamiento_id)) sesionesPorTto.set(s.tratamiento_id, []);
+      sesionesPorTto.get(s.tratamiento_id).push(s);
+    });
+  } catch (e) {
+    console.warn('Error cargando sesiones históricas:', e);
+  }
 }
 
 async function loadFeriados(from, to) {
@@ -776,6 +802,28 @@ function renderWeek(container) {
   });
 }
 
+function calcularNumeroSesion(t) {
+  if (!t.tratamiento_id) return t.numero_sesion || null;
+  const sesiones = sesionesPorTto.get(t.tratamiento_id) || [];
+  // Caso A: ya existe una sesión con este turno_id → usar su numero_sesion (caso pacientes migrados o ya procesados)
+  const match = sesiones.find(s => s.turno_id === t.id);
+  if (match) return match.numero_sesion;
+  // Caso B: no hay sesión registrada para este turno. Calcular:
+  //   (max numero_sesion ya registrado para el tto)
+  //   + posición cronológica de este turno entre los turnos NO procesados (sin sesión en tabla `sesiones`).
+  const maxSesionRegistrada = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
+  const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
+  const turnosNoProcesados = turnos.filter(x =>
+    x.tratamiento_id === t.tratamiento_id &&
+    x.estado !== 'CANCELADO' &&
+    x.estado !== 'SOBRETURNO' &&
+    !turnIdsConSesion.has(x.id)
+  ).sort((a,b) => (a.fecha+a.hora_inicio).localeCompare(b.fecha+b.hora_inicio));
+  const posicion = turnosNoProcesados.findIndex(x => x.id === t.id) + 1;
+  if (posicion === 0) return null;
+  return maxSesionRegistrada + posicion;
+}
+
 function renderTurno(t) {
   const pCls = `p-${(t.practica_codigo||'').toLowerCase()}`;
   const eCls = `e-${(t.estado||'').toLowerCase()}`;
@@ -783,20 +831,7 @@ function renderTurno(t) {
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
   const nombre = persona ? persona.nombre : `#${t.persona_id}`;
-  // Calcular número de sesión en vivo: contar turnos no-cancelados del mismo tratamiento
-  // con fecha+hora <= este turno (incluyéndolo). Fallback a t.numero_sesion si no hay tto.
-  let nroSesion = null;
-  if (t.tratamiento_id) {
-    const hermanos = turnos.filter(x =>
-      x.tratamiento_id === t.tratamiento_id &&
-      x.estado !== 'CANCELADO' &&
-      x.estado !== 'SOBRETURNO' &&
-      (x.fecha < t.fecha || (x.fecha === t.fecha && x.hora_inicio <= t.hora_inicio))
-    );
-    nroSesion = hermanos.length || null;
-  } else if (t.numero_sesion) {
-    nroSesion = t.numero_sesion;
-  }
+  const nroSesion = calcularNumeroSesion(t);
   const sesTxt = nroSesion ? ` · S${nroSesion}` : '';
   const titleSes = nroSesion ? ` · Sesión ${nroSesion}` : '';
   return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo}${titleSes} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
@@ -1381,19 +1416,7 @@ async function onTurnoClick(turnoId) {
     const { data: tt } = await supa.from('tratamientos').select('codigo_id, total_sesiones, estado, valor_sesion, modalidad, obra_social').eq('id', t.tratamiento_id).single();
     tratInfo = tt || null;
   }
-  // Calcular número de sesión en vivo (mismo criterio que renderTurno)
-  let nroSesionDetalle = null;
-  if (t.tratamiento_id) {
-    const hermanos = turnos.filter(x =>
-      x.tratamiento_id === t.tratamiento_id &&
-      x.estado !== 'CANCELADO' &&
-      x.estado !== 'SOBRETURNO' &&
-      (x.fecha < t.fecha || (x.fecha === t.fecha && x.hora_inicio <= t.hora_inicio))
-    );
-    nroSesionDetalle = hermanos.length || null;
-  } else if (t.numero_sesion) {
-    nroSesionDetalle = t.numero_sesion;
-  }
+  const nroSesionDetalle = calcularNumeroSesion(t);
   const sesionTxt = nroSesionDetalle
     ? (tratInfo ? `Sesión ${nroSesionDetalle} de ${tratInfo.total_sesiones}` : `Sesión ${nroSesionDetalle}`)
     : '—';
