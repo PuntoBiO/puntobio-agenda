@@ -597,6 +597,13 @@ let estado = {
   todosPacientes: [],
   ttoSeleccionado: null, // tto del modal detalle/editar
   sesionesPorTto: {},    // tratamiento_id → cantidad de sesiones realizadas
+  emailLogueado: null,   // email del usuario actual
+}
+
+// Usuarios que pueden reactivar turnos cancelados
+const EMAILS_PUEDEN_REACTIVAR = ['liclucianavelaz@gmail.com']
+function puedeReactivar() {
+  return estado.emailLogueado && EMAILS_PUEDEN_REACTIVAR.includes(estado.emailLogueado.toLowerCase().trim())
 }
 
 // ===== HELPERS =====
@@ -958,6 +965,7 @@ window.verDetalle = async function(ttoId) {
           <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
             <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${tu.id}</span>
             <span style="flex: 1;">${fmtFecha(tu.fecha)} ${(tu.hora_inicio || tu.hora) ? '· ' + String(tu.hora_inicio || tu.hora).slice(0,5) : ''} ${tu.profesional ? '· ' + tu.profesional : ''} ${tu.estado ? '· <strong>' + tu.estado + '</strong>' : ''} <span style="font-size: 10px; color: var(--text-dim); margin-left: 6px; padding: 2px 6px; background: var(--bg-card); border-radius: 4px;">${(tu._tabla || '').replace('turnos_','').replace('turno_','')}</span></span>
+            ${(String(tu.estado||'').toUpperCase() === 'CANCELADO') ? `<button class="btn" style="padding: 6px 12px; font-size: 12px; background: var(--accent, #1e9fe0); color: #fff; border: none;" onclick="reactivarTurno(${tu.id})" title="Devolver el turno a la agenda">🔄 Reactivar</button>` : ''}
             <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarTurno(${tu.id})">🗑️</button>
           </div>
         `).join('')}
@@ -1091,8 +1099,30 @@ window.borrarSesion = async function(sesId) {
   }
 }
 
-// ===== BORRAR TURNO ASOCIADO =====
-window.borrarTurno = async function(turnoId) {
+// ===== REACTIVAR TURNO CANCELADO =====
+// Devuelve el turno a la agenda: CANCELADO → PENDIENTE. Solo usuarios autorizados.
+window.reactivarTurno = async function(turnoId) {
+  const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
+  if (!tu) return
+  const msg = `¿Reactivar el turno #${turnoId}?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora_inicio || tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\n\nVolverá a aparecer en la agenda como PENDIENTE. Después, cuando el paciente venga, lo marcás presente desde la agenda.`
+  if (!confirm(msg)) return
+  try {
+    const tabla = tu._tabla || 'turnos_consultorio'
+    const { data, error } = await sb.from(tabla).update({ estado: 'PENDIENTE' }).eq('id', turnoId).select()
+    if (error) throw error
+    if (!data || data.length === 0) {
+      toast('No se pudo reactivar: turno no encontrado (#' + turnoId + ')', 'err', 6000)
+      return
+    }
+    toast(`✓ Turno #${turnoId} reactivado, vuelve a la agenda`, 'ok')
+    const ttoId = estado.ttoSeleccionado?.id
+    await cargarDatos()
+    if (ttoId) await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error al reactivar: ' + err.message, 'err', 6000)
+  }
+}
   const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
   if (!tu) return
   const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora_inicio || tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
@@ -1527,6 +1557,14 @@ $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
 const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEventListener('change', () => { autocompletarPrecioEd(); actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa') })
 
+// Detecta el email del usuario logueado (para permisos de reactivar)
+async function detectarUsuario() {
+  try {
+    const { data: { user } } = await sb.auth.getUser()
+    if (user) estado.emailLogueado = user.email || null
+  } catch (e) { console.warn('No se pudo detectar usuario:', e.message) }
+}
+
 // Init
 poblarPracticasSelect()
 cargarObrasSociales()
@@ -1534,6 +1572,7 @@ toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field')
 toggleObraSocial('ed-modalidad', 'ed-obra-field')
 actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa')
 actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa')
+detectarUsuario()
 cargarDatos()
 </script>
 </body>
