@@ -414,7 +414,7 @@ body {
   <div class="section-title">Desglose por área</div>
   <div class="areas-grid" id="areasGrid"></div>
 
-  <div class="section-title">Generado por profesional</div>
+  <div class="section-title">Cobrado por profesional</div>
   <div class="areas-grid" id="profGrid"></div>
 
   <div class="resumen-actions">
@@ -643,13 +643,20 @@ function getProfesional(p) {
   return p.profesional || p.profesional_nombre || p.kine || p.terapeuta || null;
 }
 
+// Quién recibió la plata, tolerante a distintas tablas
+function getCobrador(p) {
+  const c = p.quien_cobro || p.recibio || p.cobrador || null;
+  return c ? String(c).split('(')[0].trim() : null;
+}
+
 function renderProfesionales(datos) {
-  const acc = {};   // nombre → total
+  const acc = {};   // nombre → total cobrado (plata real del día)
   datos.forEach((d, idx) => {
     const areaLabel = AREAS[idx] ? AREAS[idx].label : 'Otra área';
     (d.rows || []).forEach(p => {
-      // Si el cobro no tiene profesional (ej: TF cobra por plan), se agrupa por área
-      const nombre = getProfesional(p) || areaLabel;
+      // Agrupamos por quién RECIBIÓ la plata (caja real, no liquidación).
+      // Si el cobro no registra cobrador (ej: TF), se agrupa por área.
+      const nombre = getCobrador(p) || areaLabel;
       acc[nombre] = (acc[nombre] || 0) + getImporte(p);
     });
   });
@@ -662,7 +669,7 @@ function renderProfesionales(datos) {
     cont.innerHTML = `<div class="area-card is-empty"><div class="area-card-count">Sin cobros en el período</div></div>`;
     return;
   }
-  const colores = { 'Bruno':'#2563eb','Male':'#db2777','Vero':'#9333ea','Jime':'#16a34a','Lu':'#1e9fe0','Terapia Física':'#d97706' };
+  const colores = { 'Bruno':'#2563eb','Male':'#db2777','Vero':'#9333ea','Jime':'#16a34a','Lu':'#1e9fe0','Recepción':'#0c7bb8','Terapia Física':'#d97706' };
   cont.innerHTML = lista.map(([nombre, total]) => `
     <div class="area-card">
       <div class="area-card-head">
@@ -699,7 +706,7 @@ function buildResumenTexto() {
   });
   if (ultimoProfes && ultimoProfes.length > 0) {
     lineas.push('');
-    lineas.push('*Generado por profesional:*');
+    lineas.push('*Cobrado por profesional:*');
     ultimoProfes.forEach(pr => {
       lineas.push(`  👤 ${pr.nombre}: ${fmtMoney(pr.total)}`);
     });
@@ -732,9 +739,15 @@ function enviarJime() {
 
 // ===== CIERRE DE CAJA POR TURNO =====
 const TURNO_CORTE_HORA = 12; // mañana 7-12, tarde 12-20
+const EMAILS_PUEDEN_REABRIR = ['liclucianavelaz@gmail.com']; // solo estos usuarios ven "Reabrir"
 let adminLogueada = null;    // {nombre, persona_id}
+let emailLogueado = null;    // email del usuario logueado
 let cierresDelDia = [];      // cierres ya registrados hoy
 let datosPorTurno = null;    // {MAÑANA:{...}, TARDE:{...}} calculado de los pagos
+
+function puedeReabrir() {
+  return emailLogueado && EMAILS_PUEDEN_REABRIR.includes(emailLogueado.toLowerCase().trim());
+}
 
 // Hora local Argentina (UTC-3) a partir de un timestamp
 function horaLocalAR(creadoEn) {
@@ -759,6 +772,7 @@ async function detectarAdmin() {
   try {
     const { data: { user } } = await supa.auth.getUser();
     if (user) {
+      emailLogueado = user.email || null;
       const { data } = await supa.from('personas').select('id, nombre').eq('auth_user_id', user.id).maybeSingle();
       if (data) { adminLogueada = { nombre: data.nombre, persona_id: data.id }; return; }
       adminLogueada = { nombre: user.email || 'Administrativa', persona_id: null };
@@ -817,11 +831,15 @@ function renderCierres() {
       const dif = cierre.diferencia || 0;
       const difCls = Math.abs(dif) < 1 ? 'ok' : 'mal';
       const difTxt = Math.abs(dif) < 1 ? '✓ Efectivo cuadra' : (dif > 0 ? `Sobra ${fmtMoney(dif)}` : `Falta ${fmtMoney(Math.abs(dif))}`);
+      const btnReabrir = puedeReabrir()
+        ? `<button class="btn-reabrir" data-cierre-id="${cierre.id}" data-turno="${tn}" style="margin-top:8px;background:#fff;color:#dc2626;border:1px solid #fecaca;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;">🔓 Reabrir</button>`
+        : '';
       return `<div class="turno-card cerrado">
         <div class="turno-card-tit">${tn === 'MAÑANA' ? '🌅' : '🌆'} ${tn} <span class="turno-card-estado ok">Cerrado</span></div>
         <div class="turno-card-total">${fmtMoney(cierre.total_sistema)}</div>
         <div class="turno-card-meta">Por ${cierre.administrativa || '—'}<br>Efectivo declarado: ${fmtMoney(cierre.efectivo_declarado)}</div>
         <div class="turno-card-dif ${difCls}">${difTxt}</div>
+        ${btnReabrir}
       </div>`;
     }
     return `<div class="turno-card pendiente">
@@ -831,6 +849,11 @@ function renderCierres() {
     </div>`;
   });
   document.getElementById('cierreTurnos').innerHTML = cards.join('');
+
+  // Enganchar botones de reabrir (solo aparecen para usuarios autorizados)
+  document.querySelectorAll('#cierreTurnos .btn-reabrir').forEach(b => {
+    b.addEventListener('click', () => reabrirTurno(b.dataset.cierreId, b.dataset.turno));
+  });
 
   // Estado del botón
   const btn = document.getElementById('btnCerrarTurno');
@@ -991,6 +1014,22 @@ function buildResumenTextoCierre() {
   lineas.push('');
   lineas.push('PuntoBiO - Caja General');
   return lineas.join('\n');
+}
+
+// Reabrir un turno cerrado (solo usuarios autorizados). Borra el cierre → vuelve a "sin cerrar".
+async function reabrirTurno(cierreId, turno) {
+  if (!puedeReabrir()) { alert('No tenés permiso para reabrir cajas.'); return; }
+  const ok = confirm(`¿Reabrir el turno ${turno}?\n\nSe borrará el cierre registrado y el turno vuelve a quedar "sin cerrar" para que puedas corregirlo y volver a cerrarlo.`);
+  if (!ok) return;
+  try {
+    const { error } = await supa.from('cierres_caja').delete().eq('id', cierreId);
+    if (error) throw error;
+    await recargarCierres();
+    alert(`✓ Turno ${turno} reabierto. Ya podés volver a cerrarlo con los datos corregidos.`);
+  } catch (e) {
+    console.error(e);
+    alert('Error al reabrir el turno: ' + (e.message || e));
+  }
 }
 
 async function recargarCierres() {
