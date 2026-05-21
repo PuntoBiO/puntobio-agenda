@@ -98,6 +98,54 @@
 
   .empty{text-align:center; padding:40px; color:var(--muted);}
   .obs-cell{color:var(--muted); font-size:12px; max-width:260px;}
+
+  /* Botón editar */
+  .col-accion{text-align:center; width:60px;}
+  .btn-editar{
+    background:var(--panel-2); border:1px solid var(--border);
+    border-radius:6px; padding:5px 9px; cursor:pointer;
+    font-size:14px; line-height:1; transition:all .15s;
+  }
+  .btn-editar:hover{border-color:var(--accent); background:#e0f2fe;}
+
+  /* Modal editar */
+  .modal-back{
+    position:fixed; inset:0; background:rgba(15,23,42,0.5);
+    display:none; align-items:center; justify-content:center;
+    z-index:1000; padding:20px;
+  }
+  .modal-back.activo{display:flex;}
+  .modal{
+    background:var(--panel); border-radius:12px; width:100%;
+    max-width:460px; box-shadow:0 20px 60px rgba(15,23,42,0.25);
+  }
+  .modal-head{
+    padding:18px 22px; border-bottom:1px solid var(--border);
+    display:flex; justify-content:space-between; align-items:center;
+    font-size:17px; font-weight:700;
+  }
+  .modal-close{background:none; border:none; font-size:24px; cursor:pointer; color:var(--muted);}
+  .modal-body{padding:22px;}
+  .modal-foot{
+    padding:16px 22px; border-top:1px solid var(--border);
+    display:flex; justify-content:flex-end; gap:10px;
+  }
+  .modal-info{font-size:13px; color:var(--muted); margin-bottom:16px; line-height:1.6;}
+  .form-group{margin-bottom:16px;}
+  .form-group label{display:block; font-size:13px; font-weight:600; color:var(--muted); margin-bottom:6px;}
+  .form-group input, .form-group select{
+    width:100%; padding:10px 12px; border:1px solid var(--border);
+    border-radius:8px; font-size:15px; font-family:inherit; color:var(--text);
+  }
+  .form-group input:focus, .form-group select:focus{outline:none; border-color:var(--accent);}
+  .mbtn{
+    padding:9px 18px; border-radius:7px; font-size:14px; font-weight:700;
+    cursor:pointer; border:none; font-family:inherit;
+  }
+  .mbtn-primary{background:var(--accent); color:#fff;}
+  .mbtn-primary:hover{background:var(--accent-2);}
+  .mbtn-secondary{background:var(--panel-2); color:var(--text); border:1px solid var(--border);}
+  .mbtn-secondary:hover{border-color:var(--accent);}
 </style>
 </head>
 <body>
@@ -154,6 +202,7 @@
           <th>Tipo</th>
           <th>Observaciones</th>
           <th class="col-importe">Importe</th>
+          <th class="col-accion">Editar</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -161,6 +210,35 @@
   </div>
 
   <div id="empty" class="empty" style="display:none;">No hay cobros TF en esta fecha</div>
+</div>
+
+<!-- MODAL EDITAR PAGO -->
+<div class="modal-back" id="modalEditar">
+  <div class="modal">
+    <div class="modal-head">
+      <span>✏️ Editar cobro</span>
+      <button class="modal-close" onclick="cerrarEditar()">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="editInfo"></div>
+      <div class="form-group">
+        <label>Importe ($)</label>
+        <input type="number" id="editImporte" step="100" min="0">
+      </div>
+      <div class="form-group">
+        <label>Medio de pago</label>
+        <select id="editMedio">
+          <option value="EFECTIVO">Efectivo</option>
+          <option value="TRANSFERENCIA">Transferencia</option>
+          <option value="DEBITO">Débito</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="mbtn mbtn-secondary" onclick="cerrarEditar()">Cancelar</button>
+      <button class="mbtn mbtn-primary" id="btnGuardarEdit" onclick="guardarEditar()">Guardar cambios</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -260,7 +338,9 @@
         <td><span class="badge badge-${p.tipo_cobro}">${p.tipo_cobro}</span></td>
         <td class="obs-cell">${p.observaciones || ''}</td>
         <td class="col-importe">${fmt(importe)}</td>
+        <td class="col-accion"><button class="btn-editar" title="Editar monto y medio">✏️</button></td>
       `;
+      tr.querySelector('.btn-editar').addEventListener('click', () => abrirEditar(p, nombre));
       rows.appendChild(tr);
     });
 
@@ -278,6 +358,46 @@
     document.getElementById('t-total').textContent = fmt(total);
     document.getElementById('c-total').textContent = cant + ' cobros';
   }
+
+  // ===== EDITAR PAGO =====
+  let pagoEnEdicion = null;
+
+  function abrirEditar(p, nombre){
+    pagoEnEdicion = p;
+    document.getElementById('editInfo').innerHTML =
+      `Cobro <strong>#${p.id}</strong> · ${nombre}<br>` +
+      `Imputa a: ${monthLabel(p.mes_imputado)} · Tipo: ${p.tipo_cobro}`;
+    document.getElementById('editImporte').value = parseFloat(p.importe) || 0;
+    document.getElementById('editMedio').value = p.medio || 'EFECTIVO';
+    document.getElementById('modalEditar').classList.add('activo');
+  }
+
+  window.cerrarEditar = function(){
+    document.getElementById('modalEditar').classList.remove('activo');
+    pagoEnEdicion = null;
+  };
+
+  window.guardarEditar = async function(){
+    if (!pagoEnEdicion) return;
+    const nuevoImporte = parseFloat(document.getElementById('editImporte').value);
+    const nuevoMedio = document.getElementById('editMedio').value;
+    if (isNaN(nuevoImporte) || nuevoImporte < 0){ alert('Ingresá un importe válido'); return; }
+
+    const btn = document.getElementById('btnGuardarEdit');
+    btn.disabled = true; btn.textContent = 'Guardando...';
+    try {
+      const { error } = await sb.from('pagos_tf')
+        .update({ importe: nuevoImporte, medio: nuevoMedio })
+        .eq('id', pagoEnEdicion.id);
+      if (error) throw error;
+      cerrarEditar();
+      await cargarCobros();
+    } catch(e){
+      alert('Error al guardar: ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = 'Guardar cambios';
+    }
+  };
 
   function navegarDia(delta){
     const inp = document.getElementById('fecha');

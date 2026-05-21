@@ -113,6 +113,25 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
   .stat-value{font-size:15px}
   .stat-value.money{font-size:13px}
 }
+.btn-edit-ses{background:var(--bg-elev);border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;font-size:13px;line-height:1;transition:all .15s}
+.btn-edit-ses:hover{border-color:var(--accent);background:var(--accent-bg)}
+.modal-back{position:fixed;inset:0;background:rgba(26,29,33,0.55);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px}
+.modal-back.activo{display:flex}
+.modal-ses{background:var(--bg-elev);border-radius:10px;width:100%;max-width:440px;box-shadow:0 20px 60px rgba(0,0,0,0.25)}
+.modal-ses-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:15px;font-weight:700;color:var(--text)}
+.modal-ses-close{background:none;border:none;font-size:22px;cursor:pointer;color:var(--text-dim)}
+.modal-ses-body{padding:20px}
+.modal-ses-foot{padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px}
+.modal-ses-info{font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.6;font-family:'JetBrains Mono',monospace}
+.fg{margin-bottom:14px}
+.fg label{display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:5px}
+.fg input{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;font-size:15px;font-family:'JetBrains Mono',monospace;color:var(--text)}
+.fg input:focus{outline:none;border-color:var(--accent)}
+.mbtn{padding:8px 16px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;border:none;font-family:inherit}
+.mbtn-p{background:var(--accent);color:#fff}
+.mbtn-p:hover{background:var(--accent-dim)}
+.mbtn-s{background:var(--bg-elev-2);color:var(--text);border:1px solid var(--border)}
+.mbtn-s:hover{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -179,6 +198,35 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- MODAL EDITAR SESIÓN -->
+<div class="modal-back" id="modalEditSes">
+  <div class="modal-ses">
+    <div class="modal-ses-head">
+      <span>✏️ Editar montos de sesión</span>
+      <button class="modal-ses-close" onclick="cerrarEditarSesion()">×</button>
+    </div>
+    <div class="modal-ses-body">
+      <div class="modal-ses-info" id="editSesInfo"></div>
+      <div class="fg">
+        <label>$ Centro</label>
+        <input type="number" id="editSesCentro" step="100" min="0">
+      </div>
+      <div class="fg">
+        <label>$ Profesional</label>
+        <input type="number" id="editSesProf" step="100" min="0">
+      </div>
+      <div class="fg" id="fgMoplex" style="display:none;">
+        <label>$ Moplex</label>
+        <input type="number" id="editSesMoplex" step="100" min="0">
+      </div>
+    </div>
+    <div class="modal-ses-foot">
+      <button class="mbtn mbtn-s" onclick="cerrarEditarSesion()">Cancelar</button>
+      <button class="mbtn mbtn-p" id="btnGuardarSes" onclick="guardarEditarSesion()">Guardar cambios</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
@@ -435,6 +483,7 @@ function render() {
   html += `<th class="numeric">%P</th>`;
   html += `<th class="numeric ${sortCls('monto_centro')}" data-sort="monto_centro">$Centro <span class="sort-ind">${sortInd('monto_centro')}</span></th>`;
   html += `<th class="numeric ${sortCls('monto_profesional')}" data-sort="monto_profesional">$Profesional <span class="sort-ind">${sortInd('monto_profesional')}</span></th>`;
+  html += `<th class="numeric">Editar</th>`;
   html += `</tr></thead><tbody>`;
 
   let totC = 0, totP = 0, totM = 0;
@@ -482,6 +531,7 @@ function render() {
     html += `<td class="numeric col-pct">${pctP != null ? fmtPct(pctP) : '—'}</td>`;
     html += `<td class="numeric col-monto centro">${fmtMoney(mC)}</td>`;
     html += `<td class="numeric col-monto prof">${fmtMoney(mP)}${mM > 0 ? `<div class="col-modalidad-meta" title="Moplex: ${fmtMoney(mM)}">+M ${fmtMoney(mM)}</div>` : ''}</td>`;
+    html += `<td class="numeric"><button class="btn-edit-ses" data-sid="${s.id}" title="Editar montos">✏️</button></td>`;
     html += `</tr>`;
   });
 
@@ -489,6 +539,7 @@ function render() {
     <td colspan="12" style="text-align:right;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;font-size:10px">Totales (${filtered.length} sesiones)${totM > 0 ? ` · Moplex: ${fmtMoney(totM)}` : ''}:</td>
     <td class="numeric col-monto centro">${fmtMoney(totC)}</td>
     <td class="numeric col-monto prof">${fmtMoney(totP)}</td>
+    <td></td>
   </tr></tfoot></table></div>`;
 
   container.innerHTML = html;
@@ -500,6 +551,15 @@ function render() {
       if (sortBy === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
       else { sortBy = key; sortDir = 'asc'; }
       render();
+    });
+  });
+
+  // Click en botones editar
+  container.querySelectorAll('.btn-edit-ses').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sid = btn.dataset.sid;
+      const ses = sesiones.find(s => String(s.id) === String(sid));
+      if (ses) abrirEditarSesion(ses);
     });
   });
 }
@@ -594,6 +654,65 @@ function toast(msg, type) {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.className = 'toast', 2400);
 }
+
+// === EDITAR SESIÓN ===
+let sesionEnEdicion = null;
+
+function abrirEditarSesion(s) {
+  sesionEnEdicion = s;
+  const personaId = getPersonaId(s);
+  const persona = personaId ? personasMap.get(personaId) : null;
+  const nombre = persona ? persona.nombre : (personaId ? `#${personaId}` : '—');
+  const codigoTto = getCodigoTto(s);
+  const practLbl = practicaLabel(getPracticaCodigo(s));
+  document.getElementById('editSesInfo').innerHTML =
+    `Sesión #${s.id} · ${escapeHtml(nombre)}<br>` +
+    `Tto ${escapeHtml(codigoTto)} · ${escapeHtml(practLbl)} · ${escapeHtml(s.profesional || '—')}`;
+  document.getElementById('editSesCentro').value = Number(s.monto_centro) || 0;
+  document.getElementById('editSesProf').value = Number(s.monto_profesional) || 0;
+  const mM = Number(s.monto_moplex) || 0;
+  const fgM = document.getElementById('fgMoplex');
+  if (mM > 0) {
+    fgM.style.display = '';
+    document.getElementById('editSesMoplex').value = mM;
+  } else {
+    fgM.style.display = 'none';
+  }
+  document.getElementById('modalEditSes').classList.add('activo');
+}
+
+window.cerrarEditarSesion = function() {
+  document.getElementById('modalEditSes').classList.remove('activo');
+  sesionEnEdicion = null;
+};
+
+window.guardarEditarSesion = async function() {
+  if (!sesionEnEdicion) return;
+  const nC = parseFloat(document.getElementById('editSesCentro').value);
+  const nP = parseFloat(document.getElementById('editSesProf').value);
+  if (isNaN(nC) || isNaN(nP) || nC < 0 || nP < 0) { alert('Ingresá montos válidos'); return; }
+
+  const update = { monto_centro: nC, monto_profesional: nP };
+  const fgM = document.getElementById('fgMoplex');
+  if (fgM.style.display !== 'none') {
+    const nM = parseFloat(document.getElementById('editSesMoplex').value);
+    if (!isNaN(nM) && nM >= 0) update.monto_moplex = nM;
+  }
+
+  const btn = document.getElementById('btnGuardarSes');
+  btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    const { error } = await supa.from('sesiones').update(update).eq('id', sesionEnEdicion.id);
+    if (error) throw error;
+    cerrarEditarSesion();
+    await refresh();
+    toast('Sesión actualizada');
+  } catch (e) {
+    alert('Error al guardar: ' + (e.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Guardar cambios';
+  }
+};
 
 // === HELPERS ===
 // Acceso tolerante a la columna "hora" (puede llamarse distinto)
