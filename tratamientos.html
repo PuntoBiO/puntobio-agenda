@@ -597,13 +597,6 @@ let estado = {
   todosPacientes: [],
   ttoSeleccionado: null, // tto del modal detalle/editar
   sesionesPorTto: {},    // tratamiento_id → cantidad de sesiones realizadas
-  emailLogueado: null,   // email del usuario actual
-}
-
-// Usuarios que pueden reactivar turnos cancelados
-const EMAILS_PUEDEN_REACTIVAR = ['liclucianavelaz@gmail.com']
-function puedeReactivar() {
-  return estado.emailLogueado && EMAILS_PUEDEN_REACTIVAR.includes(estado.emailLogueado.toLowerCase().trim())
 }
 
 // ===== HELPERS =====
@@ -1099,8 +1092,28 @@ window.borrarSesion = async function(sesId) {
   }
 }
 
+// ===== BORRAR TURNO ASOCIADO =====
+window.borrarTurno = async function(turnoId) {
+  const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
+  if (!tu) return
+  const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora_inicio || tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
+  if (!confirm(msg)) return
+  try {
+    const tabla = tu._tabla || 'turnos_consultorio'
+    const { error } = await sb.from(tabla).delete().eq('id', turnoId)
+    if (error) throw error
+    toast(`✓ Turno #${turnoId} borrado de la agenda`, 'ok')
+    const ttoId = estado.ttoSeleccionado?.id
+    await cargarDatos()
+    if (ttoId) await verDetalle(ttoId)
+  } catch (err) {
+    console.error(err)
+    toast('Error borrando turno: ' + err.message, 'err', 6000)
+  }
+}
+
 // ===== REACTIVAR TURNO CANCELADO =====
-// Devuelve el turno a la agenda: CANCELADO → PENDIENTE. Solo usuarios autorizados.
+// Devuelve el turno a la agenda: CANCELADO → PENDIENTE.
 window.reactivarTurno = async function(turnoId) {
   const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
   if (!tu) return
@@ -1121,23 +1134,6 @@ window.reactivarTurno = async function(turnoId) {
   } catch (err) {
     console.error(err)
     toast('Error al reactivar: ' + err.message, 'err', 6000)
-  }
-}
-  const tu = (estado.turnosAsoc || []).find(x => x.id === turnoId)
-  if (!tu) return
-  const msg = `¿Borrar turno #${turnoId} de la agenda?\n\nFecha: ${tu.fecha || '—'}\nHora: ${tu.hora_inicio || tu.hora || '—'}\nProfesional: ${tu.profesional || '—'}\nEstado: ${tu.estado || '—'}\n\nEsto NO se puede deshacer.`
-  if (!confirm(msg)) return
-  try {
-    const tabla = tu._tabla || 'turnos_consultorio'
-    const { error } = await sb.from(tabla).delete().eq('id', turnoId)
-    if (error) throw error
-    toast(`✓ Turno #${turnoId} borrado de la agenda`, 'ok')
-    const ttoId = estado.ttoSeleccionado?.id
-    await cargarDatos()
-    if (ttoId) await verDetalle(ttoId)
-  } catch (err) {
-    console.error(err)
-    toast('Error borrando turno: ' + err.message, 'err', 6000)
   }
 }
 
@@ -1557,14 +1553,6 @@ $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
 const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEventListener('change', () => { autocompletarPrecioEd(); actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa') })
 
-// Detecta el email del usuario logueado (para permisos de reactivar)
-async function detectarUsuario() {
-  try {
-    const { data: { user } } = await sb.auth.getUser()
-    if (user) estado.emailLogueado = user.email || null
-  } catch (e) { console.warn('No se pudo detectar usuario:', e.message) }
-}
-
 // Init
 poblarPracticasSelect()
 cargarObrasSociales()
@@ -1572,7 +1560,6 @@ toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field')
 toggleObraSocial('ed-modalidad', 'ed-obra-field')
 actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa')
 actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa')
-detectarUsuario()
 cargarDatos()
 </script>
 </body>
