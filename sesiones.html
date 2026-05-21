@@ -126,6 +126,10 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 .fg{margin-bottom:14px}
 .fg label{display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:5px}
 .fg input{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;font-size:15px;font-family:'JetBrains Mono',monospace;color:var(--text)}
+.fg select{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:7px;font-size:15px;font-family:inherit;color:var(--text);background:#fff;}
+.fg select:focus{outline:none;border-color:var(--accent)}
+.reparto-box{margin:-4px 0 14px;padding:10px 12px;background:var(--bg-elev-2,#f1f5f9);border-radius:8px;font-size:13px;color:var(--text-dim);display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.reparto-box strong{color:var(--text);font-variant-numeric:tabular-nums;}
 .fg input:focus{outline:none;border-color:var(--accent)}
 .mbtn{padding:8px 16px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;border:none;font-family:inherit}
 .mbtn-p{background:var(--accent);color:#fff}
@@ -209,13 +213,29 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
     <div class="modal-ses-body">
       <div class="modal-ses-info" id="editSesInfo"></div>
       <div class="fg">
-        <label>$ Centro</label>
-        <input type="number" id="editSesCentro" step="100" min="0">
+        <label>Quién atendió (profesional)</label>
+        <select id="editSesProfesional" onchange="recalcSplitSesion()"></select>
       </div>
       <div class="fg">
-        <label>$ Profesional</label>
-        <input type="number" id="editSesProf" step="100" min="0">
+        <label>Importe total ($)</label>
+        <input type="number" id="editSesTotal" step="100" min="0" oninput="recalcSplitSesion()">
       </div>
+      <div class="reparto-box" id="repartoSesBox">
+        <span>Centro <strong id="repSesCentro">$0</strong></span>
+        <span id="repSesPct" style="font-size:11px;color:var(--text-dim);"></span>
+        <span>Profesional <strong id="repSesProf">$0</strong></span>
+      </div>
+      <details style="margin-bottom:14px;">
+        <summary style="cursor:pointer;font-size:12px;color:var(--text-dim);">Ajustar montos a mano (opcional)</summary>
+        <div class="fg" style="margin-top:10px;">
+          <label>$ Centro</label>
+          <input type="number" id="editSesCentro" step="100" min="0">
+        </div>
+        <div class="fg">
+          <label>$ Profesional</label>
+          <input type="number" id="editSesProf" step="100" min="0">
+        </div>
+      </details>
       <div class="fg" id="fgMoplex" style="display:none;">
         <label>$ Moplex</label>
         <input type="number" id="editSesMoplex" step="100" min="0">
@@ -307,6 +327,8 @@ let sesiones = [];
 let personas = [];
 let personasMap = new Map();
 let tratamientosMap = new Map();
+let splitsMap = new Map();     // "PRACTICA|PROFESIONAL" → pct_centro
+let profesionalesSplit = [];   // lista de profesionales del tarifario
 let feriadoActual = null;
 let practicaFiltro = '';
 let modalidadFiltro = '';
@@ -321,6 +343,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     document.getElementById('datePicker').value = currentDate;
     await loadPersonas();
+    await loadSplits();
     await refresh();
   } catch (e) { showError(e.message || 'Error iniciando'); console.error(e); }
 });
@@ -384,6 +407,27 @@ async function loadPersonas() {
   personas = data || [];
   personasMap.clear();
   personas.forEach(p => personasMap.set(p.id, p));
+}
+
+// Carga los splits (práctica + profesional → % centro) desde el tarifario
+async function loadSplits() {
+  try {
+    const { data, error } = await supa.from('tarifario_splits').select('practica_codigo, profesional, pct_centro');
+    if (error) { console.warn('No se pudo leer tarifario_splits:', error.message); return; }
+    splitsMap.clear();
+    const profSet = new Set();
+    (data || []).forEach(s => {
+      splitsMap.set(`${s.practica_codigo}|${s.profesional}`, Number(s.pct_centro));
+      if (s.profesional) profSet.add(s.profesional);
+    });
+    profesionalesSplit = [...profSet].sort();
+  } catch (e) { console.error('Error cargando splits:', e); }
+}
+
+// % de centro (0-100) para práctica + profesional. null si no está en el tarifario.
+function pctCentroDe(practicaCodigo, profesional) {
+  const v = splitsMap.get(`${practicaCodigo}|${profesional}`);
+  return (v === undefined || v === null) ? null : v;
 }
 
 async function loadSesiones(fecha) {
@@ -664,12 +708,29 @@ function abrirEditarSesion(s) {
   const persona = personaId ? personasMap.get(personaId) : null;
   const nombre = persona ? persona.nombre : (personaId ? `#${personaId}` : '—');
   const codigoTto = getCodigoTto(s);
-  const practLbl = practicaLabel(getPracticaCodigo(s));
+  const practCode = getPracticaCodigo(s);
+  const practLbl = practicaLabel(practCode);
   document.getElementById('editSesInfo').innerHTML =
     `Sesión #${s.id} · ${escapeHtml(nombre)}<br>` +
-    `Tto ${escapeHtml(codigoTto)} · ${escapeHtml(practLbl)} · ${escapeHtml(s.profesional || '—')}`;
+    `Tto ${escapeHtml(codigoTto)} · ${escapeHtml(practLbl)}`;
+
+  // Selector de profesional (lista del tarifario + el actual si no estuviera)
+  const selProf = document.getElementById('editSesProfesional');
+  selProf.innerHTML = '';
+  const lista = [...profesionalesSplit];
+  if (s.profesional && !lista.includes(s.profesional)) lista.unshift(s.profesional);
+  lista.forEach(n => {
+    const o = document.createElement('option'); o.value = n; o.textContent = n;
+    if (n === s.profesional) o.selected = true;
+    selProf.appendChild(o);
+  });
+
+  // Importe total = centro + profesional (moplex va aparte)
+  const total = (Number(s.monto_centro) || 0) + (Number(s.monto_profesional) || 0);
+  document.getElementById('editSesTotal').value = total;
   document.getElementById('editSesCentro').value = Number(s.monto_centro) || 0;
   document.getElementById('editSesProf').value = Number(s.monto_profesional) || 0;
+
   const mM = Number(s.monto_moplex) || 0;
   const fgM = document.getElementById('fgMoplex');
   if (mM > 0) {
@@ -678,8 +739,36 @@ function abrirEditarSesion(s) {
   } else {
     fgM.style.display = 'none';
   }
+
+  recalcSplitSesion();
   document.getElementById('modalEditSes').classList.add('activo');
 }
+
+// Recalcula Centro/Profesional según el % del tarifario (práctica + profesional)
+window.recalcSplitSesion = function() {
+  if (!sesionEnEdicion) return;
+  const total = parseFloat(document.getElementById('editSesTotal').value) || 0;
+  const prof = document.getElementById('editSesProfesional').value;
+  const practCode = getPracticaCodigo(sesionEnEdicion);
+  const pctC = pctCentroDe(practCode, prof);
+
+  const pctLabel = document.getElementById('repSesPct');
+  let centro;
+  if (pctC === null) {
+    const origTot = (Number(sesionEnEdicion.monto_centro)||0) + (Number(sesionEnEdicion.monto_profesional)||0);
+    const ratio = origTot > 0 ? (Number(sesionEnEdicion.monto_centro)||0) / origTot : 1;
+    centro = Math.round(total * ratio);
+    pctLabel.textContent = '⚠️ sin tarifa, proporción actual';
+  } else {
+    centro = Math.round(total * (pctC / 100));
+    pctLabel.textContent = `${pctC}% centro`;
+  }
+  const profesional = total - centro;
+  document.getElementById('repSesCentro').textContent = fmtMoney(centro);
+  document.getElementById('repSesProf').textContent = fmtMoney(profesional);
+  document.getElementById('editSesCentro').value = centro;
+  document.getElementById('editSesProf').value = profesional;
+};
 
 window.cerrarEditarSesion = function() {
   document.getElementById('modalEditSes').classList.remove('activo');
@@ -692,7 +781,11 @@ window.guardarEditarSesion = async function() {
   const nP = parseFloat(document.getElementById('editSesProf').value);
   if (isNaN(nC) || isNaN(nP) || nC < 0 || nP < 0) { alert('Ingresá montos válidos'); return; }
 
-  const update = { monto_centro: nC, monto_profesional: nP };
+  const update = {
+    monto_centro: nC,
+    monto_profesional: nP,
+    profesional: document.getElementById('editSesProfesional').value,
+  };
   const fgM = document.getElementById('fgMoplex');
   if (fgM.style.display !== 'none') {
     const nM = parseFloat(document.getElementById('editSesMoplex').value);
