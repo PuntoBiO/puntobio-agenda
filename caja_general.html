@@ -230,7 +230,7 @@ body {
 }
 .area-card-breakdown {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
@@ -414,6 +414,9 @@ body {
   <div class="section-title">Desglose por área</div>
   <div class="areas-grid" id="areasGrid"></div>
 
+  <div class="section-title">Generado por profesional</div>
+  <div class="areas-grid" id="profGrid"></div>
+
   <div class="resumen-actions">
     <button class="btn btn-secondary" id="btnCopiar">📋 Copiar resumen</button>
     <button class="btn btn-primary" id="btnEnviarJime">📲 Enviar a Jime por WhatsApp</button>
@@ -585,17 +588,60 @@ async function cargar() {
             <div class="area-card-breakdown-label">Débito</div>
             <div class="area-card-breakdown-value">${fmtMoney(t.breakdown.debito)}</div>
           </div>
+          <div class="area-card-breakdown-item">
+            <div class="area-card-breakdown-label">Crédito</div>
+            <div class="area-card-breakdown-value">${fmtMoney(t.breakdown.credito)}</div>
+          </div>
         </div>
       </div>
     `;
   });
   document.getElementById('areasGrid').innerHTML = cards.join('');
 
+  // ===== Desglose por profesional (todas las áreas juntas) =====
+  renderProfesionales(datos);
+
   // Guardar para botones de resumen
   ultimoResumen = { totalesArea, grand, gCount, gEfe, gTra, gDeb, gCre, rangoLabel: r.label, rango: document.getElementById('rango').value };
 }
 
 let ultimoResumen = null;
+let ultimoProfes = [];   // [{nombre, total}] para el resumen a Jime
+
+// Nombre del profesional tolerante a distintas tablas
+function getProfesional(p) {
+  return p.profesional || p.profesional_nombre || p.kine || p.terapeuta || null;
+}
+
+function renderProfesionales(datos) {
+  const acc = {};   // nombre → total
+  datos.forEach(d => {
+    (d.rows || []).forEach(p => {
+      const nombre = getProfesional(p) || 'Sin asignar';
+      acc[nombre] = (acc[nombre] || 0) + getImporte(p);
+    });
+  });
+  const lista = Object.entries(acc).sort((a, b) => b[1] - a[1]);
+  ultimoProfes = lista.map(([nombre, total]) => ({ nombre, total }));
+
+  const cont = document.getElementById('profGrid');
+  if (!cont) return;
+  if (lista.length === 0) {
+    cont.innerHTML = `<div class="area-card is-empty"><div class="area-card-count">Sin cobros en el período</div></div>`;
+    return;
+  }
+  const colores = { 'Bruno':'#2563eb','Male':'#db2777','Vero':'#9333ea','Jime':'#16a34a','Lu':'#1e9fe0' };
+  cont.innerHTML = lista.map(([nombre, total]) => `
+    <div class="area-card">
+      <div class="area-card-head">
+        <div class="area-card-title">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${colores[nombre]||'#94a3b8'};margin-right:6px;"></span>${nombre}
+        </div>
+      </div>
+      <div class="area-card-total">${fmtMoney(total)}</div>
+    </div>
+  `).join('');
+}
 
 function buildResumenTexto() {
   if (!ultimoResumen) return '';
@@ -615,9 +661,17 @@ function buildResumenTexto() {
   lineas.push('*Desglose por área:*');
   r.totalesArea.forEach(t => {
     if (t.area.activa) {
-      lineas.push(`  ${t.area.icon} ${t.area.label}: ${fmtMoney(t.total)} (${t.count} cobros)`);
+      lineas.push(`  ${t.area.icon} *${t.area.label}: ${fmtMoney(t.total)}* (${t.count} cobros)`);
+      lineas.push(`      Efvo ${fmtMoney(t.breakdown.efectivo)} · Transf ${fmtMoney(t.breakdown.transferencia)} · Déb ${fmtMoney(t.breakdown.debito)}${t.breakdown.credito ? ' · Créd ' + fmtMoney(t.breakdown.credito) : ''}`);
     }
   });
+  if (ultimoProfes && ultimoProfes.length > 0) {
+    lineas.push('');
+    lineas.push('*Generado por profesional:*');
+    ultimoProfes.forEach(pr => {
+      lineas.push(`  👤 ${pr.nombre}: ${fmtMoney(pr.total)}`);
+    });
+  }
   return lineas.join('\n');
 }
 
@@ -881,6 +935,14 @@ function buildResumenTextoCierre() {
     lineas.push(`Transferencia: ${fmtMoney(ultimoResumen.gTra)}`);
     lineas.push(`Debito: ${fmtMoney(ultimoResumen.gDeb)}`);
     lineas.push(`Credito: ${fmtMoney(ultimoResumen.gCre)}`);
+    lineas.push('');
+    lineas.push('*Desglose por área:*');
+    ultimoResumen.totalesArea.forEach(t => {
+      if (t.area.activa) {
+        lineas.push(`${t.area.icon} *${t.area.label}: ${fmtMoney(t.total)}* (${t.count} cobros)`);
+        lineas.push(`   Efvo ${fmtMoney(t.breakdown.efectivo)} · Transf ${fmtMoney(t.breakdown.transferencia)} · Déb ${fmtMoney(t.breakdown.debito)}${t.breakdown.credito ? ' · Créd ' + fmtMoney(t.breakdown.credito) : ''}`);
+      }
+    });
     lineas.push('');
   }
   lineas.push('*Cierres por turno:*');
