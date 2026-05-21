@@ -426,7 +426,7 @@ body {
   </div>
 
   <div class="notice-note">
-    <strong>📌 Nota:</strong> esta vista <strong>agrega</strong> los cobros de cada área que tiene tabla propia en Supabase. Hoy lee <strong>pagos_consultorio</strong> (Consultorios) y <strong>pagos_tf</strong> (Terapia Física). Cuando se creen las tablas <code>pagos_biolab</code>, <code>pagos_masoterapia</code>, <code>pagos_especialidades</code>, se van a sumar automáticamente.
+    <strong>📌 Nota:</strong> esta vista <strong>agrega</strong> todos los cobros del período. Lee <strong>pagos_consultorio</strong> (que se reparte entre Consultorios, Masoterapia, BioLab y Especialidades según la práctica de cada tratamiento) y <strong>pagos_tf</strong> (Terapia Física).
   </div>
 
   <!-- ===== CIERRE DE CAJA POR TURNO ===== -->
@@ -460,13 +460,15 @@ const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Configuración de las áreas — cuando se cree una tabla nueva, se agrega acá y listo.
+// Configuración de las áreas.
+// Consultorios/Maso/BioLab/Especialidades comparten la tabla pagos_consultorio
+// y se separan por las prácticas del tratamiento. TF tiene su propia tabla pagos_tf.
 const AREAS = [
-  { id: 'consultorios', label: 'Consultorios', icon: '🩺', tabla: 'pagos_consultorio', activa: true },
-  { id: 'tf',           label: 'Terapia Física', icon: '🏋️', tabla: 'pagos_tf', activa: true },
-  { id: 'masoterapia',  label: 'Masoterapia', icon: '💆', tabla: 'pagos_masoterapia', activa: false },
-  { id: 'biolab',       label: 'BioLab', icon: '🔬', tabla: 'pagos_biolab', activa: false },
-  { id: 'especialidades', label: 'Especialidades', icon: '✨', tabla: 'pagos_especialidades', activa: false },
+  { id: 'consultorios',   label: 'Consultorios',   icon: '🩺', fuente: 'consultorio', practicas: ['FISIO','FISIO_PC','FISIO_SC','FISIO_DESC','RPG','OSTEO','DRENAJE','PUNC_SECA','SUELO_PEL','TERAPIA_MANUAL','TERAP_MANUAL'], activa: true },
+  { id: 'tf',             label: 'Terapia Física', icon: '🏋️', fuente: 'tf', activa: true },
+  { id: 'masoterapia',    label: 'Masoterapia',    icon: '💆', fuente: 'consultorio', practicas: ['MASAJES_C','MASAJES_CC','MASAJES_EYC','MASAJES_PAK','MASAJES_R','MASAJES_CERO'], activa: true },
+  { id: 'biolab',         label: 'BioLab',         icon: '🔬', fuente: 'consultorio', practicas: ['EVAL','MOPLEX'], activa: true },
+  { id: 'especialidades', label: 'Especialidades', icon: '✨', fuente: 'consultorio', practicas: ['ESPECIALIDAD','ESPEC'], activa: true },
 ];
 
 function fmtMoney(n) {
@@ -512,20 +514,48 @@ function clearError() {
   document.getElementById('errorMsg').classList.remove('is-active');
 }
 
-async function fetchArea(area, from, to) {
-  if (!area.activa) return { rows: [], inactive: true };
+// Trae todos los pagos del rango y reparte por área según la fuente y prácticas.
+// Devuelve un array paralelo a AREAS: [{ rows: [...] }, ...]
+async function fetchTodasLasAreas(from, to) {
+  // 1) Cargar pagos_consultorio (consultorios, maso, biolab, especialidades)
+  let pagosCons = [];
   try {
-    const { data, error } = await supa.from(area.tabla).select('*').gte('fecha', from).lte('fecha', to);
-    if (error) {
-      // Tabla no existe o sin permisos
-      console.warn(`No se pudo leer ${area.tabla}:`, error.message);
-      return { rows: [], error: error.message };
-    }
-    return { rows: data || [] };
-  } catch (e) {
-    console.error(`Error fetching ${area.tabla}:`, e);
-    return { rows: [], error: e.message };
+    const { data, error } = await supa.from('pagos_consultorio').select('*').gte('fecha', from).lte('fecha', to);
+    if (error) { console.warn('No se pudo leer pagos_consultorio:', error.message); }
+    else pagosCons = data || [];
+  } catch (e) { console.error('Error pagos_consultorio:', e); }
+
+  // 2) Cargar pagos_tf (Terapia Física)
+  let pagosTf = [];
+  try {
+    const { data, error } = await supa.from('pagos_tf').select('*').gte('fecha', from).lte('fecha', to);
+    if (error) { console.warn('No se pudo leer pagos_tf:', error.message); }
+    else pagosTf = data || [];
+  } catch (e) { console.error('Error pagos_tf:', e); }
+
+  // 3) Mapear tratamiento_id → practica_codigo (para repartir los de consultorio)
+  const tratIds = [...new Set(pagosCons.map(p => p.tratamiento_id).filter(Boolean))];
+  const tratMap = {};
+  if (tratIds.length > 0) {
+    try {
+      const { data } = await supa.from('tratamientos').select('id, practica_codigo').in('id', tratIds);
+      (data || []).forEach(t => tratMap[t.id] = t.practica_codigo);
+    } catch (e) { console.error('Error tratamientos:', e); }
   }
+
+  // 4) Repartir cada cobro a su área
+  return AREAS.map(area => {
+    if (!area.activa) return { rows: [], inactive: true };
+    if (area.fuente === 'tf') {
+      return { rows: pagosTf };
+    }
+    // fuente consultorio → filtrar por prácticas del área
+    const rows = pagosCons.filter(p => {
+      const pc = tratMap[p.tratamiento_id];
+      return pc && area.practicas && area.practicas.includes(pc);
+    });
+    return { rows };
+  });
 }
 
 async function cargar() {
@@ -533,7 +563,7 @@ async function cargar() {
   const r = getRange();
   document.getElementById('grandTotalMeta').textContent = r.label;
 
-  const datos = await Promise.all(AREAS.map(a => fetchArea(a, r.from, r.to)));
+  const datos = await fetchTodasLasAreas(r.from, r.to);
 
   // Totales por área y globales
   const totalesArea = AREAS.map((a, i) => {
@@ -574,7 +604,7 @@ async function cargar() {
           <div class="area-card-status ${statusCls}">${statusText}</div>
         </div>
         <div class="area-card-total">${fmtMoney(t.total)}</div>
-        <div class="area-card-count">${t.count} cobros · tabla <code>${t.area.tabla}</code></div>
+        <div class="area-card-count">${t.count} cobros · ${t.area.fuente === 'tf' ? 'tabla pagos_tf' : 'área ' + t.area.label}</div>
         <div class="area-card-breakdown">
           <div class="area-card-breakdown-item">
             <div class="area-card-breakdown-label">Efectivo</div>
@@ -741,7 +771,7 @@ async function detectarAdmin() {
 // Calcula totales del día separados por turno (solo vista 'día')
 async function calcularTurnos() {
   const fecha = document.getElementById('fecha').value;
-  const datos = await Promise.all(AREAS.map(a => fetchArea(a, fecha, fecha)));
+  const datos = await fetchTodasLasAreas(fecha, fecha);
   const base = () => ({ total: 0, efectivo: 0, transferencia: 0, debito: 0, credito: 0, count: 0 });
   const acc = { 'MAÑANA': base(), 'TARDE': base() };
   AREAS.forEach((a, idx) => {
