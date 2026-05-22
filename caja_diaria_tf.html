@@ -236,6 +236,7 @@
     </div>
     <div class="modal-foot">
       <button class="mbtn mbtn-secondary" onclick="cerrarEditar()">Cancelar</button>
+      <button class="mbtn" id="btnBorrarCobro" onclick="borrarCobro()" style="display:none; background:#fee2e2; color:#dc2626; border:1px solid #dc2626;">🗑️ Borrar cobro</button>
       <button class="mbtn mbtn-primary" id="btnGuardarEdit" onclick="guardarEditar()">Guardar cambios</button>
     </div>
   </div>
@@ -369,8 +370,38 @@
       `Imputa a: ${monthLabel(p.mes_imputado)} · Tipo: ${p.tipo_cobro}`;
     document.getElementById('editImporte').value = parseFloat(p.importe) || 0;
     document.getElementById('editMedio').value = p.medio || 'EFECTIVO';
+    // Botón borrar: solo para Lu
+    const btnB = document.getElementById('btnBorrarCobro');
+    if (btnB) btnB.style.display = window._esLu ? '' : 'none';
     document.getElementById('modalEditar').classList.add('activo');
   }
+
+  // Borrar un cobro (SOLO Lu), con confirmación. Acción permanente.
+  window.borrarCobro = async function(){
+    if (!window._esLu) { alert('Solo Lu puede borrar cobros.'); return; }
+    if (!pagoEnEdicion) return;
+    const p = pagoEnEdicion;
+    const ok = confirm(
+      '⚠️ BORRAR COBRO\n\n' +
+      '• Cobro #' + p.id + '\n' +
+      '• Importe: $' + (parseFloat(p.importe) || 0).toLocaleString('es-AR') + '\n' +
+      '• Imputa a: ' + monthLabel(p.mes_imputado) + '\n\n' +
+      'Esta acción NO se puede deshacer. ¿Confirmás que querés borrarlo?'
+    );
+    if (!ok) return;
+    const btn = document.getElementById('btnBorrarCobro');
+    btn.disabled = true; btn.textContent = 'Borrando...';
+    try {
+      const { error } = await sb.from('pagos_tf').delete().eq('id', p.id);
+      if (error) throw error;
+      cerrarEditar();
+      await cargarCobros();
+    } catch(e){
+      alert('Error al borrar: ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = '🗑️ Borrar cobro';
+    }
+  };
 
   window.cerrarEditar = function(){
     document.getElementById('modalEditar').classList.remove('activo');
@@ -409,6 +440,12 @@
 
   async function init(){
     try {
+      // Detectar si el usuario logueado es Lu (solo ella puede borrar cobros)
+      try {
+        const { data: u } = await sb.auth.getUser();
+        const email = (u && u.user && u.user.email || '').toLowerCase().trim();
+        window._esLu = (email === 'liclucianavelaz@gmail.com');
+      } catch(e) { window._esLu = false; }
       await cargarCaches();
       poblarFiltroMes();
       document.getElementById('fecha').value = todayStr();
