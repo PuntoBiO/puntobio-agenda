@@ -738,7 +738,9 @@ function enviarJime() {
 }
 
 // ===== CIERRE DE CAJA POR TURNO =====
-const TURNO_CORTE_HORA = 12; // mañana 7-12, tarde 12-20
+// Cortes de turno (hora decimal): mañana hasta 12:15, siesta hasta 15:00, tarde después.
+const CORTE_SIESTA = 12.25; // 12:15
+const CORTE_TARDE  = 15.0;  // 15:00
 const EMAILS_PUEDEN_REABRIR = ['liclucianavelaz@gmail.com']; // solo estos usuarios ven "Reabrir"
 let adminLogueada = null;    // {nombre, persona_id}
 let emailLogueado = null;    // email del usuario logueado
@@ -749,22 +751,23 @@ function puedeReabrir() {
   return emailLogueado && EMAILS_PUEDEN_REABRIR.includes(emailLogueado.toLowerCase().trim());
 }
 
-// Hora local Argentina (UTC-3) a partir de un timestamp
+// Hora local Argentina (UTC-3) en decimal (ej: 12.25 = 12:15) a partir de un timestamp
 function horaLocalAR(creadoEn) {
   if (!creadoEn) return null;
   const d = new Date(creadoEn);
-  // getHours() del navegador ya da hora local si la máquina está en AR;
-  // para asegurar, calculamos en base a UTC-3
   const utcH = d.getUTCHours();
+  const utcM = d.getUTCMinutes();
   let h = utcH - 3;
   if (h < 0) h += 24;
-  return h;
+  return h + (utcM / 60); // hora en decimal
 }
 
 function turnoDeCobro(p) {
   const h = horaLocalAR(p.creado_en);
   if (h === null) return 'MAÑANA'; // sin timestamp, asumimos mañana
-  return h < TURNO_CORTE_HORA ? 'MAÑANA' : 'TARDE';
+  if (h < CORTE_SIESTA) return 'MAÑANA';
+  if (h < CORTE_TARDE) return 'SIESTA';
+  return 'TARDE';
 }
 
 // Identificar la administrativa logueada (Supabase Auth + personas)
@@ -787,7 +790,7 @@ async function calcularTurnos() {
   const fecha = document.getElementById('fecha').value;
   const datos = await fetchTodasLasAreas(fecha, fecha);
   const base = () => ({ total: 0, efectivo: 0, transferencia: 0, debito: 0, credito: 0, count: 0 });
-  const acc = { 'MAÑANA': base(), 'TARDE': base() };
+  const acc = { 'MAÑANA': base(), 'SIESTA': base(), 'TARDE': base() };
   AREAS.forEach((a, idx) => {
     (datos[idx].rows || []).forEach(p => {
       const t = turnoDeCobro(p);
@@ -823,7 +826,8 @@ function renderCierres() {
     return;
   }
   document.getElementById('cierreSection').style.display = '';
-  const turnos = ['MAÑANA', 'TARDE'];
+  const turnos = ['MAÑANA', 'SIESTA', 'TARDE'];
+  const iconoTurno = { 'MAÑANA': '🌅', 'SIESTA': '☀️', 'TARDE': '🌆' };
   const cards = turnos.map(tn => {
     const cierre = turnoCerrado(tn);
     const sis = datosPorTurno ? datosPorTurno[tn] : null;
@@ -833,7 +837,7 @@ function renderCierres() {
       const difTxt = Math.abs(dif) < 1 ? '✓ Efectivo cuadra' : (dif > 0 ? `Sobra ${fmtMoney(dif)}` : `Falta ${fmtMoney(Math.abs(dif))}`);
       const btnReabrir = `<button class="btn-reabrir" data-cierre-id="${cierre.id}" data-turno="${tn}" style="margin-top:8px;background:#fff;color:#dc2626;border:1px solid #fecaca;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;">🔓 Reabrir</button>`;
       return `<div class="turno-card cerrado">
-        <div class="turno-card-tit">${tn === 'MAÑANA' ? '🌅' : '🌆'} ${tn} <span class="turno-card-estado ok">Cerrado</span></div>
+        <div class="turno-card-tit">${iconoTurno[tn]} ${tn} <span class="turno-card-estado ok">Cerrado</span></div>
         <div class="turno-card-total">${fmtMoney(cierre.total_sistema)}</div>
         <div class="turno-card-meta">Por ${cierre.administrativa || '—'}<br>Efectivo declarado: ${fmtMoney(cierre.efectivo_declarado)}</div>
         <div class="turno-card-dif ${difCls}">${difTxt}</div>
@@ -841,7 +845,7 @@ function renderCierres() {
       </div>`;
     }
     return `<div class="turno-card pendiente">
-      <div class="turno-card-tit">${tn === 'MAÑANA' ? '🌅' : '🌆'} ${tn} <span class="turno-card-estado pend">Sin cerrar</span></div>
+      <div class="turno-card-tit">${iconoTurno[tn]} ${tn} <span class="turno-card-estado pend">Sin cerrar</span></div>
       <div class="turno-card-total">${sis ? fmtMoney(sis.total) : '$0'}</div>
       <div class="turno-card-meta">${sis ? sis.count + ' cobros en sistema' : '—'}</div>
     </div>`;
@@ -853,30 +857,35 @@ function renderCierres() {
     b.addEventListener('click', () => reabrirTurno(b.dataset.cierreId, b.dataset.turno));
   });
 
-  // Estado del botón
+  // Estado del botón: se cierran en orden MAÑANA → SIESTA → TARDE
   const btn = document.getElementById('btnCerrarTurno');
   const manana = turnoCerrado('MAÑANA');
+  const siesta = turnoCerrado('SIESTA');
   const tarde = turnoCerrado('TARDE');
-  if (manana && tarde) {
+  if (manana && siesta && tarde) {
     btn.textContent = '✅ Día cerrado — Reenviar resumen a Jime';
     btn.disabled = false;
-  } else if (manana) {
+  } else if (manana && siesta) {
     btn.textContent = '🔒 Cerrar turno TARDE (cierre final)';
+    btn.disabled = false;
+  } else if (manana) {
+    btn.textContent = '🔒 Cerrar turno SIESTA';
     btn.disabled = false;
   } else {
     btn.textContent = '🔒 Cerrar turno MAÑANA';
     btn.disabled = false;
   }
   document.getElementById('cierreSub').textContent = adminLogueada
-    ? `Cierra: ${adminLogueada.nombre}. Mañana 7-12hs · Tarde 12-20hs.`
+    ? `Cierra: ${adminLogueada.nombre}. Mañana 7-12:15 · Siesta 12:15-15 · Tarde 15-20:30.`
     : 'Cada turno cierra su caja. El último cierre del día envía el total a Jime.';
 }
 
-// Cuál turno toca cerrar ahora
+// Cuál turno toca cerrar ahora (en orden)
 function turnoACerrar() {
-  if (turnoCerrado('MAÑANA') && turnoCerrado('TARDE')) return null; // ya está todo
-  if (turnoCerrado('MAÑANA')) return 'TARDE';
-  return 'MAÑANA';
+  if (!turnoCerrado('MAÑANA')) return 'MAÑANA';
+  if (!turnoCerrado('SIESTA')) return 'SIESTA';
+  if (!turnoCerrado('TARDE')) return 'TARDE';
+  return null; // ya está todo
 }
 
 window.abrirModalCierre = () => {
@@ -887,7 +896,7 @@ window.abrirModalCierre = () => {
     return;
   }
   const sis = datosPorTurno ? datosPorTurno[tn] : { total: 0, efectivo: 0, transferencia: 0, debito: 0, credito: 0, count: 0 };
-  const esFinal = (tn === 'TARDE') || turnoCerrado('MAÑANA');
+  const esFinal = (tn === 'TARDE'); // el turno TARDE es siempre el cierre final del día
   document.getElementById('modalCierreTitulo').textContent = `🔒 Cerrar turno ${tn}${esFinal ? ' (cierre final)' : ''}`;
   document.getElementById('modalCierreBody').innerHTML = `
     <div style="font-size:13px;color:var(--text-dim);margin-bottom:14px;">
@@ -999,7 +1008,7 @@ function buildResumenTextoCierre() {
     lineas.push('');
   }
   lineas.push('*Cierres por turno:*');
-  ['MAÑANA', 'TARDE'].forEach(tn => {
+  ['MAÑANA', 'SIESTA', 'TARDE'].forEach(tn => {
     const c = turnoCerrado(tn);
     if (c) {
       const dif = c.diferencia || 0;
