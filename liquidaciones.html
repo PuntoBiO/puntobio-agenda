@@ -223,6 +223,26 @@ async function cargar(){
   }
 
   DATA = data;
+
+  // ===== PAGOS DE OBRAS SOCIALES (informativo, no afecta el cálculo) =====
+  // Se filtran por el mes elegido y, si hay filtro de profesional, por ese profesional.
+  let pagosOS = [];
+  try {
+    let qOS = sb.from('pagos_obras_sociales')
+      .select('obra_social, monto, fecha, profesional_nombre')
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
+      .order('fecha');
+    // Si está fijado un profesional (incluye el caso "solo lo mío"), filtrar por su nombre
+    const profSel = document.getElementById('filtroProf').value;
+    if (profSel) qOS = qOS.ilike('profesional_nombre', '%' + profSel + '%');
+    const { data: osData } = await qOS;
+    pagosOS = osData || [];
+  } catch (e) {
+    console.warn('No se pudieron cargar pagos OS:', e.message);
+  }
+  window._pagosOS = pagosOS;
+
   render(data, sesionesData);
 }
 
@@ -531,6 +551,30 @@ function render(pagos, sesiones){
       html += `<div class="cruce-linea"><b>${n[0]}</b> le debe <b>${fmt(n[2])}</b> a <b>${n[1]}</b></div>`;
     }
     html += `</div>`;
+  }
+
+  // ===== BLOQUE INFORMATIVO: pagos de obras sociales recibidos este mes =====
+  // Solo informativo: NO se suma ni afecta los cálculos de la liquidación.
+  const pagosOS = window._pagosOS || [];
+  if (pagosOS.length > 0) {
+    // Agrupar por obra social
+    const porOS = {};
+    let totalOS = 0;
+    for (const p of pagosOS) {
+      const os = p.obra_social || 'Sin especificar';
+      porOS[os] = (porOS[os] || 0) + (Number(p.monto) || 0);
+      totalOS += (Number(p.monto) || 0);
+    }
+    html += `<h2 class="bloque-tit">💳 Pagos de obras sociales recibidos este mes</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Informativo — estos pagos los recibió el profesional directamente en su cuenta. NO se incluyen en el cálculo de la liquidación.</p>`;
+    html += `<table style="margin-bottom:8px;"><thead><tr>
+        <th>Obra social</th><th class="num">Monto recibido</th>
+      </tr></thead><tbody>`;
+    for (const os of Object.keys(porOS).sort()) {
+      html += `<tr><td>${os}</td><td class="num">${fmt(porOS[os])}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#dcfce7;color:#166534;"><td>TOTAL recibido de OS</td><td class="num">${fmt(totalOS)}</td></tr>`;
+    html += `</tbody></table>`;
   }
 
   document.getElementById('resultado').innerHTML = html;
