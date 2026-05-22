@@ -337,9 +337,49 @@ let sortBy = 'hora_inicio';
 let sortDir = 'asc';
 let toastTimer = null;
 
+// === FILTRO "SOLO LO MÍO" (solo se activa si el usuario tiene solo_lo_mio=TRUE) ===
+const EMAIL_A_NOMBRE = {
+  'brunitovelez99@gmail.com':    'Bruno',
+  'loz.magdalena@gmail.com':     'Male',
+  'veronicasandler@hotmail.com': 'Vero'
+};
+let miFiltro = null; // null = ve todo (admins); {nombre} = ve solo lo suyo
+
+async function detectarFiltroPropio() {
+  try {
+    const { data: { user } } = await supa.auth.getUser();
+    if (!user || !user.email) return;
+    const email = user.email.toLowerCase().trim();
+    const { data: persona } = await supa.from('personas')
+      .select('id').ilike('email', email).maybeSingle();
+    if (!persona) return;
+    const { data: perm } = await supa.from('permisos_equipo')
+      .select('solo_lo_mio').eq('persona_id', persona.id).maybeSingle();
+    if (perm && perm.solo_lo_mio === true) {
+      const nombre = EMAIL_A_NOMBRE[email] || null;
+      if (nombre) miFiltro = { nombre };
+    }
+  } catch (e) {
+    console.warn('No se pudo determinar filtro propio (se muestra todo):', e.message);
+    miFiltro = null;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    await detectarFiltroPropio();
+    // Si ve solo lo suyo, fijar el dropdown a su nombre y bloquearlo
+    if (miFiltro) {
+      const sel = document.getElementById('filterProfesional');
+      if (sel) {
+        sel.value = miFiltro.nombre;
+        sel.disabled = true;
+        Array.from(sel.options).forEach(o => {
+          if (o.value && o.value !== miFiltro.nombre) o.style.display = 'none';
+        });
+      }
+    }
     bindEvents();
     document.getElementById('datePicker').value = currentDate;
     await loadPersonas();
@@ -502,6 +542,8 @@ function render() {
   // Filtros
   const profFiltro = document.getElementById('filterProfesional').value;
   let filtered = sesiones.slice();
+  // Filtro "solo lo mío": si el usuario tiene solo_lo_mio, solo ve SUS sesiones
+  if (miFiltro) filtered = filtered.filter(s => s.profesional === miFiltro.nombre);
   if (profFiltro) filtered = filtered.filter(s => s.profesional === profFiltro);
   if (practicaFiltro) filtered = filtered.filter(s => chipMatch(practicaFiltro, getPracticaCodigo(s)));
   if (modalidadFiltro) filtered = filtered.filter(s => matchModalidad(getModalidad(s), modalidadFiltro));
