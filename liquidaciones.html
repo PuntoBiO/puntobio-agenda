@@ -248,13 +248,9 @@ function render(pagos){
       else if (medio.includes('EFECTIVO')) porMedio[prof].efectivo += totalPago;
     }
 
-    // BLOQUE 3 y 4 — cruces (uno cobró por otro)
+    // BLOQUE 3 y 4 — guardar cruces crudos (el cálculo inteligente se hace después del loop)
     if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
       crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe});
-      if (mProf > 0){
-        const k = cobro + '||' + prof;
-        netos[k] = (netos[k] || 0) + mProf;
-      }
     }
 
     // BLOQUE 5 — detalle por profesional + práctica
@@ -265,6 +261,42 @@ function render(pagos){
     detalle[dk].cobrado += importe;
     detalle[dk].mProf += mProf;
     detalle[dk].centro += mCentro;
+  }
+
+  // ===== CÁLCULO INTELIGENTE DE CRUCES =====
+  // Cada profesional tiene un "saldo a favor" = lo que le corresponde - lo que ya cobró él mismo.
+  // Cuando otro cobró un pago suyo, la parte profesional va al profesional SOLO hasta cubrir su saldo.
+  // Lo que exceda (porque ya cobró todo lo suyo) va al CENTRO.
+  const saldoAFavor = {};   // profesional → cuánto le falta cobrar de su parte
+  for (const prof of Object.keys(resumen)){
+    const r = resumen[prof];
+    saldoAFavor[prof] = Math.max(r.prof - r.cobroProf, 0); // su parte - lo que ya cobró
+  }
+  // Procesar cruces en orden, descontando del saldo a favor de cada profesional
+  let cruceAlCentro = 0;   // total que Bruno/otros cobraron de más y va al centro
+  for (const c of crucesBrutos){
+    const disponible = saldoAFavor[c.prof] || 0;  // cuánto le falta cobrar al que atendió
+    if (disponible > 0){
+      // El profesional todavía tiene saldo: le asignamos hasta cubrirlo
+      const aProfesional = Math.min(c.mProf, disponible);
+      const alCentro = c.mProf - aProfesional;  // lo que excede va al centro
+      saldoAFavor[c.prof] -= aProfesional;
+      if (aProfesional > 0.5){
+        const k = c.cobro + '||' + c.prof;
+        netos[k] = (netos[k] || 0) + aProfesional;
+      }
+      cruceAlCentro += alCentro + c.mCentro; // parte centro siempre va al centro
+      c._aProfesional = aProfesional;
+      c._alCentro = alCentro + c.mCentro;
+    } else {
+      // El profesional YA cobró todo lo suyo: TODO lo que cobró el otro va al centro
+      cruceAlCentro += c.mProf + c.mCentro;
+      c._aProfesional = 0;
+      c._alCentro = c.mProf + c.mCentro;
+    }
+    // Quien cobró de más le debe al centro lo que cobró que no era su parte
+    const k2 = c.cobro + '||CENTRO';
+    netos[k2] = (netos[k2] || 0) + (c._alCentro);
   }
 
   const orden = ['Bruno','Male','Vero','Jime','Lu'];
@@ -351,20 +383,41 @@ function render(pagos){
   }
 
   // ===== BLOQUE 4: CRUCES NETOS =====
+  // Separamos deudas hacia el CENTRO (clave "X||CENTRO") de las deudas entre profesionales
+  const deudasCentro = {};   // profesional → cuánto le debe al centro
+  const netosEntreProfs = {};
+  for (const k of Object.keys(netos)){
+    const [a, b] = k.split('||');
+    if (b === 'CENTRO'){
+      deudasCentro[a] = (deudasCentro[a] || 0) + netos[k];
+    } else {
+      netosEntreProfs[k] = netos[k];
+    }
+  }
+  // Netear deudas entre profesionales (A le debe a B menos lo que B le debe a A)
   const netosFinales = [];
   const procesadas = new Set();
-  for (const k of Object.keys(netos)){
+  for (const k of Object.keys(netosEntreProfs)){
     if (procesadas.has(k)) continue;
     const [cobrador, profesional] = k.split('||');
     const inversa = profesional + '||' + cobrador;
-    const neto = (netos[k]||0) - (netos[inversa]||0);
+    const neto = (netosEntreProfs[k]||0) - (netosEntreProfs[inversa]||0);
     if (neto > 0.5) netosFinales.push([cobrador, profesional, neto]);
     else if (neto < -0.5) netosFinales.push([profesional, cobrador, Math.abs(neto)]);
     procesadas.add(k); procesadas.add(inversa);
   }
-  if (netosFinales.length > 0){
-    html += `<h2 class="bloque-tit">4 · Cruces netos (quién le debe a quién)</h2>
+
+  if (netosFinales.length > 0 || Object.keys(deudasCentro).length > 0){
+    html += `<h2 class="bloque-tit">4 · Cruces netos (quién debe a quién)</h2>
       <table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto neto</th></tr></thead><tbody>`;
+    // Deudas hacia el centro
+    const ordenC = ['Bruno','Male','Vero','Jime','Lu'];
+    Object.keys(deudasCentro).sort((a,b)=>{const ia=ordenC.indexOf(a),ib=ordenC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+      if (deudasCentro[prof] > 0.5){
+        html += `<tr><td>${badge(prof)}</td><td><b>PuntoBiO (centro)</b></td><td class="num"><b>${fmt(deudasCentro[prof])}</b></td></tr>`;
+      }
+    });
+    // Deudas entre profesionales
     netosFinales.sort((a,b)=> (a[0]+a[1]).localeCompare(b[0]+b[1]));
     for (const n of netosFinales){
       html += `<tr><td>${badge(n[0])}</td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
@@ -438,8 +491,15 @@ function render(pagos){
   html += `</div>`;
 
   // Resumen de cruces "quién le paga a quién" en texto claro
-  if (netosFinales.length > 0){
-    html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Pagos entre profesionales</div>`;
+  const hayDeudasCentro = Object.keys(deudasCentro).some(p => deudasCentro[p] > 0.5);
+  if (netosFinales.length > 0 || hayDeudasCentro){
+    html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Cobros a devolver</div>`;
+    const ordenRC = ['Bruno','Male','Vero','Jime','Lu'];
+    Object.keys(deudasCentro).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+      if (deudasCentro[prof] > 0.5){
+        html += `<div class="cruce-linea"><b>${prof}</b> cobró de más y debe <b>${fmt(deudasCentro[prof])}</b> al <b>centro (PuntoBiO)</b></div>`;
+      }
+    });
     for (const n of netosFinales){
       html += `<div class="cruce-linea"><b>${n[0]}</b> le debe <b>${fmt(n[2])}</b> a <b>${n[1]}</b></div>`;
     }
@@ -449,7 +509,7 @@ function render(pagos){
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
-  window._liq = { resumen, porMedio, crucesBrutos, netosFinales, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: pagos.length };
+  window._liq = { resumen, porMedio, crucesBrutos, netosFinales, deudasCentro, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: pagos.length };
 }
 
 function toggleDetalle(prof){
@@ -541,9 +601,16 @@ function exportarPDF(){
   }
 
   // BLOQUE 4
-  if (L.netosFinales.length){
-    const b4 = L.netosFinales.map(n=>[n[0], n[1], fmtP(n[2])]);
-    tabla('4 - Cruces netos', ['Debe','A','Monto neto'], b4);
+  const dc = L.deudasCentro || {};
+  const hayDC = Object.keys(dc).some(p=>dc[p]>0.5);
+  if (L.netosFinales.length || hayDC){
+    const b4 = [];
+    const ordC = ['Bruno','Male','Vero','Jime','Lu'];
+    Object.keys(dc).sort((a,b)=>{const ia=ordC.indexOf(a),ib=ordC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+      if (dc[prof]>0.5) b4.push([prof, 'PuntoBiO (centro)', fmtP(dc[prof])]);
+    });
+    L.netosFinales.forEach(n=> b4.push([n[0], n[1], fmtP(n[2])]));
+    tabla('4 - Cruces netos (quién debe a quién)', ['Debe','A','Monto neto'], b4);
   }
 
   // BLOQUE 5 - detalle por profesional
