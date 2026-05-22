@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <title>Liquidaciones — PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f7f9fc;color:#111;padding:24px}
@@ -74,6 +75,21 @@
   .est-deb{background:#fee2e2;color:#991b1b}
   .vacio{padding:16px;color:#666;background:#fff;border:1px solid #e5e7eb;border-radius:12px;text-align:center}
   .det-prof-tit{margin:14px 0 6px;font-size:15px;font-weight:700}
+  .resumen-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-bottom:20px}
+  .resumen-card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;border-top:5px solid #6b7280}
+  .resumen-card.rc-pb{border-top-color:#1e9fe0}
+  .resumen-card.rc-deb{border-top-color:#ef4444}
+  .resumen-card.rc-ok{border-top-color:#10b981}
+  .rc-nombre{margin-bottom:10px;font-size:16px}
+  .rc-fila{display:flex;justify-content:space-between;font-size:13px;color:#555;padding:3px 0}
+  .rc-fila b{color:#111;font-variant-numeric:tabular-nums}
+  .rc-estado{margin-top:10px;padding:8px;border-radius:8px;background:#f3f4f6;font-weight:700;font-size:14px;text-align:center}
+  .resumen-card.rc-pb .rc-estado{background:#dbeafe;color:#1e40af}
+  .resumen-card.rc-deb .rc-estado{background:#fee2e2;color:#991b1b}
+  .resumen-card.rc-ok .rc-estado{background:#d1fae5;color:#065f46}
+  .resumen-cruces{background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:16px;margin-bottom:20px}
+  .rc-tit-cruces{font-weight:700;margin-bottom:10px;color:#92400e}
+  .cruce-linea{padding:6px 0;font-size:14px;border-top:1px solid #fef3c7}
 </style>
 </head>
 <body>
@@ -106,7 +122,7 @@
       </select>
     </div>
     <button class="btn" onclick="cargar()">🔄 Recalcular</button>
-    <button class="btn btn-export" onclick="exportarExcel()">📊 Exportar Excel</button>
+    <button class="btn btn-export" onclick="exportarPDF()">📄 Exportar PDF</button>
   </div>
 
   <div id="resultado"></div>
@@ -371,8 +387,40 @@ function render(pagos){
     html += `</tbody></table>`;
   }
 
+  // ===== RESUMEN FINAL LINDO (después de todo) =====
+  html += `<h2 class="bloque-tit">📋 Resumen final</h2>`;
+  html += `<div class="resumen-cards">`;
+  for (const prof of profs){
+    const r = resumen[prof];
+    const neto = r.prof - r.cobroProf;
+    let estadoTxt, claseCard, iconoEstado;
+    if (neto > 0.5){ estadoTxt = `PuntoBiO le paga ${fmt(neto)}`; claseCard = 'rc-pb'; iconoEstado = '⬆️'; }
+    else if (neto < -0.5){ estadoTxt = `Le debe a PuntoBiO ${fmt(Math.abs(neto))}`; claseCard = 'rc-deb'; iconoEstado = '⬇️'; }
+    else { estadoTxt = 'Saldado'; claseCard = 'rc-ok'; iconoEstado = '✅'; }
+    html += `
+      <div class="resumen-card ${claseCard}">
+        <div class="rc-nombre">${badge(prof)}</div>
+        <div class="rc-fila"><span>Le corresponde</span><b>${fmt(r.prof)}</b></div>
+        <div class="rc-fila"><span>Ya cobró él/ella</span><b>${fmt(r.cobroProf)}</b></div>
+        <div class="rc-fila"><span>Cobró PuntoBiO</span><b>${fmt(r.cobroPB)}</b></div>
+        <div class="rc-estado">${iconoEstado} ${estadoTxt}</div>
+      </div>`;
+  }
+  html += `</div>`;
+
+  // Resumen de cruces "quién le paga a quién" en texto claro
+  if (netosFinales.length > 0){
+    html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Pagos entre profesionales</div>`;
+    for (const n of netosFinales){
+      html += `<div class="cruce-linea"><b>${n[0]}</b> le debe <b>${fmt(n[2])}</b> a <b>${n[1]}</b></div>`;
+    }
+    html += `</div>`;
+  }
+
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
+  // Guardar todo lo calculado para el PDF
+  window._liq = { resumen, porMedio, crucesBrutos, netosFinales, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: pagos.length };
 }
 
 function toggleDetalle(prof){
@@ -415,47 +463,76 @@ function toggleDetalle(prof){
   }
 }
 
-function exportarExcel(){
-  if (!DATA) { alert('Primero cargá los datos'); return; }
+function exportarPDF(){
+  if (!window._liq) { alert('Primero cargá los datos'); return; }
+  const L = window._liq;
   const mes = document.getElementById('mes').value;
-  const wb = XLSX.utils.book_new();
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF('p', 'mm', 'a4');
+  const azul = [30,159,224];
+  const fmtP = n => '$' + (Number(n)||0).toLocaleString('es-AR',{maximumFractionDigits:0});
 
-  // Hoja 1: RESUMEN
-  const g = window._grupos;
-  const resumen = [
-    ['Profesional','Cant pagos','Bruto cobrado','$ Profesional','$ Centro','% Prof']
-  ];
-  let tCant=0, tBruto=0, tProf=0, tCentro=0;
-  const orden = ['Bruno','Male','Vero','Jime','Lu'];
-  const profs = Object.keys(g).sort((a,b)=>{const ia=orden.indexOf(a),ib=orden.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
-  for (const p of profs){
-    const r = g[p];
-    resumen.push([p, r.cant, r.bruto, r.prof, r.centro, (r.bruto>0?r.prof/r.bruto:0)]);
-    tCant+=r.cant; tBruto+=r.bruto; tProf+=r.prof; tCentro+=r.centro;
+  // Encabezado
+  doc.setFontSize(18); doc.setTextColor(...azul);
+  doc.text('Liquidación PuntoBiO', 14, 18);
+  doc.setFontSize(11); doc.setTextColor(80);
+  doc.text(`Mes: ${mes}`, 14, 25);
+  let y = 32;
+
+  const tabla = (titulo, head, body, opts={}) => {
+    doc.setFontSize(12); doc.setTextColor(...azul);
+    doc.text(titulo, 14, y); y += 2;
+    doc.autoTable({
+      startY: y, head:[head], body,
+      theme:'grid', headStyles:{fillColor:azul, fontSize:8}, bodyStyles:{fontSize:8},
+      margin:{left:14,right:14}, ...opts
+    });
+    y = doc.lastAutoTable.finalY + 8;
+  };
+
+  // BLOQUE 1
+  const b1 = L.profs.map(prof=>{
+    const r = L.resumen[prof]; const neto = r.prof - r.cobroProf;
+    let est = 'Saldado'; if (neto>0.5) est='PuntoBiO le debe'; else if (neto<-0.5) est='Le debe a PuntoBiO';
+    return [prof, fmtP(r.prof), fmtP(r.centro), fmtP(r.cobroProf), fmtP(r.cobroPB), fmtP(neto), est];
+  });
+  tabla('1 - Resumen por profesional',
+    ['Prof','Total Prof','Total Centro','Cobró Prof','Cobró PuntoBiO','Neto','Estado'], b1);
+
+  // BLOQUE 2
+  const b2 = L.ordenarProfs(Object.keys(L.porMedio)).map(prof=>{
+    const m = L.porMedio[prof]; return [prof, fmtP(m.debito), fmtP(m.efectivo), fmtP(m.transferencia)];
+  });
+  if (b2.length) tabla('2 - Cobros por medio', ['Prof','Débito','Efectivo','Transferencia'], b2);
+
+  // BLOQUE 3
+  if (L.crucesBrutos.length){
+    const b3 = L.crucesBrutos.map(c=>[c.fecha, c.cobro, c.prof, fmtP(c.mProf), fmtP(c.importe)]);
+    tabla('3 - Cruces (uno cobró por otro)', ['Fecha','Cobró','Correspondía a','Cruce prof','Total'], b3);
   }
-  resumen.push(['TOTAL', tCant, tBruto, tProf, tCentro, (tBruto>0?tProf/tBruto:0)]);
-  const ws1 = XLSX.utils.aoa_to_sheet(resumen);
-  XLSX.utils.book_append_sheet(wb, ws1, 'Resumen');
 
-  // Hoja 2: DETALLE TODOS LOS PAGOS
-  const detalle = [
-    ['Fecha','Profesional','Paciente','Tratamiento','Práctica','Modalidad','Obra Social','Medio','Tipo cobro','Bruto','$ Prof','$ Centro','$ Moplex']
-  ];
-  for (const p of DATA){
-    const t = p.tratamientos || {};
-    const per = (t.personas || {});
-    detalle.push([
-      p.fecha, p.profesional || '', per.nombre || '', t.codigo_id || '',
-      t.practica_codigo || '', t.modalidad || '', t.obra_social || '',
-      p.medio_pago || '', p.tipo_cobro || '',
-      Number(p.importe)||0, Number(p.monto_profesional)||0,
-      Number(p.monto_centro)||0, Number(p.monto_moplex)||0
-    ]);
+  // BLOQUE 4
+  if (L.netosFinales.length){
+    const b4 = L.netosFinales.map(n=>[n[0], n[1], fmtP(n[2])]);
+    tabla('4 - Cruces netos', ['Debe','A','Monto neto'], b4);
   }
-  const ws2 = XLSX.utils.aoa_to_sheet(detalle);
-  XLSX.utils.book_append_sheet(wb, ws2, 'Detalle');
 
-  XLSX.writeFile(wb, `Liquidacion_${mes}.xlsx`);
+  // BLOQUE 5 - detalle por profesional
+  doc.setFontSize(12); doc.setTextColor(...azul);
+  doc.text('5 - Detalle por profesional y práctica', 14, y); y += 4;
+  const porProf = {};
+  for (const k of Object.keys(L.detalle)){ const d=L.detalle[k]; (porProf[d.prof]=porProf[d.prof]||[]).push(d); }
+  for (const prof of L.ordenarProfs(Object.keys(porProf))){
+    const items = porProf[prof].sort((a,b)=>a.prac.localeCompare(b.prac));
+    const body = items.map(d=>[d.prac, fmtP(d.cobrado), fmtP(d.mProf), fmtP(d.centro)]);
+    doc.setFontSize(10); doc.setTextColor(40); doc.text(prof, 14, y); y += 1;
+    doc.autoTable({ startY:y, head:[['Práctica','Cobrado','Profesional','PuntoBiO']], body,
+      theme:'grid', headStyles:{fillColor:[120,120,120],fontSize:8}, bodyStyles:{fontSize:8}, margin:{left:14,right:14} });
+    y = doc.lastAutoTable.finalY + 6;
+    if (y > 260){ doc.addPage(); y = 20; }
+  }
+
+  doc.save(`Liquidacion_${mes}.pdf`);
 }
 
 // Cargar al inicio
