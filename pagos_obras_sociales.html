@@ -123,16 +123,28 @@
   <div class="card" id="formCard">
     <h2>➕ Nuevo pago recibido</h2>
     <div id="warnZone"></div>
-    <div class="field">
-      <label>Obra social</label>
-      <select id="inOS">
-        <option value="">Elegí una obra social…</option>
-      </select>
+    <p style="font-size:12px;color:#94a3b8;margin:-4px 0 12px;">Si en un mismo pago te liquidaron varias obras sociales, agregá un renglón por cada una. El descuento se aplica solo según la obra social (Sancor 5%, Apross 10%, resto 6%).</p>
+
+    <!-- RENGLONES de obras sociales -->
+    <div id="renglones"></div>
+    <button type="button" class="btn" id="btnAgregarOS" style="background:#dbeafe;color:#1e40af;border:1px solid #1e9fe0;margin-bottom:14px;">➕ Agregar obra social</button>
+
+    <!-- RESUMEN -->
+    <div id="resumenPago" style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px;background:#f8fafc;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:13px;">
+        <span style="color:var(--text-dim);">Subtotal créditos</span>
+        <span class="monto" id="sumCreditos">$0</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:13px;">
+        <span style="color:var(--text-dim);">Total débitos (descuentos)</span>
+        <span class="monto" id="sumDebitos" style="color:#dc2626;">- $0</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;border-top:1px dashed var(--border);padding-top:6px;margin-top:6px;font-size:15px;font-weight:700;">
+        <span>Total final (neto)</span>
+        <span class="monto" id="sumTotal" style="color:#16a34a;">$0</span>
+      </div>
     </div>
-    <div class="field">
-      <label>Monto recibido</label>
-      <input type="number" id="inMonto" placeholder="Ej: 45000" min="0" step="0.01">
-    </div>
+
     <div class="field">
       <label>Fecha del pago</label>
       <input type="date" id="inFecha">
@@ -144,25 +156,6 @@
     <div class="field">
       <label>N° de factura <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional, se puede completar después)</span></label>
       <input type="text" id="inFactura" placeholder="Ej: 0001-00012345" autocomplete="off">
-    </div>
-    <div class="field">
-      <label>N° de sesiones <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional, se puede completar después)</span></label>
-      <input type="number" id="inSesiones" placeholder="Ej: 8" min="0" step="1">
-    </div>
-    <div style="border-top:1px dashed var(--border);margin:14px 0 4px;padding-top:12px;">
-      <p style="font-size:12px;color:#94a3b8;margin-bottom:10px;">Datos informativos del resumen del banco (opcionales, no modifican el monto):</p>
-    </div>
-    <div class="field">
-      <label>Concepto <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional)</span></label>
-      <input type="text" id="inConcepto" placeholder="Ej: liquidación abril" autocomplete="off">
-    </div>
-    <div class="field">
-      <label>Créditos <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional)</span></label>
-      <input type="number" id="inCreditos" placeholder="Ej: 50000" min="0" step="0.01">
-    </div>
-    <div class="field">
-      <label>Débitos <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional)</span></label>
-      <input type="number" id="inDebitos" placeholder="Ej: 1200" min="0" step="0.01">
     </div>
     <button class="btn" id="btnGuardar">Guardar pago</button>
   </div>
@@ -199,22 +192,22 @@ let usuarioActual = null; // {id, nombre, email}
 let misPagos = [];
 let esAdmin = false; // si NO tiene solo_lo_mio → ve todos los pagos
 let todosPagos = [];
+let renglones = []; // [{os, concepto, monto}]
+let renglonSeq = 0;
 
 const fmt = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
 
+// Descuento (%) según la obra social: Sancor 5%, Apross 10%, resto 6%.
+function descuentoPorOS(os) {
+  if (!os) return 0;
+  const o = os.toLowerCase();
+  if (o.includes('sancor')) return 5;
+  if (o.includes('apross')) return 10;
+  if (o === 'otros') return 0; // si no se sabe la OS, sin descuento automático
+  return 6;
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
-  // Llenar el desplegable de obras sociales
-  const sel = document.getElementById('inOS');
-  // "Otros" va primero (para cuando no se sabe de qué obra social es)
-  const oOtros = document.createElement('option');
-  oOtros.value = 'Otros'; oOtros.textContent = 'Otros';
-  sel.appendChild(oOtros);
-  // Después las obras sociales reales
-  OBRAS_SOCIALES.forEach(os => {
-    const o = document.createElement('option');
-    o.value = os; o.textContent = os;
-    sel.appendChild(o);
-  });
   // Fecha de hoy por defecto
   document.getElementById('inFecha').value = new Date().toISOString().split('T')[0];
 
@@ -230,7 +223,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     o.value = val; o.textContent = txt;
     selMes.appendChild(o);
   }
-  // Por defecto: el mes actual (primer opción)
+
+  // Arrancar con un renglón vacío
+  agregarRenglon();
+  document.getElementById('btnAgregarOS').onclick = agregarRenglon;
 
   await detectarUsuario();
   await cargarMisPagos();
@@ -238,6 +234,73 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('btnGuardar').onclick = guardarPago;
 });
+
+// Opciones del select de OS (Otros primero, después las reales)
+function opcionesOS(seleccion) {
+  let html = '<option value="">Elegí una obra social…</option>';
+  html += `<option value="Otros"${seleccion==='Otros'?' selected':''}>Otros</option>`;
+  OBRAS_SOCIALES.forEach(os => {
+    html += `<option value="${os}"${seleccion===os?' selected':''}>${os}</option>`;
+  });
+  return html;
+}
+
+function agregarRenglon() {
+  const id = ++renglonSeq;
+  renglones.push({ id, os: '', concepto: '', monto: 0 });
+  renderRenglones();
+}
+
+window.quitarRenglon = function(id) {
+  renglones = renglones.filter(r => r.id !== id);
+  if (renglones.length === 0) agregarRenglon();
+  else renderRenglones();
+};
+
+window.cambiarRenglon = function(id, campo, valor) {
+  const r = renglones.find(x => x.id === id);
+  if (!r) return;
+  if (campo === 'monto') r.monto = parseFloat(valor) || 0;
+  else r[campo] = valor;
+  // Si cambió la OS, refrescar para mostrar el % y recalcular
+  if (campo === 'os' || campo === 'monto') renderResumen();
+  if (campo === 'os') renderRenglones();
+};
+
+function renderRenglones() {
+  const zona = document.getElementById('renglones');
+  zona.innerHTML = renglones.map(r => {
+    const pct = descuentoPorOS(r.os);
+    const debito = (r.monto || 0) * pct / 100;
+    const neto = (r.monto || 0) - debito;
+    return `
+    <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;background:#fff;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong style="font-size:12px;color:var(--text-dim);text-transform:uppercase;">Obra social</strong>
+        ${renglones.length > 1 ? `<button type="button" onclick="quitarRenglon(${r.id})" style="background:#fee2e2;color:#dc2626;border:1px solid #dc2626;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px;">✕ Quitar</button>` : ''}
+      </div>
+      <select onchange="cambiarRenglon(${r.id},'os',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
+        ${opcionesOS(r.os)}
+      </select>
+      <input type="text" placeholder="Concepto (opcional, ej: FACTURA)" value="${r.concepto || ''}" onchange="cambiarRenglon(${r.id},'concepto',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
+      <input type="number" placeholder="Monto (crédito)" value="${r.monto || ''}" min="0" step="0.01" onchange="cambiarRenglon(${r.id},'monto',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;">
+      ${r.os && r.os !== 'Otros' ? `<div style="font-size:12px;color:#94a3b8;margin-top:6px;">Descuento ${pct}% = <span style="color:#dc2626;">- ${fmt(debito)}</span> · Neto: <strong style="color:#16a34a;">${fmt(neto)}</strong></div>` : ''}
+    </div>`;
+  }).join('');
+  renderResumen();
+}
+
+function renderResumen() {
+  let creditos = 0, debitos = 0;
+  renglones.forEach(r => {
+    const pct = descuentoPorOS(r.os);
+    creditos += (r.monto || 0);
+    debitos += (r.monto || 0) * pct / 100;
+  });
+  document.getElementById('sumCreditos').textContent = fmt(creditos);
+  document.getElementById('sumDebitos').textContent = '- ' + fmt(debitos);
+  document.getElementById('sumTotal').textContent = fmt(creditos - debitos);
+}
 
 // Detecta al profesional logueado (igual que el resto del sistema, por email)
 async function detectarUsuario() {
@@ -280,52 +343,53 @@ function bloquearSinLogin(msg) {
 
 async function guardarPago() {
   if (!usuarioActual) { alert('Iniciá sesión para cargar pagos.'); return; }
-  const os = document.getElementById('inOS').value;
-  const monto = parseFloat(document.getElementById('inMonto').value);
   const fecha = document.getElementById('inFecha').value;
   const mesCorr = document.getElementById('inMes').value;
   const factura = document.getElementById('inFactura').value.trim();
-  const sesionesVal = document.getElementById('inSesiones').value;
-  const concepto = document.getElementById('inConcepto').value.trim();
-  const creditosVal = document.getElementById('inCreditos').value;
-  const debitosVal = document.getElementById('inDebitos').value;
 
-  if (!os) { alert('Elegí una obra social.'); return; }
-  if (!monto || monto <= 0) { alert('Ingresá un monto válido.'); return; }
   if (!fecha) { alert('Elegí la fecha del pago.'); return; }
+  // Validar renglones: al menos uno con OS y monto
+  const validos = renglones.filter(r => r.os && r.monto > 0);
+  if (validos.length === 0) { alert('Cargá al menos una obra social con su monto.'); return; }
+  // Si hay renglones a medias, avisar
+  const incompletos = renglones.filter(r => (r.os && !(r.monto > 0)) || (!r.os && r.monto > 0));
+  if (incompletos.length > 0) {
+    if (!confirm('Hay renglones incompletos (sin obra social o sin monto). Se van a ignorar. ¿Continuar?')) return;
+  }
 
   const btn = document.getElementById('btnGuardar');
   btn.disabled = true;
   btn.textContent = 'Guardando…';
   try {
-    const fila = {
-      obra_social: os,
-      monto: monto,
-      fecha: fecha,
-      mes_correspondiente: mesCorr,
-      nro_factura: factura || null,
-      nro_sesiones: sesionesVal ? parseInt(sesionesVal, 10) : null,
-      concepto: concepto || null,
-      creditos: creditosVal ? parseFloat(creditosVal) : null,
-      debitos: debitosVal ? parseFloat(debitosVal) : null,
-      profesional_id: usuarioActual.id,
-      profesional_nombre: usuarioActual.nombre,
-      profesional_email: usuarioActual.email,
-      leido: false
-    };
-    const { data, error } = await sb.from('pagos_obras_sociales').insert(fila).select().single();
+    // Una fila por cada obra social del pago
+    const filas = validos.map(r => {
+      const pct = descuentoPorOS(r.os);
+      const debito = Math.round((r.monto * pct / 100) * 100) / 100;
+      return {
+        obra_social: r.os,
+        monto: r.monto,
+        fecha: fecha,
+        mes_correspondiente: mesCorr,
+        nro_factura: factura || null,
+        concepto: r.concepto || null,
+        creditos: r.monto,
+        debitos: debito || null,
+        profesional_id: usuarioActual.id,
+        profesional_nombre: usuarioActual.nombre,
+        profesional_email: usuarioActual.email,
+        leido: false
+      };
+    });
+    const { data, error } = await sb.from('pagos_obras_sociales').insert(filas).select();
     if (error) throw error;
-    misPagos.unshift(data);
-    // Limpiar formulario (menos la fecha y el mes)
-    document.getElementById('inOS').value = '';
-    document.getElementById('inMonto').value = '';
+    (data || []).forEach(d => misPagos.unshift(d));
+    // Reiniciar el formulario de renglones
+    renglones = [];
+    agregarRenglon();
     document.getElementById('inFactura').value = '';
-    document.getElementById('inSesiones').value = '';
-    document.getElementById('inConcepto').value = '';
-    document.getElementById('inCreditos').value = '';
-    document.getElementById('inDebitos').value = '';
     renderMisPagos();
-    showToast('✓ Pago guardado. Quedó avisado.');
+    const cuantas = validos.length;
+    showToast(`✓ Pago guardado (${cuantas} obra${cuantas>1?'s':''} social${cuantas>1?'es':''}). Quedó avisado.`);
   } catch (e) {
     alert('Error al guardar: ' + e.message);
   }
