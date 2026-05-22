@@ -67,6 +67,13 @@
     .controls{flex-direction:column;align-items:stretch}
     table{font-size:12px}
   }
+  .bloque-tit{font-size:18px;margin:28px 0 12px;color:#1e9fe0;font-weight:700;border-bottom:2px solid #e5e7eb;padding-bottom:6px}
+  .est{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700}
+  .est-ok{background:#d1fae5;color:#065f46}
+  .est-pb{background:#dbeafe;color:#1e40af}
+  .est-deb{background:#fee2e2;color:#991b1b}
+  .vacio{padding:16px;color:#666;background:#fff;border:1px solid #e5e7eb;border-radius:12px;text-align:center}
+  .det-prof-tit{margin:14px 0 6px;font-size:15px;font-weight:700}
 </style>
 </head>
 <body>
@@ -119,6 +126,30 @@ const badge = (prof) => {
 
 let DATA = null; // guarda los pagos crudos para detalles + export
 
+// Normaliza nombre de profesional/cobrador (sin tildes, mayúsculas)
+function normProf(txt){
+  const t = String(txt||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'');
+  if (t === 'puntobio' || t === 'punto bio' || t === 'punto-bio') return 'PuntoBiO';
+  const map = {'bruno':'Bruno','male':'Male','vero':'Vero','jime':'Jime','lu':'Lu'};
+  return map[t] || (txt ? String(txt).trim() : '');
+}
+// Solo profesionales reales (para cruces)
+const PROFS_VALIDOS = ['Bruno','Male','Vero','Jime','Lu'];
+// Etiqueta legible de práctica desde su código
+function practicaLabel(code){
+  const c = String(code||'').toUpperCase();
+  const map = {
+    'FISIO':'Fisio','FISIO_PQ':'Fisio PQ','FISIO_SC':'Fisio SC','FISIO_PC':'Fisio PC','FISIO_DESC':'Fisio DESC',
+    'OSTEOPATIA':'Osteo','OSTEO':'Osteo','DLM':'DLM','DRENAJE':'DLM','DRENAJE_LINFATICO':'DLM',
+    'PUNCION_SECA':'Punc Seca','PUNC_SECA':'Punc Seca','SUELO_PELVICO':'PP','SUELO_PEL':'PP',
+    'MASAJES':'Maso','MASAJES_EYC':'Maso EyC','MASAJES_CC':'Maso CC','MASAJES_PAK':'Maso Pak',
+    'MASAJES_R':'Maso R','MASAJES_C':'Maso C','TERAP_MANUAL':'Terap M.','TERAPIA_MANUAL':'Terap M.',
+    'EVALUACION':'Evaluación','EVAL':'Evaluación','MOPLEX':'Moplex','RPG':'RPG',
+    'SARKMED_BL':'Sarkmed BioLab','SARKMED_PP':'Sarkmed PP'
+  };
+  return map[c] || (code || '—');
+}
+
 async function cargar(){
   const mes = document.getElementById('mes').value; // "2026-05"
   const filtroProf = document.getElementById('filtroProf').value;
@@ -131,7 +162,7 @@ async function cargar(){
   // Traemos pagos del mes con su tratamiento y persona
   let q = sb.from('pagos_consultorio')
     .select(`
-      id, fecha, importe, medio_pago, profesional, tipo_cobro,
+      id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro,
       monto_centro, monto_profesional, monto_moplex,
       tratamientos (
         id, codigo_id, practica_codigo, modalidad, obra_social,
@@ -158,36 +189,65 @@ async function cargar(){
 }
 
 function render(pagos){
-  // agrupar por profesional
-  const grupos = {};
-  let totalBruto = 0, totalProf = 0, totalCentro = 0, totalMoplex = 0;
+  // ===== procesar todos los pagos =====
+  const resumen = {};        // por profesional (quien atendió)
+  const porMedio = {};       // cobros por medio de cada profesional
+  const crucesBrutos = [];   // pagos donde cobró != atendió
+  const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
+  const detalle = {};        // "profesional||practica" → {cobrado, prof, centro}
+  let totalBruto = 0, totalProf = 0, totalCentro = 0;
 
   for (const p of pagos){
-    const prof = p.profesional || 'Sin asignar';
-    if (!grupos[prof]) grupos[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, pagos:[]};
-    const g = grupos[prof];
+    const prof = normProf(p.profesional);     // quien ATENDIÓ
+    const cobro = normProf(p.quien_cobro);     // quien RECIBIÓ la plata
     const importe = Number(p.importe) || 0;
     const mProf = Number(p.monto_profesional) || 0;
     const mCentro = Number(p.monto_centro) || 0;
-    const mMoplex = Number(p.monto_moplex) || 0;
-    g.cant++;
-    g.bruto += importe;
-    g.prof += mProf;
-    g.centro += mCentro;
-    g.moplex += mMoplex;
-    g.pagos.push(p);
-    totalBruto += importe;
-    totalProf += mProf;
-    totalCentro += mCentro;
-    totalMoplex += mMoplex;
+    const totalPago = mProf + mCentro;
+    if (!prof) continue;
+
+    totalBruto += importe; totalProf += mProf; totalCentro += mCentro;
+
+    // BLOQUE 1 — resumen por profesional
+    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, cobroProf:0, cobroPB:0, pagos:[]};
+    const r = resumen[prof];
+    r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.pagos.push(p);
+    if (cobro === prof) r.cobroProf += totalPago;
+    else if (cobro === 'PuntoBiO') r.cobroPB += totalPago;
+
+    // BLOQUE 2 — por medio (solo de lo que cobró el propio profesional)
+    if (cobro === prof){
+      if (!porMedio[prof]) porMedio[prof] = {debito:0, efectivo:0, transferencia:0};
+      const medio = String(p.medio_pago||'').toUpperCase();
+      if (medio.includes('DEBITO') || medio.includes('DÉBITO')) porMedio[prof].debito += totalPago;
+      else if (medio.includes('TRANSFER')) porMedio[prof].transferencia += totalPago;
+      else if (medio.includes('EFECTIVO')) porMedio[prof].efectivo += totalPago;
+    }
+
+    // BLOQUE 3 y 4 — cruces (uno cobró por otro)
+    if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
+      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe});
+      if (mProf > 0){
+        const k = cobro + '||' + prof;
+        netos[k] = (netos[k] || 0) + mProf;
+      }
+    }
+
+    // BLOQUE 5 — detalle por profesional + práctica
+    const t = p.tratamientos || {};
+    const prac = practicaLabel(t.practica_codigo);
+    const dk = prof + '||' + prac;
+    if (!detalle[dk]) detalle[dk] = {prof, prac, cobrado:0, mProf:0, centro:0};
+    detalle[dk].cobrado += importe;
+    detalle[dk].mProf += mProf;
+    detalle[dk].centro += mCentro;
   }
 
   const orden = ['Bruno','Male','Vero','Jime','Lu'];
-  const profs = Object.keys(grupos).sort((a,b) => {
-    const ia = orden.indexOf(a), ib = orden.indexOf(b);
-    return (ia===-1?99:ia) - (ib===-1?99:ib);
-  });
+  const ordenarProfs = arr => arr.sort((a,b)=>{const ia=orden.indexOf(a),ib=orden.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
+  const profs = ordenarProfs(Object.keys(resumen));
 
+  // ===== tarjetas resumen =====
   let html = `
     <div class="cards">
       <div class="card cant">
@@ -209,61 +269,110 @@ function render(pagos){
         <div class="card-value">${fmt(totalCentro)}</div>
         <div class="card-sub">${(totalCentro/totalBruto*100||0).toFixed(1)}% del bruto</div>
       </div>
-    </div>
+    </div>`;
 
-    <table>
-      <thead>
-        <tr>
-          <th></th>
-          <th>Profesional</th>
-          <th class="num">Cant pagos</th>
-          <th class="num">Bruto cobrado</th>
-          <th class="num">$ Profesional</th>
-          <th class="num">$ Centro</th>
-          <th class="num">% Prof</th>
-        </tr>
-      </thead>
-      <tbody>
-  `;
-
+  // ===== BLOQUE 1: RESUMEN =====
+  html += `<h2 class="bloque-tit">1 · Resumen por profesional</h2>
+    <table><thead><tr>
+      <th></th><th>Profesional</th><th class="num">Total Profesional</th><th class="num">Total Centro</th>
+      <th class="num">Cobró Profesional</th><th class="num">Cobró PuntoBiO</th><th class="num">Neto</th><th>Estado</th>
+    </tr></thead><tbody>`;
   for (const prof of profs){
-    const g = grupos[prof];
-    const pctProf = g.bruto > 0 ? (g.prof/g.bruto*100) : 0;
+    const r = resumen[prof];
+    const neto = r.prof - r.cobroProf;
+    let estado = 'Saldado', estCls = 'est-ok';
+    if (neto > 0.5){ estado = 'PuntoBiO le debe'; estCls = 'est-pb'; }
+    else if (neto < -0.5){ estado = 'Le debe a PuntoBiO'; estCls = 'est-deb'; }
     html += `
       <tr class="prof-row" onclick="toggleDetalle('${prof}')">
         <td><span class="arrow" id="arr-${prof}">▶</span></td>
         <td>${badge(prof)}</td>
-        <td class="num">${fmtNum(g.cant)}</td>
-        <td class="num">${fmt(g.bruto)}</td>
-        <td class="num"><b>${fmt(g.prof)}</b></td>
-        <td class="num">${fmt(g.centro)}</td>
-        <td class="num">${pctProf.toFixed(1)}%</td>
+        <td class="num"><b>${fmt(r.prof)}</b></td>
+        <td class="num">${fmt(r.centro)}</td>
+        <td class="num">${fmt(r.cobroProf)}</td>
+        <td class="num">${fmt(r.cobroPB)}</td>
+        <td class="num"><b>${fmt(neto)}</b></td>
+        <td><span class="est ${estCls}">${estado}</span></td>
       </tr>
       <tr class="detail-row" id="det-${prof}" style="display:none">
-        <td colspan="7">
-          <div class="detail-content" id="det-content-${prof}"></div>
-        </td>
-      </tr>
-    `;
+        <td colspan="8"><div class="detail-content" id="det-content-${prof}"></div></td>
+      </tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // ===== BLOQUE 2: COBROS POR MEDIO =====
+  html += `<h2 class="bloque-tit">2 · Cobros por medio de pago</h2>
+    <table><thead><tr>
+      <th>Profesional</th><th class="num">Débito</th><th class="num">Efectivo</th><th class="num">Transferencia</th>
+    </tr></thead><tbody>`;
+  for (const prof of ordenarProfs(Object.keys(porMedio))){
+    const m = porMedio[prof];
+    html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(m.debito)}</td><td class="num">${fmt(m.efectivo)}</td><td class="num">${fmt(m.transferencia)}</td></tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // ===== BLOQUE 3: CRUCES BRUTOS =====
+  html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
+  if (crucesBrutos.length === 0){
+    html += `<p class="vacio">Sin cruces este mes 👍</p>`;
+  } else {
+    crucesBrutos.sort((a,b)=> (a.cobro+a.prof).localeCompare(b.cobro+b.prof));
+    html += `<table><thead><tr>
+      <th>Fecha</th><th>Cobró</th><th>Correspondía a</th><th class="num">Cruce profesional</th><th class="num">Total cobrado</th>
+    </tr></thead><tbody>`;
+    for (const c of crucesBrutos){
+      html += `<tr><td>${c.fecha}</td><td>${badge(c.cobro)}</td><td>${badge(c.prof)}</td><td class="num">${fmt(c.mProf)}</td><td class="num">${fmt(c.importe)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
   }
 
-  html += `
-      </tbody>
-      <tfoot>
-        <tr>
-          <td colspan="2">TOTAL</td>
-          <td class="num">${fmtNum(pagos.length)}</td>
-          <td class="num">${fmt(totalBruto)}</td>
-          <td class="num">${fmt(totalProf)}</td>
-          <td class="num">${fmt(totalCentro)}</td>
-          <td class="num">${(totalProf/totalBruto*100||0).toFixed(1)}%</td>
-        </tr>
-      </tfoot>
-    </table>
-  `;
+  // ===== BLOQUE 4: CRUCES NETOS =====
+  const netosFinales = [];
+  const procesadas = new Set();
+  for (const k of Object.keys(netos)){
+    if (procesadas.has(k)) continue;
+    const [cobrador, profesional] = k.split('||');
+    const inversa = profesional + '||' + cobrador;
+    const neto = (netos[k]||0) - (netos[inversa]||0);
+    if (neto > 0.5) netosFinales.push([cobrador, profesional, neto]);
+    else if (neto < -0.5) netosFinales.push([profesional, cobrador, Math.abs(neto)]);
+    procesadas.add(k); procesadas.add(inversa);
+  }
+  if (netosFinales.length > 0){
+    html += `<h2 class="bloque-tit">4 · Cruces netos (quién le debe a quién)</h2>
+      <table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto neto</th></tr></thead><tbody>`;
+    netosFinales.sort((a,b)=> (a[0]+a[1]).localeCompare(b[0]+b[1]));
+    for (const n of netosFinales){
+      html += `<tr><td>${badge(n[0])}</td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // ===== BLOQUE 5: DETALLE POR PROFESIONAL Y PRÁCTICA =====
+  html += `<h2 class="bloque-tit">5 · Detalle por profesional y práctica</h2>`;
+  const porProfDetalle = {};
+  for (const k of Object.keys(detalle)){
+    const d = detalle[k];
+    if (!porProfDetalle[d.prof]) porProfDetalle[d.prof] = [];
+    porProfDetalle[d.prof].push(d);
+  }
+  for (const prof of ordenarProfs(Object.keys(porProfDetalle))){
+    const items = porProfDetalle[prof].sort((a,b)=> a.prac.localeCompare(b.prac));
+    html += `<div class="det-prof-tit">${badge(prof)}</div>
+      <table style="margin-bottom:16px;"><thead><tr>
+        <th>Práctica</th><th class="num">Total cobrado</th><th class="num">Total profesional</th><th class="num">Total PuntoBiO</th>
+      </tr></thead><tbody>`;
+    let sc=0, sp=0, sce=0;
+    for (const d of items){
+      sc+=d.cobrado; sp+=d.mProf; sce+=d.centro;
+      html += `<tr><td>${d.prac}</td><td class="num">${fmt(d.cobrado)}</td><td class="num">${fmt(d.mProf)}</td><td class="num">${fmt(d.centro)}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#f3f4f6;"><td>TOTAL</td><td class="num">${fmt(sc)}</td><td class="num">${fmt(sp)}</td><td class="num">${fmt(sce)}</td></tr>`;
+    html += `</tbody></table>`;
+  }
 
   document.getElementById('resultado').innerHTML = html;
-  window._grupos = grupos;
+  window._grupos = resumen;
 }
 
 function toggleDetalle(prof){
@@ -276,7 +385,7 @@ function toggleDetalle(prof){
     // generar contenido detalle
     const g = window._grupos[prof];
     let html = `<table><thead><tr>
-      <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Mod</th>
+      <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Cobró</th>
       <th>Medio</th><th class="num">Bruto</th><th class="num">$ Prof</th><th class="num">$ Centro</th>
     </tr></thead><tbody>`;
     for (const p of g.pagos){
@@ -286,8 +395,8 @@ function toggleDetalle(prof){
         <td>${p.fecha}</td>
         <td>${per.nombre || '-'}</td>
         <td>${t.codigo_id || '-'}</td>
-        <td>${t.practica_codigo || '-'}</td>
-        <td>${t.modalidad || '-'}</td>
+        <td>${practicaLabel(t.practica_codigo)}</td>
+        <td>${normProf(p.quien_cobro) || '-'}</td>
         <td>${p.medio_pago || '-'}</td>
         <td class="num">${fmt(p.importe)}</td>
         <td class="num">${fmt(p.monto_profesional)}</td>
