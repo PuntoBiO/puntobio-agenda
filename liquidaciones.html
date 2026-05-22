@@ -33,11 +33,11 @@
   .card.centro{border-top:4px solid #10b981}
   .card.cant{border-top:4px solid #6b7280}
   
-  table{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden}
-  thead{background:#111;color:#fff}
-  th{padding:12px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+  table{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  thead{background:#f1f5f9;color:#1e9fe0}
+  th{padding:12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;border-bottom:2px solid #e2e8f0}
   th.num{text-align:right}
-  td{padding:12px;border-top:1px solid #f3f4f6;font-size:14px}
+  td{padding:11px 12px;border-top:1px solid #f3f4f6;font-size:14px;color:#334155}
   td.num{text-align:right;font-variant-numeric:tabular-nums}
   tr.prof-row{cursor:pointer;transition:background .15s}
   tr.prof-row:hover{background:#f9fafb}
@@ -74,7 +74,7 @@
   .est-pb{background:#dbeafe;color:#1e40af}
   .est-deb{background:#fee2e2;color:#991b1b}
   .vacio{padding:16px;color:#666;background:#fff;border:1px solid #e5e7eb;border-radius:12px;text-align:center}
-  .det-prof-tit{margin:14px 0 6px;font-size:15px;font-weight:700}
+  .det-prof-tit{margin:24px 0 8px;font-size:15px;font-weight:700}
   .resumen-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-bottom:20px}
   .resumen-card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;border-top:5px solid #6b7280}
   .resumen-card.rc-pb{border-top-color:#1e9fe0}
@@ -187,7 +187,7 @@ async function cargar(){
   let q = sb.from('pagos_consultorio')
     .select(`
       id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro,
-      monto_centro, monto_profesional, monto_moplex,
+      monto_centro, monto_profesional, monto_moplex, tratamiento_id,
       tratamientos (
         id, codigo_id, practica_codigo, modalidad, obra_social,
         personas ( id, nombre )
@@ -208,17 +208,33 @@ async function cargar(){
     document.getElementById('resultado').innerHTML = `<div class="empty">📭 Sin pagos en ${mes}</div>`;
     return;
   }
+
+  // Traemos las SESIONES de los tratamientos involucrados.
+  // La parte profesional REAL de cada tratamiento sale de las sesiones (lo que se trabajó),
+  // NO de los pagos (que pueden venir divididos). Ej: evaluación = 1 sesión de $40.000 prof,
+  // aunque el pago haya entrado en 2 cuotas de $20.000.
+  const tratIds = [...new Set(data.map(p => p.tratamiento_id).filter(x => x != null))];
+  let sesionesData = [];
+  if (tratIds.length > 0){
+    const { data: sesData, error: sesErr } = await sb.from('sesiones')
+      .select('tratamiento_id, profesional, monto_profesional')
+      .in('tratamiento_id', tratIds);
+    if (!sesErr && sesData) sesionesData = sesData;
+  }
+
   DATA = data;
-  render(data);
+  render(data, sesionesData);
 }
 
-function render(pagos){
+function render(pagos, sesiones){
+  sesiones = sesiones || [];
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien atendió)
   const porMedio = {};       // cobros por medio de cada profesional
   const crucesBrutos = [];   // pagos donde cobró != atendió
   const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
   const detalle = {};        // "profesional||practica" → {cobrado, prof, centro}
+  const porTrat = {};        // tratamiento_id → {profParte:0, cobradoProfMismo:0} (para cruces por tratamiento)
   let totalBruto = 0, totalProf = 0, totalCentro = 0;
 
   for (const p of pagos){
@@ -231,6 +247,14 @@ function render(pagos){
     if (!prof) continue;
 
     totalBruto += importe; totalProf += mProf; totalCentro += mCentro;
+
+    // Acumular por tratamiento: cuánto YA cobró el propio profesional (el pago COMPLETO que se llevó cuenta contra su parte).
+    // (profParte se calcula aparte, desde las SESIONES, más abajo)
+    const tid = p.tratamiento_id;
+    if (tid != null){
+      if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
+      if (cobro === prof) porTrat[tid].cobradoProfMismo += totalPago; // el pago completo que se llevó el profesional
+    }
 
     // BLOQUE 1 — resumen por profesional
     if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, cobroProf:0, cobroPB:0, pagos:[]};
@@ -250,7 +274,7 @@ function render(pagos){
 
     // BLOQUE 3 y 4 — guardar cruces crudos (el cálculo inteligente se hace después del loop)
     if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
-      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe});
+      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe, tratId:p.tratamiento_id});
     }
 
     // BLOQUE 5 — detalle por profesional + práctica
@@ -263,40 +287,43 @@ function render(pagos){
     detalle[dk].centro += mCentro;
   }
 
-  // ===== CÁLCULO INTELIGENTE DE CRUCES =====
-  // Cada profesional tiene un "saldo a favor" = lo que le corresponde - lo que ya cobró él mismo.
-  // Cuando otro cobró un pago suyo, la parte profesional va al profesional SOLO hasta cubrir su saldo.
-  // Lo que exceda (porque ya cobró todo lo suyo) va al CENTRO.
-  const saldoAFavor = {};   // profesional → cuánto le falta cobrar de su parte
-  for (const prof of Object.keys(resumen)){
-    const r = resumen[prof];
-    saldoAFavor[prof] = Math.max(r.prof - r.cobroProf, 0); // su parte - lo que ya cobró
+  // La parte profesional REAL de cada tratamiento sale de las SESIONES (lo trabajado),
+  // no de los pagos. Sumamos monto_profesional de las sesiones por tratamiento.
+  for (const s of sesiones){
+    const tid = s.tratamiento_id;
+    if (tid == null) continue;
+    if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
+    porTrat[tid].profParte += Number(s.monto_profesional) || 0;
   }
-  // Procesar cruces en orden, descontando del saldo a favor de cada profesional
-  let cruceAlCentro = 0;   // total que Bruno/otros cobraron de más y va al centro
+
+  // ===== CÁLCULO INTELIGENTE DE CRUCES (POR TRATAMIENTO) =====
+  // Para cada cruce miramos ESE tratamiento puntual:
+  //   saldo del tratamiento = parte profesional total - lo que el propio profesional YA cobró de ese tratamiento.
+  //   lo que cobró el otro va al profesional solo hasta cubrir ese saldo; el resto va al CENTRO.
+  // Si el profesional ya cobró toda su parte de ese tratamiento, TODO lo que cobró el otro va al centro.
+  const saldoTrat = {};  // tratamiento_id → parte profesional que aún le falta cobrar al profesional
+  for (const tid of Object.keys(porTrat)){
+    saldoTrat[tid] = Math.max(porTrat[tid].profParte - porTrat[tid].cobradoProfMismo, 0);
+  }
   for (const c of crucesBrutos){
-    const disponible = saldoAFavor[c.prof] || 0;  // cuánto le falta cobrar al que atendió
-    if (disponible > 0){
-      // El profesional todavía tiene saldo: le asignamos hasta cubrirlo
+    const tid = c.tratId;
+    const disponible = (tid != null && saldoTrat[tid] != null) ? saldoTrat[tid] : 0;
+    if (disponible > 0.5){
+      // Al profesional le falta cobrar parte de ESTE tratamiento → le va hasta cubrirlo
       const aProfesional = Math.min(c.mProf, disponible);
-      const alCentro = c.mProf - aProfesional;  // lo que excede va al centro
-      saldoAFavor[c.prof] -= aProfesional;
+      const alCentro = c.mProf - aProfesional;
+      if (tid != null) saldoTrat[tid] -= aProfesional;
       if (aProfesional > 0.5){
         const k = c.cobro + '||' + c.prof;
         netos[k] = (netos[k] || 0) + aProfesional;
       }
-      cruceAlCentro += alCentro + c.mCentro; // parte centro siempre va al centro
-      c._aProfesional = aProfesional;
       c._alCentro = alCentro + c.mCentro;
     } else {
-      // El profesional YA cobró todo lo suyo: TODO lo que cobró el otro va al centro
-      cruceAlCentro += c.mProf + c.mCentro;
-      c._aProfesional = 0;
+      // El profesional YA cobró su parte de ESTE tratamiento → todo va al centro
       c._alCentro = c.mProf + c.mCentro;
     }
-    // Quien cobró de más le debe al centro lo que cobró que no era su parte
     const k2 = c.cobro + '||CENTRO';
-    netos[k2] = (netos[k2] || 0) + (c._alCentro);
+    netos[k2] = (netos[k2] || 0) + c._alCentro;
   }
 
   const orden = ['Bruno','Male','Vero','Jime','Lu'];
@@ -444,7 +471,7 @@ function render(pagos){
       sc+=d.cobrado; sp+=d.mProf; sce+=d.centro;
       html += `<tr><td>${d.prac}</td><td class="num">${fmt(d.cobrado)}</td><td class="num">${fmt(d.mProf)}</td><td class="num">${fmt(d.centro)}</td></tr>`;
     }
-    html += `<tr style="font-weight:700;background:#f3f4f6;"><td>TOTAL</td><td class="num">${fmt(sc)}</td><td class="num">${fmt(sp)}</td><td class="num">${fmt(sce)}</td></tr>`;
+    html += `<tr style="font-weight:700;background:#eff6ff;color:#1e40af;"><td>TOTAL</td><td class="num">${fmt(sc)}</td><td class="num">${fmt(sp)}</td><td class="num">${fmt(sce)}</td></tr>`;
     html += `</tbody></table>`;
   }
 
