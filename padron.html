@@ -322,6 +322,7 @@
       </div>
       <div id="zonaEliminarInsc" style="display:none; margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);">
         <button type="button" id="btnCambiarPlan" onclick="abrirCambioPlan()" style="background:#dbeafe; color:#1e40af; border:1px solid #1e9fe0; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; margin-right:8px;">🔄 Cambiar plan (con proporcional)</button>
+        <button type="button" id="btnDeshacerCambioPlan" onclick="deshacerCambioPlan()" style="display:none; background:#fef3c7; color:#92400e; border:1px solid #f59e0b; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; margin-right:8px;">🗑️ Deshacer cambio de plan</button>
         <button type="button" id="btnEliminarInsc" onclick="eliminarInscTF()" style="background:#fee2e2; color:#dc2626; border:1px solid #dc2626; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;">🗑️ Eliminar inscripción TF</button>
         <span style="display:block; margin-top:8px; font-size:12px; color:var(--text-dim);">Usá "Cambiar plan" para subir/bajar de código a mitad de mes: el sistema calcula el proporcional y programa el plan nuevo para el mes que viene. El botón rojo da de baja la inscripción.</span>
       </div>
@@ -1130,6 +1131,12 @@ function abrirModalEditar() {
     $('#edDiaVenc').value = i.dia_vencimiento || '';
     $('#edDescuento').value = i.descuento_libre || 0;
     $('#edObsInsc').value = i.observaciones || '';
+    // Botón "Deshacer cambio de plan": solo Lu y solo si hay un cambio programado
+    const btnDeshacer = document.getElementById('btnDeshacerCambioPlan');
+    if (btnDeshacer) {
+      const hayCambio = !!(i.plan_futuro && i.mes_aplica_plan);
+      btnDeshacer.style.display = (esLu && hayCambio) ? '' : 'none';
+    }
   } else {
     // No tiene inscripción → mostrar aviso y formulario vacío para crear
     if (avisoSin) avisoSin.style.display = '';
@@ -1443,6 +1450,8 @@ window.confirmarCambioPlan = async () => {
   const datos = cpRecalcular();
   if (!datos) { toast('Elegí el plan nuevo primero.', true); return; }
   const { planNuevo, mesQueViene, plano } = datos;
+  // Guardamos datos del cambio para poder ofrecer el WhatsApp después de confirmar
+  window._ultimoCambioPlan = null;
 
   const importe = parseFloat($('#cpImporte').value) || 0;
   const sinCobro = $('#cpSinCobro').checked;
@@ -1503,6 +1512,10 @@ window.confirmarCambioPlan = async () => {
     if (!sinCobro && importe > 0) msg += ` · cobrado ${fmt$(importe)}`;
     if (cpTurnosSel.size > 0) msg += ` · ${cpTurnosSel.size} clase(s) agregada(s)`;
     toast(msg);
+
+    // Ofrecer enviar el aviso por WhatsApp con plan/monto/día nuevo
+    enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene);
+
     cerrarModal('modalCambioPlan');
     cerrarModal('modalEditar');
     await cargarTodo();
@@ -1511,6 +1524,96 @@ window.confirmarCambioPlan = async () => {
     toast('Error al cambiar el plan: ' + e.message, true);
   } finally {
     btn.disabled = false; btn.textContent = 'Confirmar cambio de plan';
+  }
+};
+
+// Arma y ofrece el aviso por WhatsApp con plan nuevo + monto nuevo + día/horario nuevo
+function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene) {
+  try {
+    const montoNuevo = tarifario[planNuevo] ? (tarifario[planNuevo].valor_lista || 0) : 0;
+    // Días/horarios nuevos elegidos (de las clases extra seleccionadas)
+    const elegidos = cpTurnosCache.filter(t => cpTurnosSel.has(t.id || t.turno_id));
+    let lineaDias = '';
+    if (elegidos.length) {
+      const txt = elegidos.map(t => `${t.dia} ${t.hora}hs`).join(', ');
+      lineaDias = `\n📅 Días/horarios: ${txt}`;
+    }
+    const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
+    const msg =
+      `¡Hola ${(p.nombre || '').split(' ')[0]}! 👋\n\n` +
+      `Te confirmamos el cambio de plan en PuntoBiO:\n\n` +
+      `🔄 Plan nuevo: ${planNuevo}\n` +
+      `💲 Cuota nueva: ${fmt$(montoNuevo)} (desde ${nombreMes(mesQueViene)})` +
+      lineaDias +
+      `\n\n¡Cualquier duda avisanos! 💪`;
+
+    if (!tel) {
+      toast('Cambio guardado. Ojo: el alumno no tiene celular cargado para avisarle por WhatsApp.', true);
+      return;
+    }
+    const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
+    const waUrl = `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
+    // Preguntar antes de abrir WhatsApp (no abrir sin avisar)
+    if (confirm('Cambio guardado ✓\n\n¿Querés enviarle el aviso por WhatsApp al alumno con el plan, el monto y el día nuevo?')) {
+      window.open(waUrl, '_blank');
+    }
+  } catch (e) {
+    console.warn('No se pudo armar el WhatsApp del cambio de plan:', e.message);
+  }
+}
+
+// Deshacer un cambio de plan programado (SOLO Lu): limpia el plan futuro y
+// borra el pago del proporcional que se generó. Acción permanente, con confirmación.
+window.deshacerCambioPlan = async () => {
+  if (!esLu) { toast('Solo Lu puede deshacer cambios de plan.', true); return; }
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  const p = alumnoActivo && alumnoActivo.persona;
+  if (!i || !i.plan_futuro) { toast('No hay un cambio de plan programado para deshacer.', true); return; }
+
+  const ok = confirm(
+    `⚠️ DESHACER cambio de plan de ${p ? p.nombre : 'este alumno'}\n\n` +
+    `• Se cancela el plan programado (${i.plan} → ${i.plan_futuro}).\n` +
+    `• Se borra el pago del proporcional, si se cobró.\n\n` +
+    `Esta acción NO se puede deshacer. ¿Confirmás?`
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById('btnDeshacerCambioPlan');
+  if (btn) { btn.disabled = true; btn.textContent = 'Deshaciendo...'; }
+  try {
+    // 1) Limpiar el plan programado y la nota que se había agregado
+    const obsLimpia = (i.observaciones || '').replace(/\s*\[Cambio programado:[^\]]*\]/g, '').trim();
+    const { error: errInsc } = await sb.from('inscripciones_tf').update({
+      plan_futuro: null,
+      mes_aplica_plan: null,
+      observaciones: obsLimpia || null,
+      actualizado_en: new Date().toISOString()
+    }).eq('id', i.id);
+    if (errInsc) throw errInsc;
+
+    // 2) Borrar el pago del proporcional (se reconoce por la observación)
+    const { data: pagosProp, error: errBuscar } = await sb.from('pagos_tf')
+      .select('id, observaciones')
+      .eq('inscripcion_id', i.id)
+      .ilike('observaciones', 'PROPORCIONAL cambio de plan%');
+    if (errBuscar) throw errBuscar;
+    let borrados = 0;
+    if (pagosProp && pagosProp.length) {
+      // Borrar el más reciente (el de este cambio)
+      const idABorrar = pagosProp[pagosProp.length - 1].id;
+      const { error: errDel } = await sb.from('pagos_tf').delete().eq('id', idABorrar);
+      if (errDel) throw errDel;
+      borrados = 1;
+    }
+
+    toast(`✓ Cambio de plan deshecho${borrados ? ' · pago proporcional borrado' : ''}. Si habías agregado clases extra a la agenda, revisalas a mano.`);
+    cerrarModal('modalEditar');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al deshacer: ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🗑️ Deshacer cambio de plan'; }
   }
 };
 
@@ -2644,10 +2747,15 @@ function renderHCDetail(hc, persona) {
 // ===== ARRANQUE =====
 // Obtener el UUID del usuario logueado (sesión compartida con app.html vía Supabase).
 // Si no hay sesión, usuarioId queda null (nunca texto) para no romper los campos UUID.
+let esLu = false; // solo Lu puede borrar pagos / deshacer cambios de plan
 async function cargarUsuario() {
   try {
     const { data, error } = await sb.auth.getUser();
-    if (!error && data && data.user) usuarioId = data.user.id;
+    if (!error && data && data.user) {
+      usuarioId = data.user.id;
+      const email = (data.user.email || '').toLowerCase().trim();
+      esLu = (email === 'liclucianavelaz@gmail.com');
+    }
   } catch (e) {
     console.warn('No se pudo obtener el usuario logueado:', e.message);
     usuarioId = null;
