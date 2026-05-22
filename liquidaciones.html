@@ -225,13 +225,15 @@ async function cargar(){
   DATA = data;
 
   // ===== PAGOS DE OBRAS SOCIALES (informativo, no afecta el cálculo) =====
-  // Se filtran por el MES AL QUE CORRESPONDE (no por la fecha en que entró),
+  // Se filtran por la FECHA DE PAGO (cuándo entró a la cuenta del profesional),
   // y si hay filtro de profesional, por ese profesional.
+  // El "mes al que corresponde" es solo un dato informativo, no se usa para filtrar.
   let pagosOS = [];
   try {
     let qOS = sb.from('pagos_obras_sociales')
       .select('obra_social, monto, fecha, mes_correspondiente, profesional_nombre')
-      .eq('mes_correspondiente', mes)
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
       .order('fecha');
     // Si está fijado un profesional (incluye el caso "solo lo mío"), filtrar por su nombre
     const profSel = document.getElementById('filtroProf').value;
@@ -555,56 +557,27 @@ function render(pagos, sesiones){
 
   // ===== BLOQUE INFORMATIVO: pagos de obras sociales recibidos este mes =====
   // Solo informativo: NO se suma ni afecta los cálculos de la liquidación.
+  // Muestra el TOTAL por profesional (el detalle fino está en el módulo Pagos Obras Sociales).
   const pagosOS = window._pagosOS || [];
   if (pagosOS.length > 0) {
     let totalOS = 0;
-    for (const p of pagosOS) totalOS += (Number(p.monto) || 0);
+    const porProf = {};
+    for (const p of pagosOS) {
+      const prof = (p.profesional_nombre || 'Sin profesional').split(' ')[0];
+      porProf[prof] = (porProf[prof] || 0) + (Number(p.monto) || 0);
+      totalOS += (Number(p.monto) || 0);
+    }
 
     html += `<h2 class="bloque-tit">💳 Pagos de obras sociales recibidos este mes</h2>
-      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Informativo — estos pagos los recibió el profesional directamente en su cuenta. NO se incluyen en el cálculo de la liquidación.</p>`;
-
-    // ¿Estamos viendo un solo profesional (filtro puesto o "solo lo mío")?
-    const profSelOS = document.getElementById('filtroProf').value;
-
-    if (profSelOS) {
-      // VISTA DE UN PROFESIONAL: simple, agrupado por obra social
-      const porOS = {};
-      for (const p of pagosOS) {
-        const os = p.obra_social || 'Sin especificar';
-        porOS[os] = (porOS[os] || 0) + (Number(p.monto) || 0);
-      }
-      html += `<table style="margin-bottom:8px;"><thead><tr>
-          <th>Obra social</th><th class="num">Monto recibido</th>
-        </tr></thead><tbody>`;
-      for (const os of Object.keys(porOS).sort()) {
-        html += `<tr><td>${os}</td><td class="num">${fmt(porOS[os])}</td></tr>`;
-      }
-      html += `<tr style="font-weight:700;background:#dcfce7;color:#166534;"><td>TOTAL recibido de OS</td><td class="num">${fmt(totalOS)}</td></tr>`;
-      html += `</tbody></table>`;
-    } else {
-      // VISTA GENERAL (admin ve todo): con columna PROFESIONAL
-      const porProf = {};
-      for (const p of pagosOS) {
-        const prof = (p.profesional_nombre || 'Sin profesional').split(' ')[0];
-        if (!porProf[prof]) porProf[prof] = [];
-        porProf[prof].push(p);
-      }
-      html += `<table style="margin-bottom:8px;"><thead><tr>
-          <th>Profesional</th><th>Obra social</th><th class="num">Monto recibido</th>
-        </tr></thead><tbody>`;
-      for (const prof of Object.keys(porProf).sort()) {
-        const items = porProf[prof].sort((a,b)=> (a.obra_social||'').localeCompare(b.obra_social||''));
-        let subtotal = 0;
-        items.forEach((p, i) => {
-          subtotal += (Number(p.monto) || 0);
-          const profCell = i === 0 ? badge(prof) : '';
-          html += `<tr><td>${profCell}</td><td>${p.obra_social || 'Sin especificar'}</td><td class="num">${fmt(p.monto)}</td></tr>`;
-        });
-        html += `<tr style="background:#f0f9ff;font-weight:600;"><td></td><td style="text-align:right;">Subtotal ${prof}</td><td class="num">${fmt(subtotal)}</td></tr>`;
-      }
-      html += `<tr style="font-weight:700;background:#dcfce7;color:#166534;"><td colspan="2">TOTAL recibido de OS (todos)</td><td class="num">${fmt(totalOS)}</td></tr>`;
-      html += `</tbody></table>`;
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Informativo — estos pagos los recibió el profesional directamente en su cuenta. NO se incluyen en el cálculo de la liquidación. El detalle de cada obra social está en el módulo "Pagos Obras Sociales".</p>`;
+    html += `<table style="margin-bottom:8px;"><thead><tr>
+        <th>Profesional</th><th class="num">Total recibido de OS</th>
+      </tr></thead><tbody>`;
+    for (const prof of ordenarProfs(Object.keys(porProf))) {
+      html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(porProf[prof])}</td></tr>`;
     }
+    html += `<tr style="font-weight:700;background:#dcfce7;color:#166534;"><td>TOTAL recibido de OS</td><td class="num">${fmt(totalOS)}</td></tr>`;
+    html += `</tbody></table>`;
   }
 
   document.getElementById('resultado').innerHTML = html;

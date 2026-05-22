@@ -138,8 +138,16 @@
       <input type="date" id="inFecha">
     </div>
     <div class="field">
-      <label>Mes al que corresponde</label>
+      <label>Mes al que corresponde (período)</label>
       <select id="inMes"></select>
+    </div>
+    <div class="field">
+      <label>N° de factura <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional, se puede completar después)</span></label>
+      <input type="text" id="inFactura" placeholder="Ej: 0001-00012345" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>N° de sesiones <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional, se puede completar después)</span></label>
+      <input type="number" id="inSesiones" placeholder="Ej: 8" min="0" step="1">
     </div>
     <button class="btn" id="btnGuardar">Guardar pago</button>
   </div>
@@ -148,6 +156,12 @@
   <div class="card">
     <h2>📋 Mis pagos cargados</h2>
     <div id="listaZone"><div class="loader"></div></div>
+  </div>
+
+  <!-- TODOS LOS PAGOS (solo admin: Lu/Jime/Ale/Pau) -->
+  <div class="card" id="todosCard" style="display:none;">
+    <h2>🗂️ Todos los pagos del equipo</h2>
+    <div id="todosZone"><div class="loader"></div></div>
   </div>
 </div>
 
@@ -168,6 +182,8 @@ const OBRAS_SOCIALES = [
 
 let usuarioActual = null; // {id, nombre, email}
 let misPagos = [];
+let esAdmin = false; // si NO tiene solo_lo_mio → ve todos los pagos
+let todosPagos = [];
 
 const fmt = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
 
@@ -203,6 +219,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await detectarUsuario();
   await cargarMisPagos();
+  if (esAdmin) await cargarTodosPagos();
 
   document.getElementById('btnGuardar').onclick = guardarPago;
 });
@@ -223,9 +240,16 @@ async function detectarUsuario() {
       usuarioActual = { id: persona.id, nombre: persona.nombre, email: user.email };
       const primer = (persona.nombre || '').split(' ')[0];
       document.getElementById('userBadge').textContent = '👤 ' + primer;
+      // ¿Es admin? (NO tiene solo_lo_mio) → ve todos los pagos
+      try {
+        const { data: perm } = await sb.from('permisos_equipo')
+          .select('solo_lo_mio').eq('persona_id', persona.id).maybeSingle();
+        esAdmin = !(perm && perm.solo_lo_mio === true);
+      } catch (e) { esAdmin = false; }
     } else {
       usuarioActual = { id: null, nombre: user.email, email: user.email };
       document.getElementById('userBadge').textContent = '👤 ' + user.email;
+      esAdmin = false;
     }
   } catch (e) {
     console.warn('No se pudo detectar usuario:', e.message);
@@ -245,6 +269,8 @@ async function guardarPago() {
   const monto = parseFloat(document.getElementById('inMonto').value);
   const fecha = document.getElementById('inFecha').value;
   const mesCorr = document.getElementById('inMes').value;
+  const factura = document.getElementById('inFactura').value.trim();
+  const sesionesVal = document.getElementById('inSesiones').value;
 
   if (!os) { alert('Elegí una obra social.'); return; }
   if (!monto || monto <= 0) { alert('Ingresá un monto válido.'); return; }
@@ -259,6 +285,8 @@ async function guardarPago() {
       monto: monto,
       fecha: fecha,
       mes_correspondiente: mesCorr,
+      nro_factura: factura || null,
+      nro_sesiones: sesionesVal ? parseInt(sesionesVal, 10) : null,
       profesional_id: usuarioActual.id,
       profesional_nombre: usuarioActual.nombre,
       profesional_email: usuarioActual.email,
@@ -267,9 +295,11 @@ async function guardarPago() {
     const { data, error } = await sb.from('pagos_obras_sociales').insert(fila).select().single();
     if (error) throw error;
     misPagos.unshift(data);
-    // Limpiar formulario (menos la fecha)
+    // Limpiar formulario (menos la fecha y el mes)
     document.getElementById('inOS').value = '';
     document.getElementById('inMonto').value = '';
+    document.getElementById('inFactura').value = '';
+    document.getElementById('inSesiones').value = '';
     renderMisPagos();
     showToast('✓ Pago guardado. Quedó avisado.');
   } catch (e) {
@@ -295,6 +325,56 @@ async function cargarMisPagos() {
   }
 }
 
+// Carga TODOS los pagos del equipo (solo admin: Lu/Jime/Ale/Pau)
+async function cargarTodosPagos() {
+  document.getElementById('todosCard').style.display = 'block';
+  const zona = document.getElementById('todosZone');
+  try {
+    const { data, error } = await sb.from('pagos_obras_sociales')
+      .select('*')
+      .order('fecha', { ascending: false });
+    if (error) throw error;
+    todosPagos = data || [];
+    renderTodosPagos();
+  } catch (e) {
+    zona.innerHTML = `<div class="empty">Error al cargar: ${e.message}</div>`;
+  }
+}
+
+function renderTodosPagos() {
+  const zona = document.getElementById('todosZone');
+  if (!todosPagos.length) {
+    zona.innerHTML = '<div class="empty">Todavía no hay pagos cargados por el equipo.</div>';
+    return;
+  }
+  let total = 0;
+  for (const p of todosPagos) total += (Number(p.monto) || 0);
+  zona.innerHTML = `
+    <table>
+      <thead>
+        <tr><th>Fecha</th><th>Profesional</th><th>Mes</th><th>Obra social</th><th>Monto</th><th>Factura</th><th>Sesiones</th></tr>
+      </thead>
+      <tbody>
+        ${todosPagos.map(p => `
+          <tr>
+            <td>${formatFecha(p.fecha)}</td>
+            <td><strong>${escapeHtml((p.profesional_nombre||'').split(' ')[0] || '—')}</strong></td>
+            <td>${formatMes(p.mes_correspondiente)}</td>
+            <td>${escapeHtml(p.obra_social)}</td>
+            <td class="monto">${fmt(p.monto)}</td>
+            <td>${escapeHtml(p.nro_factura || '—')}</td>
+            <td>${p.nro_sesiones != null ? p.nro_sesiones : '—'}</td>
+          </tr>
+        `).join('')}
+        <tr style="font-weight:700;background:#dcfce7;color:#166534;">
+          <td colspan="4">TOTAL del equipo</td>
+          <td class="monto">${fmt(total)}</td>
+          <td colspan="2"></td>
+        </tr>
+      </tbody>
+    </table>`;
+}
+
 function formatFecha(iso) {
   if (!iso) return '—';
   const [y,m,d] = iso.split('-');
@@ -308,9 +388,10 @@ function renderMisPagos() {
     return;
   }
   zona.innerHTML = `
+    <p style="font-size:12px;color:#94a3b8;margin-bottom:10px;">💡 Podés completar la factura y las sesiones más tarde: escribí y se guarda solo.</p>
     <table>
       <thead>
-        <tr><th>Fecha</th><th>Mes</th><th>Obra social</th><th>Monto</th><th>Estado</th></tr>
+        <tr><th>Fecha</th><th>Mes</th><th>Obra social</th><th>Monto</th><th>Factura</th><th>Sesiones</th><th>Estado</th></tr>
       </thead>
       <tbody>
         ${misPagos.map(p => `
@@ -319,6 +400,12 @@ function renderMisPagos() {
             <td>${formatMes(p.mes_correspondiente)}</td>
             <td>${escapeHtml(p.obra_social)}</td>
             <td class="monto">${fmt(p.monto)}</td>
+            <td><input type="text" value="${escapeHtml(p.nro_factura || '')}" placeholder="—"
+                 onchange="guardarCampo(${p.id}, 'nro_factura', this.value)"
+                 style="width:110px;padding:5px 7px;border:1px solid var(--border);border-radius:6px;font-size:12px;"></td>
+            <td><input type="number" value="${p.nro_sesiones != null ? p.nro_sesiones : ''}" placeholder="—" min="0" step="1"
+                 onchange="guardarCampo(${p.id}, 'nro_sesiones', this.value)"
+                 style="width:60px;padding:5px 7px;border:1px solid var(--border);border-radius:6px;font-size:12px;"></td>
             <td>${p.leido
               ? '<span class="pill pill-leido">✓ Visto</span>'
               : '<span class="pill pill-nuevo">Enviado</span>'}</td>
@@ -326,6 +413,23 @@ function renderMisPagos() {
         `).join('')}
       </tbody>
     </table>`;
+}
+
+// Guarda factura o sesiones al editarlos en la tabla
+async function guardarCampo(id, campo, valor) {
+  try {
+    let v = valor;
+    if (campo === 'nro_sesiones') v = valor === '' ? null : parseInt(valor, 10);
+    if (campo === 'nro_factura') v = valor.trim() === '' ? null : valor.trim();
+    const { error } = await sb.from('pagos_obras_sociales').update({ [campo]: v }).eq('id', id);
+    if (error) throw error;
+    // Reflejar en memoria
+    const p = misPagos.find(x => x.id === id);
+    if (p) p[campo] = v;
+    showToast('✓ Guardado');
+  } catch (e) {
+    alert('Error al guardar: ' + e.message);
+  }
 }
 
 // Formatea "2026-05" → "may 2026"
