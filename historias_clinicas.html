@@ -371,6 +371,19 @@
   .obs-card-autor { font-weight: 700; color: var(--celeste-dark); }
   .obs-card.nota .obs-card-autor { color: #b45309; }
   .obs-card-fecha { color: var(--gris-texto); }
+  .obs-card-head-right { display: flex; align-items: center; gap: 6px; }
+  .obs-card-fecha em { font-style: italic; color: #999; }
+  .obs-mini-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
+    opacity: 0.7;
+  }
+  .obs-mini-btn:hover { opacity: 1; background: var(--gris-bg); }
   .obs-card-texto { font-size: 13px; white-space: pre-wrap; color: var(--negro); }
   .obs-empty { color: var(--gris-texto); font-style: italic; font-size: 13px; padding: 4px 0; }
 
@@ -611,14 +624,45 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Detecta el profesional logueado (mismo patrón que el resto del sistema)
+// Kines profesionales que pueden EDITAR observaciones/notas (cualquier caja)
+const EMAILS_PUEDEN_EDITAR = [
+  'liclucianavelaz@gmail.com',  // Lu
+  'jimenahllorente@gmail.com',  // Jime
+  'loz.magdalena@gmail.com',    // Male
+  'brunitovelez99@gmail.com'    // Bruno
+];
+// Solo este usuario puede ELIMINAR observaciones/notas
+const EMAILS_PUEDEN_ELIMINAR = [
+  'liclucianavelaz@gmail.com'   // Lu
+];
+
+function normEmail(e) { return (e || '').toLowerCase().trim(); }
+function puedeEditar() {
+  return usuarioActual && EMAILS_PUEDEN_EDITAR.includes(normEmail(usuarioActual.email));
+}
+function puedeEliminar() {
+  return usuarioActual && EMAILS_PUEDEN_ELIMINAR.includes(normEmail(usuarioActual.email));
+}
+
 async function detectarUsuario() {
   try {
     const { data: { user } } = await sb.auth.getUser();
     if (!user) return;
-    const { data: persona } = await sb.from('personas')
+    // Igual que el resto del sistema: identificar por email (columna email)
+    let persona = null;
+    const { data: porEmail } = await sb.from('personas')
       .select('id, nombre, rol_principal')
-      .eq('auth_user_id', user.id)
+      .ilike('email', user.email)
       .maybeSingle();
+    persona = porEmail;
+    // Fallback: por auth_user_id si no se encontró por email
+    if (!persona) {
+      const { data: porAuth } = await sb.from('personas')
+        .select('id, nombre, rol_principal')
+        .eq('auth_user_id', user.id)
+        .maybeSingle();
+      persona = porAuth;
+    }
     if (persona) {
       usuarioActual = { id: persona.id, nombre: persona.nombre, rol_principal: persona.rol_principal, email: user.email };
     } else {
@@ -1364,15 +1408,91 @@ function cajaTexto(items, tipo) {
   if (!items.length) {
     return `<div class="obs-empty">${tipo === 'nota' ? 'Sin notas internas todavía.' : 'Sin observaciones todavía.'}</div>`;
   }
+  const verEditar = puedeEditar();
+  const verEliminar = puedeEliminar();
   return items.map(o => `
-    <div class="obs-card ${tipo === 'nota' ? 'nota' : ''}">
+    <div class="obs-card ${tipo === 'nota' ? 'nota' : ''}" id="obsCard-${o.id}">
       <div class="obs-card-head">
         <span class="obs-card-autor">${escapeHtml(o.autor_nombre ? upperName(o.autor_nombre).split(' ').slice(0,2).join(' ') : 'Profesional')}</span>
-        <span class="obs-card-fecha">${formatDateTime(o.creado_en)}</span>
+        <span class="obs-card-head-right">
+          <span class="obs-card-fecha">${formatDateTime(o.creado_en)}${o.editado_en ? ' · <em>editado</em>' : ''}</span>
+          ${verEditar ? `<button class="obs-mini-btn" title="Editar" onclick="editarCaja(${o.id})">✏️</button>` : ''}
+          ${verEliminar ? `<button class="obs-mini-btn danger" title="Eliminar" onclick="eliminarCaja(${o.id})">🗑️</button>` : ''}
+        </span>
       </div>
-      <div class="obs-card-texto">${escapeHtml(o.texto)}</div>
+      <div class="obs-card-texto" id="obsTexto-${o.id}">${escapeHtml(o.texto)}</div>
     </div>
   `).join('');
+}
+
+// Reemplaza el texto de una caja por un editor inline
+function editarCaja(obsId) {
+  if (!puedeEditar()) return;
+  const o = obsActual.find(x => x.id === obsId);
+  if (!o) return;
+  const cont = document.getElementById('obsTexto-' + obsId);
+  if (!cont) return;
+  cont.innerHTML = `
+    <textarea class="obs-textarea" id="editInput-${obsId}" style="margin-bottom:6px;">${escapeHtml(o.texto)}</textarea>
+    <div class="obs-add-row">
+      <button class="btn btn-sm" onclick="cancelarEdicion(${obsId}, '${o.tipo}')">Cancelar</button>
+      <button class="btn btn-sm btn-primary" id="btnGuardarEdit-${obsId}" onclick="guardarEdicion(${obsId}, '${o.tipo}')">Guardar cambios</button>
+    </div>`;
+  document.getElementById('editInput-' + obsId).focus();
+}
+
+function cancelarEdicion(obsId, tipo) {
+  const o = obsActual.find(x => x.id === obsId);
+  if (!o) return;
+  const cont = document.getElementById('obsTexto-' + obsId);
+  if (cont) cont.innerHTML = escapeHtml(o.texto);
+}
+
+async function guardarEdicion(obsId, tipo) {
+  if (!puedeEditar()) return;
+  const input = document.getElementById('editInput-' + obsId);
+  const btn = document.getElementById('btnGuardarEdit-' + obsId);
+  const nuevo = (input.value || '').trim();
+  if (!nuevo) { input.focus(); return; }
+  btn.disabled = true;
+  btn.textContent = 'Guardando…';
+  try {
+    const cambios = {
+      texto: nuevo,
+      editado_en: new Date().toISOString(),
+      editado_por_nombre: usuarioActual.nombre,
+      editado_por_email: usuarioActual.email
+    };
+    const { error } = await sb.from('hc_observaciones').update(cambios).eq('id', obsId);
+    if (error) throw error;
+    const idx = obsActual.findIndex(x => x.id === obsId);
+    if (idx >= 0) Object.assign(obsActual[idx], cambios);
+    if (tipo === 'nota') pintarNotas(currentHCId, obsActual[idx]?.persona_id);
+    else pintarObservaciones(currentHCId, obsActual[idx]?.persona_id);
+    showToast('✓ Cambios guardados');
+  } catch (e) {
+    alert('Error al guardar los cambios: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Guardar cambios';
+  }
+}
+
+async function eliminarCaja(obsId) {
+  if (!puedeEliminar()) return;
+  const o = obsActual.find(x => x.id === obsId);
+  if (!o) return;
+  const tipoTxt = o.tipo === 'nota' ? 'esta nota' : 'esta observación';
+  if (!confirm(`¿Seguro que querés eliminar ${tipoTxt}?\n\nEsta acción no se puede deshacer.`)) return;
+  try {
+    const { error } = await sb.from('hc_observaciones').delete().eq('id', obsId);
+    if (error) throw error;
+    obsActual = obsActual.filter(x => x.id !== obsId);
+    if (o.tipo === 'nota') pintarNotas(currentHCId, o.persona_id);
+    else pintarObservaciones(currentHCId, o.persona_id);
+    showToast('✓ Eliminada');
+  } catch (e) {
+    alert('Error al eliminar: ' + e.message);
+  }
 }
 
 function pintarObservaciones(historiaId, personaId) {
