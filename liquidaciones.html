@@ -696,8 +696,44 @@ function exportarPDF(){
   doc.save(`Liquidacion_${mes}.pdf`);
 }
 
-// Cargar al inicio
-cargar();
+// === RESTRICCIÓN "SOLO LO MÍO" en liquidaciones ===
+// Si el usuario logueado tiene solo_lo_mio=TRUE, fija el filtro de profesional
+// a su propio nombre y bloquea el dropdown para que no pueda ver a otros.
+// A prueba de fallos: ante cualquier error, no restringe nada (ve todo, como hoy).
+const EMAIL_A_NOMBRE_LIQ = {
+  'brunitovelez99@gmail.com':    'Bruno',
+  'loz.magdalena@gmail.com':     'Male',
+  'veronicasandler@hotmail.com': 'Vero'
+};
+async function restringirSiSoloLoMio(){
+  try {
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user || !user.email) return;
+    const email = user.email.toLowerCase().trim();
+    const { data: persona } = await sb.from('personas')
+      .select('id').ilike('email', email).maybeSingle();
+    if (!persona) return;
+    const { data: perm } = await sb.from('permisos_equipo')
+      .select('solo_lo_mio').eq('persona_id', persona.id).maybeSingle();
+    if (perm && perm.solo_lo_mio === true) {
+      const nombre = EMAIL_A_NOMBRE_LIQ[email] || null;
+      if (nombre) {
+        const sel = document.getElementById('filtroProf');
+        sel.value = nombre;        // fija a su nombre
+        sel.disabled = true;        // no puede cambiarlo
+        // Por las dudas: dejar solo su opción visible
+        Array.from(sel.options).forEach(o => {
+          if (o.value && o.value !== nombre) o.style.display = 'none';
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('No se pudo restringir liquidación (se muestra todo):', e.message);
+  }
+}
+
+// Cargar al inicio (primero restringe si corresponde, después calcula)
+restringirSiSoloLoMio().finally(() => cargar());
 </script>
 </body>
 </html>

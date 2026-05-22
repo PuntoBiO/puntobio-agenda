@@ -564,6 +564,40 @@ let pagos = []
 let pacientesMap = {}
 let tratamientosMap = {} // id → practica_codigo
 
+// === FILTRO "SOLO LO MÍO" (solo se activa si el usuario tiene solo_lo_mio=TRUE) ===
+const EMAIL_A_NOMBRE = {
+  'brunitovelez99@gmail.com':    'Bruno',
+  'loz.magdalena@gmail.com':     'Male',
+  'veronicasandler@hotmail.com': 'Vero'
+}
+let miFiltro = null
+
+async function detectarFiltroPropio() {
+  try {
+    const { data: { user } } = await sb.auth.getUser()
+    if (!user || !user.email) return
+    const email = user.email.toLowerCase().trim()
+    const { data: persona } = await sb.from('personas')
+      .select('id').ilike('email', email).maybeSingle()
+    if (!persona) return
+    const { data: perm } = await sb.from('permisos_equipo')
+      .select('solo_lo_mio').eq('persona_id', persona.id).maybeSingle()
+    if (perm && perm.solo_lo_mio === true) {
+      const nombre = EMAIL_A_NOMBRE[email] || null
+      if (nombre) miFiltro = { nombre }
+    }
+  } catch (e) {
+    console.warn('No se pudo determinar filtro propio (se muestra todo):', e.message)
+    miFiltro = null
+  }
+}
+
+function aplicarFiltroPropio(lista) {
+  if (!miFiltro) return lista
+  const n = miFiltro.nombre
+  return lista.filter(p => p.profesional === n || p.quien_cobro === n)
+}
+
 const fmt = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR')
 
 // ======================
@@ -689,6 +723,9 @@ window.cargarDatos = async function() {
     } else {
       pagos = []
     }
+
+    // Filtro "solo lo mío" (solo afecta a quien tiene solo_lo_mio=TRUE; admins ven todo)
+    pagos = aplicarFiltroPropio(pagos)
 
     // Cargar pacientes en lote (solo los que aparecen en los pagos filtrados)
     const personaIds = [...new Set(pagos.map(p => p.persona_id).filter(Boolean))]
@@ -947,7 +984,7 @@ function renderTabla() {
 }
 
 // ARRANCAR
-init()
+detectarFiltroPropio().finally(() => init())
 </script>
 
 </body>
