@@ -146,12 +146,8 @@
     </div>
 
     <div class="field">
-      <label>Fecha del pago</label>
+      <label>Fecha de pago <span style="color:#94a3b8;font-weight:400;text-transform:none;">(cuándo te pagaron, una sola para todo)</span></label>
       <input type="date" id="inFecha">
-    </div>
-    <div class="field">
-      <label>Mes al que corresponde (período)</label>
-      <select id="inMes"></select>
     </div>
     <div class="field">
       <label>N° de factura <span style="color:#94a3b8;font-weight:400;text-transform:none;">(opcional, se puede completar después)</span></label>
@@ -192,8 +188,9 @@ let usuarioActual = null; // {id, nombre, email}
 let misPagos = [];
 let esAdmin = false; // si NO tiene solo_lo_mio → ve todos los pagos
 let todosPagos = [];
-let renglones = []; // [{os, concepto, monto}]
+let renglones = []; // [{os, mes, concepto, monto}]
 let renglonSeq = 0;
+let MESES_OPC = []; // lista de períodos para los renglones
 
 const fmt = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
 
@@ -211,17 +208,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Fecha de hoy por defecto
   document.getElementById('inFecha').value = new Date().toISOString().split('T')[0];
 
-  // Llenar el desplegable de "mes al que corresponde" (últimos 12 meses, el actual primero)
-  const selMes = document.getElementById('inMes');
+  // Generar la lista de meses/períodos (últimos 13 meses) para usar en cada renglón
   const MESES_NOM = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
   const hoy = new Date();
+  MESES_OPC = [];
   for (let i = 0; i < 13; i++) {
     const d = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
     const val = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
     const txt = `${MESES_NOM[d.getMonth()]} de ${d.getFullYear()}`;
-    const o = document.createElement('option');
-    o.value = val; o.textContent = txt;
-    selMes.appendChild(o);
+    MESES_OPC.push({ val, txt });
   }
 
   // Arrancar con un renglón vacío
@@ -235,6 +230,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnGuardar').onclick = guardarPago;
 });
 
+// Opciones del desplegable de mes/período para cada renglón
+function opcionesMes(seleccion) {
+  let html = '<option value="">Período…</option>';
+  MESES_OPC.forEach(m => {
+    html += `<option value="${m.val}"${seleccion===m.val?' selected':''}>${m.txt}</option>`;
+  });
+  return html;
+}
+
 // Opciones del select de OS (Otros primero, después las reales)
 function opcionesOS(seleccion) {
   let html = '<option value="">Elegí una obra social…</option>';
@@ -247,7 +251,7 @@ function opcionesOS(seleccion) {
 
 function agregarRenglon() {
   const id = ++renglonSeq;
-  renglones.push({ id, os: '', concepto: '', monto: 0 });
+  renglones.push({ id, os: '', mes: '', concepto: '', monto: 0 });
   renderRenglones();
 }
 
@@ -282,7 +286,16 @@ function renderRenglones() {
       <select onchange="cambiarRenglon(${r.id},'os',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
         ${opcionesOS(r.os)}
       </select>
-      <input type="text" placeholder="Concepto (opcional, ej: FACTURA)" value="${r.concepto || ''}" onchange="cambiarRenglon(${r.id},'concepto',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
+      <select onchange="cambiarRenglon(${r.id},'mes',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;">
+        ${opcionesMes(r.mes)}
+      </select>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <select onchange="cambiarRenglon(${r.id},'concepto',this.value)" style="flex:0 0 auto;padding:8px;border:1px solid var(--border);border-radius:6px;">
+          <option value="">N°…</option>
+          ${Array.from({length:50},(_,i)=>i+1).map(n => `<option value="${n}"${String(r.concepto)===String(n)?' selected':''}>${n}</option>`).join('')}
+        </select>
+        <span style="font-size:13px;color:var(--text-dim);">sesiones</span>
+      </div>
       <input type="number" placeholder="Monto (crédito)" value="${r.monto || ''}" min="0" step="0.01" onchange="cambiarRenglon(${r.id},'monto',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;">
       ${r.os && r.os !== 'Otros' ? `<div style="font-size:12px;color:#94a3b8;margin-top:6px;">Descuento ${pct}% = <span style="color:#dc2626;">- ${fmt(debito)}</span> · Neto: <strong style="color:#16a34a;">${fmt(neto)}</strong></div>` : ''}
     </div>`;
@@ -344,10 +357,9 @@ function bloquearSinLogin(msg) {
 async function guardarPago() {
   if (!usuarioActual) { alert('Iniciá sesión para cargar pagos.'); return; }
   const fecha = document.getElementById('inFecha').value;
-  const mesCorr = document.getElementById('inMes').value;
   const factura = document.getElementById('inFactura').value.trim();
 
-  if (!fecha) { alert('Elegí la fecha del pago.'); return; }
+  if (!fecha) { alert('Elegí la fecha de pago.'); return; }
   // Validar renglones: al menos uno con OS y monto
   const validos = renglones.filter(r => r.os && r.monto > 0);
   if (validos.length === 0) { alert('Cargá al menos una obra social con su monto.'); return; }
@@ -361,7 +373,7 @@ async function guardarPago() {
   btn.disabled = true;
   btn.textContent = 'Guardando…';
   try {
-    // Una fila por cada obra social del pago
+    // Una fila por cada obra social del pago (cada una con su propio período)
     const filas = validos.map(r => {
       const pct = descuentoPorOS(r.os);
       const debito = Math.round((r.monto * pct / 100) * 100) / 100;
@@ -369,9 +381,10 @@ async function guardarPago() {
         obra_social: r.os,
         monto: r.monto,
         fecha: fecha,
-        mes_correspondiente: mesCorr,
+        mes_correspondiente: r.mes || null,
         nro_factura: factura || null,
-        concepto: r.concepto || null,
+        nro_sesiones: r.concepto ? parseInt(r.concepto, 10) : null,
+        concepto: r.concepto ? (r.concepto + ' sesiones') : null,
         creditos: r.monto,
         debitos: debito || null,
         profesional_id: usuarioActual.id,
