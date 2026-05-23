@@ -462,11 +462,25 @@
         <div class="field">
           <label for="tipoCobro">Tipo de cobro</label>
           <select id="tipoCobro">
-            <option value="NORMAL">Normal (aplica tarifario)</option>
-            <option value="SOLO_COSEGURO">Solo coseguro (100% centro)</option>
-            <option value="CORTESIA">Cortesía (sin split, monto 0)</option>
-            <option value="MANUAL">Manual (no aplicar splits)</option>
+            <option value="NORMAL" selected>Normal (aplica tarifario)</option>
+            <option value="LIBRE">Libre (poné cuánto cobra cada uno)</option>
           </select>
+        </div>
+
+        <div class="field" id="libreBox" style="display:none; grid-column: 1 / -1;">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+            <div>
+              <label for="libreProf">Cobra Profesional ($)</label>
+              <input id="libreProf" type="number" step="0.01" min="0" placeholder="0.00">
+            </div>
+            <div>
+              <label for="libreCentro">Cobra Centro ($)</label>
+              <input id="libreCentro" type="number" step="0.01" min="0" placeholder="0.00">
+            </div>
+          </div>
+          <div style="font-size:12px; color:var(--text-dim, #64748b); margin-top:6px;">
+            💡 El importe total se calcula solo (Profesional + Centro).
+          </div>
         </div>
 
         <div class="field full">
@@ -662,6 +676,8 @@
     $('importe').addEventListener('input', onImporteChange);
     $('profesional').addEventListener('change', actualizarPreview);
     $('tipoCobro').addEventListener('change', actualizarPreview);
+    if ($('libreProf')) $('libreProf').addEventListener('input', actualizarPreview);
+    if ($('libreCentro')) $('libreCentro').addEventListener('input', actualizarPreview);
     $('btnCobrar').addEventListener('click', cobrar);
 
     document.querySelectorAll('.importeRapido button').forEach(b => {
@@ -990,15 +1006,27 @@
     // Si cambió profesional, recargar split
     await cargarSplit();
 
-    const importe = Number($('importe').value) || 0;
     const tipo = $('tipoCobro').value;
     const saldo = Number(t.saldo_pendiente || 0);
     const preview = $('preview');
     const btn = $('btnCobrar');
 
-    let montoCentro = 0, montoProfesional = 0, montoMoplex = 0;
+    // Mostrar/ocultar caja de montos libres y bloquear el importe (se calcula solo en LIBRE)
+    const esLibre = (tipo === 'LIBRE');
+    if ($('libreBox')) $('libreBox').style.display = esLibre ? 'block' : 'none';
+    $('importe').readOnly = esLibre;
 
-    if (importe > 0 && state.splitCache) {
+    let montoCentro = 0, montoProfesional = 0, montoMoplex = 0;
+    let importe = Number($('importe').value) || 0;
+
+    if (esLibre) {
+      // Montos cargados a mano por la admin
+      montoProfesional = Number($('libreProf').value) || 0;
+      montoCentro = Number($('libreCentro').value) || 0;
+      montoMoplex = 0;
+      importe = montoProfesional + montoCentro;
+      $('importe').value = importe ? importe : '';
+    } else if (importe > 0 && state.splitCache) {
       const pc = Number(state.splitCache.pct_centro || 0);
       const pm = Number(state.splitCache.pct_moplex || 0);
       const factorCentro = pc > 1 ? pc / 100 : pc;
@@ -1008,14 +1036,6 @@
         montoCentro = importe * factorCentro;
         montoMoplex = importe * factorMoplex;
         montoProfesional = importe - montoCentro - montoMoplex;
-      } else if (tipo === 'SOLO_COSEGURO') {
-        montoCentro = importe;
-        montoProfesional = 0;
-        montoMoplex = 0;
-      } else if (tipo === 'CORTESIA') {
-        montoCentro = 0; montoProfesional = 0; montoMoplex = 0;
-      } else if (tipo === 'MANUAL') {
-        montoCentro = 0; montoProfesional = 0; montoMoplex = 0;
       }
     }
 
@@ -1027,14 +1047,14 @@
     let valido = true;
     let motivoBloqueo = '';
 
-    if (importe <= 0 && tipo !== 'CORTESIA') {
+    if (importe <= 0) {
       valido = false;
-      motivoBloqueo = 'Ingresá un importe mayor a 0';
-    } else if (tipo !== 'CORTESIA' && importe > saldo && saldo > 0) {
+      motivoBloqueo = esLibre ? 'Cargá cuánto cobra profesional y/o centro' : 'Ingresá un importe mayor a 0';
+    } else if (importe > saldo && saldo > 0) {
       valido = false;
       const exceso = importe - saldo;
       motivoBloqueo = `Excede el saldo en ${fmt(exceso)} — no se permite cobrar de más`;
-    } else if (saldo <= 0 && tipo !== 'CORTESIA') {
+    } else if (saldo <= 0) {
       valido = false;
       motivoBloqueo = 'Este tratamiento ya está saldado';
     }
@@ -1053,22 +1073,33 @@
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Guardando...';
 
-    const importe = Number($('importe').value) || 0;
     const tipoCobro = $('tipoCobro').value;
+    const esLibre = (tipoCobro === 'LIBRE');
+
+    // Montos según el tipo
+    let importe, libreProf = 0, libreCentro = 0;
+    if (esLibre) {
+      libreProf = Number($('libreProf').value) || 0;
+      libreCentro = Number($('libreCentro').value) || 0;
+      importe = libreProf + libreCentro;
+    } else {
+      importe = Number($('importe').value) || 0;
+    }
 
     // Validación final
     const saldo = Number(t.saldo_pendiente || 0);
-    if (tipoCobro !== 'CORTESIA') {
-      if (importe <= 0) { toast('Importe inválido', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
-      if (importe > saldo) { toast('No podés cobrar de más', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
+    if (importe <= 0) {
+      toast(esLibre ? 'Cargá cuánto cobra profesional y/o centro' : 'Importe inválido', 'err');
+      btn.disabled = false; btn.textContent = 'Registrar cobro'; return;
     }
+    if (importe > saldo && saldo > 0) { toast('No podés cobrar de más', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
     if (!$('quienCobro').value) { toast('Elegí quién cobró', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
 
     const payload = {
       fecha: $('fecha').value || hoy(),
       tratamiento_id: t.id,
       persona_id: state.pacienteSel.id,
-      importe: tipoCobro === 'CORTESIA' ? 0 : importe,
+      importe: importe,
       medio_pago: $('medio').value,
       quien_cobro: $('quienCobro').value,
       profesional: $('profesional').value,
@@ -1076,9 +1107,15 @@
       observaciones: $('obs').value || null,
       cargado_por: $('cargadoPor').value,
     };
+    // En LIBRE mandamos los montos a mano (que NO los recalcule el tarifario)
+    if (esLibre) {
+      payload.monto_profesional = libreProf;
+      payload.monto_centro = libreCentro;
+      payload.monto_moplex = 0;
+    }
 
     // Si tu schema NO tiene tipo_cobro / cargado_por, eliminá esas claves del payload.
-    // Los triggers de Supabase recalculan monto_centro/profesional/moplex automáticamente.
+    // Los triggers de Supabase recalculan monto_centro/profesional/moplex automáticamente (salvo LIBRE).
 
     try {
       const { data, error } = await sb
