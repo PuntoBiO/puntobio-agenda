@@ -795,6 +795,11 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
   }
 }
 
+// Estados de tratamiento que se consideran ACTIVOS / EN CURSO.
+// Solo estos aparecen en el dropdown de turno y permiten cargar sesiones.
+// (SALDADO, null, vacío, NoAplica = cerrados o dudosos, NO aparecen)
+const ESTADOS_ACTIVOS = ['ACTIVO', 'PARCIAL', 'PENDIENTE', 'EN CURSO', 'ENCURSO'];
+
 async function loadTratamientosPersona(personaId, practicaCodigo) {
   // FIX BUG: el módulo tratamientos.html guarda con códigos cortos (OSTEO, PUNC_SECA, DRENAJE, etc.)
   // mientras que la agenda usa códigos largos (OSTEOPATIA, PUNCION_SECA, DLM, etc.)
@@ -811,10 +816,10 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
     .in('practica_codigo', codigosBusqueda)
     .order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
-  // Aceptar todos los ttos "vivos" (ACTIVO, Pendiente, En curso, etc.)
-  // Solo excluir los terminados explícitamente.
-  const ESTADOS_EXCLUIDOS = ['FINALIZADO', 'CANCELADO', 'BAJA', 'COMPLETADO'];
-  return (data||[]).filter(t => !t.estado || !ESTADOS_EXCLUIDOS.includes((t.estado||'').toUpperCase()));
+  // Solo mostrar tratamientos ACTIVOS / EN CURSO en el dropdown.
+  // SALDADO, null, vacío, NoAplica y cualquier otro estado quedan fuera
+  // para no confundir y para no poder cargar turnos a ttos cerrados.
+  return (data||[]).filter(t => ESTADOS_ACTIVOS.includes((t.estado||'').toUpperCase()));
 }
 
 function renderGrid() {
@@ -1493,8 +1498,43 @@ async function onGuardarTurno() {
       mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones del tratamiento. Probá de nuevo.', 'error');
       return;
     }
+    // CANDADO ESTADO: no permitir cargar turnos a tratamientos cerrados/dudosos.
+    // Solo activos en curso (ACTIVO, PARCIAL, Pendiente, En curso).
+    if (ttoTope && !ESTADOS_ACTIVOS.includes((ttoTope.estado||'').toUpperCase())) {
+      const codTxt = ttoTope.codigo_id ? ttoTope.codigo_id : '#' + datosForm.tratamiento_id;
+      mostrarAlerta('nuevoAlert',
+        `🚫 El tratamiento ${codTxt} no está activo (estado: ${ttoTope.estado || 'sin estado'}).\n\n` +
+        `Solo se pueden cargar turnos a tratamientos en curso. ` +
+        `Si necesitás reabrirlo, cambiá su estado desde el módulo Tratamientos.`,
+        'error');
+      return;
+    }
     if (ttoTope && ttoTope.total_sesiones) {
-      const yaUsadas = contarSesionesConsumidas(datosForm.tratamiento_id);
+      // CONTEO REAL: consultamos a Supabase TODOS los turnos del tratamiento
+      // (no solo los de la semana visible en pantalla, que era el bug).
+      // Cuentan PENDIENTE + PRESENTE. No cuentan AUSENTE/CANCELADO/SOBRETURNO.
+      const { data: turnosTto, error: errCount } = await supa
+        .from('turnos_consultorio')
+        .select('id, estado')
+        .eq('tratamiento_id', datosForm.tratamiento_id)
+        .in('estado', ['PENDIENTE', 'PRESENTE']);
+      if (errCount) {
+        mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones. Probá de nuevo.', 'error');
+        return;
+      }
+      let yaUsadas = (turnosTto || []).length;
+      // Sumar sesiones históricas migradas (tabla `sesiones`) que NO estén ya
+      // representadas por un turno (para no doble contar).
+      const idsTurnoUsados = new Set((turnosTto || []).map(x => x.id));
+      const { data: sesHist } = await supa
+        .from('sesiones')
+        .select('numero_sesion, turno_id')
+        .eq('tratamiento_id', datosForm.tratamiento_id);
+      if (sesHist && sesHist.length) {
+        const historicasSinTurno = sesHist.filter(s => !s.turno_id || !idsTurnoUsados.has(s.turno_id)).length;
+        // Usamos el mayor entre el conteo de turnos y las históricas para no perder ninguna
+        yaUsadas = Math.max(yaUsadas, yaUsadas + historicasSinTurno);
+      }
       const aCrear = slotsForm.length;
       const cupoLibre = ttoTope.total_sesiones - yaUsadas;
       if (cupoLibre <= 0) {
