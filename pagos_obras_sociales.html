@@ -251,8 +251,40 @@ function opcionesOS(seleccion) {
 
 function agregarRenglon() {
   const id = ++renglonSeq;
-  renglones.push({ id, os: '', mes: '', concepto: '', monto: 0 });
+  renglones.push({ id, os: '', mes: '', concepto: '', monto: 0, extras: [] });
   renderRenglones();
+}
+
+// Descuentos extras dentro de un renglón
+window.agregarExtra = function(renglonId) {
+  const r = renglones.find(x => x.id === renglonId);
+  if (!r) return;
+  if (!r.extras) r.extras = [];
+  r.extras.push({ eid: ++renglonSeq, monto: 0, detalle: '' });
+  renderRenglones();
+};
+
+window.quitarExtra = function(renglonId, eid) {
+  const r = renglones.find(x => x.id === renglonId);
+  if (!r || !r.extras) return;
+  r.extras = r.extras.filter(e => e.eid !== eid);
+  renderRenglones();
+};
+
+window.cambiarExtra = function(renglonId, eid, campo, valor) {
+  const r = renglones.find(x => x.id === renglonId);
+  if (!r || !r.extras) return;
+  const e = r.extras.find(x => x.eid === eid);
+  if (!e) return;
+  if (campo === 'monto') e.monto = parseFloat(valor) || 0;
+  else e.detalle = valor;
+  renderResumen();
+};
+
+// Suma de los descuentos extras de un renglón (vacío = 0)
+function totalExtras(r) {
+  if (!r.extras || !r.extras.length) return 0;
+  return r.extras.reduce((s, e) => s + (parseFloat(e.monto) || 0), 0);
 }
 
 window.quitarRenglon = function(id) {
@@ -275,8 +307,15 @@ function renderRenglones() {
   const zona = document.getElementById('renglones');
   zona.innerHTML = renglones.map(r => {
     const pct = descuentoPorOS(r.os);
-    const debito = (r.monto || 0) * pct / 100;
-    const neto = (r.monto || 0) - debito;
+    const debitoAuto = (r.monto || 0) * pct / 100;
+    const extras = totalExtras(r);
+    const neto = (r.monto || 0) - debitoAuto - extras;
+    const extrasHtml = (r.extras || []).map(e => `
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+        <input type="number" placeholder="Monto $" value="${e.monto || ''}" min="0" step="0.01" onchange="cambiarExtra(${r.id},${e.eid},'monto',this.value)" style="flex:0 0 110px;padding:6px;border:1px solid var(--border);border-radius:6px;">
+        <input type="text" placeholder="¿Qué descuento es? (ej: Col. Prof.)" value="${e.detalle || ''}" onchange="cambiarExtra(${r.id},${e.eid},'detalle',this.value)" style="flex:1;padding:6px;border:1px solid var(--border);border-radius:6px;">
+        <button type="button" onclick="quitarExtra(${r.id},${e.eid})" style="flex:0 0 auto;background:#fee2e2;color:#dc2626;border:1px solid #dc2626;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;">✕</button>
+      </div>`).join('');
     return `
     <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;background:#fff;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -297,7 +336,13 @@ function renderRenglones() {
         <span style="font-size:13px;color:var(--text-dim);">sesiones</span>
       </div>
       <input type="number" placeholder="Monto (crédito)" value="${r.monto || ''}" min="0" step="0.01" onchange="cambiarRenglon(${r.id},'monto',this.value)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;">
-      ${r.os && r.os !== 'Otros' ? `<div style="font-size:12px;color:#94a3b8;margin-top:6px;">Descuento ${pct}% = <span style="color:#dc2626;">- ${fmt(debito)}</span> · Neto: <strong style="color:#16a34a;">${fmt(neto)}</strong></div>` : ''}
+      ${r.os && r.os !== 'Otros' ? `<div style="font-size:12px;color:#94a3b8;margin-top:6px;">Descuento automático ${pct}% = <span style="color:#dc2626;">- ${fmt(debitoAuto)}</span></div>` : ''}
+      <div style="border-top:1px dashed var(--border);margin-top:10px;padding-top:8px;">
+        <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;margin-bottom:6px;">Descuentos extras (opcional)</div>
+        ${extrasHtml}
+        <button type="button" onclick="agregarExtra(${r.id})" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;">➕ Agregar descuento extra</button>
+      </div>
+      <div style="font-size:13px;margin-top:10px;text-align:right;">Neto de esta obra social: <strong style="color:#16a34a;">${fmt(neto)}</strong></div>
     </div>`;
   }).join('');
   renderResumen();
@@ -309,6 +354,7 @@ function renderResumen() {
     const pct = descuentoPorOS(r.os);
     creditos += (r.monto || 0);
     debitos += (r.monto || 0) * pct / 100;
+    debitos += totalExtras(r);
   });
   document.getElementById('sumCreditos').textContent = fmt(creditos);
   document.getElementById('sumDebitos').textContent = '- ' + fmt(debitos);
@@ -376,7 +422,17 @@ async function guardarPago() {
     // Una fila por cada obra social del pago (cada una con su propio período)
     const filas = validos.map(r => {
       const pct = descuentoPorOS(r.os);
-      const debito = Math.round((r.monto * pct / 100) * 100) / 100;
+      const debitoAuto = r.monto * pct / 100;
+      const extras = totalExtras(r);
+      const debito = Math.round((debitoAuto + extras) * 100) / 100;
+      // Armar el concepto: sesiones + detalle de los descuentos extras
+      const partes = [];
+      if (r.concepto) partes.push(r.concepto + ' sesiones');
+      (r.extras || []).forEach(e => {
+        if ((parseFloat(e.monto) || 0) > 0) {
+          partes.push(`desc ${fmt(e.monto)}${e.detalle ? ' ('+e.detalle+')' : ''}`);
+        }
+      });
       return {
         obra_social: r.os,
         monto: r.monto,
@@ -384,7 +440,7 @@ async function guardarPago() {
         mes_correspondiente: r.mes || null,
         nro_factura: factura || null,
         nro_sesiones: r.concepto ? parseInt(r.concepto, 10) : null,
-        concepto: r.concepto ? (r.concepto + ' sesiones') : null,
+        concepto: partes.length ? partes.join(' · ') : null,
         creditos: r.monto,
         debitos: debito || null,
         profesional_id: usuarioActual.id,
