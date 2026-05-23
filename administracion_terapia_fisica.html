@@ -1514,8 +1514,9 @@ window.confirmarCambioPlan = async () => {
     if (cpTurnosSel.size > 0) msg += ` · ${cpTurnosSel.size} clase(s) agregada(s)`;
     toast(msg);
 
-    // Ofrecer enviar el aviso por WhatsApp con plan/monto/día nuevo
-    enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene);
+    // Ofrecer enviar el aviso por WhatsApp con plan/monto/turnos nuevos
+    const proporcionalCobrado = (!sinCobro && importe > 0) ? importe : 0;
+    enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene, proporcionalCobrado, i.dia_vencimiento);
 
     cerrarModal('modalCambioPlan');
     cerrarModal('modalEditar');
@@ -1528,26 +1529,40 @@ window.confirmarCambioPlan = async () => {
   }
 };
 
-// Arma y ofrece el aviso por WhatsApp con plan nuevo + monto nuevo + día/horario nuevo
-function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene) {
+// Arma y ofrece el aviso por WhatsApp del cambio de plan (formato completo, estilo inscripción)
+function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene, proporcional, diaVenc) {
   try {
-    const montoNuevo = tarifario[planNuevo] ? (tarifario[planNuevo].valor_lista || 0) : 0;
-    // Días/horarios nuevos elegidos (de las clases extra seleccionadas)
+    // Turnos NUEVOS elegidos en el cambio (los que ya tenía se conservan, no se listan)
     const elegidos = cpTurnosCache.filter(t => cpTurnosSel.has(t.id || t.turno_id));
-    let lineaDias = '';
+    let bloqueTurnos = '';
     if (elegidos.length) {
-      const txt = elegidos.map(t => `${t.dia} ${t.hora}hs`).join(', ');
-      lineaDias = `\n📅 Días/horarios: ${txt}`;
+      const lineas = elegidos.map(t => {
+        const act = normServicio(t.servicio);
+        return `> ${t.dia} ${t.hora}${act ? ' (' + act + ')' : ''}`;
+      }).join('\n');
+      bloqueTurnos = `\nTurnos fijos nuevos:\n${lineas}\n`;
     }
-    const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
-    const msg =
-      `¡Hola ${(p.nombre || '').split(' ')[0]}! 👋\n\n` +
-      `Te confirmamos el cambio de plan en PuntoBiO:\n\n` +
-      `🔄 Plan nuevo: ${planNuevo}\n` +
-      `💲 Cuota nueva: ${fmt$(montoNuevo)} (desde ${nombreMes(mesQueViene)})` +
-      lineaDias +
-      `\n\n¡Cualquier duda avisanos! 💪`;
 
+    // Línea del proporcional (solo si se cobró algo)
+    const lineaProporcional = (proporcional && proporcional > 0)
+      ? `\nProporcional a abonar: ${fmt$(proporcional)} (por lo que resta del mes)`
+      : '';
+
+    // Línea de vencimiento
+    const lineaVenc = diaVenc ? `\nVencimiento: día ${diaVenc} de cada mes` : '';
+
+    const nombre = (p.nombre || '').trim();
+    const msg =
+      `¡Hola ${nombre}! Te confirmamos tu cambio de plan en PuntoBiO:\n\n` +
+      `Plan nuevo: ${planNuevo}\n` +
+      bloqueTurnos +
+      `¡Ya podés disfrutar de tus clases nuevas desde este mes! 💪` +
+      lineaProporcional +
+      `\nEl cambio de plan se verá reflejado el próximo mes.` +
+      lineaVenc +
+      `\n\nPuntoBiO - ¡Te esperamos!`;
+
+    const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
     if (!tel) {
       toast('Cambio guardado. Ojo: el alumno no tiene celular cargado para avisarle por WhatsApp.', true);
       return;
@@ -1555,7 +1570,7 @@ function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene) {
     const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
     const waUrl = `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
     // Preguntar antes de abrir WhatsApp (no abrir sin avisar)
-    if (confirm('Cambio guardado ✓\n\n¿Querés enviarle el aviso por WhatsApp al alumno con el plan, el monto y el día nuevo?')) {
+    if (confirm('Cambio guardado ✓\n\n¿Querés enviarle el aviso por WhatsApp al alumno con el plan, los turnos y el proporcional?')) {
       window.open(waUrl, '_blank');
     }
   } catch (e) {
