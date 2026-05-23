@@ -76,8 +76,9 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .turno.p-masajes .practica{color:var(--c-masajes)}
 .turno.p-terap_manual{border-color:var(--c-tm);background:var(--c-tm-bg)}
 .turno.p-terap_manual .practica{color:var(--c-tm)}
-.turno.is-sobreturno{outline:1px dashed var(--c-sobre);outline-offset:-3px}
-.turno.is-sobreturno::after{content:"ST";position:absolute;top:2px;right:4px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:var(--c-sobre);letter-spacing:.05em}
+.turno.is-sobreturno{border-color:var(--c-sobre)!important;background:var(--c-sobre-bg)!important;outline:1px dashed var(--c-sobre);outline-offset:-3px}
+.turno.is-sobreturno .practica{color:var(--c-sobre)!important}
+.turno.is-sobreturno::after{content:"REHAB";position:absolute;top:2px;right:4px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:var(--c-sobre);letter-spacing:.05em}
 .turno.e-presente .turno-paciente::before{content:"✓ ";color:var(--s-presente);font-weight:700}
 .turno.e-ausente .turno-paciente{text-decoration:line-through;opacity:.6}
 .loading-state,.empty-state,.error-state{padding:40px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);letter-spacing:.04em}
@@ -257,6 +258,14 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
       <div class="form-row">
         <label class="form-label">Práctica común</label>
         <select class="form-select" id="fNT_practica" disabled><option value="">— Asigná profesionales primero —</option></select>
+      </div>
+
+      <div class="form-row" id="fNT_tipoFisioWrap" style="display:none">
+        <label class="form-label">Tipo de Fisio</label>
+        <select class="form-select" id="fNT_tipo_fisio">
+          <option value="CONSULTORIO">Fisio Consultorio</option>
+          <option value="REHAB">Rehabilitación Física (amarillo)</option>
+        </select>
       </div>
 
       <div class="form-row paciente-search-wrap">
@@ -914,17 +923,41 @@ function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
   return { faltantes, totalEsperado: totalSesiones, cumplidas, futurasValidas };
 }
 
+// === TOPE DE SESIONES ===
+// Cuenta cuántas sesiones YA CONSUMEN un tratamiento (las que cuentan contra el tope).
+// Regla: PENDIENTE + PRESENTE cuentan. AUSENTE, CANCELADO y SOBRETURNO NO cuentan.
+// Incluye sesiones históricas cumplidas (migradas del Excel) sin doble contar.
+function contarSesionesConsumidas(tratamientoId) {
+  if (!tratamientoId) return 0;
+  const sesiones = sesionesPorTto.get(tratamientoId) || [];
+  // Sesiones históricas cumplidas (vienen de la tabla `sesiones`, ej. migración Excel)
+  const cumplidasHist = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
+  const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
+  const todos = turnosPorTto.get(tratamientoId) || [];
+  // Turnos que consumen sesión y NO están ya contados en `sesiones`
+  const consumenTurno = todos.filter(x =>
+    (x.estado === 'PENDIENTE' || x.estado === 'PRESENTE') &&
+    !turnIdsConSesion.has(x.id)
+  ).length;
+  return cumplidasHist + consumenTurno;
+}
+
 function renderTurno(t) {
   const pCls = claseColorPractica(t.practica_codigo);
   const eCls = `e-${(t.estado||'').toLowerCase()}`;
-  const sCls = t.estado==='SOBRETURNO' ? 'is-sobreturno' : '';
+  // Es Rehab si: es sobreturno (3er cupo) O se marcó manualmente con [REHAB] en observaciones
+  const esRehabManual = (t.observaciones || '').includes('[REHAB]');
+  const esRehab = t.estado==='SOBRETURNO' || esRehabManual;
+  const sCls = esRehab ? 'is-sobreturno' : '';
   const horaTxt = t.hora_inicio.slice(0,5);
   const persona = personas.find(p => p.id===t.persona_id);
   const nombre = persona ? persona.nombre : `#${t.persona_id}`;
   const nroSesion = calcularNumeroSesion(t);
   const sesTxt = nroSesion ? ` · S${nroSesion}` : '';
   const titleSes = nroSesion ? ` · Sesión ${nroSesion}` : '';
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${t.practica_codigo}${titleSes} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${t.practica_codigo}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+  // Rehab (sobreturno o manual) de FISIO/FISIO_PQ se muestra como "REHAB FIS"
+  const etiqueta = esRehab ? 'REHAB FIS' : t.practica_codigo;
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
 }
 
 function renderMonth(container) {
@@ -1153,10 +1186,20 @@ function resetForm() {
   document.getElementById('ct_modalidad').value = 'PARTICULAR';
   document.getElementById('ct_obra_social').value = '';
   document.getElementById('ctAlert').innerHTML = '';
+  const tfWrap = document.getElementById('fNT_tipoFisioWrap');
+  if (tfWrap) { tfWrap.style.display = 'none'; document.getElementById('fNT_tipo_fisio').value = 'CONSULTORIO'; }
   tratamientosPersona = [];
 }
 
 async function onPracticaChange() {
+  // El selector Consultorio/Rehab solo aplica a FISIO y FISIO_PQ
+  const prac = document.getElementById('fNT_practica').value;
+  const esFisio = (prac === 'FISIO' || prac === 'FISIO_PQ');
+  const wrap = document.getElementById('fNT_tipoFisioWrap');
+  if (wrap) {
+    wrap.style.display = esFisio ? '' : 'none';
+    if (!esFisio) document.getElementById('fNT_tipo_fisio').value = 'CONSULTORIO';
+  }
   await refrescarTratamientos(document.getElementById('fNT_persona_id').value, document.getElementById('fNT_practica').value);
 }
 
@@ -1420,12 +1463,62 @@ async function onGuardarTurno() {
   if (slotsForm.some(s => !s.profesional)) errs.push('Falta asignar profesional en algún slot.');
   if (errs.length) { mostrarAlerta('nuevoAlert', errs.join('\n'), 'error'); return; }
 
+  // Si es FISIO/FISIO_PQ y se eligió Rehab, marcamos el turno con [REHAB]
+  // en observaciones (solo visual, el turno sigue siendo FISIO).
+  const tipoFisio = document.getElementById('fNT_tipo_fisio')?.value || 'CONSULTORIO';
+  const esRehabManual = (prac === 'FISIO' || prac === 'FISIO_PQ') && tipoFisio === 'REHAB';
+  let obsTexto = document.getElementById('fNT_observaciones').value.trim();
+  if (esRehabManual) {
+    obsTexto = obsTexto ? `[REHAB] ${obsTexto}` : '[REHAB]';
+  }
+
   const datosForm = {
     practica: prac,
     persona_id: parseInt(pid,10),
     tratamiento_id: (document.getElementById('fNT_tratamiento').value && document.getElementById('fNT_tratamiento').value !== '__NUEVO__') ? parseInt(document.getElementById('fNT_tratamiento').value,10) : null,
-    observaciones: document.getElementById('fNT_observaciones').value.trim() || null
+    observaciones: obsTexto || null
   };
+
+  // === VALIDACIÓN TOPE DE SESIONES ===
+  // Si el turno pertenece a un tratamiento con cupo definido, no dejar
+  // agendar más turnos que sesiones tenga el tratamiento.
+  // Cuenta PENDIENTE + PRESENTE (no AUSENTE/CANCELADO/SOBRETURNO).
+  if (datosForm.tratamiento_id) {
+    const { data: ttoTope, error: errTope } = await supa
+      .from('tratamientos')
+      .select('codigo_id, total_sesiones, estado')
+      .eq('id', datosForm.tratamiento_id)
+      .single();
+    if (errTope) {
+      mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones del tratamiento. Probá de nuevo.', 'error');
+      return;
+    }
+    if (ttoTope && ttoTope.total_sesiones) {
+      const yaUsadas = contarSesionesConsumidas(datosForm.tratamiento_id);
+      const aCrear = slotsForm.length;
+      const cupoLibre = ttoTope.total_sesiones - yaUsadas;
+      if (cupoLibre <= 0) {
+        const codTxt = ttoTope.codigo_id ? ttoTope.codigo_id : '#' + datosForm.tratamiento_id;
+        mostrarAlerta('nuevoAlert',
+          `🚫 Tratamiento ${codTxt} completo.\n\n` +
+          `Tiene ${ttoTope.total_sesiones} sesiones y ya hay ${yaUsadas} agendadas/cumplidas. ` +
+          `No se pueden cargar más turnos.\n\n` +
+          `Si necesitás más sesiones, ampliá el total desde Admin Tratamiento (botón ⚙).`,
+          'error');
+        return;
+      }
+      if (aCrear > cupoLibre) {
+        const codTxt = ttoTope.codigo_id ? ttoTope.codigo_id : '#' + datosForm.tratamiento_id;
+        mostrarAlerta('nuevoAlert',
+          `🚫 Te pasás del tope del tratamiento ${codTxt}.\n\n` +
+          `Quedan ${cupoLibre} sesión(es) libres (de ${ttoTope.total_sesiones} totales, ${yaUsadas} ya usadas) ` +
+          `y estás intentando cargar ${aCrear} turnos.\n\n` +
+          `Sacá ${aCrear - cupoLibre} slot(s) o ampliá el total desde Admin Tratamiento.`,
+          'error');
+        return;
+      }
+    }
+  }
 
   const validaciones = slotsForm.map(s => validarUnSlot(s, datosForm));
   const fallos = validaciones.filter(v => !v.ok);
