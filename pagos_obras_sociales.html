@@ -107,6 +107,8 @@
     animation: spin 0.8s linear infinite; margin: 24px auto;
   }
   @keyframes spin { 100% { transform: rotate(360deg); } }
+  .filtro-tipo { background:#fff; color:var(--text-dim); }
+  .filtro-tipo.activo { background:#1e9fe0; color:#fff; }
 </style>
 </head>
 <body>
@@ -168,6 +170,25 @@
     <button class="btn" id="btnGuardar">Guardar pago</button>
   </div>
 
+  <!-- FILTRO POR MES -->
+  <div class="card">
+    <h2>🔎 Filtrar por mes</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+      <select id="filtroMes" style="padding:8px;border:1px solid var(--border);border-radius:6px;"></select>
+      <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+        <button type="button" id="btnPorPago" class="filtro-tipo activo" style="padding:8px 12px;border:none;cursor:pointer;font-size:13px;">Por fecha de pago</button>
+        <button type="button" id="btnPorPeriodo" class="filtro-tipo" style="padding:8px 12px;border:none;cursor:pointer;font-size:13px;">Por período</button>
+      </div>
+      <button type="button" id="btnLimpiarMes" style="padding:8px 12px;border:1px solid var(--border);background:#fff;border-radius:6px;cursor:pointer;font-size:13px;">Ver todos</button>
+    </div>
+  </div>
+
+  <!-- RESUMEN POR PROFESIONAL DEL MES (solo admin) -->
+  <div class="card" id="resumenProfCard" style="display:none;">
+    <h2>📊 Resumen por profesional</h2>
+    <div id="resumenProfZone"></div>
+  </div>
+
   <!-- MIS PAGOS CARGADOS -->
   <div class="card">
     <h2>📋 Mis pagos cargados</h2>
@@ -199,10 +220,13 @@ const OBRAS_SOCIALES = [
 let usuarioActual = null; // {id, nombre, email}
 let misPagos = [];
 let esAdmin = false; // si NO tiene solo_lo_mio → ve todos los pagos
+let esLu = false; // solo Lu puede borrar pagos
 let todosPagos = [];
 let renglones = []; // [{os, mes, concepto, monto}]
 let renglonSeq = 0;
 let MESES_OPC = []; // lista de períodos para los renglones
+let filtroMesVal = ''; // '' = todos, o 'YYYY-MM'
+let filtroTipo = 'pago'; // 'pago' (por fecha) o 'periodo' (por mes_correspondiente)
 
 const fmt = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR');
 
@@ -241,7 +265,73 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (esAdmin) await cargarTodosPagos();
 
   document.getElementById('btnGuardar').onclick = guardarPago;
+
+  // Filtro por mes: llenar selector con los mismos meses
+  const fMes = document.getElementById('filtroMes');
+  fMes.innerHTML = '<option value="">Todos los meses</option>' + MESES_OPC.map(m => `<option value="${m.val}">${m.txt}</option>`).join('');
+  fMes.onchange = () => { filtroMesVal = fMes.value; refrescarVistas(); };
+  document.getElementById('btnLimpiarMes').onclick = () => { filtroMesVal = ''; fMes.value = ''; refrescarVistas(); };
+  document.getElementById('btnPorPago').onclick = () => { filtroTipo = 'pago'; marcarToggle(); refrescarVistas(); };
+  document.getElementById('btnPorPeriodo').onclick = () => { filtroTipo = 'periodo'; marcarToggle(); refrescarVistas(); };
 });
+
+function marcarToggle() {
+  document.getElementById('btnPorPago').classList.toggle('activo', filtroTipo === 'pago');
+  document.getElementById('btnPorPeriodo').classList.toggle('activo', filtroTipo === 'periodo');
+}
+
+// El mes de un pago según el tipo de filtro elegido
+function mesDePago(p) {
+  if (filtroTipo === 'periodo') return p.mes_correspondiente || '';
+  return (p.fecha || '').slice(0, 7); // 'YYYY-MM' de la fecha de pago
+}
+
+// Filtra una lista de pagos por el mes seleccionado
+function filtrarPorMes(lista) {
+  if (!filtroMesVal) return lista;
+  return lista.filter(p => mesDePago(p) === filtroMesVal);
+}
+
+// Refresca las tablas y el resumen según el filtro
+function refrescarVistas() {
+  renderMisPagos();
+  if (esAdmin) { renderTodosPagos(); renderResumenProf(); }
+}
+
+// Resumen: total por profesional del mes filtrado (créditos, descuentos, neto)
+function renderResumenProf() {
+  const card = document.getElementById('resumenProfCard');
+  const zona = document.getElementById('resumenProfZone');
+  if (!card || !zona) return;
+  card.style.display = '';
+  const lista = filtrarPorMes(todosPagos);
+  if (!lista.length) {
+    zona.innerHTML = '<div class="empty">No hay pagos para el mes elegido.</div>';
+    return;
+  }
+  const porProf = {};
+  lista.forEach(p => {
+    const nombre = (p.profesional_nombre || '—').split(' ')[0];
+    if (!porProf[nombre]) porProf[nombre] = { cred: 0, deb: 0 };
+    porProf[nombre].cred += (Number(p.monto) || 0);
+    porProf[nombre].deb += (Number(p.debitos) || 0);
+  });
+  let totCred = 0, totDeb = 0;
+  const filas = Object.keys(porProf).sort().map(n => {
+    const d = porProf[n]; totCred += d.cred; totDeb += d.deb;
+    return `<tr><td><strong>${escapeHtml(n)}</strong></td><td class="monto">${fmt(d.cred)}</td><td class="monto" style="color:#dc2626;">- ${fmt(d.deb)}</td><td class="monto" style="color:#166534;">${fmt(d.cred - d.deb)}</td></tr>`;
+  }).join('');
+  zona.innerHTML = `
+    <div style="overflow-x:auto;"><table>
+      <thead><tr><th>Profesional</th><th>Créditos</th><th>Descuentos</th><th>Neto</th></tr></thead>
+      <tbody>
+        ${filas}
+        <tr style="font-weight:700;background:#dcfce7;color:#166534;border-top:2px solid var(--border);">
+          <td>TOTAL equipo</td><td class="monto">${fmt(totCred)}</td><td class="monto">- ${fmt(totDeb)}</td><td class="monto">${fmt(totCred - totDeb)}</td>
+        </tr>
+      </tbody>
+    </table></div>`;
+}
 
 // Opciones del desplegable de mes/período para cada renglón
 function opcionesMes(seleccion) {
@@ -385,6 +475,7 @@ async function detectarUsuario() {
       .maybeSingle();
     if (persona) {
       usuarioActual = { id: persona.id, nombre: persona.nombre, email: user.email };
+      esLu = ((user.email || '').toLowerCase().trim() === 'liclucianavelaz@gmail.com');
       const primer = (persona.nombre || '').split(' ')[0];
       document.getElementById('userBadge').textContent = '👤 ' + primer;
       // ¿Es admin? (NO tiene solo_lo_mio) → ve todos los pagos
@@ -517,6 +608,7 @@ async function cargarTodosPagos() {
     if (error) throw error;
     todosPagos = data || [];
     renderTodosPagos();
+    renderResumenProf();
   } catch (e) {
     zona.innerHTML = `<div class="empty">Error al cargar: ${e.message}</div>`;
   }
@@ -524,20 +616,21 @@ async function cargarTodosPagos() {
 
 function renderTodosPagos() {
   const zona = document.getElementById('todosZone');
-  if (!todosPagos.length) {
-    zona.innerHTML = '<div class="empty">Todavía no hay pagos cargados por el equipo.</div>';
+  const lista = filtrarPorMes(todosPagos);
+  if (!lista.length) {
+    zona.innerHTML = '<div class="empty">No hay pagos del equipo para mostrar.</div>';
     return;
   }
   let totCred = 0, totDeb = 0;
-  for (const p of todosPagos) { totCred += (Number(p.monto) || 0); totDeb += (Number(p.debitos) || 0); }
+  for (const p of lista) { totCred += (Number(p.monto) || 0); totDeb += (Number(p.debitos) || 0); }
   zona.innerHTML = `
     <div style="overflow-x:auto;">
     <table>
       <thead>
-        <tr><th>Fecha</th><th>Profesional</th><th>Obra social</th><th>Monto</th><th>Sesiones</th><th>Concepto</th></tr>
+        <tr><th>Fecha</th><th>Profesional</th><th>Obra social</th><th>Monto</th><th>Sesiones</th><th>Concepto</th>${esLu ? '<th></th>' : ''}</tr>
       </thead>
       <tbody>
-        ${todosPagos.map(p => {
+        ${lista.map(p => {
           const esDesc = (Number(p.monto) || 0) === 0 && (Number(p.debitos) || 0) > 0;
           return `
           <tr${esDesc ? ' style="background:#fffbeb;"' : ''}>
@@ -547,22 +640,23 @@ function renderTodosPagos() {
             <td class="monto">${esDesc ? '<span style="color:#dc2626;">- '+fmt(p.debitos)+'</span>' : fmt(p.monto)}</td>
             <td>${p.nro_sesiones != null ? p.nro_sesiones : '—'}</td>
             <td>${escapeHtml(p.concepto || '—')}</td>
+            ${esLu ? `<td><button onclick="borrarPagoOS(${p.id})" title="Borrar" style="background:#fee2e2;color:#dc2626;border:1px solid #dc2626;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px;">🗑️</button></td>` : ''}
           </tr>`;
         }).join('')}
         <tr style="font-weight:700;border-top:2px solid var(--border);">
           <td colspan="3">Total créditos</td>
           <td class="monto">${fmt(totCred)}</td>
-          <td colspan="2"></td>
+          <td colspan="${esLu ? 3 : 2}"></td>
         </tr>
         <tr style="font-weight:700;color:#dc2626;">
           <td colspan="3">Total descuentos</td>
           <td class="monto">- ${fmt(totDeb)}</td>
-          <td colspan="2"></td>
+          <td colspan="${esLu ? 3 : 2}"></td>
         </tr>
         <tr style="font-weight:700;background:#dcfce7;color:#166534;">
           <td colspan="3">TOTAL NETO del equipo</td>
           <td class="monto">${fmt(totCred - totDeb)}</td>
-          <td colspan="2"></td>
+          <td colspan="${esLu ? 3 : 2}"></td>
         </tr>
       </tbody>
     </table>
@@ -577,20 +671,21 @@ function formatFecha(iso) {
 
 function renderMisPagos() {
   const zona = document.getElementById('listaZone');
-  if (!misPagos.length) {
-    zona.innerHTML = '<div class="empty">Todavía no cargaste ningún pago.</div>';
+  const lista = filtrarPorMes(misPagos);
+  if (!lista.length) {
+    zona.innerHTML = '<div class="empty">No hay pagos para mostrar.</div>';
     return;
   }
   let totCred = 0, totDeb = 0;
-  misPagos.forEach(p => { totCred += (Number(p.monto) || 0); totDeb += (Number(p.debitos) || 0); });
+  lista.forEach(p => { totCred += (Number(p.monto) || 0); totDeb += (Number(p.debitos) || 0); });
   zona.innerHTML = `
     <div style="overflow-x:auto;">
     <table>
       <thead>
-        <tr><th>Fecha</th><th>Obra social</th><th>Monto</th><th>Sesiones</th><th>Concepto</th><th>Estado</th></tr>
+        <tr><th>Fecha</th><th>Obra social</th><th>Monto</th><th>Sesiones</th><th>Concepto</th><th>Estado</th>${esLu ? '<th></th>' : ''}</tr>
       </thead>
       <tbody>
-        ${misPagos.map(p => {
+        ${lista.map(p => {
           const esDesc = (Number(p.monto) || 0) === 0 && (Number(p.debitos) || 0) > 0;
           return `
           <tr${esDesc ? ' style="background:#fffbeb;"' : ''}>
@@ -602,27 +697,47 @@ function renderMisPagos() {
             <td>${p.leido
               ? '<span class="pill pill-leido">✓ Visto</span>'
               : '<span class="pill pill-nuevo">Enviado</span>'}</td>
+            ${esLu ? `<td><button onclick="borrarPagoOS(${p.id})" title="Borrar" style="background:#fee2e2;color:#dc2626;border:1px solid #dc2626;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px;">🗑️</button></td>` : ''}
           </tr>`;
         }).join('')}
         <tr style="font-weight:700;border-top:2px solid var(--border);">
           <td colspan="2">Total créditos</td>
           <td class="monto">${fmt(totCred)}</td>
-          <td colspan="3"></td>
+          <td colspan="${esLu ? 4 : 3}"></td>
         </tr>
         <tr style="font-weight:700;color:#dc2626;">
           <td colspan="2">Total descuentos</td>
           <td class="monto">- ${fmt(totDeb)}</td>
-          <td colspan="3"></td>
+          <td colspan="${esLu ? 4 : 3}"></td>
         </tr>
         <tr style="font-weight:700;background:#dcfce7;color:#166534;">
           <td colspan="2">TOTAL NETO</td>
           <td class="monto">${fmt(totCred - totDeb)}</td>
-          <td colspan="3"></td>
+          <td colspan="${esLu ? 4 : 3}"></td>
         </tr>
       </tbody>
     </table>
     </div>`;
 }
+
+// Borrar un pago de obra social (SOLO Lu), con confirmación
+window.borrarPagoOS = async function(id) {
+  if (!esLu) { alert('Solo Lu puede borrar pagos.'); return; }
+  const p = misPagos.find(x => x.id === id) || todosPagos.find(x => x.id === id);
+  const detalle = p ? `\n\n• ${p.obra_social}\n• ${p.monto > 0 ? fmt(p.monto) : '- ' + fmt(p.debitos)}\n• ${formatFecha(p.fecha)}` : '';
+  if (!confirm('⚠️ BORRAR este registro' + detalle + '\n\nEsta acción NO se puede deshacer. ¿Confirmás?')) return;
+  try {
+    const { error } = await sb.from('pagos_obras_sociales').delete().eq('id', id);
+    if (error) throw error;
+    misPagos = misPagos.filter(x => x.id !== id);
+    todosPagos = todosPagos.filter(x => x.id !== id);
+    renderMisPagos();
+    if (esAdmin) renderTodosPagos();
+    showToast('✓ Registro borrado.');
+  } catch (e) {
+    alert('Error al borrar: ' + e.message);
+  }
+};
 
 // Guarda los campos editables al modificarlos en la tabla
 async function guardarCampo(id, campo, valor) {
