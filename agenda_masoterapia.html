@@ -378,6 +378,38 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
   </div>
 </div>
 
+<div class="modal-overlay" id="modalAdminTto">
+  <div class="modal" style="max-width:540px">
+    <div class="modal-header">
+      <div class="modal-title" style="color:#5a3a8a">⚙ Admin tratamiento</div>
+      <button class="modal-close" data-close="modalAdminTto">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="adminTtoInfo" style="background:#f5f6f8;border-radius:8px;padding:12px;font-size:13px;line-height:1.6;margin-bottom:14px">—</div>
+
+      <div class="section-divider" style="margin-top:0">✏ Modificar datos</div>
+      <div class="form-row row-flex">
+        <div><label class="form-label">Valor sesión ($)</label><input type="number" class="form-input" id="admTto_valor" min="0"></div>
+        <div><label class="form-label">Total sesiones</label><input type="number" class="form-input" id="admTto_total" min="1"></div>
+      </div>
+      <div id="admTtoAlert"></div>
+
+      <div class="section-divider">⚠ Acciones destructivas</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn warning" id="admTtoRestarSesion">➖ Restar 1 sesión</button>
+        <button class="btn warning" id="admTtoCancelar">❌ Cancelar tratamiento</button>
+        <button class="btn danger" id="admTtoBorrar">🗑 Borrar tratamiento</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:8px;font-style:italic">⚠ Borrar elimina el tratamiento y todas sus sesiones/pagos. Cancelar solo cambia el estado.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" data-close="modalAdminTto">Cerrar</button>
+      <button class="btn primary" id="admTtoGuardar">💾 Guardar cambios</button>
+    </div>
+  </div>
+</div>
+
+
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
@@ -667,37 +699,40 @@ async function calcularOrdinalesYTratamientos() {
     });
 
     Object.entries(grouped).forEach(([ttoId, turnosTto]) => {
+      // NUMERACIÓN ROBUSTA (no depende de que la sesión esté registrada en `sesiones`):
+      // 1) Las CUMPLIDAS (turnos PRESENTE) van primero, ordenadas por fecha+hora.
+      // 2) Las PENDIENTES (PENDIENTE/SOBRETURNO) van después, ordenadas por fecha+hora.
+      // 3) AUSENTE y CANCELADO NO cuentan (se reagendan / se anularon).
+      // Además sumamos las sesiones históricas migradas (tabla sesiones, turno_id NULL,
+      // que no corresponden a ningún turno PRESENTE de esta agenda) al arranque del conteo.
       const sesiones = (sesionesPorTto[ttoId] || []).slice();
-      const totalCumplidas = sesiones.length;
-      // sesiones ordenadas por fecha+hora (para saber qué número tiene cada una)
-      const ordenadas = sesiones.slice().sort((a,b) =>
-        (a.fecha||'').localeCompare(b.fecha||'') || String(a.hora||'').localeCompare(String(b.hora||'')));
 
-      // posición para los turnos PENDIENTE/SOBRETURNO: arrancan después de las cumplidas
-      let posPendiente = 0;
-      turnosTto.forEach(t => {
-        const est = (t.estado || '').toUpperCase();
-        if (est === 'PRESENTE') {
-          // Un turno PRESENTE ya generó una sesión cumplida.
-          // (A) match directo por turno_id
-          let matchSes = sesiones.find(s => s.turno_id === t.id);
-          // (B) si la sesión vino del Excel (sin turno_id), matchear por fecha (+hora si existe)
-          if (!matchSes) {
-            matchSes = sesiones.find(s => !s.turno_id && s.fecha === t.fecha &&
-              (!s.hora || !t.hora_inicio || String(s.hora).slice(0,5) === String(t.hora_inicio).slice(0,5)));
-          }
-          if (!matchSes) {
-            matchSes = sesiones.find(s => !s.turno_id && s.fecha === t.fecha);
-          }
-          // su número = posición de esa sesión dentro de las cumplidas (ordenadas por fecha)
-          const num = matchSes ? (ordenadas.indexOf(matchSes) + 1) : totalCumplidas;
-          turnoOrdinalMap.set(t.id, num);
-        } else {
-          // PENDIENTE / SOBRETURNO: después de TODAS las cumplidas
-          posPendiente += 1;
-          turnoOrdinalMap.set(t.id, totalCumplidas + posPendiente);
-        }
-      });
+      const ordenarPorFecha = (a, b) =>
+        (a.fecha||'').localeCompare(b.fecha||'') ||
+        String(a.hora_inicio||'').localeCompare(String(b.hora_inicio||''));
+
+      const presentes = turnosTto
+        .filter(t => (t.estado||'').toUpperCase() === 'PRESENTE')
+        .sort(ordenarPorFecha);
+      const pendientes = turnosTto
+        .filter(t => ['PENDIENTE','SOBRETURNO'].includes((t.estado||'').toUpperCase()))
+        .sort(ordenarPorFecha);
+
+      // Sesiones históricas (del Excel) que NO matchean ningún turno PRESENTE de la agenda.
+      // Esas ya están cumplidas pero no tienen turno en esta vista, así que cuentan al inicio.
+      const fechasPresentes = new Set(presentes.map(t => t.fecha));
+      const idsPresentes = new Set(presentes.map(t => t.id));
+      const historicasSinTurno = sesiones.filter(s =>
+        (!s.turno_id || !idsPresentes.has(s.turno_id)) &&
+        !fechasPresentes.has(s.fecha)
+      ).length;
+
+      let num = historicasSinTurno;
+      // Primero las cumplidas (presentes), por fecha
+      presentes.forEach(t => { num += 1; turnoOrdinalMap.set(t.id, num); });
+      // Después las pendientes, por fecha
+      pendientes.forEach(t => { num += 1; turnoOrdinalMap.set(t.id, num); });
+      // AUSENTE / CANCELADO: no se les asigna número (no cuentan)
     });
   } catch (e) { console.warn('No se pudieron calcular ordinales:', e.message); }
 }
@@ -1574,11 +1609,17 @@ function onTurnoClick(turnoId) {
   `;
   const footer = document.getElementById('detalleFooter');
   const btnHC = `<button class="btn" style="background:#1e9fe0;color:white;border-color:#1e9fe0;" onclick="parent.postMessage({tipo:'VER_HC',persona_id:${t.persona_id}},'*')">🩺 Ver HC</button>`;
+  // Botón Admin Tto: solo si el turno tiene tratamiento y el usuario es admin_general
+  const btnAdminTto = (t.tratamiento_id && esAdminGeneral())
+    ? `<button class="btn" style="background:#5a3a8a;color:white;border-color:#5a3a8a;" id="btnAbrirAdminTto">⚙ Admin tto</button>`
+    : '';
   if (t.estado==='PRESENTE' || t.estado==='AUSENTE') {
-    footer.innerHTML = `${btnHC}<button class="btn" data-close="modalDetalle">Cerrar</button><button class="btn warning" data-accion="PENDIENTE" data-id="${t.id}">Volver a pendiente</button>`;
+    footer.innerHTML = `${btnHC}${btnAdminTto}<button class="btn" data-close="modalDetalle">Cerrar</button><button class="btn warning" data-accion="PENDIENTE" data-id="${t.id}">Volver a pendiente</button>`;
   } else {
-    footer.innerHTML = `${btnHC}<button class="btn" data-close="modalDetalle">Cerrar</button><button class="btn danger" data-accion="CANCELADO" data-id="${t.id}">Cancelar</button><button class="btn" data-accion="AUSENTE" data-id="${t.id}">Ausente</button><button class="btn success" data-accion="PRESENTE" data-id="${t.id}">Presente ✓</button>`;
+    footer.innerHTML = `${btnHC}${btnAdminTto}<button class="btn" data-close="modalDetalle">Cerrar</button><button class="btn danger" data-accion="CANCELADO" data-id="${t.id}">Cancelar</button><button class="btn" data-accion="AUSENTE" data-id="${t.id}">Ausente</button><button class="btn success" data-accion="PRESENTE" data-id="${t.id}">Presente ✓</button>`;
   }
+  const btnAT = document.getElementById('btnAbrirAdminTto');
+  if (btnAT) btnAT.addEventListener('click', () => abrirAdminTratamiento(t));
   footer.querySelectorAll('[data-accion]').forEach(b => b.addEventListener('click', () => {
     const id = parseInt(b.dataset.id,10);
     const accion = b.dataset.accion;
@@ -1631,6 +1672,136 @@ async function cambiarEstado(id, nuevoEstado) {
 
 function openModal(id) { document.getElementById(id).classList.add('is-open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('is-open'); }
+
+// ============= ADMIN TRATAMIENTO (masajes) =============
+// Permite a admin_general corregir un tratamiento desde la agenda:
+// valor por sesión, total de sesiones, restar/cancelar/borrar.
+// Masajes siempre es Particular, así que no hay modalidad ni obra social.
+let _admTtoCtx = null;  // { turnoId, tratamientoId, codigoId, nombre }
+
+async function abrirAdminTratamiento(turno) {
+  if (!esAdminGeneral()) {
+    alert('Solo admin_general puede editar tratamientos. Pedile a Lu o Jime.');
+    return;
+  }
+  if (!turno.tratamiento_id) {
+    alert('Este turno no tiene tratamiento asociado.');
+    return;
+  }
+  // Traemos datos frescos del tratamiento (el cache no trae valor_sesion ni estado)
+  let tratInfo;
+  try {
+    const { data, error } = await supa.from('tratamientos')
+      .select('codigo_id, estado, total_sesiones, valor_sesion')
+      .eq('id', turno.tratamiento_id).single();
+    if (error) throw error;
+    tratInfo = data;
+  } catch (e) {
+    alert('No se pudo cargar el tratamiento: ' + (e.message||e));
+    return;
+  }
+  const persona = personas.find(p => p.id===turno.persona_id);
+  const nombre = turno.paciente_nombre || (persona ? persona.nombre : `#${turno.persona_id}`);
+  _admTtoCtx = {
+    turnoId: turno.id,
+    tratamientoId: turno.tratamiento_id,
+    codigoId: tratInfo.codigo_id,
+    nombre: nombre
+  };
+  document.getElementById('adminTtoInfo').innerHTML = `
+    <div><strong>Paciente:</strong> ${escapeHtml(nombre)}</div>
+    <div><strong>Tratamiento:</strong> ${escapeHtml(tratInfo.codigo_id||'')} (#${turno.tratamiento_id})</div>
+    <div><strong>Estado actual:</strong> ${escapeHtml(tratInfo.estado||'—')}</div>
+    <div><strong>Total sesiones:</strong> ${tratInfo.total_sesiones||'—'}</div>
+  `;
+  document.getElementById('admTto_valor').value = tratInfo.valor_sesion || 0;
+  document.getElementById('admTto_total').value = tratInfo.total_sesiones || 1;
+  document.getElementById('admTtoAlert').innerHTML = '';
+  closeModal('modalDetalle');
+  openModal('modalAdminTto');
+}
+
+async function admTtoGuardarCambios() {
+  if (!_admTtoCtx) return;
+  const valor = parseInt(document.getElementById('admTto_valor').value,10) || 0;
+  const total = parseInt(document.getElementById('admTto_total').value,10) || 1;
+  try {
+    const { error } = await supa.from('tratamientos').update({
+      valor_sesion: valor,
+      total_sesiones: total
+    }).eq('id', _admTtoCtx.tratamientoId);
+    if (error) throw error;
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert success">✓ Guardado correctamente</div>`;
+    setTimeout(async () => { closeModal('modalAdminTto'); await refresh(); }, 800);
+  } catch (e) {
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
+    console.error(e);
+  }
+}
+
+async function admTtoRestarUnaSesion() {
+  if (!_admTtoCtx) return;
+  if (!confirm(`¿Restar 1 sesión a ${_admTtoCtx.codigoId} (${_admTtoCtx.nombre})?\n\nEsto reduce total_sesiones en 1.`)) return;
+  try {
+    const { data: tt, error: e1 } = await supa.from('tratamientos').select('total_sesiones').eq('id', _admTtoCtx.tratamientoId).single();
+    if (e1) throw e1;
+    const nuevoTotal = Math.max(1, (tt.total_sesiones||1) - 1);
+    const { error } = await supa.from('tratamientos').update({ total_sesiones: nuevoTotal }).eq('id', _admTtoCtx.tratamientoId);
+    if (error) throw error;
+    document.getElementById('admTto_total').value = nuevoTotal;
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert success">✓ Total ahora: ${nuevoTotal} sesiones</div>`;
+    await refresh();
+  } catch (e) {
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
+    console.error(e);
+  }
+}
+
+async function admTtoCancelarTratamiento() {
+  if (!_admTtoCtx) return;
+  if (!confirm(`¿Cancelar tratamiento ${_admTtoCtx.codigoId} de ${_admTtoCtx.nombre}?\n\nSe marca como CANCELADO pero NO se borra. Los turnos PENDIENTES también se cancelarán.`)) return;
+  try {
+    const { error: e1 } = await supa.from('tratamientos').update({ estado: 'CANCELADO' }).eq('id', _admTtoCtx.tratamientoId);
+    if (e1) throw e1;
+    const { error: e2 } = await supa.from('turnos_masoterapia').update({ estado:'CANCELADO' }).eq('tratamiento_id', _admTtoCtx.tratamientoId).eq('estado','PENDIENTE');
+    if (e2) console.warn('Error al cancelar turnos pendientes:', e2);
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert success">✓ Tratamiento cancelado</div>`;
+    setTimeout(async () => { closeModal('modalAdminTto'); await refresh(); }, 1000);
+  } catch (e) {
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
+    console.error(e);
+  }
+}
+
+async function admTtoBorrarTratamiento() {
+  if (!_admTtoCtx) return;
+  const txt1 = `⚠ BORRAR TRATAMIENTO\n\nVas a ELIMINAR ${_admTtoCtx.codigoId} de ${_admTtoCtx.nombre}.\n\nEsto elimina:\n  • el tratamiento\n  • todas sus sesiones\n  • todos sus pagos\n  • todos sus turnos asociados\n\n¿Continuar?`;
+  if (!confirm(txt1)) return;
+  const respuesta = prompt(`Última confirmación.\n\nEscribí "BORRAR" para confirmar:`);
+  if (respuesta !== 'BORRAR') {
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert">Cancelado. Necesitás escribir exactamente "BORRAR".</div>`;
+    return;
+  }
+  try {
+    const id = _admTtoCtx.tratamientoId;
+    await supa.from('turnos_masoterapia').delete().eq('tratamiento_id', id);
+    await supa.from('sesiones').delete().eq('tratamiento_id', id);
+    const { error } = await supa.from('tratamientos').delete().eq('id', id);
+    if (error) throw error;
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert success">✓ Tratamiento borrado completamente</div>`;
+    setTimeout(async () => { closeModal('modalAdminTto'); await refresh(); }, 1000);
+  } catch (e) {
+    document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
+    console.error(e);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const g = document.getElementById('admTtoGuardar'); if (g) g.addEventListener('click', admTtoGuardarCambios);
+  const r = document.getElementById('admTtoRestarSesion'); if (r) r.addEventListener('click', admTtoRestarUnaSesion);
+  const c = document.getElementById('admTtoCancelar'); if (c) c.addEventListener('click', admTtoCancelarTratamiento);
+  const b = document.getElementById('admTtoBorrar'); if (b) b.addEventListener('click', admTtoBorrarTratamiento);
+});
 
 function lunesDe(date) {
   const d = new Date(date); d.setHours(0,0,0,0);
