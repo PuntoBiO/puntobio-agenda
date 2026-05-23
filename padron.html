@@ -229,21 +229,14 @@
 
 <div class="toolbar">
   <input type="text" id="buscador" placeholder="🔍 Buscar por nombre, DNI o #ID...">
-  <label>Plan:
-    <select id="filtroPlan"><option value="">Todos</option></select>
-  </label>
-  <label>Día venc.:
-    <select id="filtroDia"><option value="">Todos</option></select>
-  </label>
   <button class="filtro-btn" onclick="limpiarFiltros()" style="border-color: var(--azul); color: var(--azul);">Limpiar filtros</button>
 </div>
 
 <div class="filtros" id="filtrosEstado">
   <button class="filtro-btn active" data-filtro="TODOS">Todos</button>
-  <button class="filtro-btn" data-filtro="TF_ACTIVO">🏋️ TF Activo</button>
-  <button class="filtro-btn" data-filtro="TF_BAJA">❌ TF Baja</button>
-  <button class="filtro-btn" data-filtro="TF_BONIF">💜 Bonificados</button>
-  <button class="filtro-btn" data-filtro="SIN_TF">Sin TF</button>
+  <button class="filtro-btn" data-filtro="CON_TRAT">🩺 Con tratamiento activo</button>
+  <button class="filtro-btn" data-filtro="TF_ACTIVO">🏋️ Alumno activo</button>
+  <button class="filtro-btn" data-filtro="SIN_HC">📋 Sin historia clínica</button>
 </div>
 
 <div class="resumen" id="resumen"></div>
@@ -683,6 +676,8 @@ let personas = [];       // 1 fila por persona (las 420)
 let pagosPorInsc = {};   // id_inscripcion -> [pagos]
 let tarifario = {};      // plan -> {valor_lista, ...}
 let planesUnicos = [];
+let personasConTratActivo = new Set();  // persona_id con tratamiento en curso
+let personasConHC = new Set();          // persona_id que ya completó su HC
 let filtroEstado = 'TODOS';
 let filtroPlan = '';
 let filtroDia = '';
@@ -772,16 +767,34 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, tratR, hcR] = await Promise.all([
       sb.from('personas').select('*').eq('es_equipo', false),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
-      sb.from('tarifario_tf').select('*')
+      sb.from('tarifario_tf').select('*'),
+      sb.from('tratamientos').select('persona_id, estado'),
+      sb.from('historias_clinicas').select('persona_id')
     ]);
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
     if (pagosR.error) throw pagosR.error;
     if (tarR.error) throw tarR.error;
+    // tratamientos e HC: si fallan, no rompemos el padrón (quedan vacíos)
+    if (tratR.error) console.warn('No se pudieron cargar tratamientos:', tratR.error.message);
+    if (hcR.error) console.warn('No se pudieron cargar historias clínicas:', hcR.error.message);
+
+    // Set de personas con tratamiento ACTIVO (en curso): ACTIVO / PARCIAL / Pendiente
+    const ESTADOS_TRAT_ACTIVO = ['ACTIVO', 'PARCIAL', 'PENDIENTE'];
+    personasConTratActivo = new Set();
+    (tratR.data || []).forEach(t => {
+      if (t.persona_id && ESTADOS_TRAT_ACTIVO.includes(String(t.estado || '').toUpperCase())) {
+        personasConTratActivo.add(t.persona_id);
+      }
+    });
+
+    // Set de personas que YA completaron su historia clínica
+    personasConHC = new Set();
+    (hcR.data || []).forEach(h => { if (h.persona_id) personasConHC.add(h.persona_id); });
 
     // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
     // Misma lógica que morosos_tf.html: si un alumno tiene un cambio programado
@@ -850,6 +863,8 @@ async function cargarTodo() {
         todasInscripciones: inscripciones,
         cuota,
         estadoTF,
+        tieneTratActivo: personasConTratActivo.has(persona.id),
+        tieneHC: personasConHC.has(persona.id),
         // Placeholders para futuras áreas
         tieneConsultorios: false,
         tieneBioLab: false,
@@ -870,36 +885,46 @@ async function cargarTodo() {
 // ===== CARDS =====
 function renderCards() {
   const total = personas.length;
-  const tfAct = personas.filter(f => f.estadoTF === 'TF_ACTIVO').length;
-  const tfBaja = personas.filter(f => f.estadoTF === 'TF_BAJA').length;
-  const tfBon = personas.filter(f => f.estadoTF === 'TF_BONIF').length;
-  const sinTF = personas.filter(f => f.estadoTF === 'SIN_TF').length;
+  const conTratActivo = personas.filter(f => f.tieneTratActivo).length;
+  const alumnosActivos = personas.filter(f => f.estadoTF === 'TF_ACTIVO' || f.estadoTF === 'TF_BONIF').length;
+  const sinHC = personas.filter(f => !f.tieneHC).length;
   $('#cards').innerHTML = `
     <div class="card"><div class="card-label">Total personas</div><div class="card-value">${total}</div><div class="card-sub">Padrón completo (sin equipo)</div></div>
-    <div class="card verde"><div class="card-label">TF Activos</div><div class="card-value">${tfAct}</div><div class="card-sub">Cuota normal</div></div>
-    <div class="card rojo"><div class="card-label">TF De baja</div><div class="card-value">${tfBaja}</div><div class="card-sub">Inscripción dada de baja</div></div>
-    <div class="card violeta"><div class="card-label">Bonificados</div><div class="card-value">${tfBon}</div><div class="card-sub">Sin costo (COD0BON)</div></div>
-    <div class="card"><div class="card-label">Sin TF</div><div class="card-value">${sinTF}</div><div class="card-sub">Pacientes o contactos</div></div>
+    <div class="card verde"><div class="card-label">Pacientes con tratamiento activo</div><div class="card-value">${conTratActivo}</div><div class="card-sub">Fisio / consultorio en curso</div></div>
+    <div class="card violeta"><div class="card-label">Alumnos activos</div><div class="card-value">${alumnosActivos}</div><div class="card-sub">Terapia Física al día</div></div>
+    <div class="card rojo card-clickable" onclick="filtrarSinHC()" style="cursor:pointer;" title="Tocá para ver quiénes no completaron la HC"><div class="card-label">Sin historia clínica</div><div class="card-value">${sinHC}</div><div class="card-sub">👆 Tocá para verlos y mandar el link</div></div>
   `;
 }
 
+// Filtro rápido: mostrar solo quienes NO tienen HC completa (desde la card)
+window.filtrarSinHC = () => {
+  filtroEstado = 'SIN_HC';
+  document.querySelectorAll('#filtrosEstado .filtro-btn').forEach(b => b.classList.remove('active'));
+  const btnSinHC = document.querySelector('#filtrosEstado .filtro-btn[data-filtro="SIN_HC"]');
+  if (btnSinHC) btnSinHC.classList.add('active');
+  aplicarFiltros();
+};
+
 function renderFiltrosOpciones() {
-  // Planes
+  // Los dropdowns de Plan y Día venc. se quitaron del padrón (eran de TF).
+  // Se conserva la función por compatibilidad; sale si no existen.
   const selPlan = $('#filtroPlan');
-  selPlan.innerHTML = '<option value="">Todos</option>' + planesUnicos.map(p => `<option value="${p}">${p}</option>`).join('');
-  // Días 1-31
+  if (selPlan) selPlan.innerHTML = '<option value="">Todos</option>' + planesUnicos.map(p => `<option value="${p}">${p}</option>`).join('');
   const selDia = $('#filtroDia');
-  let diasOpts = '<option value="">Todos</option>';
-  for (let d=1; d<=31; d++) diasOpts += `<option value="${d}">${d}</option>`;
-  selDia.innerHTML = diasOpts;
+  if (selDia) {
+    let diasOpts = '<option value="">Todos</option>';
+    for (let d=1; d<=31; d++) diasOpts += `<option value="${d}">${d}</option>`;
+    selDia.innerHTML = diasOpts;
+  }
 }
 
 // ===== FILTROS Y RENDER TABLA =====
 function aplicarFiltros() {
   let f = personas.slice();
-  if (filtroEstado !== 'TODOS') f = f.filter(x => x.estadoTF === filtroEstado);
-  if (filtroPlan) f = f.filter(x => x.inscripcion && (x.inscripcion.plan || '') === filtroPlan);
-  if (filtroDia) f = f.filter(x => x.inscripcion && String(x.inscripcion.dia_vencimiento || '') === String(filtroDia));
+  if (filtroEstado === 'CON_TRAT') f = f.filter(x => x.tieneTratActivo);
+  else if (filtroEstado === 'SIN_HC') f = f.filter(x => !x.tieneHC);
+  else if (filtroEstado === 'TF_ACTIVO') f = f.filter(x => x.estadoTF === 'TF_ACTIVO' || x.estadoTF === 'TF_BONIF');
+  else if (filtroEstado !== 'TODOS') f = f.filter(x => x.estadoTF === filtroEstado);
   if (textoBusqueda) {
     const t = textoBusqueda.toLowerCase().replace('#','');
     f = f.filter(x =>
@@ -931,33 +956,36 @@ function renderTabla(lista) {
   }
   let html = `<table><thead><tr>
     <th>Persona</th>
-    <th>Áreas activas</th>
-    <th>Plan / Día venc.</th>
-    <th class="right">Cuota TF</th>
-    <th>Teléfono</th>
-    <th>Antigüedad</th>
+    <th>DNI</th>
+    <th>Celular</th>
+    <th>Contacto de urgencia</th>
+    <th>Historia clínica</th>
     <th class="center">Acciones</th>
   </tr></thead><tbody>`;
   lista.forEach((f, idx) => {
-    const tel = f.persona.celular || f.persona.telefono || '—';
-    const planDia = f.inscripcion ? `${f.inscripcion.plan || '—'} · día ${f.inscripcion.dia_vencimiento || '—'}` : '—';
-    const cuotaTxt = f.estadoTF === 'TF_ACTIVO' ? fmt$(f.cuota) : (f.estadoTF === 'TF_BONIF' ? '$0' : '—');
-    const antig = f.inscripcion ? calcAntiguedad(f.inscripcion.fecha_alta) : (f.persona.fecha_alta ? calcAntiguedad(f.persona.fecha_alta) : '—');
-    const esActivoTF = f.estadoTF === 'TF_ACTIVO' || f.estadoTF === 'TF_BONIF';
-    const esBajaTF = f.estadoTF === 'TF_BAJA';
-    const sinTF = f.estadoTF === 'SIN_TF';
-    const puedeAltaTF = sinTF || esBajaTF; // dar alta a quien no está activo
+    const p = f.persona;
+    const cel = p.celular || p.telefono || '—';
+    const dni = p.dni || '—';
+    const urgNombre = p.contacto_urgencia_nombre || '';
+    const urgCel = p.contacto_urgencia_celular || '';
+    const urgTxt = (urgNombre || urgCel)
+      ? `${urgNombre || '—'}${urgCel ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">${urgCel}</div>` : ''}`
+      : '<span style="color:var(--text-dim);">—</span>';
+    // Estado HC: si tiene, chip verde; si no, botón para mandar el link por WhatsApp
+    const celNum = (p.celular || p.telefono || '').replace(/\D/g, '');
+    const hcCell = f.tieneHC
+      ? '<span class="area-chip tf-act">✓ Cargada</span>'
+      : `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="wsphc" title="Enviar link de HC por WhatsApp" style="font-size:11px; padding:5px 8px; white-space:nowrap;">📱 Mandar link</button>`;
     const acciones = `
       <button class="btn-accion btn-ver" data-idx="${idx}" data-accion="ver" title="Ver detalle">📋</button>
       <button class="btn-accion btn-editar" data-idx="${idx}" data-accion="editar" title="Editar datos personales">✏️</button>
     `;
     html += `<tr class="row" data-idx="${idx}">
-      <td><strong>${f.persona.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${f.persona.id}</span>${f.persona.dni?`<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">DNI ${f.persona.dni}</div>`:''}</td>
-      <td>${chipsAreas(f)}</td>
-      <td>${planDia}</td>
-      <td class="right">${cuotaTxt}</td>
-      <td>${tel}</td>
-      <td>${antig}</td>
+      <td><strong>${p.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${p.id}</span></td>
+      <td>${dni}</td>
+      <td>${cel}</td>
+      <td>${urgTxt}</td>
+      <td>${hcCell}</td>
       <td><div class="acciones-cell">${acciones}</div></td>
     </tr>`;
   });
@@ -973,6 +1001,11 @@ function renderTabla(lista) {
       alumnoActivo = fila;
       if (accion === 'ver') abrirModalVer();
       else if (accion === 'editar') abrirModalEditar();
+      else if (accion === 'wsphc') {
+        const cel = (fila.persona.celular || fila.persona.telefono || '');
+        if (!cel) { toast('Esta persona no tiene celular cargado.', true); return; }
+        enviarWspHC(cel, fila.persona.nombre || '');
+      }
       else if (accion === 'altatf') abrirAltaTF();
       else if (accion === 'cobrar') abrirModalCobrar();
       else if (accion === 'baja') abrirModalBaja();
@@ -991,13 +1024,11 @@ $('#filtrosEstado').addEventListener('click', e => {
   filtroEstado = e.target.dataset.filtro;
   aplicarFiltros();
 });
-$('#filtroPlan').addEventListener('change', e => { filtroPlan = e.target.value; aplicarFiltros(); });
-$('#filtroDia').addEventListener('change', e => { filtroDia = e.target.value; aplicarFiltros(); });
 $('#buscador').addEventListener('input', e => { textoBusqueda = e.target.value.trim(); aplicarFiltros(); });
 window.limpiarFiltros = () => {
   filtroEstado = 'TODOS';
-  filtroPlan = ''; filtroDia = ''; textoBusqueda = '';
-  $('#filtroPlan').value = ''; $('#filtroDia').value = ''; $('#buscador').value = '';
+  textoBusqueda = '';
+  $('#buscador').value = '';
   document.querySelectorAll('#filtrosEstado .filtro-btn').forEach(b => b.classList.remove('active'));
   document.querySelector('#filtrosEstado .filtro-btn[data-filtro="TODOS"]').classList.add('active');
   aplicarFiltros();
