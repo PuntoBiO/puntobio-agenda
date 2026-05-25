@@ -238,6 +238,14 @@
   .avatar-grande.con-foto { background-color: #e5e7eb; color: transparent; }
   .foto-perfil-acciones { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
   .foto-perfil-acciones .btn-hc { font-size: 13px; }
+  /* Menú de WhatsApp */
+  .wsp-opciones { display: flex; flex-direction: column; gap: 8px; }
+  .wsp-opcion {
+    text-align: left; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid #d1fae5; background: #f0fdf4; color: #065f46;
+    font-size: 14px; font-weight: 500; cursor: pointer; transition: all .15s;
+  }
+  .wsp-opcion:hover { background: #dcfce7; border-color: #25D366; }
 </style>
 </head>
 <body>
@@ -276,6 +284,32 @@
     <div class="modal-body" id="verBody"></div>
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalVer')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL MENÚ WHATSAPP -->
+<div class="modal-backdrop" id="modalWsp">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" style="color:#128C7E;">📱 Enviar WhatsApp</span>
+      <button class="modal-close" onclick="cerrarModal('modalWsp')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="wspInfo" style="margin-bottom:14px; color:var(--text-dim); font-size:13px;"></div>
+      <div style="font-size:13px; font-weight:600; margin-bottom:8px;">Elegí un mensaje:</div>
+      <div class="wsp-opciones">
+        <button class="wsp-opcion" onclick="enviarWspPlantilla('hc')">📋 Completar historia clínica</button>
+        <button class="wsp-opcion" onclick="enviarWspPlantilla('foto')">📷 Pedir foto para el sistema</button>
+        <button class="wsp-opcion" onclick="enviarWspPlantilla('pago')">💲 Recordatorio de pago / cuota</button>
+        <button class="wsp-opcion" onclick="enviarWspPlantilla('turno')">📅 Recordatorio de turno</button>
+      </div>
+      <div style="font-size:13px; font-weight:600; margin:16px 0 8px;">O escribí tu propio mensaje:</div>
+      <textarea id="wspTextoLibre" rows="3" placeholder="Escribí acá lo que quieras mandarle…" style="width:100%; padding:10px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px; font-family:inherit; resize:vertical;"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalWsp')">Cancelar</button>
+      <button class="btn-modal" style="background:#25D366; color:#fff;" onclick="enviarWspLibre()">📱 Enviar mensaje escrito</button>
     </div>
   </div>
 </div>
@@ -1151,6 +1185,7 @@ async function abrirModalVer() {
         <button class="btn-hc" style="background:var(--azul); color:#fff;" onclick="document.getElementById('inputFotoPerfil').click()">📷 ${p.foto_perfil ? 'Cambiar foto' : 'Subir foto'}</button>
         ${p.foto_perfil ? `<button class="btn-hc" style="background:#fee2e2; color:#b91c1c;" onclick="quitarFotoPerfil()">🗑️ Quitar</button>` : ''}
         <input type="file" id="inputFotoPerfil" accept="image/*" style="display:none;" onchange="subirFotoPerfil(event)">
+        ${(p.celular || p.telefono) ? `<button class="btn-hc" style="background:#25D366; color:#fff;" onclick="abrirMenuWsp()">📱 Enviar WhatsApp</button>` : '<div style="font-size:11px; color:var(--text-dim);">Sin celular para WhatsApp</div>'}
         <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">Solo la ve el equipo. Máx 5MB.</div>
       </div>
     </div>
@@ -2593,6 +2628,59 @@ window.enviarWspHC = (celular, nombre) => {
   const primer = (nombre || '').split(' ')[0] || '';
   const msg = encodeURIComponent(`Hola ${primer}! Te dejamos el link para que completes tu historia clínica de PuntoBiO: ${FORM_URL}`);
   window.open(`https://wa.me/${num}?text=${msg}`, '_blank');
+};
+
+// ===== MENÚ DE WHATSAPP (plantillas + mensaje libre) =====
+// Normaliza un celular argentino al formato que entiende wa.me
+function normalizarCel(celular) {
+  let num = (celular || '').replace(/\D/g, '');
+  if (!num) return '';
+  if (num.startsWith('0')) num = num.substring(1);
+  if (!num.startsWith('54')) num = '549' + num;
+  return num;
+}
+
+// Abre el chat de WhatsApp de la persona activa con un texto ya armado
+function abrirWhatsApp(texto) {
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  const num = normalizarCel(p.celular || p.telefono);
+  if (!num) { toast('Esta persona no tiene celular cargado.', true); return; }
+  window.open(`https://wa.me/${num}?text=${encodeURIComponent(texto)}`, '_blank');
+}
+
+window.abrirMenuWsp = () => {
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  $('#wspInfo').innerHTML = `Para <strong>${escapeHtml(p.nombre || '')}</strong> · ${escapeHtml(p.celular || p.telefono || '')}`;
+  $('#wspTextoLibre').value = '';
+  $('#modalWsp').classList.add('activo');
+};
+
+// Plantillas listas: arman el texto con el nombre y abren WhatsApp
+window.enviarWspPlantilla = (tipo) => {
+  if (!alumnoActivo) return;
+  const primer = (alumnoActivo.persona.nombre || '').split(' ')[0] || '';
+  let texto = '';
+  if (tipo === 'hc') {
+    texto = `Hola ${primer}! Te dejamos el link para que completes tu historia clínica de PuntoBiO: ${FORM_URL}`;
+  } else if (tipo === 'foto') {
+    texto = `Hola ${primer}! ¿Nos pasás una foto tuya tipo carnet (de frente, cara visible) para cargarla en tu ficha de PuntoBiO? ¡Gracias!`;
+  } else if (tipo === 'pago') {
+    texto = `Hola ${primer}! Te escribimos de PuntoBiO para recordarte que tenés un pago pendiente. Cualquier duda quedamos a disposición. ¡Gracias!`;
+  } else if (tipo === 'turno') {
+    texto = `Hola ${primer}! Te recordamos tu próximo turno en PuntoBiO. Si no podés asistir, avisanos así liberamos el lugar. ¡Te esperamos!`;
+  }
+  abrirWhatsApp(texto);
+  cerrarModal('modalWsp');
+};
+
+// Mensaje libre escrito en el textarea
+window.enviarWspLibre = () => {
+  const texto = ($('#wspTextoLibre').value || '').trim();
+  if (!texto) { toast('Escribí un mensaje primero.', true); return; }
+  abrirWhatsApp(texto);
+  cerrarModal('modalWsp');
 };
 
 // ===== FOTO DE PERFIL: subir / quitar =====
