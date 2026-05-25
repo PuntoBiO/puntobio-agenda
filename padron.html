@@ -2452,6 +2452,7 @@ function renderHCResumenSection(persona) {
           </div>
         </div>
         <div class="hc-actions">
+          ${esKine ? `<button class="btn-hc" onclick="iniciarEvaluacionPadron()" style="background:#16a34a; color:#fff;">🩺 Iniciar evaluación</button>` : ''}
           <button class="btn-hc btn-hc-copy" onclick="copiarLinkHC()">📋 Copiar link</button>
           ${num ? `<button class="btn-hc btn-hc-wsp" onclick="enviarWspHC('${num}', '${(persona.nombre || '').replace(/'/g, "\\'")}')">📱 Enviar por WhatsApp</button>` : ''}
         </div>
@@ -2500,6 +2501,36 @@ window.enviarWspHC = (celular, nombre) => {
   const primer = (nombre || '').split(' ')[0] || '';
   const msg = encodeURIComponent(`Hola ${primer}! Te dejamos el link para que completes tu historia clínica de PuntoBiO: ${FORM_URL}`);
   window.open(`https://wa.me/${num}?text=${msg}`, '_blank');
+};
+
+// Inicia una evaluación (HC abierta por el profesional) para el alumno/persona activo.
+// Crea la HC en blanco con origen='profesional' y abre el modal del módulo Historias Clínicas.
+window.iniciarEvaluacionPadron = async () => {
+  if (!esKine) { toast('Solo los kinesiólogos pueden iniciar una evaluación.', true); return; }
+  if (!alumnoActivo || !alumnoActivo.persona) { toast('No hay una persona seleccionada.', true); return; }
+  const persona = alumnoActivo.persona;
+  if (!confirm(`Vas a iniciar una evaluación para ${persona.nombre}.\n\nSe crea una historia clínica nueva donde vas a poder cargar tus observaciones, notas y adjuntos desde el módulo Historias Clínicas. El paciente igual va a poder completar su parte del formulario cuando quiera.\n\n¿Confirmás?`)) return;
+
+  try {
+    const fila = {
+      persona_id: persona.id,
+      dni: persona.dni || '—',  // dni es obligatorio en la tabla
+      origen: 'profesional',
+      motivo_consulta: null
+    };
+    const { data, error } = await sb.from('historias_clinicas').insert(fila).select().single();
+    if (error) throw error;
+
+    // abrirModalVer() recarga hcsPersona desde la base, así que solo marcamos
+    // el set de "con HC" para los stats y refrescamos el modal.
+    personasConHC.add(persona.id);
+
+    toast('✓ Evaluación iniciada. Abrila desde el módulo Historias Clínicas para cargar tus observaciones.');
+    // Refrescar el modal Ver para que muestre la HC recién creada
+    await abrirModalVer();
+  } catch (e) {
+    toast('No se pudo iniciar la evaluación: ' + e.message, true);
+  }
 };
 
 window.verHCCompleta = (idx) => {
@@ -2694,6 +2725,15 @@ function renderHCDetail(hc, persona) {
 // Obtener el UUID del usuario logueado (sesión compartida con app.html vía Supabase).
 // Si no hay sesión, usuarioId queda null (nunca texto) para no romper los campos UUID.
 let esLu = false; // solo Lu puede borrar pagos / deshacer cambios de plan
+let esKine = false; // los kinesiólogos pueden iniciar evaluaciones (HC)
+let kineActual = null; // { id, nombre, email } del kine logueado (para autoría de la HC)
+// Kinesiólogos que pueden iniciar una evaluación (mismos 4 que en historias_clinicas.html)
+const EMAILS_KINES = [
+  'liclucianavelaz@gmail.com',  // Lu
+  'jimenahllorente@gmail.com',  // Jime
+  'loz.magdalena@gmail.com',    // Male
+  'brunitovelez99@gmail.com'    // Bruno
+];
 async function cargarUsuario() {
   try {
     const { data, error } = await sb.auth.getUser();
@@ -2701,6 +2741,19 @@ async function cargarUsuario() {
       usuarioId = data.user.id;
       const email = (data.user.email || '').toLowerCase().trim();
       esLu = (email === 'liclucianavelaz@gmail.com');
+      esKine = EMAILS_KINES.includes(email);
+      if (esKine) {
+        // Buscar la persona del kine (por email) para guardar autoría en la HC
+        try {
+          const { data: pk } = await sb.from('personas')
+            .select('id, nombre')
+            .ilike('email', email)
+            .maybeSingle();
+          kineActual = { id: pk ? pk.id : null, nombre: pk ? pk.nombre : email, email };
+        } catch (e) {
+          kineActual = { id: null, nombre: email, email };
+        }
+      }
     }
   } catch (e) {
     console.warn('No se pudo obtener el usuario logueado:', e.message);

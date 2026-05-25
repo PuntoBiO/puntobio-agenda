@@ -584,6 +584,7 @@
       <div id="modalReviewStatus" style="font-size:13px; color:var(--gris-texto);"></div>
       <div style="display:flex; gap:8px;">
         <button class="btn" onclick="closeModal()">Cerrar</button>
+        <button class="btn" id="btnGenerarPDF" onclick="abrirSelectorPDF()" style="background:#1e9fe0; color:#fff; border-color:#1e9fe0;">📄 Generar PDF</button>
         <button class="btn btn-success" id="btnMarcarRevisada" onclick="marcarRevisada()">✓ Marcar como revisada</button>
       </div>
     </div>
@@ -594,6 +595,7 @@
 <div class="toast" id="toast">Listo</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxcGp0b2lpY3RuemNhc3hmdWNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MDQwOTMsImV4cCI6MjA5NDI4MDA5M30.N1pG65Bm0EmPqxe8hzEFQqE0v1_N5pwrv8HO8We8Xdw';
@@ -615,6 +617,7 @@ let currentMoplexId = null; // Eval MOPLEX abierta en modal
 let modalType = 'hc'; // 'hc' o 'moplex'
 let obsActual = [];   // observaciones+notas de la HC abierta
 let adjActual = [];   // adjuntos de la HC abierta
+let personasConEvalProf = new Set(); // personas que ya tienen una HC abierta por profesional
 
 document.addEventListener('DOMContentLoaded', async () => {
   await detectarUsuario();
@@ -642,6 +645,11 @@ function puedeEditar() {
 }
 function puedeEliminar() {
   return usuarioActual && EMAILS_PUEDEN_ELIMINAR.includes(normEmail(usuarioActual.email));
+}
+// Solo los kinesiólogos (Lu, Jime, Male, Bruno) pueden iniciar una evaluación
+// para un paciente que todavía no completó el formulario público.
+function puedeIniciarEval() {
+  return usuarioActual && EMAILS_PUEDEN_EDITAR.includes(normEmail(usuarioActual.email));
 }
 
 async function detectarUsuario() {
@@ -703,6 +711,10 @@ async function loadAllData() {
     // 4) Personas sin HC (de la vista)
     const personaIdsConHC = new Set(allHCs.map(h => h.persona_id));
     sinHC = allPersonas.filter(p => !personaIdsConHC.has(p.id));
+
+    // Set de personas que YA tienen al menos una HC abierta por el profesional
+    // (evita que el botón "Iniciar evaluación" cree duplicados sin querer)
+    personasConEvalProf = new Set(allHCs.filter(h => h.origen === 'profesional').map(h => h.persona_id));
   } catch (err) {
     console.error('Error cargando datos:', err);
     document.getElementById('tabContent').innerHTML =
@@ -857,6 +869,7 @@ function renderSinCompletarInner() {
             <td>${p.mail || '—'}</td>
             <td>${formatDate(p.fecha_alta)}</td>
             <td><div class="table-actions">
+              ${puedeIniciarEval() ? `<button class="btn btn-sm btn-success" onclick="iniciarEvaluacion(${p.id})" title="Cargar la evaluación del profesional aunque el paciente no haya completado el formulario">🩺 Iniciar evaluación</button>` : ''}
               ${p.celular ? `<button class="btn btn-sm" onclick="sendWhatsApp('${p.celular}', '${(p.nombre || '').replace(/'/g, "\\'")}')" title="Enviar link por WhatsApp">📱 WhatsApp</button>` : ''}
             </div></td>
           </tr>
@@ -996,6 +1009,56 @@ function formatDate(iso) {
 /* =============================================================
    MODAL VER HC
 ============================================================= */
+/* =============================================================
+   INICIAR EVALUACIÓN (HC abierta por el profesional)
+   Crea una HC nueva en blanco para un paciente que todavía no
+   completó el formulario público, y la abre para cargar la evaluación.
+============================================================= */
+async function iniciarEvaluacion(personaId) {
+  if (!puedeIniciarEval()) {
+    alert('Solo los kinesiólogos pueden iniciar una evaluación.');
+    return;
+  }
+  const persona = allPersonas.find(p => p.id === personaId);
+  if (!persona) { alert('No se encontró a la persona.'); return; }
+
+  // Aviso si ya tiene una evaluación abierta por profesional sin completar,
+  // para no crear duplicados sin querer (igual lo dejamos decidir).
+  if (personasConEvalProf.has(personaId)) {
+    if (!confirm(`${upperName(persona.nombre)} ya tiene una evaluación abierta por un profesional.\n\n¿Querés crear OTRA historia clínica nueva igual? (Por ejemplo, si es por otra lesión o consulta distinta).`)) {
+      return;
+    }
+  } else {
+    if (!confirm(`Vas a iniciar una evaluación para ${upperName(persona.nombre)}.\n\nSe crea una historia clínica nueva donde podés cargar tus observaciones, notas y adjuntos. El paciente igual va a poder completar su parte del formulario cuando quiera.\n\n¿Confirmás?`)) {
+      return;
+    }
+  }
+
+  try {
+    const fila = {
+      persona_id: personaId,
+      dni: persona.dni || '—',     // dni es obligatorio en la tabla; si no hay, ponemos un guion
+      origen: 'profesional',        // <-- marca que la abrió el kinesiólogo, no el paciente
+      motivo_consulta: null
+    };
+    const { data, error } = await sb.from('historias_clinicas').insert(fila).select().single();
+    if (error) throw error;
+
+    // Sumar la HC nueva al estado local y refrescar
+    allHCs.unshift(data);
+    personasConEvalProf.add(personaId);
+    sinHC = sinHC.filter(p => p.id !== personaId);
+    renderStats();
+    renderTab();
+
+    // Abrir el modal de la HC recién creada para cargar la evaluación
+    openHC(data.id);
+    showToast('✓ Evaluación iniciada — ya podés cargar tus observaciones');
+  } catch (e) {
+    alert('No se pudo iniciar la evaluación: ' + e.message);
+  }
+}
+
 function openHC(hcId) {
   const hc = allHCs.find(h => h.id === hcId);
   if (!hc) return;
@@ -1007,8 +1070,11 @@ function openHC(hcId) {
   // Header celeste (default)
   document.getElementById('modalHeader').classList.remove('modal-header-rojo');
   document.getElementById('modalNombre').textContent = persona ? upperName(persona.nombre) : '(sin nombre)';
+  const etiquetaOrigen = hc.origen === 'profesional'
+    ? ' · 🩺 Abierta por profesional'
+    : ' · 📝 Completada por el paciente';
   document.getElementById('modalMeta').textContent =
-    `DNI ${hc.dni || '—'} · Cargada el ${formatDate(hc.completado_en)}`;
+    `DNI ${hc.dni || '—'} · Cargada el ${formatDate(hc.completado_en)}${etiquetaOrigen}`;
 
   document.getElementById('modalBody').innerHTML = renderHCDetail(hc, persona);
 
@@ -1032,6 +1098,10 @@ function openHC(hcId) {
 
   document.getElementById('modalHC').classList.add('show');
   document.getElementById('modalHC').scrollTop = 0;
+
+  // Mostrar el botón "Generar PDF" (solo aplica a HC, no a MOPLEX)
+  const btnPdf = document.getElementById('btnGenerarPDF');
+  if (btnPdf) btnPdf.style.display = 'inline-block';
 }
 
 /* =============================================================
@@ -1070,6 +1140,10 @@ function openMoplex(moplexId) {
 
   document.getElementById('modalHC').classList.add('show');
   document.getElementById('modalHC').scrollTop = 0;
+
+  // El botón PDF no aplica a MOPLEX
+  const btnPdf = document.getElementById('btnGenerarPDF');
+  if (btnPdf) btnPdf.style.display = 'none';
 }
 
 function closeModal() {
@@ -1206,6 +1280,15 @@ function renderHCDetail(hc, persona) {
     : '<span class="hc-field-value">Sin antecedentes destacados</span>';
 
   return `
+    <!-- AVISO si la abrió el profesional y el paciente todavía no completó su parte -->
+    ${hc.origen === 'profesional' && !hc.motivo_consulta ? `
+    <div class="hc-section" style="border-left:4px solid #f59e0b;">
+      <div class="hc-section-body" style="background:#fffbeb;">
+        <div style="font-weight:600; color:#92400e;">🩺 Evaluación abierta por el profesional</div>
+        <div style="color:#92400e; font-size:13px; margin-top:4px;">El paciente todavía no completó el formulario público, así que los datos personales y antecedentes de abajo van a aparecer vacíos. Podés cargar tus observaciones, notas y adjuntos igual. Cuando el paciente complete el formulario, se va a crear su propia historia clínica.</div>
+      </div>
+    </div>` : ''}
+
     <!-- DATOS PERSONALES -->
     <div class="hc-section">
       <div class="hc-section-header">👤 Datos personales</div>
@@ -1770,6 +1853,317 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+/* =============================================================
+   PDF DE LA HISTORIA CLÍNICA (para enviar al paciente)
+   - Logo + datos del paciente (lo que completó)
+   - Observaciones que el profesional ELIGE (checkbox)
+   - Lista de adjuntos (los PDF de VALD u otros estudios)
+============================================================= */
+
+// Paso 1: abrir un selector liviano para elegir qué observaciones incluir
+function abrirSelectorPDF() {
+  if (!currentHCId) return;
+  const hc = allHCs.find(h => h.id === currentHCId);
+  if (!hc) return;
+  const persona = allPersonas.find(p => p.id === hc.persona_id);
+
+  // Solo observaciones clínicas (las notas internas NUNCA van al paciente)
+  const observaciones = obsActual.filter(o => o.tipo === 'observacion');
+
+  const obsCheckboxes = observaciones.length
+    ? observaciones.map((o, i) => `
+        <label style="display:flex; gap:10px; align-items:flex-start; padding:10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:8px; cursor:pointer;">
+          <input type="checkbox" class="pdf-obs-check" data-obs-id="${o.id}" checked style="margin-top:3px;">
+          <span style="flex:1;">
+            <span style="font-weight:600; font-size:13px;">${escapeHtml(o.autor_nombre ? upperName(o.autor_nombre).split(' ').slice(0,2).join(' ') : 'Profesional')}</span>
+            <span style="color:var(--gris-texto); font-size:12px;"> · ${formatDateTime(o.creado_en)}</span>
+            <div style="font-size:13px; margin-top:4px; white-space:pre-wrap;">${escapeHtml(o.texto)}</div>
+          </span>
+        </label>`).join('')
+    : '<div class="obs-empty">No hay observaciones clínicas cargadas.</div>';
+
+  // Adjuntos (para listar / incluir referencia en el PDF)
+  const adjCheckboxes = adjActual.length
+    ? adjActual.map(a => `
+        <label style="display:flex; gap:10px; align-items:center; padding:8px 10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:6px; cursor:pointer;">
+          <input type="checkbox" class="pdf-adj-check" data-adj-id="${a.id}" checked>
+          <span style="flex:1; font-size:13px;">${iconoArchivo(a.tipo_mime, a.nombre_original)} ${escapeHtml(a.nombre_original)} <span style="color:var(--gris-texto); font-size:12px;">(${formatTamano(a.tamano_bytes)})</span></span>
+        </label>`).join('')
+    : '<div class="obs-empty">Sin archivos adjuntos.</div>';
+
+  const html = `
+    <div class="modal-overlay show" id="modalSelectorPDF" style="z-index:9999;">
+      <div class="modal" style="max-width:640px;">
+        <div class="modal-header">
+          <div>
+            <h2 style="margin:0;">📄 Armar PDF de la historia clínica</h2>
+            <div class="meta">${persona ? upperName(persona.nombre) : ''} · Elegí qué incluir</div>
+          </div>
+          <button class="modal-close" onclick="cerrarSelectorPDF()">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="hc-section">
+            <div class="hc-section-header">📋 Datos del formulario del paciente</div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirFormulario" ${hc.motivo_consulta ? 'checked' : ''} ${hc.motivo_consulta ? '' : 'disabled'}>
+                <span style="font-size:13px;">${hc.motivo_consulta ? 'Incluir lo que completó el paciente (motivo, antecedentes, hábitos, etc.)' : 'El paciente todavía no completó el formulario — no hay datos para incluir.'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">🩺 Observaciones del profesional <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(tildá las que querés enviar)</span></div>
+            <div class="hc-section-body">${obsCheckboxes}</div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">📎 Archivos adjuntos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(se listan en el PDF; los archivos se mandan aparte)</span></div>
+            <div class="hc-section-body">${adjCheckboxes}</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <div style="font-size:12px; color:var(--gris-texto);">🔒 Las notas internas nunca se incluyen.</div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" onclick="cerrarSelectorPDF()">Cancelar</button>
+            <button class="btn" id="btnHacerPDF" onclick="generarPDF()" style="background:#1e9fe0; color:#fff; border-color:#1e9fe0;">📄 Generar y descargar</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  const cont = document.createElement('div');
+  cont.id = 'selectorPDFWrap';
+  cont.innerHTML = html;
+  document.body.appendChild(cont);
+}
+
+function cerrarSelectorPDF() {
+  const w = document.getElementById('selectorPDFWrap');
+  if (w) w.remove();
+}
+
+// Paso 2: generar el PDF con jsPDF
+function generarPDF() {
+  if (!currentHCId) return;
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    alert('No se pudo cargar el generador de PDF. Revisá tu conexión a internet y probá de nuevo.');
+    return;
+  }
+  const hc = allHCs.find(h => h.id === currentHCId);
+  if (!hc) return;
+  const persona = allPersonas.find(p => p.id === hc.persona_id);
+
+  // Qué eligió incluir
+  const incluirForm = document.getElementById('pdfIncluirFormulario')?.checked;
+  const obsIds = Array.from(document.querySelectorAll('.pdf-obs-check:checked')).map(c => parseInt(c.dataset.obsId));
+  const adjIds = Array.from(document.querySelectorAll('.pdf-adj-check:checked')).map(c => parseInt(c.dataset.adjId));
+  const obsElegidas = obsActual.filter(o => obsIds.includes(o.id));
+  const adjElegidos = adjActual.filter(a => adjIds.includes(a.id));
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const PAGE_W = doc.internal.pageSize.getWidth();
+  const PAGE_H = doc.internal.pageSize.getHeight();
+  const MARGIN = 48;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+  const AZUL = [30, 159, 224];   // #1e9fe0
+  const NEGRO = [17, 17, 17];    // #111
+  const GRIS = [110, 110, 110];
+  let y = MARGIN;
+
+  // --- Salto de página automático ---
+  function checkPage(alto) {
+    if (y + alto > PAGE_H - MARGIN) {
+      pieDePagina();
+      doc.addPage();
+      y = MARGIN;
+    }
+  }
+
+  function pieDePagina() {
+    doc.setFontSize(8);
+    doc.setTextColor(...GRIS);
+    doc.text('PuntoBiO · Centro de Rehabilitación y Entrenamiento — Córdoba', MARGIN, PAGE_H - 24);
+    doc.text('www.puntobio.com.ar', PAGE_W - MARGIN, PAGE_H - 24, { align: 'right' });
+  }
+
+  // --- ENCABEZADO con logo (esfera dibujada) ---
+  function dibujarLogo(cx, cy, r) {
+    // Esfera celeste estilizada (anillo + centro) que evoca el logo de PuntoBiO
+    doc.setFillColor(...AZUL);
+    doc.circle(cx, cy, r, 'F');
+    doc.setFillColor(255, 255, 255);
+    doc.circle(cx + r * 0.25, cy - r * 0.25, r * 0.35, 'F');
+    doc.setDrawColor(...AZUL);
+    doc.setLineWidth(2);
+    doc.circle(cx, cy, r + 5, 'S');
+  }
+  dibujarLogo(MARGIN + 16, y + 14, 16);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(20);
+  doc.setTextColor(...NEGRO);
+  doc.text('PuntoBiO', MARGIN + 46, y + 12);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(...GRIS);
+  doc.text('Centro de Rehabilitación y Entrenamiento', MARGIN + 46, y + 27);
+
+  doc.setFontSize(9);
+  doc.text('Historia Clínica', PAGE_W - MARGIN, y + 12, { align: 'right' });
+  doc.text(`Emitida: ${formatDate(new Date().toISOString())}`, PAGE_W - MARGIN, y + 26, { align: 'right' });
+  y += 50;
+
+  // Línea separadora azul
+  doc.setDrawColor(...AZUL);
+  doc.setLineWidth(2);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  y += 24;
+
+  // --- TÍTULO PACIENTE ---
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.setTextColor(...NEGRO);
+  doc.text(persona ? upperName(persona.nombre) : '(sin nombre)', MARGIN, y);
+  y += 18;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10);
+  doc.setTextColor(...GRIS);
+  const datosLinea = [
+    hc.dni ? `DNI: ${hc.dni}` : null,
+    persona?.celular ? `Cel: ${persona.celular}` : null,
+    persona?.mail ? `Mail: ${persona.mail}` : null
+  ].filter(Boolean).join('   ·   ');
+  if (datosLinea) { doc.text(datosLinea, MARGIN, y); y += 14; }
+  doc.text(`Historia cargada el ${formatDate(hc.completado_en)}`, MARGIN, y);
+  y += 24;
+
+  // --- Helper: título de sección ---
+  function tituloSeccion(texto) {
+    checkPage(34);
+    doc.setFillColor(240, 248, 253);
+    doc.rect(MARGIN, y - 12, CONTENT_W, 24, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(...AZUL);
+    doc.text(texto, MARGIN + 8, y + 4);
+    y += 28;
+  }
+
+  // --- Helper: fila etiqueta + valor ---
+  function fila(label, valor) {
+    if (valor === null || valor === undefined || valor === '' || valor === '—') return;
+    const valorTxt = String(valor);
+    const lineas = doc.splitTextToSize(valorTxt, CONTENT_W - 150);
+    const alto = Math.max(16, lineas.length * 13 + 3);
+    checkPage(alto);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...NEGRO);
+    doc.text(label, MARGIN + 8, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(60, 60, 60);
+    doc.text(lineas, MARGIN + 150, y);
+    y += alto;
+  }
+
+  const ynTxt = (v) => v === true ? 'Sí' : v === false ? 'No' : null;
+
+  // ====== DATOS DEL FORMULARIO (si el paciente lo completó y lo eligieron) ======
+  if (incluirForm && hc.motivo_consulta) {
+    tituloSeccion('Motivo de consulta');
+    fila('Motivo', hc.motivo_consulta);
+    fila('Derivación médica', ynTxt(hc.derivacion_medica));
+    fila('Médico derivante', hc.medico_derivante);
+    fila('Cómo llegó', hc.como_llego);
+    fila('Servicios requeridos', (hc.servicios_requeridos || []).join(', '));
+
+    // Antecedentes con SÍ
+    const ANTEC = [
+      ['hipertension','Hipertensión'],['hipotension','Hipotensión'],['anemia','Anemia'],
+      ['asma','Asma'],['colesterol_elevado','Colesterol elevado'],['hipotiroidismo','Hipotiroidismo'],
+      ['hipertiroidismo','Hipertiroidismo'],['diabetes','Diabetes'],['varices','Várices'],
+      ['contracturas','Contracturas'],['taquicardia','Taquicardia'],['problemas_digestivos','Problemas digestivos'],
+      ['mujer_partos','Partos'],['incontinencia_urinaria','Incontinencia urinaria'],['mareos','Mareos'],
+      ['vertigo','Vértigo'],['depresion','Depresión'],['ansiedad','Ansiedad'],['sueno_irregular','Sueño irregular'],
+      ['insomnio','Insomnio'],['usa_vendaje_protesis','Usa vendaje/prótesis'],['usa_plantillas','Usa plantillas'],
+      ['cirugias','Cirugías previas']
+    ];
+    const conSi = ANTEC.filter(([k]) => hc[k] === true).map(([,l]) => l);
+    tituloSeccion('Antecedentes');
+    fila('Lado hábil', hc.lado_habil);
+    fila('Con respuesta SÍ', conSi.length ? conSi.join(', ') : 'Sin antecedentes destacados');
+    fila('Contracturas (dónde)', hc.contracturas_donde);
+    fila('Cirugías (cuáles)', hc.cirugias_descripcion);
+    fila('Otros antecedentes', hc.otros_antecedentes);
+
+    if (hc.dolor_motivo_consulta !== null && hc.dolor_motivo_consulta !== undefined) {
+      tituloSeccion('Dolor / síntoma actual');
+      fila('Consulta por dolor', ynTxt(hc.dolor_motivo_consulta));
+      fila('Zona', hc.dolor_zona);
+      fila('Desde cuándo', hc.dolor_desde_cuando);
+      fila('Tratamientos previos', ynTxt(hc.dolor_realizo_tratamientos));
+      fila('Detalle', hc.dolor_tratamientos_descripcion);
+    }
+
+    if (hc.objetivo_funcional) {
+      tituloSeccion('Objetivo funcional');
+      fila('Objetivo', hc.objetivo_funcional);
+    }
+  }
+
+  // ====== OBSERVACIONES DEL PROFESIONAL (las elegidas) ======
+  if (obsElegidas.length) {
+    tituloSeccion('Observaciones del profesional');
+    obsElegidas.forEach(o => {
+      const autor = o.autor_nombre ? upperName(o.autor_nombre).split(' ').slice(0,2).join(' ') : 'Profesional';
+      const cab = `${autor} · ${formatDateTime(o.creado_en)}`;
+      const lineasTexto = doc.splitTextToSize(o.texto || '', CONTENT_W - 16);
+      const alto = 18 + lineasTexto.length * 13 + 10;
+      checkPage(alto);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...AZUL);
+      doc.text(cab, MARGIN + 8, y);
+      y += 14;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(40, 40, 40);
+      doc.text(lineasTexto, MARGIN + 8, y);
+      y += lineasTexto.length * 13 + 12;
+    });
+  }
+
+  // ====== ADJUNTOS (lista) ======
+  if (adjElegidos.length) {
+    tituloSeccion('Archivos adjuntos');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(60, 60, 60);
+    adjElegidos.forEach(a => {
+      checkPage(16);
+      doc.text(`•  ${a.nombre_original}  (${formatTamano(a.tamano_bytes)})`, MARGIN + 8, y);
+      y += 15;
+    });
+    y += 4;
+    checkPage(28);
+    doc.setFontSize(8.5);
+    doc.setTextColor(...GRIS);
+    const nota = doc.splitTextToSize('Los archivos adjuntos (estudios, RX, evaluaciones VALD) se envían por separado junto a este PDF.', CONTENT_W - 8);
+    doc.text(nota, MARGIN + 8, y);
+    y += nota.length * 11;
+  }
+
+  pieDePagina();
+
+  // Nombre de archivo limpio
+  const nombreArch = `HC_${(persona?.nombre || 'paciente').replace(/[^a-zA-Z0-9]/g, '_')}_${formatDate(hc.completado_en).replace(/\//g, '-')}.pdf`;
+  doc.save(nombreArch);
+
+  cerrarSelectorPDF();
+  showToast('✓ PDF generado');
 }
 </script>
 </body>
