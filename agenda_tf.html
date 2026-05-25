@@ -149,6 +149,14 @@
   }
   .tipo-entrenamiento { background: var(--celeste-claro); color: var(--celeste-oscuro); border: 1px solid var(--celeste-medio); }
   .tipo-kinefilaxia { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+  .turno-head-right { display: flex; align-items: center; gap: 7px; }
+  .cierre-badge {
+    width: 20px; height: 20px; border-radius: 50%; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0;
+  }
+  .cb-ok { background: #16a34a; color: white; }
+  .cb-falta { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
+  .card-cerrada { background: #fafffe; }
   .turno-body { padding: 12px 14px; }
   .turno-profes { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .profe-tag {
@@ -538,6 +546,30 @@
   .evo-btn-pri:hover:not(:disabled) { background: var(--celeste-oscuro); }
   .evo-btn-pri:disabled { opacity: 0.5; cursor: not-allowed; }
   .evo-ayuda { font-size: 11px; color: var(--texto-suave); margin-top: 10px; line-height: 1.5; }
+  /* Bloque de cierre de clase */
+  .cierre-box {
+    margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+    display: flex; align-items: center; gap: 10px; justify-content: space-between;
+    border: 1px solid var(--gris-borde); flex-wrap: wrap;
+  }
+  .cierre-box.lista { background: #f0fdf4; border-color: #86efac; }
+  .cierre-box.pendiente { background: #fffbeb; border-color: #fde68a; }
+  .cierre-box.cerrada { background: #eff6ff; border-color: #93c5fd; }
+  .cierre-msg { font-size: 13px; color: var(--texto); flex: 1; min-width: 0; }
+  .cierre-cerrar {
+    background: #16a34a; color: white; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: 'DM Sans', sans-serif; white-space: nowrap; transition: background 0.12s;
+  }
+  .cierre-cerrar:hover { background: #15803d; }
+  .cierre-box.pendiente .cierre-cerrar { background: #d97706; }
+  .cierre-box.pendiente .cierre-cerrar:hover { background: #b45309; }
+  .cierre-reabrir {
+    background: white; color: var(--celeste-oscuro); border: 1px solid var(--celeste-medio);
+    border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer;
+    font-family: 'DM Sans', sans-serif; white-space: nowrap;
+  }
+  .cierre-reabrir:hover { background: var(--celeste-claro); }
   @media (max-width: 600px) {
     header { padding: 0 16px; }
     .contenido { padding: 14px 16px 32px; }
@@ -885,6 +917,7 @@ async function cargarDatos() {
         estado: 'reservado'
       });
     });
+    await cargarClasesCerradas();
     renderDiasTabs();
     renderTurnos();
   } catch(err) {
@@ -996,6 +1029,7 @@ function renderTurnos() {
     container.innerHTML = '<div class="sin-turnos">No hay turnos para este filtro</div>';
     return;
   }
+  const fechaGrid = fechaRealDiaActivo();
   container.innerHTML = turnos.map(t => {
     const alumnos = getAlumnos(t);
     const ocup = alumnos.length;
@@ -1004,11 +1038,18 @@ function renderTurnos() {
     const colorTexto = pct>=100?'var(--rojo)':pct>=75?'var(--amarillo)':'var(--celeste-oscuro)';
     const tipoClass = t.servicio==='Entrenamiento'?'tipo-entrenamiento':'tipo-kinefilaxia';
     const libres = t.capacidad - ocup;
+    const cerrada = claseEstaCerrada(t.id, fechaGrid);
+    const badgeCierre = cerrada
+      ? `<span class="cierre-badge cb-ok" title="Clase cerrada">✓</span>`
+      : `<span class="cierre-badge cb-falta" title="Falta cerrar">✗</span>`;
     return `
-      <div class="turno-card" onclick="abrirModal('${t.dia}','${t.hora}','${t.servicio}')">
+      <div class="turno-card${cerrada?' card-cerrada':''}" onclick="abrirModal('${t.dia}','${t.hora}','${t.servicio}')">
         <div class="turno-header">
           <span class="turno-hora">${t.hora}</span>
-          <span class="turno-tipo ${tipoClass}">${t.servicio}</span>
+          <span class="turno-head-right">
+            ${badgeCierre}
+            <span class="turno-tipo ${tipoClass}">${t.servicio}</span>
+          </span>
         </div>
         <div class="turno-body">
           <div class="turno-profes">${t.profes.map(p=>`<span class="profe-tag">${p}</span>`).join('')}</div>
@@ -1176,6 +1217,34 @@ let EVO_TURNO = {};      // persona_id -> {id, modulo, contenido, ...}
 let EVO_RECIENTES = [];  // últimas anotaciones cargadas (para reusar)
 let evoSeleccion = new Set(); // persona_id seleccionados para aplicar en lote
 let evoTurnoActual = null;    // el turno abierto
+let CLASES_CERRADAS = new Set();  // claves "turnoId-fecha" de clases ya cerradas
+
+// Carga todas las clases cerradas de la semana visible (para los ✓/✗ de la grilla)
+async function cargarClasesCerradas() {
+  try {
+    const filas = await supabaseQuery('clases_cerradas', `?select=turno_id,fecha`);
+    CLASES_CERRADAS = new Set((filas || []).map(f => `${f.turno_id}-${f.fecha}`));
+  } catch (e) { CLASES_CERRADAS = new Set(); console.warn('No se pudo cargar clases cerradas', e); }
+}
+
+// ¿Está cerrada esta clase (turno) en la fecha dada?
+function claseEstaCerrada(turnoId, fecha) {
+  return CLASES_CERRADAS.has(`${turnoId}-${fecha}`);
+}
+
+// ¿La clase está COMPLETA? (todos los alumnos tienen evolución o están ausentes)
+function claseCompleta(t) {
+  const alumnos = getAlumnos(t);
+  if (!alumnos.length) return false;
+  return alumnos.every(a => {
+    const pid = String(a.id);
+    const tieneEvo = !!EVO_TURNO[pid];
+    const key = `${t.dia}-${t.hora}-${t.servicio}-${pid}`;
+    const estado = asistenciaEstados[key] || 'reservado';
+    const estaAusente = estado === 'ausente' || estado === 'ausente-justificada';
+    return tieneEvo || estaAusente;
+  });
+}
 
 // Carga las evoluciones ya guardadas de este turno+fecha
 async function cargarEvolucionesTurno(t) {
@@ -1376,9 +1445,46 @@ window.evoAplicarLote = async () => {
   evoCaritaSel = ''; evoDolorSel = false;
   renderModalBody(t.dia, t.hora, t.servicio);
 };
-// Lee el panel "Anotación de hoy"
-let evoCaritaSel = '';
-let evoDolorSel = false;
+
+// Cerrar la clase (marcarla como finalizada)
+window.cerrarClase = async () => {
+  const t = evoTurnoActual;
+  if (!t) return;
+  const fecha = fechaRealDiaActivo();
+  const btn = document.getElementById('cerrar-clase-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cerrando...'; }
+  try {
+    await supabaseInsert('clases_cerradas', {
+      turno_id: t.id,
+      fecha,
+      cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
+      cerrada_por_email: USUARIO_ACTUAL?.email || null
+    });
+    CLASES_CERRADAS.add(`${t.id}-${fecha}`);
+    toast('✓ Clase cerrada');
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos(); // refrescar los ✓/✗ de la grilla
+  } catch (e) {
+    toast('No se pudo cerrar la clase: ' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '🔒 Cerrar clase'; }
+  }
+};
+
+// Reabrir una clase cerrada (por si se cerró por error)
+window.reabrirClase = async () => {
+  const t = evoTurnoActual;
+  if (!t) return;
+  const fecha = fechaRealDiaActivo();
+  try {
+    await supabaseDelete('clases_cerradas', `turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    CLASES_CERRADAS.delete(`${t.id}-${fecha}`);
+    toast('Clase reabierta');
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos();
+  } catch (e) {
+    toast('No se pudo reabrir: ' + e.message, 'err');
+  }
+};
 function leerPanelEvo() {
   return {
     modulo: evoModulosSel.join(', '),
@@ -1579,6 +1685,27 @@ function renderPanelEvo() {
            <div class="evo-profe-label">Iniciá sesión para que la evolución quede firmada</div>
          </div>
        </div>`;
+  // Bloque de cierre de clase: según esté cerrada, completa, o falten alumnos
+  const fechaHoy = fechaRealDiaActivo();
+  const cerrada = claseEstaCerrada(evoTurnoActual?.id, fechaHoy);
+  const completa = claseCompleta(evoTurnoActual);
+  let bloqueCierre = '';
+  if (cerrada) {
+    bloqueCierre = `<div class="cierre-box cerrada">
+        <div class="cierre-msg">🔒 <b>Clase cerrada</b> — ya está finalizada</div>
+        <button class="cierre-reabrir" onclick="reabrirClase()">Reabrir</button>
+      </div>`;
+  } else if (completa) {
+    bloqueCierre = `<div class="cierre-box lista">
+        <div class="cierre-msg">✅ <b>Clase lista para cerrar</b> — todos cargados</div>
+        <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar clase</button>
+      </div>`;
+  } else {
+    bloqueCierre = `<div class="cierre-box pendiente">
+        <div class="cierre-msg">⏳ Faltan alumnos por cargar (evolución o ausencia) para poder cerrar</div>
+        <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar igual</button>
+      </div>`;
+  }
   cont.innerHTML = `
     <div class="evo-titulo">📝 Anotación de hoy</div>
     ${cartelProfe}
@@ -1622,6 +1749,7 @@ function renderPanelEvo() {
       <button id="evo-aplicar-btn" class="evo-btn-pri" onclick="evoAplicarLote()" disabled>Elegí alumnos para aplicar</button>
     </div>
     <div class="evo-ayuda">Tildá ☐ a la izquierda de cada alumno para elegir a quiénes aplicar esta anotación. El botón 📝 de cada alumno la abre solo para esa persona.</div>
+    ${bloqueCierre}
   `;
   // Restaurar estado visual
   pintarChipsModulos();
