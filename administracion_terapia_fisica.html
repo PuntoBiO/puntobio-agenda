@@ -261,6 +261,39 @@
   </div>
 </div>
 
+<!-- MODAL OPCIONES PDF -->
+<div class="modal-backdrop" id="modalPDF">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title modal-title-ver">📄 Exportar informe en PDF</span>
+      <button class="modal-close" onclick="cerrarModal('modalPDF')">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Elegí qué incluir en el informe (período: todo el historial):</div>
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" id="pdfDatos" checked style="width:18px;height:18px">
+        <div><div style="font-weight:600;font-size:14px">Datos del alumno</div><div style="font-size:12px;color:var(--text-dim)">Nombre, DNI, contacto</div></div>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" id="pdfHorarios" checked style="width:18px;height:18px">
+        <div><div style="font-weight:600;font-size:14px">Horarios fijos</div><div style="font-size:12px;color:var(--text-dim)">Días y horas que tiene asignados</div></div>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" id="pdfAsistencia" checked style="width:18px;height:18px">
+        <div><div style="font-weight:600;font-size:14px">Asistencias y ausencias</div><div style="font-size:12px;color:var(--text-dim)">Resumen y detalle de faltas (con/sin aviso)</div></div>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" id="pdfEvoluciones" checked style="width:18px;height:18px">
+        <div><div style="font-weight:600;font-size:14px">Evoluciones clínicas</div><div style="font-size:12px;color:var(--text-dim)">Qué trabajó cada día, cómo se sintió, dolor</div></div>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalPDF')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-editar" onclick="generarPDF()">📄 Generar PDF</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL FICHA DEL ALUMNO (horarios + asistencia + foto) -->
 <div class="modal-backdrop" id="modalFicha">
   <div class="modal modal-lg">
@@ -1112,6 +1145,7 @@ async function abrirModalVer() {
 
 // ===== FICHA DEL ALUMNO (horarios + asistencia + foto) =====
 let fichaTurnosSistema = [];   // cache de todos los turnos del sistema
+let fichaDatosActual = null;   // datos cargados de la ficha actual (para el PDF)
 
 async function abrirFichaAlumno() {
   const f = alumnoActivo;
@@ -1119,15 +1153,17 @@ async function abrirFichaAlumno() {
   $('#modalFicha').classList.add('activo');
   $('#fichaBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando ficha…</div>';
   try {
-    // Traer en paralelo: turnos del sistema, turnos del alumno, su asistencia
-    const [turnosRes, misTurnosRes, asisRes] = await Promise.all([
+    // Traer en paralelo: turnos del sistema, turnos del alumno, su asistencia, sus evoluciones
+    const [turnosRes, misTurnosRes, asisRes, evoRes] = await Promise.all([
       fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
-      sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false})
+      sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false}),
+      sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false})
     ]);
     if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
     const misTurnoIds = (misTurnosRes.data || []).map(t => t.turno_id);
     const asistencias = asisRes.data || [];
+    const evoluciones = evoRes.data || [];
 
     // Horarios fijos del alumno
     const misTurnos = fichaTurnosSistema
@@ -1139,6 +1175,9 @@ async function abrirFichaAlumno() {
     const conAviso = asistencias.filter(a => a.estado === 'ausente-justificada').length;
     const sinAviso = asistencias.filter(a => a.estado === 'ausente').length;
     const totalFaltas = conAviso + sinAviso;
+
+    // Guardar todo para el informe PDF
+    fichaDatosActual = { p, misTurnos, asistencias, evoluciones, presentes, conAviso, sinAviso };
 
     // Foto / iniciales
     const ini = (p.nombre||'').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase() || '··';
@@ -1181,6 +1220,7 @@ async function abrirFichaAlumno() {
           <div style="font-size:20px;font-weight:700">${p.nombre || '(sin nombre)'}</div>
           <div style="font-size:13px;color:var(--text-dim)">#${p.id}${p.dni?' · DNI '+p.dni:''}${p.celular||p.telefono?' · '+(p.celular||p.telefono):''}</div>
         </div>
+        <button onclick="abrirOpcionesPDF()" style="margin-left:auto;background:#7c3aed;color:white;border:none;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap">📄 Exportar PDF</button>
       </div>
 
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:22px">
@@ -1271,6 +1311,131 @@ window.fichaConfirmarHorario = async (turnoViejoId) => {
     }
     abrirFichaAlumno();
   } catch (e) { alert('No se pudo guardar: ' + e.message); }
+};
+
+// ===== EXPORTAR INFORME A PDF =====
+window.abrirOpcionesPDF = () => {
+  if (!fichaDatosActual) { alert('Abrí primero la ficha del alumno'); return; }
+  $('#modalPDF').classList.add('activo');
+};
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+window.generarPDF = () => {
+  const d = fichaDatosActual;
+  if (!d) return;
+  const incDatos = $('#pdfDatos').checked;
+  const incHorarios = $('#pdfHorarios').checked;
+  const incAsis = $('#pdfAsistencia').checked;
+  const incEvo = $('#pdfEvoluciones').checked;
+  const p = d.p;
+  const hoy = new Date().toLocaleDateString('es-AR', {day:'2-digit',month:'long',year:'numeric'});
+
+  let cuerpo = '';
+
+  // Datos del alumno
+  if (incDatos) {
+    cuerpo += `<div class="sec"><h2>Datos del alumno</h2>
+      <table class="datos">
+        <tr><td class="lbl">Nombre</td><td>${escHtml(p.nombre)}</td></tr>
+        <tr><td class="lbl">ID</td><td>#${p.id}</td></tr>
+        ${p.dni?`<tr><td class="lbl">DNI</td><td>${escHtml(p.dni)}</td></tr>`:''}
+        ${(p.celular||p.telefono)?`<tr><td class="lbl">Teléfono</td><td>${escHtml(p.celular||p.telefono)}</td></tr>`:''}
+        ${p.email?`<tr><td class="lbl">Email</td><td>${escHtml(p.email)}</td></tr>`:''}
+        ${p.obra_social?`<tr><td class="lbl">Obra social</td><td>${escHtml(p.obra_social)}</td></tr>`:''}
+      </table></div>`;
+  }
+
+  // Horarios fijos
+  if (incHorarios) {
+    const filas = d.misTurnos.length
+      ? d.misTurnos.map(t => `<tr><td>${escHtml(t.dia)}</td><td>${escHtml(t.hora)}</td><td>${escHtml(t.servicio)}</td></tr>`).join('')
+      : '<tr><td colspan="3" style="color:#888">Sin horarios fijos asignados</td></tr>';
+    cuerpo += `<div class="sec"><h2>Horarios fijos</h2>
+      <table class="grid"><thead><tr><th>Día</th><th>Hora</th><th>Actividad</th></tr></thead><tbody>${filas}</tbody></table></div>`;
+  }
+
+  // Asistencias
+  if (incAsis) {
+    const ausencias = d.asistencias.filter(a => a.estado==='ausente' || a.estado==='ausente-justificada');
+    const detalle = ausencias.length
+      ? ausencias.map(a => {
+          const just = a.estado === 'ausente-justificada';
+          const t = fichaTurnosSistema.find(x => x.id === a.turno_id);
+          return `<tr><td>${formatearFechaFicha(a.fecha)}</td><td>${just?'Con aviso':'Sin aviso'}</td><td>${t?escHtml(t.dia+' '+t.hora+' · '+t.servicio):''}</td><td>${escHtml(a.motivo||'')}</td></tr>`;
+        }).join('')
+      : '<tr><td colspan="4" style="color:#888">Sin ausencias registradas</td></tr>';
+    cuerpo += `<div class="sec"><h2>Asistencias y ausencias</h2>
+      <div class="resumen">
+        <span class="r-ok">Asistencias: <b>${d.presentes}</b></span>
+        <span class="r-av">Canceló con aviso: <b>${d.conAviso}</b></span>
+        <span class="r-no">Faltó sin aviso: <b>${d.sinAviso}</b></span>
+      </div>
+      <table class="grid"><thead><tr><th>Fecha</th><th>Tipo</th><th>Turno</th><th>Motivo</th></tr></thead><tbody>${detalle}</tbody></table></div>`;
+  }
+
+  // Evoluciones
+  if (incEvo) {
+    const evos = d.evoluciones || [];
+    const filas = evos.length
+      ? evos.map(e => `<tr>
+          <td style="white-space:nowrap">${formatearFechaFicha(e.fecha)}</td>
+          <td>${escHtml(e.servicio||'')}${e.sala?' · '+escHtml(e.sala):''}</td>
+          <td>${escHtml([e.modulo, e.contenido].filter(Boolean).join(' · '))}${e.como_se_sintio?'<br><i>'+escHtml(e.como_se_sintio)+'</i>':''}${e.dolor?' <b style="color:#b91c1c">· con dolor</b>':''}${e.observacion?'<br>Obs: '+escHtml(e.observacion):''}</td>
+          <td style="white-space:nowrap">${escHtml(e.autor_nombre||'')}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="4" style="color:#888">Sin evoluciones registradas</td></tr>';
+    cuerpo += `<div class="sec"><h2>Evoluciones clínicas (${evos.length})</h2>
+      <table class="grid"><thead><tr><th>Fecha</th><th>Actividad</th><th>Detalle</th><th>Profesional</th></tr></thead><tbody>${filas}</tbody></table></div>`;
+  }
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Informe ${escHtml(p.nombre)}</title>
+  <style>
+    @page { margin: 1.5cm; }
+    body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color:#1e293b; font-size:12px; line-height:1.5; }
+    .header { display:flex; align-items:center; gap:12px; border-bottom:3px solid #1e9fe0; padding-bottom:12px; margin-bottom:18px; }
+    .logo { width:46px; height:46px; border-radius:50%; background:#111; display:flex; align-items:center; justify-content:center; }
+    .logo div { width:26px; height:26px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #7fd4f5, #1e9fe0 60%, #0b5e8a); }
+    .marca { font-size:20px; font-weight:800; color:#1e9fe0; }
+    .marca span { color:#111; }
+    .sub { font-size:11px; color:#64748b; }
+    .meta { margin-left:auto; text-align:right; font-size:11px; color:#64748b; }
+    h2 { font-size:14px; color:#1e9fe0; border-bottom:1px solid #e2e8f0; padding-bottom:4px; margin:18px 0 8px; }
+    .sec { margin-bottom:6px; page-break-inside:auto; }
+    table { width:100%; border-collapse:collapse; }
+    table.datos td { padding:4px 6px; }
+    table.datos .lbl { color:#64748b; width:120px; font-weight:600; }
+    table.grid th { background:#f1f5f9; text-align:left; padding:6px 8px; font-size:11px; border-bottom:2px solid #cbd5e1; }
+    table.grid td { padding:6px 8px; border-bottom:1px solid #e2e8f0; vertical-align:top; }
+    table.grid tr { page-break-inside:avoid; }
+    .resumen { display:flex; gap:18px; margin-bottom:10px; font-size:13px; }
+    .r-ok b { color:#15803d; } .r-av b { color:#a16207; } .r-no b { color:#b91c1c; }
+    .pie { margin-top:24px; padding-top:10px; border-top:1px solid #e2e8f0; font-size:10px; color:#94a3b8; text-align:center; }
+  </style></head>
+  <body>
+    <div class="header">
+      <div class="logo"><div></div></div>
+      <div>
+        <div class="marca">Punto<span>BiO</span></div>
+        <div class="sub">Centro de Rehabilitación & Entrenamiento</div>
+      </div>
+      <div class="meta">Informe de Terapia Física<br>Emitido: ${hoy}</div>
+    </div>
+    <h1 style="font-size:17px;margin:0 0 4px">${escHtml(p.nombre)}</h1>
+    <div class="sub" style="margin-bottom:6px">Historial completo</div>
+    ${cuerpo}
+    <div class="pie">Informe generado por el Ecosistema PuntoBiO · ${hoy}</div>
+  </body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { alert('Permití las ventanas emergentes para generar el PDF'); return; }
+  w.document.write(html);
+  w.document.close();
+  cerrarModal('modalPDF');
+  // Esperar a que cargue y abrir el diálogo de impresión (Guardar como PDF)
+  setTimeout(() => { w.focus(); w.print(); }, 400);
 };
 
 // ===== MODAL EDITAR =====
