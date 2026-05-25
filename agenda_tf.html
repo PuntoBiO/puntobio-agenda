@@ -294,6 +294,47 @@
     align-items: center; justify-content: center; padding: 16px;
   }
   .justif-overlay.activo { display: flex; }
+  /* Alerta de dolor al lado del nombre */
+  .alerta-dolor { margin-right: 5px; font-size: 13px; }
+  /* Modal histórico del alumno */
+  .hist-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5); z-index: 210;
+    align-items: center; justify-content: center; padding: 16px;
+  }
+  .hist-overlay.activo { display: flex; }
+  .hist-modal {
+    background: white; border-radius: 14px;
+    width: 560px; max-width: 100%; max-height: 86vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.3); border-top: 3px solid #7c3aed;
+  }
+  .hist-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--gris-borde);
+    display: flex; align-items: flex-start; justify-content: space-between; flex-shrink: 0;
+  }
+  .hist-titulo { font-size: 16px; font-weight: 600; color: #7c3aed; }
+  .hist-nombre { font-size: 14px; font-weight: 600; color: var(--texto); margin-top: 2px; }
+  .hist-body { padding: 12px 20px 20px; overflow-y: auto; }
+  .hist-item {
+    display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--gris-borde);
+  }
+  .hist-item.con-dolor { background: #fef2f2; margin: 0 -20px; padding: 12px 20px; border-bottom: 1px solid #fecaca; }
+  .hist-fecha-col { flex: 0 0 90px; }
+  .hist-fecha { font-size: 12px; font-weight: 600; color: var(--texto); }
+  .hist-area { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--texto-suave); margin-top: 2px; }
+  .hist-detalle { flex: 1; min-width: 0; }
+  .hist-modulos { font-size: 13px; font-weight: 600; color: var(--celeste-oscuro); }
+  .hist-contenido { font-size: 13px; color: var(--texto); margin-top: 2px; }
+  .hist-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .hist-tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 99px;
+    background: var(--gris-fondo); border: 1px solid var(--gris-borde); color: var(--texto);
+  }
+  .hist-tag.dolor { background: #fee2e2; border-color: #fca5a5; color: #991b1b; font-weight: 600; }
+  .hist-tag.ok { background: #f0fdf4; border-color: #86efac; color: #166534; }
+  .hist-obs { font-size: 12px; color: var(--texto-suave); margin-top: 5px; font-style: italic; }
+  .hist-autor { font-size: 11px; color: var(--texto-suave); margin-top: 4px; }
   .justif-modal {
     background: white; border-radius: 12px;
     width: 360px; max-width: 100%;
@@ -663,6 +704,19 @@
       <button class="btn-modal" onclick="cancelarJustif()">Cancelar</button>
       <button class="btn-modal primario" onclick="confirmarJustif()">Confirmar</button>
     </div>
+  </div>
+</div>
+<!-- HISTÓRICO DEL ALUMNO -->
+<div class="hist-overlay" id="hist-overlay" onclick="if(event.target===this)cerrarHistorico()">
+  <div class="hist-modal">
+    <div class="hist-header">
+      <div>
+        <div class="hist-titulo">📊 Histórico del alumno</div>
+        <div class="hist-nombre" id="hist-nombre"></div>
+      </div>
+      <button class="modal-cerrar" onclick="cerrarHistorico()">✕</button>
+    </div>
+    <div class="hist-body" id="hist-body"></div>
   </div>
 </div>
 <!-- LOGIN -->
@@ -1218,6 +1272,24 @@ let EVO_RECIENTES = [];  // últimas anotaciones cargadas (para reusar)
 let evoSeleccion = new Set(); // persona_id seleccionados para aplicar en lote
 let evoTurnoActual = null;    // el turno abierto
 let CLASES_CERRADAS = new Set();  // claves "turnoId-fecha" de clases ya cerradas
+let DOLOR_RECIENTE = new Set();   // persona_id que tuvieron dolor en las últimas 2 semanas
+
+// Carga qué alumnos del turno tuvieron dolor en las últimas 2 semanas (para la alerta ⚠️)
+async function cargarDolorReciente(t) {
+  DOLOR_RECIENTE = new Set();
+  const alumnos = getAlumnos(t);
+  if (!alumnos.length) return;
+  // Fecha de hace 14 días (en formato YYYY-MM-DD)
+  const hace14 = new Date();
+  hace14.setDate(hace14.getDate() - 14);
+  const desde = `${hace14.getFullYear()}-${String(hace14.getMonth()+1).padStart(2,'0')}-${String(hace14.getDate()).padStart(2,'0')}`;
+  const ids = alumnos.map(a => a.id).join(',');
+  try {
+    const filas = await supabaseQuery('evoluciones_tf',
+      `?select=persona_id&dolor=eq.true&fecha=gte.${desde}&persona_id=in.(${ids})`);
+    (filas || []).forEach(f => DOLOR_RECIENTE.add(String(f.persona_id)));
+  } catch (e) { console.warn('No se pudo cargar dolor reciente', e); }
+}
 
 // Carga todas las clases cerradas de la semana visible (para los ✓/✗ de la grilla)
 async function cargarClasesCerradas() {
@@ -1485,6 +1557,57 @@ window.reabrirClase = async () => {
     toast('No se pudo reabrir: ' + e.message, 'err');
   }
 };
+
+// ===== Histórico del alumno (línea de tiempo de evoluciones) =====
+window.abrirHistorico = async (personaId, nombre) => {
+  document.getElementById('hist-nombre').textContent = nombre || `#${personaId}`;
+  document.getElementById('hist-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--celeste)">⟳ Cargando histórico...</div>';
+  document.getElementById('hist-overlay').classList.add('activo');
+  try {
+    const filas = await supabaseQuery('evoluciones_tf',
+      `?select=*&persona_id=eq.${personaId}&order=fecha.desc,creado_en.desc&limit=60`);
+    if (!filas || !filas.length) {
+      document.getElementById('hist-body').innerHTML = '<div style="padding:24px;text-align:center;color:var(--texto-suave);font-size:14px">Todavía no hay evoluciones cargadas para este alumno.</div>';
+      return;
+    }
+    const html = filas.map(f => {
+      const fechaTxt = formatearFechaLarga(f.fecha);
+      const partes = [f.sala, f.modulo].filter(Boolean).join(' · ');
+      return `
+        <div class="hist-item ${f.dolor?'con-dolor':''}">
+          <div class="hist-fecha-col">
+            <div class="hist-fecha">${fechaTxt}</div>
+            <div class="hist-area">${f.servicio||''}</div>
+          </div>
+          <div class="hist-detalle">
+            ${partes ? `<div class="hist-modulos">${partes}</div>` : ''}
+            ${f.contenido ? `<div class="hist-contenido">${f.contenido}</div>` : ''}
+            <div class="hist-tags">
+              ${f.como_se_sintio ? `<span class="hist-tag">${f.como_se_sintio}</span>` : ''}
+              ${f.dolor ? `<span class="hist-tag dolor">⚠️ Dolor / molestia</span>` : '<span class="hist-tag ok">Sin dolor</span>'}
+            </div>
+            ${f.observacion ? `<div class="hist-obs">📝 ${f.observacion}</div>` : ''}
+            ${f.autor_nombre ? `<div class="hist-autor">— ${f.autor_nombre}</div>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+    document.getElementById('hist-body').innerHTML = html;
+  } catch (e) {
+    document.getElementById('hist-body').innerHTML = `<div style="padding:24px;text-align:center;color:var(--rojo);font-size:14px">No se pudo cargar el histórico: ${e.message}</div>`;
+  }
+};
+window.cerrarHistorico = () => {
+  document.getElementById('hist-overlay').classList.remove('activo');
+};
+// Fecha YYYY-MM-DD → "Lun 12 may 2026"
+function formatearFechaLarga(iso) {
+  if (!iso) return '';
+  const [y,m,d] = iso.split('-').map(Number);
+  const f = new Date(y, m-1, d);
+  const dias = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  return `${dias[f.getDay()]} ${d} ${meses[m-1]} ${y}`;
+}
 function leerPanelEvo() {
   return {
     modulo: evoModulosSel.join(', '),
@@ -1611,6 +1734,10 @@ function renderModalBody(dia, hora, servicio) {
           const motivo = asistenciaMotivos[`${dia}-${hora}-${servicio}-${a.id}`] || '';
           const ev = EVO_TURNO[String(a.id)];
           const tieneEvo = !!ev;
+          const tuvoDolor = DOLOR_RECIENTE.has(String(a.id));
+          const alertaDolor = tuvoDolor
+            ? `<span class="alerta-dolor" title="Tuvo dolor/molestia en las últimas 2 semanas">⚠️</span>`
+            : '';
           const resumenEvo = tieneEvo
             ? `<div class="evo-mini">📝 ${[ev.sala, ev.modulo, ev.contenido].filter(Boolean).join(' · ') || 'evolución cargada'}${ev.como_se_sintio? ' · '+ev.como_se_sintio : ''}${ev.dolor? ' · ⚠️ dolor':''}</div>`
             : '';
@@ -1618,7 +1745,7 @@ function renderModalBody(dia, hora, servicio) {
           <div class="alumno-item" style="background:${est==='presente'?'#f0fdf4':esAusente?'#fef2f2':'transparent'}">
             <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
             <div style="flex:1; min-width:0">
-              <div class="alumno-nombre">${a.nombre}</div>
+              <div class="alumno-nombre">${alertaDolor}${a.nombre}</div>
               <div class="alumno-id">#${a.id}${est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''}</div>
               ${motivo ? `<div style="font-size:11px;color:var(--texto-suave);margin-top:2px">${motivo}</div>` : ''}
               ${resumenEvo}
@@ -1633,6 +1760,9 @@ function renderModalBody(dia, hora, servicio) {
               <button class="btn-asistencia ${tieneEvo?'evo-hecha':''}" style="${tieneEvo?'background:#16a34a;color:white;border-color:#16a34a;':'background:#f0f9ff;color:#1e9fe0;border-color:#b8dcf0;'}"
                 onclick="abrirEvoIndividual(${a.id})"
                 title="${tieneEvo?'Ver / editar evolución':'Cargar evolución'}">📝</button>
+              <button class="btn-asistencia" style="background:#f5f3ff;color:#7c3aed;border-color:#ddd6fe;"
+                onclick="abrirHistorico(${a.id}, '${(a.nombre||'').replace(/'/g,'')}')"
+                title="Ver histórico de evoluciones">📊</button>
               <button class="btn-asistencia" style="background:#1e9fe0;color:white;border-color:#1e9fe0;"
                 onclick="parent.postMessage({tipo:'VER_HC',persona_id:${a.id}},'*')"
                 title="Ver historia clínica">🩺</button>
@@ -1778,7 +1908,8 @@ async function abrirModal(dia, hora, servicio) {
     '<div id="evo-cargando" style="font-size:12px;color:var(--celeste);padding:4px 0">⟳ Cargando asistencia y evoluciones...</div>');
   const tareas = [
     cargarAsistenciaTurno(t),
-    cargarEvolucionesTurno(t)
+    cargarEvolucionesTurno(t),
+    cargarDolorReciente(t)
   ];
   if (!MODULOS_TF.length) tareas.push(cargarModulosTF());
   if (!NOTAS_PRED.length) tareas.push(cargarNotasPred());
