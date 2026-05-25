@@ -719,6 +719,24 @@
     <div class="hist-body" id="hist-body"></div>
   </div>
 </div>
+<!-- AGREGAR ALUMNO -->
+<div class="hist-overlay" id="agregar-overlay" onclick="if(event.target===this)cerrarAgregar()">
+  <div class="hist-modal" style="max-width:520px">
+    <div class="hist-header">
+      <div>
+        <div class="hist-titulo">➕ Agregar alumno al turno</div>
+        <div class="hist-nombre" id="agregar-subtitulo"></div>
+      </div>
+      <button class="modal-cerrar" onclick="cerrarAgregar()">✕</button>
+    </div>
+    <div class="hist-body" id="agregar-body" style="padding:16px 20px">
+      <input id="agregar-buscar" type="text" placeholder="Buscá por nombre o DNI…" autocomplete="off"
+        oninput="buscarPersonaAgregar(this.value)"
+        style="width:100%;box-sizing:border-box;padding:10px 12px;border:1.5px solid #d8e6f0;border-radius:10px;font-size:14px;outline:none;margin-bottom:10px">
+      <div id="agregar-resultados" style="max-height:320px;overflow-y:auto"></div>
+    </div>
+  </div>
+</div>
 <!-- LOGIN -->
 <div class="login-overlay" id="login-overlay">
   <div class="login-box">
@@ -932,6 +950,9 @@ function fechaRealDiaActivo() {
 // Cache de datos
 let HORARIOS = [];
 let ALUMNOS_POR_TURNO = {};
+// Agregados puntuales (recuperatorio/suelto) de la semana visible.
+// key: `${turno_id}-${fecha}` -> [{id, nombre, tipo, agregadoId}]
+let AGREGADOS_POR_TURNO = {};
 let cargando = false;
 async function cargarDatos() {
   if (cargando) return;
@@ -971,6 +992,7 @@ async function cargarDatos() {
         estado: 'reservado'
       });
     });
+    await cargarAgregadosSemana();
     await cargarClasesCerradas();
     renderDiasTabs();
     renderTurnos();
@@ -1056,8 +1078,57 @@ function getTurnosDia() {
     return ha !== hb ? ha - hb : a.servicio.localeCompare(b.servicio);
   });
 }
-function getAlumnos(t) {
-  return ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || [];
+// Carga los agregados puntuales (recuperatorio/suelto) de las fechas de la semana visible.
+async function cargarAgregadosSemana() {
+  AGREGADOS_POR_TURNO = {};
+  try {
+    const lunes = getLunes(offsetSemana);
+    const fechas = [];
+    for (let i = 0; i < 5; i++) {
+      const f = new Date(lunes);
+      f.setDate(lunes.getDate() + i);
+      fechas.push(`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`);
+    }
+    const filas = await supabaseQuery('turno_agregados',
+      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre)&fecha=in.(${fechas.join(',')})`);
+    (filas || []).forEach(a => {
+      if (!a.personas) return;
+      const key = `${a.turno_id}-${a.fecha}`;
+      if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
+      AGREGADOS_POR_TURNO[key].push({
+        id: String(a.personas.id),
+        nombre: a.personas.nombre,
+        tipo: a.tipo,            // 'recuperatorio' | 'suelto'
+        agregadoId: a.id
+      });
+    });
+  } catch (e) {
+    console.warn('No se pudieron cargar los agregados puntuales', e);
+  }
+}
+
+// Devuelve los alumnos de un turno = fijos + agregados puntuales de la fecha indicada.
+// Si no se pasa fecha, usa la del día activo (para grilla/modal).
+function getAlumnos(t, fecha) {
+  const fijos = ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || [];
+  const f = fecha || fechaDelDia(t.dia);
+  const puntuales = (AGREGADOS_POR_TURNO[`${t.id}-${f}`] || []).map(a => ({
+    id: a.id, nombre: a.nombre, estado: 'reservado',
+    tipoAgregado: a.tipo, agregadoId: a.agregadoId
+  }));
+  // Evitar duplicar si un fijo también figura como puntual
+  const idsFijos = new Set(fijos.map(a => String(a.id)));
+  const puntualesUnicos = puntuales.filter(a => !idsFijos.has(String(a.id)));
+  return fijos.concat(puntualesUnicos);
+}
+// Fecha (YYYY-MM-DD) de un día de la semana visible, según su nombre (Lunes..Viernes)
+function fechaDelDia(diaNombre) {
+  const idx = DIAS.indexOf(diaNombre);
+  if (idx < 0) return fechaRealDiaActivo();
+  const lunes = getLunes(offsetSemana);
+  const f = new Date(lunes);
+  f.setDate(lunes.getDate() + idx);
+  return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
 }
 function renderResumen() {
   const turnos = getTurnosDia();
@@ -1599,6 +1670,158 @@ window.abrirHistorico = async (personaId, nombre) => {
 window.cerrarHistorico = () => {
   document.getElementById('hist-overlay').classList.remove('activo');
 };
+
+// =============================================
+// AGREGAR ALUMNO A UN TURNO (permanente / recuperatorio / suelto)
+// =============================================
+let agregarTurno = null;          // turno donde se está agregando
+let agregarPersonaSel = null;     // {id, nombre} elegido
+let PERSONAS_CACHE_AGREGAR = [];   // cache del buscador
+let agregarBuscarTimer = null;
+
+window.abrirAgregarAlumno = (dia, hora, servicio) => {
+  const t = HORARIOS.find(x=>x.dia===dia&&x.hora===hora&&x.servicio===servicio);
+  if (!t) return;
+  agregarTurno = t;
+  agregarPersonaSel = null;
+  document.getElementById('agregar-subtitulo').textContent = `${servicio} · ${hora} · ${dia} ${formatearFechaLarga(fechaDelDia(dia))}`;
+  document.getElementById('agregar-buscar').value = '';
+  document.getElementById('agregar-resultados').innerHTML =
+    '<div style="color:var(--texto-suave);font-size:13px;padding:10px 4px">Escribí un nombre para buscar al alumno…</div>';
+  document.getElementById('agregar-overlay').classList.add('activo');
+  setTimeout(()=>document.getElementById('agregar-buscar').focus(), 100);
+};
+window.cerrarAgregar = () => {
+  document.getElementById('agregar-overlay').classList.remove('activo');
+};
+
+window.buscarPersonaAgregar = (texto) => {
+  clearTimeout(agregarBuscarTimer);
+  const q = (texto || '').trim();
+  const cont = document.getElementById('agregar-resultados');
+  if (q.length < 2) {
+    cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:10px 4px">Escribí al menos 2 letras…</div>';
+    return;
+  }
+  agregarBuscarTimer = setTimeout(async () => {
+    cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:10px 4px">⟳ Buscando…</div>';
+    try {
+      const enc = encodeURIComponent(`%${q}%`);
+      let filas = await supabaseQuery('personas', `?select=id,nombre,dni&nombre=ilike.${enc}&order=nombre&limit=25`);
+      // Si no hay por nombre, probar por DNI
+      if ((!filas || !filas.length) && /^\d+$/.test(q)) {
+        filas = await supabaseQuery('personas', `?select=id,nombre,dni&dni=ilike.${enc}&order=nombre&limit=25`);
+      }
+      PERSONAS_CACHE_AGREGAR = filas || [];
+      if (!PERSONAS_CACHE_AGREGAR.length) {
+        cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:10px 4px">No se encontró nadie con ese nombre.</div>';
+        return;
+      }
+      cont.innerHTML = PERSONAS_CACHE_AGREGAR.map(p => `
+        <div onclick="elegirPersonaAgregar(${p.id})"
+          style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer"
+          onmouseover="this.style.background='#f0f9ff'" onmouseout="this.style.background='transparent'">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:14px">${p.nombre}</div>
+            <div style="font-size:11px;color:var(--texto-suave)">#${p.id}${p.dni?' · DNI '+p.dni:''}</div>
+          </div>
+          <span style="color:#1e9fe0;font-size:12px;font-weight:600">Elegir →</span>
+        </div>`).join('');
+    } catch (e) {
+      cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:10px 4px">Error buscando: ${e.message}</div>`;
+    }
+  }, 250);
+};
+
+window.elegirPersonaAgregar = (personaId) => {
+  const p = PERSONAS_CACHE_AGREGAR.find(x => String(x.id) === String(personaId));
+  if (!p) return;
+  agregarPersonaSel = { id: p.id, nombre: p.nombre };
+  // Paso 2: elegir tipo
+  document.getElementById('agregar-resultados').innerHTML = `
+    <div style="padding:6px 4px 14px">
+      <div style="font-size:13px;color:var(--texto-suave);margin-bottom:4px">Vas a agregar a:</div>
+      <div style="font-weight:700;font-size:16px;margin-bottom:16px">${p.nombre} <span style="font-size:12px;color:var(--texto-suave);font-weight:400">#${p.id}</span></div>
+      <div style="font-size:13px;color:var(--texto);font-weight:600;margin-bottom:10px">¿Cómo lo agregamos?</div>
+      <button onclick="confirmarAgregar('permanente')" style="width:100%;text-align:left;background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:11px;padding:12px 14px;margin-bottom:9px;cursor:pointer">
+        <div style="font-weight:700;font-size:14px;color:#15803d">📌 Permanente</div>
+        <div style="font-size:12px;color:#166534;margin-top:2px">Queda fijo en este turno todas las semanas</div>
+      </button>
+      <button onclick="confirmarAgregar('recuperatorio')" style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:12px 14px;margin-bottom:9px;cursor:pointer">
+        <div style="font-weight:700;font-size:14px;color:#92400e">🔁 Recuperatorio</div>
+        <div style="font-size:12px;color:#a16207;margin-top:2px">Solo este día — recupera una clase que faltó</div>
+      </button>
+      <button onclick="confirmarAgregar('suelto')" style="width:100%;text-align:left;background:#eef2ff;border:1.5px solid #c7d2fe;border-radius:11px;padding:12px 14px;margin-bottom:4px;cursor:pointer">
+        <div style="font-weight:700;font-size:14px;color:#3730a3">➕ Suelto</div>
+        <div style="font-size:12px;color:#4338ca;margin-top:2px">Solo este día — agregado puntual</div>
+      </button>
+      <button onclick="buscarPersonaAgregar(document.getElementById('agregar-buscar').value)" style="background:none;border:none;color:var(--texto-suave);font-size:12px;margin-top:10px;cursor:pointer;text-decoration:underline">← Volver a la búsqueda</button>
+    </div>`;
+};
+
+window.confirmarAgregar = async (tipo) => {
+  if (!agregarTurno || !agregarPersonaSel) return;
+  const cont = document.getElementById('agregar-resultados');
+  cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:12px 4px">⟳ Guardando…</div>';
+  const t = agregarTurno;
+  const pid = parseInt(agregarPersonaSel.id);
+  const nombre = agregarPersonaSel.nombre;
+  const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+  try {
+    if (tipo === 'permanente') {
+      // Va a turno_alumnos (fijo). Si ya existía (aunque inactivo), reactivar; si no, insertar.
+      const existe = await supabaseQuery('turno_alumnos',
+        `?select=persona_id&turno_id=eq.${t.id}&persona_id=eq.${pid}`);
+      if (existe && existe.length) {
+        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true });
+      } else {
+        await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true });
+      }
+      const key = `${t.dia}-${t.hora}-${t.servicio}`;
+      if (!ALUMNOS_POR_TURNO[key]) ALUMNOS_POR_TURNO[key] = [];
+      if (!ALUMNOS_POR_TURNO[key].some(a => String(a.id) === String(pid)))
+        ALUMNOS_POR_TURNO[key].push({ id: String(pid), nombre, estado: 'reservado' });
+      toast(`${nombre} agregado de forma permanente`, 'ok');
+    } else {
+      // Recuperatorio o suelto: agregado puntual de la fecha
+      const fecha = fechaDelDia(t.dia);
+      const filas = await supabaseInsertReturn('turno_agregados',
+        { turno_id: t.id, persona_id: pid, fecha, tipo, agregado_por: quien });
+      const agId = (filas && filas[0]) ? filas[0].id : null;
+      const key = `${t.id}-${fecha}`;
+      if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
+      AGREGADOS_POR_TURNO[key].push({ id: String(pid), nombre, tipo, agregadoId: agId });
+      toast(`${nombre} agregado como ${tipo==='recuperatorio'?'recuperatorio':'suelto'}`, 'ok');
+    }
+    cerrarAgregar();
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos();
+  } catch (e) {
+    const msg = /duplicate|unique/i.test(e.message || '')
+      ? 'Ese alumno ya está agregado en este turno y día.'
+      : e.message;
+    toast(`No se pudo agregar: ${msg}`, 'error');
+    cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">${msg}</div>`;
+  }
+};
+
+// Quitar un agregado puntual (recuperatorio/suelto) — NO toca a los fijos
+window.quitarAgregado = async (agregadoId, dia, hora, servicio) => {
+  if (!agregadoId) return;
+  if (!confirm('¿Quitar este alumno del turno (solo de este día)?')) return;
+  try {
+    await supabaseDelete('turno_agregados', `id=eq.${agregadoId}`);
+    // Limpiar de memoria
+    Object.keys(AGREGADOS_POR_TURNO).forEach(k => {
+      AGREGADOS_POR_TURNO[k] = AGREGADOS_POR_TURNO[k].filter(a => a.agregadoId !== agregadoId);
+    });
+    toast('Alumno quitado del turno', 'ok');
+    renderModalBody(dia, hora, servicio);
+    renderTurnos();
+  } catch (e) {
+    toast(`No se pudo quitar: ${e.message}`, 'error');
+  }
+};
 // Fecha YYYY-MM-DD → "Lun 12 may 2026"
 function formatearFechaLarga(iso) {
   if (!iso) return '';
@@ -1725,7 +1948,12 @@ function renderModalBody(dia, hora, servicio) {
       ${ausentesJust > 0 ? `<span style="color:#16a34a">✓ ${ausentesJust} justif.</span>` : ''}
       <span class="res-pendiente">○ ${pendientes} sin marcar</span>
     </div>
-    <div class="alumnos-titulo">Lista de alumnos — marcá asistencia</div>
+    <div class="alumnos-titulo" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span>Lista de alumnos — marcá asistencia</span>
+      <button onclick="abrirAgregarAlumno('${dia}','${hora}','${servicio}')"
+        style="background:#1e9fe0;color:white;border:none;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
+        title="Agregar un alumno a este turno">➕ Agregar alumno</button>
+    </div>
     ${alumnos.length===0
       ? '<div style="color:var(--texto-suave);font-size:13px;padding:8px 0">Sin alumnos anotados</div>'
       : alumnos.map(a => {
@@ -1741,12 +1969,21 @@ function renderModalBody(dia, hora, servicio) {
           const resumenEvo = tieneEvo
             ? `<div class="evo-mini">📝 ${[ev.sala, ev.modulo, ev.contenido].filter(Boolean).join(' · ') || 'evolución cargada'}${ev.como_se_sintio? ' · '+ev.como_se_sintio : ''}${ev.dolor? ' · ⚠️ dolor':''}</div>`
             : '';
+          const etiquetaAgregado = a.tipoAgregado
+            ? `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;${a.tipoAgregado==='recuperatorio'?'background:#fef3c7;color:#92400e':'background:#e0e7ff;color:#3730a3'}">${a.tipoAgregado==='recuperatorio'?'RECUPERATORIO':'SUELTO'}</span>`
+            : '';
+          const btnQuitarAgregado = a.tipoAgregado
+            ? `<button class="btn-asistencia" style="background:#fef2f2;color:#dc2626;border-color:#fecaca;"
+                onclick="quitarAgregado(${a.agregadoId},'${dia}','${hora}','${servicio}')"
+                title="Quitar este agregado del turno">🗑️</button>`
+            : '';
           return `
           <div class="alumno-item" style="background:${est==='presente'?'#f0fdf4':esAusente?'#fef2f2':'transparent'}">
             <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
             <div style="flex:1; min-width:0">
               <div class="alumno-nombre">${alertaDolor}${a.nombre}</div>
               <div class="alumno-id">#${a.id}${est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''}</div>
+              ${etiquetaAgregado ? `<div>${etiquetaAgregado}</div>` : ''}
               ${motivo ? `<div style="font-size:11px;color:var(--texto-suave);margin-top:2px">${motivo}</div>` : ''}
               ${resumenEvo}
             </div>
@@ -1766,6 +2003,7 @@ function renderModalBody(dia, hora, servicio) {
               <button class="btn-asistencia" style="background:#1e9fe0;color:white;border-color:#1e9fe0;"
                 onclick="parent.postMessage({tipo:'VER_HC',persona_id:${a.id}},'*')"
                 title="Ver historia clínica">🩺</button>
+              ${btnQuitarAgregado}
             </div>
           </div>`;
         }).join('')
