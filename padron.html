@@ -214,6 +214,30 @@
     .hc-field { flex-direction: column; gap: 2px; padding: 6px 0; }
     .hc-field-label { flex: none; font-size: 11px; }
   }
+  /* Avatar / foto de perfil (estilo EVO) */
+  .persona-cell { display: flex; align-items: center; gap: 10px; }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: var(--azul); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; flex-shrink: 0;
+    background-size: cover; background-position: center;
+    user-select: none;
+  }
+  .avatar.con-foto { background-color: #e5e7eb; color: transparent; }
+  /* Foto de perfil en el modal Ver */
+  .foto-perfil-bloque { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--borde, #e5e7eb); }
+  .avatar-grande {
+    width: 84px; height: 84px; border-radius: 50%;
+    background: var(--azul); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; font-weight: 600; flex-shrink: 0;
+    background-size: cover; background-position: center;
+    user-select: none;
+  }
+  .avatar-grande.con-foto { background-color: #e5e7eb; color: transparent; }
+  .foto-perfil-acciones { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+  .foto-perfil-acciones .btn-hc { font-size: 13px; }
 </style>
 </head>
 <body>
@@ -668,6 +692,8 @@ let hcsPersona = [];     // HCs de la persona activa en modalVer
 let hcActivaIdx = null;  // índice de la HC abierta en modalHC
 
 const FORM_URL = 'https://www.puntobio.com.ar/registrate.html';
+const FOTO_BUCKET = 'fotos-perfil'; // bucket privado para fotos de perfil
+const fotoUrlCache = {};            // persona_id -> URL firmada (evita pedir la misma foto repetida)
 
 const HOY = new Date();
 const MES_ACTUAL = `${HOY.getFullYear()}-${String(HOY.getMonth()+1).padStart(2,'0')}`;
@@ -704,6 +730,46 @@ const toast = (msg, esError=false) => {
   t.className = 'toast activo' + (esError?' error':'');
   setTimeout(() => t.className = 'toast', esError ? 5000 : 3000);
 };
+
+// ===== FOTO DE PERFIL / AVATAR =====
+// Iniciales para mostrar cuando la persona no tiene foto (ej: "MC" de María Caliva)
+function inicialesDe(nombre) {
+  const partes = (nombre || '').trim().split(/\s+/).filter(Boolean);
+  if (!partes.length) return '?';
+  if (partes.length === 1) return partes[0].substring(0, 2).toUpperCase();
+  return (partes[0][0] + partes[partes.length - 1][0]).toUpperCase();
+}
+
+// Genera (o reusa del caché) la URL firmada de la foto de una persona
+async function urlFotoPerfil(personaId, fotoPath) {
+  if (!fotoPath) return null;
+  if (fotoUrlCache[personaId]) return fotoUrlCache[personaId];
+  try {
+    const { data, error } = await sb.storage.from(FOTO_BUCKET).createSignedUrl(fotoPath, 60 * 60); // 1 hora
+    if (error) throw error;
+    fotoUrlCache[personaId] = data.signedUrl;
+    return data.signedUrl;
+  } catch (e) {
+    console.warn('No se pudo cargar la foto de', personaId, e.message);
+    return null;
+  }
+}
+
+// Recorre las personas visibles y, para las que tienen foto, la carga en su avatar
+async function cargarAvatares(lista) {
+  for (const f of lista) {
+    const p = f.persona;
+    if (!p.foto_perfil) continue;
+    const el = document.getElementById('avatar-' + p.id);
+    if (!el) continue;
+    const url = await urlFotoPerfil(p.id, p.foto_perfil);
+    if (url) {
+      el.style.backgroundImage = `url('${url}')`;
+      el.classList.add('con-foto');
+      el.textContent = '';
+    }
+  }
+}
 
 // ===== CARGA INICIAL =====
 // Efectiviza los cambios de plan programados cuyo mes_aplica_plan ya llegó (o pasó).
@@ -961,7 +1027,12 @@ function renderTabla(lista) {
       <button class="btn-accion btn-editar" data-idx="${idx}" data-accion="editar" title="Editar datos personales">✏️</button>
     `;
     html += `<tr class="row" data-idx="${idx}">
-      <td><strong>${p.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${p.id}</span></td>
+      <td>
+        <div class="persona-cell">
+          <div class="avatar" id="avatar-${p.id}" data-foto="${p.foto_perfil || ''}">${inicialesDe(p.nombre)}</div>
+          <div><strong>${p.nombre || '(sin nombre)'}</strong><span class="alumno-id">#${p.id}</span></div>
+        </div>
+      </td>
       <td>${dni}</td>
       <td>${cel}</td>
       <td>${urgTxt}</td>
@@ -971,6 +1042,8 @@ function renderTabla(lista) {
   });
   html += '</tbody></table>';
   $('#tabla-wrap').innerHTML = html;
+  // Cargar las fotos de perfil de forma asíncrona (no traba el render de la lista)
+  cargarAvatares(lista);
   $('#tabla-wrap').querySelectorAll('button[data-accion]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1072,6 +1145,16 @@ async function abrirModalVer() {
   `;
 
   $('#verBody').innerHTML = `
+    <div class="foto-perfil-bloque">
+      <div class="avatar-grande" id="avatarGrande">${inicialesDe(p.nombre)}</div>
+      <div class="foto-perfil-acciones">
+        <button class="btn-hc" style="background:var(--azul); color:#fff;" onclick="document.getElementById('inputFotoPerfil').click()">📷 ${p.foto_perfil ? 'Cambiar foto' : 'Subir foto'}</button>
+        ${p.foto_perfil ? `<button class="btn-hc" style="background:#fee2e2; color:#b91c1c;" onclick="quitarFotoPerfil()">🗑️ Quitar</button>` : ''}
+        <input type="file" id="inputFotoPerfil" accept="image/*" style="display:none;" onchange="subirFotoPerfil(event)">
+        <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">Solo la ve el equipo. Máx 5MB.</div>
+      </div>
+    </div>
+
     <div class="section-title">Datos personales</div>
     <div class="info-list">
       ${item('Nombre', p.nombre)}
@@ -1099,6 +1182,15 @@ async function abrirModalVer() {
     <div class="section-title">Otras áreas</div>
     <div class="modal-info" style="margin:0;">🚧 Consultorios, Especialidades, BioLab y Masoterapia se van a integrar cuando esas tablas estén cargadas.</div>
   `;
+  // Pintar la foto en el avatar grande si la tiene
+  if (p.foto_perfil) {
+    urlFotoPerfil(p.id, p.foto_perfil).then(url => {
+      if (url) {
+        const ag = document.getElementById('avatarGrande');
+        if (ag) { ag.style.backgroundImage = `url('${url}')`; ag.classList.add('con-foto'); ag.textContent = ''; }
+      }
+    });
+  }
   $('#modalVer').classList.add('activo');
 }
 
@@ -2501,6 +2593,64 @@ window.enviarWspHC = (celular, nombre) => {
   const primer = (nombre || '').split(' ')[0] || '';
   const msg = encodeURIComponent(`Hola ${primer}! Te dejamos el link para que completes tu historia clínica de PuntoBiO: ${FORM_URL}`);
   window.open(`https://wa.me/${num}?text=${msg}`, '_blank');
+};
+
+// ===== FOTO DE PERFIL: subir / quitar =====
+window.subirFotoPerfil = async (event) => {
+  const file = event.target.files?.[0];
+  if (!file || !alumnoActivo) return;
+  const p = alumnoActivo.persona;
+
+  if (!file.type.startsWith('image/')) { toast('El archivo tiene que ser una imagen.', true); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('La imagen es muy pesada (máx 5MB).', true); return; }
+
+  toast('Subiendo foto…');
+  try {
+    // Ruta única dentro del bucket: personas/<id>/<timestamp>-foto.ext
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const path = `personas/${p.id}/${Date.now()}-foto.${ext}`;
+
+    const { error: upErr } = await sb.storage.from(FOTO_BUCKET).upload(path, file, { upsert: true });
+    if (upErr) throw upErr;
+
+    // Guardar la ruta en personas
+    const { error: dbErr } = await sb.from('personas').update({ foto_perfil: path }).eq('id', p.id);
+    if (dbErr) throw dbErr;
+
+    // Actualizar estado local + limpiar caché para que se vuelva a firmar
+    p.foto_perfil = path;
+    delete fotoUrlCache[p.id];
+
+    toast('✓ Foto actualizada');
+    abrirModalVer();          // refresca el modal con la foto nueva
+    renderTabla(listaFiltradaCache); // refresca el avatar en la lista
+  } catch (e) {
+    console.error(e);
+    toast('No se pudo subir la foto: ' + (e.message || 'error'), true);
+  }
+};
+
+window.quitarFotoPerfil = async () => {
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  if (!confirm('¿Seguro que querés quitar la foto de perfil de ' + (p.nombre || 'esta persona') + '?')) return;
+  toast('Quitando foto…');
+  try {
+    // Borrar el archivo del bucket (si existe) y limpiar la columna
+    if (p.foto_perfil) {
+      await sb.storage.from(FOTO_BUCKET).remove([p.foto_perfil]).catch(() => {});
+    }
+    const { error } = await sb.from('personas').update({ foto_perfil: null }).eq('id', p.id);
+    if (error) throw error;
+    p.foto_perfil = null;
+    delete fotoUrlCache[p.id];
+    toast('✓ Foto quitada');
+    abrirModalVer();
+    renderTabla(listaFiltradaCache);
+  } catch (e) {
+    console.error(e);
+    toast('No se pudo quitar la foto: ' + (e.message || 'error'), true);
+  }
 };
 
 // Inicia una evaluación (HC abierta por el profesional) para el alumno/persona activo.
