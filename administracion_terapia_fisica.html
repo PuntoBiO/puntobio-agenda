@@ -70,6 +70,8 @@
   .btn-reactivar:hover { background: var(--verde); color: white; }
   .btn-altatf { background: var(--azul); color: white; }
   .btn-altatf:hover { background: #1789c4; }
+  .btn-ficha { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
+  .btn-ficha:hover { background: #7c3aed; color: white; }
   /* Asistente de pasos (alta TF) */
   .wiz-steps { display: flex; gap: 6px; margin-bottom: 18px; }
   .wiz-step { flex: 1; text-align: center; font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 4px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); }
@@ -255,6 +257,20 @@
     <div class="modal-body" id="verBody"></div>
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalVer')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL FICHA DEL ALUMNO (horarios + asistencia + foto) -->
+<div class="modal-backdrop" id="modalFicha">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <span class="modal-title modal-title-ver">📅 Ficha del alumno</span>
+      <button class="modal-close" onclick="cerrarModal('modalFicha')">×</button>
+    </div>
+    <div class="modal-body" id="fichaBody"></div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalFicha')">Cerrar</button>
     </div>
   </div>
 </div>
@@ -948,6 +964,7 @@ function renderTabla(lista) {
     const acciones = `
       <button class="btn-accion btn-ver" data-idx="${idx}" data-accion="ver" title="Ver detalle">📋</button>
       <button class="btn-accion btn-editar" data-idx="${idx}" data-accion="editar" title="Editar">✏️</button>
+      <button class="btn-accion btn-ficha" data-idx="${idx}" data-accion="ficha" title="Horarios y asistencia">📅</button>
       ${puedeAltaTF ? `<button class="btn-accion btn-altatf" data-idx="${idx}" data-accion="altatf" title="Dar alta en TF">➕</button>` : ''}
       ${esActivoTF ? `<button class="btn-accion btn-cobrar" data-idx="${idx}" data-accion="cobrar" title="Cobrar TF">💵</button>` : ''}
       ${esActivoTF ? `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="baja" title="Baja TF">❌</button>` : ''}
@@ -974,6 +991,7 @@ function renderTabla(lista) {
       alumnoActivo = fila;
       if (accion === 'ver') abrirModalVer();
       else if (accion === 'editar') abrirModalEditar();
+      else if (accion === 'ficha') abrirFichaAlumno();
       else if (accion === 'altatf') abrirAltaTF();
       else if (accion === 'cobrar') abrirModalCobrar();
       else if (accion === 'baja') abrirModalBaja();
@@ -1091,6 +1109,170 @@ async function abrirModalVer() {
   `;
   $('#modalVer').classList.add('activo');
 }
+
+// ===== FICHA DEL ALUMNO (horarios + asistencia + foto) =====
+let fichaTurnosSistema = [];   // cache de todos los turnos del sistema
+const ORDEN_DIAS = ['Lunes','Martes','Miércoles','Jueves','Viernes'];
+
+async function abrirFichaAlumno() {
+  const f = alumnoActivo;
+  const p = f.persona;
+  $('#modalFicha').classList.add('activo');
+  $('#fichaBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando ficha…</div>';
+  try {
+    // Traer en paralelo: turnos del sistema, turnos del alumno, su asistencia
+    const [turnosRes, misTurnosRes, asisRes] = await Promise.all([
+      fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
+      sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
+      sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false})
+    ]);
+    if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
+    const misTurnoIds = (misTurnosRes.data || []).map(t => t.turno_id);
+    const asistencias = asisRes.data || [];
+
+    // Horarios fijos del alumno
+    const misTurnos = fichaTurnosSistema
+      .filter(t => misTurnoIds.includes(t.id))
+      .sort((a,b) => (ORDEN_DIAS.indexOf(a.dia)-ORDEN_DIAS.indexOf(b.dia)) || a.hora.localeCompare(b.hora));
+
+    // Resumen de asistencia
+    const presentes = asistencias.filter(a => a.estado === 'presente').length;
+    const conAviso = asistencias.filter(a => a.estado === 'ausente-justificada').length;
+    const sinAviso = asistencias.filter(a => a.estado === 'ausente').length;
+    const totalFaltas = conAviso + sinAviso;
+
+    // Foto / iniciales
+    const ini = (p.nombre||'').split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase() || '··';
+    const fotoHtml = p.foto_perfil
+      ? `<img src="${p.foto_perfil}" alt="${p.nombre}" style="width:72px;height:72px;border-radius:50%;object-fit:cover;border:3px solid var(--azul)">`
+      : `<div style="width:72px;height:72px;border-radius:50%;background:var(--azul);color:white;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700">${ini}</div>`;
+
+    // Lista de horarios fijos
+    const horariosHtml = misTurnos.length
+      ? misTurnos.map(t => `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px">
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:14px">${t.dia} · ${t.hora}</div>
+            <div style="font-size:12px;color:var(--text-dim)">${t.servicio}</div>
+          </div>
+          <button onclick="fichaCambiarHorario(${t.id})" style="background:#eff6ff;color:#1e9fe0;border:1px solid #bfdbfe;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer">🔄 Cambiar</button>
+          <button onclick="fichaQuitarHorario(${t.id},'${t.dia} ${t.hora}')" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer">🗑️ Quitar</button>
+        </div>`).join('')
+      : '<div style="color:var(--text-dim);font-size:13px;padding:8px 0">Sin horarios fijos asignados.</div>';
+
+    // Historial de ausencias (las últimas 20)
+    const ausencias = asistencias.filter(a => a.estado === 'ausente' || a.estado === 'ausente-justificada').slice(0,20);
+    const ausenciasHtml = ausencias.length
+      ? ausencias.map(a => {
+          const just = a.estado === 'ausente-justificada';
+          const t = fichaTurnosSistema.find(x => x.id === a.turno_id);
+          const turnoTxt = t ? `${t.dia} ${t.hora} · ${t.servicio}` : '';
+          return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:12px;font-weight:600;min-width:90px">${formatearFechaFicha(a.fecha)}</span>
+            <span style="font-size:11px;font-weight:700;padding:1px 8px;border-radius:6px;${just?'background:#dcfce7;color:#15803d':'background:#fee2e2;color:#b91c1c'}">${just?'CON AVISO':'SIN AVISO'}</span>
+            <span style="font-size:12px;color:var(--text-dim);flex:1">${turnoTxt}${a.motivo?' · '+a.motivo:''}</span>
+          </div>`;
+        }).join('')
+      : '<div style="color:var(--text-dim);font-size:13px;padding:8px 0">Sin ausencias registradas. 🎉</div>';
+
+    $('#fichaBody').innerHTML = `
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+        ${fotoHtml}
+        <div>
+          <div style="font-size:20px;font-weight:700">${p.nombre || '(sin nombre)'}</div>
+          <div style="font-size:13px;color:var(--text-dim)">#${p.id}${p.dni?' · DNI '+p.dni:''}${p.celular||p.telefono?' · '+(p.celular||p.telefono):''}</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:22px">
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:14px;text-align:center">
+          <div style="font-size:28px;font-weight:800;color:#15803d">${presentes}</div>
+          <div style="font-size:12px;color:#166534">Asistencias</div>
+        </div>
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:14px;text-align:center">
+          <div style="font-size:28px;font-weight:800;color:#a16207">${conAviso}</div>
+          <div style="font-size:12px;color:#92400e">Canceló con aviso</div>
+        </div>
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:14px;text-align:center">
+          <div style="font-size:28px;font-weight:800;color:#b91c1c">${sinAviso}</div>
+          <div style="font-size:12px;color:#991b1b">Faltó sin aviso</div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-size:15px;font-weight:700">📌 Horarios fijos</div>
+        <button onclick="fichaAgregarHorario()" style="background:var(--azul);color:white;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">➕ Agregar horario</button>
+      </div>
+      <div id="fichaHorarios" style="margin-bottom:22px">${horariosHtml}</div>
+
+      <div style="font-size:15px;font-weight:700;margin-bottom:10px">📋 Detalle de ausencias <span style="font-size:12px;color:var(--text-dim);font-weight:400">(${totalFaltas} en total)</span></div>
+      <div>${ausenciasHtml}</div>
+    `;
+  } catch (e) {
+    $('#fichaBody').innerHTML = `<div style="padding:24px;text-align:center;color:#dc2626">No se pudo cargar la ficha: ${e.message}</div>`;
+  }
+}
+
+function formatearFechaFicha(iso) {
+  if (!iso) return '';
+  const [y,m,d] = String(iso).split('-').map(Number);
+  const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  return `${d} ${meses[(m||1)-1]} ${y}`;
+}
+
+// Quitar un horario fijo (desactiva en turno_alumnos)
+window.fichaQuitarHorario = async (turnoId, etiqueta) => {
+  if (!confirm(`¿Sacar a ${alumnoActivo.persona.nombre} del horario ${etiqueta}?\n\nDejará de aparecer todas las semanas. Su historia NO se borra.`)) return;
+  try {
+    const { error } = await sb.from('turno_alumnos').update({ activo: false })
+      .eq('persona_id', alumnoActivo.persona.id).eq('turno_id', turnoId);
+    if (error) throw error;
+    abrirFichaAlumno();
+  } catch (e) { alert('No se pudo quitar: ' + e.message); }
+};
+
+// Agregar un horario fijo (elegir de la lista de turnos)
+window.fichaAgregarHorario = () => fichaSelectorTurno(null);
+window.fichaCambiarHorario = (turnoViejoId) => fichaSelectorTurno(turnoViejoId);
+
+// Muestra un selector de turno; si viene turnoViejoId, primero saca el viejo (cambiar)
+function fichaSelectorTurno(turnoViejoId) {
+  const cont = document.getElementById('fichaHorarios');
+  const opciones = fichaTurnosSistema
+    .sort((a,b) => (ORDEN_DIAS.indexOf(a.dia)-ORDEN_DIAS.indexOf(b.dia)) || a.hora.localeCompare(b.hora))
+    .map(t => `<option value="${t.id}">${t.dia} · ${t.hora} · ${t.servicio}</option>`).join('');
+  const titulo = turnoViejoId ? '🔄 Cambiar a este horario:' : '➕ Elegí el horario:';
+  cont.insertAdjacentHTML('afterbegin', `
+    <div id="fichaSelectorBox" style="background:#f8fafc;border:1.5px solid var(--azul);border-radius:10px;padding:12px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">${titulo}</div>
+      <select id="fichaNuevoTurno" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:8px">${opciones}</select>
+      <div style="display:flex;gap:8px">
+        <button onclick="fichaConfirmarHorario(${turnoViejoId||'null'})" style="flex:1;background:var(--verde);color:white;border:none;border-radius:8px;padding:9px;font-size:13px;font-weight:600;cursor:pointer">Confirmar</button>
+        <button onclick="document.getElementById('fichaSelectorBox').remove()" style="background:#f1f5f9;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer">Cancelar</button>
+      </div>
+    </div>`);
+}
+
+window.fichaConfirmarHorario = async (turnoViejoId) => {
+  const nuevoId = parseInt(document.getElementById('fichaNuevoTurno').value);
+  const pid = alumnoActivo.persona.id;
+  try {
+    // Si es cambio, sacar el viejo
+    if (turnoViejoId) {
+      await sb.from('turno_alumnos').update({ activo: false }).eq('persona_id', pid).eq('turno_id', turnoViejoId);
+    }
+    // Ver si ya existe (reactivar) o insertar
+    const { data: existe } = await sb.from('turno_alumnos').select('turno_id')
+      .eq('persona_id', pid).eq('turno_id', nuevoId);
+    if (existe && existe.length) {
+      await sb.from('turno_alumnos').update({ activo: true }).eq('persona_id', pid).eq('turno_id', nuevoId);
+    } else {
+      const { error } = await sb.from('turno_alumnos').insert({ turno_id: nuevoId, persona_id: pid, activo: true });
+      if (error) throw error;
+    }
+    abrirFichaAlumno();
+  } catch (e) { alert('No se pudo guardar: ' + e.message); }
+};
 
 // ===== MODAL EDITAR =====
 function abrirModalEditar() {
