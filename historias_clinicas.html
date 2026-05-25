@@ -630,6 +630,7 @@ textarea.form-input { resize: vertical; min-height: 44px; }
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxcGp0b2lpY3RuemNhc3hmdWNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MDQwOTMsImV4cCI6MjA5NDI4MDA5M30.N1pG65Bm0EmPqxe8hzEFQqE0v1_N5pwrv8HO8We8Xdw';
@@ -2235,7 +2236,7 @@ function abrirSelectorPDF() {
           </div>
 
           <div class="hc-section">
-            <div class="hc-section-header">📎 Archivos adjuntos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(se listan en el PDF; los archivos se mandan aparte)</span></div>
+            <div class="hc-section-header">📎 Archivos adjuntos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(se incluyen dentro del mismo PDF)</span></div>
             <div class="hc-section-body">${adjCheckboxes}</div>
           </div>
         </div>
@@ -2261,7 +2262,7 @@ function cerrarSelectorPDF() {
 }
 
 // Paso 2: generar el PDF con jsPDF
-function generarPDF(conWhatsApp = false) {
+async function generarPDF(conWhatsApp = false) {
   if (!currentHCId) return;
   if (!window.jspdf || !window.jspdf.jsPDF) {
     alert('No se pudo cargar el generador de PDF. Revisá tu conexión a internet y probá de nuevo.');
@@ -2275,7 +2276,9 @@ function generarPDF(conWhatsApp = false) {
   const incluirForm = document.getElementById('pdfIncluirFormulario')?.checked;
   const obsIds = Array.from(document.querySelectorAll('.pdf-obs-check:checked')).map(c => parseInt(c.dataset.obsId));
   const adjIds = Array.from(document.querySelectorAll('.pdf-adj-check:checked')).map(c => parseInt(c.dataset.adjId));
-  const obsElegidas = obsActual.filter(o => obsIds.includes(o.id));
+  // DOBLE CANDADO: el PDF SOLO incluye observaciones clínicas (tipo 'observacion').
+  // Las notas internas (tipo 'nota') NUNCA van al PDF del paciente, pase lo que pase.
+  const obsElegidas = obsActual.filter(o => o.tipo === 'observacion' && obsIds.includes(o.id));
   const adjElegidos = adjActual.filter(a => adjIds.includes(a.id));
 
   const { jsPDF } = window.jspdf;
@@ -2301,8 +2304,8 @@ function generarPDF(conWhatsApp = false) {
   function pieDePagina() {
     doc.setFontSize(8);
     doc.setTextColor(...GRIS);
-    doc.text('PuntoBiO · Centro de Rehabilitación y Entrenamiento — Córdoba', MARGIN, PAGE_H - 24);
-    doc.text('www.puntobio.com.ar', PAGE_W - MARGIN, PAGE_H - 24, { align: 'right' });
+    doc.text('PuntoBiO · Libertad 1549, Córdoba Capital · WhatsApp 3513023476', MARGIN, PAGE_H - 24);
+    doc.text('@puntobio · www.puntobio.com.ar', PAGE_W - MARGIN, PAGE_H - 24, { align: 'right' });
   }
 
   // --- ENCABEZADO con el logo completo de PuntoBiO ---
@@ -2319,13 +2322,18 @@ function generarPDF(conWhatsApp = false) {
     doc.text('PuntoBiO', MARGIN, y + 12);
   }
 
-  // A la derecha: tipo de documento y fecha de emisión
+  // A la derecha: tipo de documento, fecha y datos institucionales
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(...GRIS);
-  doc.text('Historia Clínica', PAGE_W - MARGIN, y + 6, { align: 'right' });
-  doc.text(`Emitida: ${formatDate(new Date().toISOString())}`, PAGE_W - MARGIN, y + 20, { align: 'right' });
-  y += LOGO_H + 6;
+  doc.text('Historia Clínica', PAGE_W - MARGIN, y + 4, { align: 'right' });
+  doc.text(`Emitida: ${formatDate(new Date().toISOString())}`, PAGE_W - MARGIN, y + 16, { align: 'right' });
+  doc.setFontSize(8);
+  doc.text('Libertad 1549, Córdoba Capital', PAGE_W - MARGIN, y + 30, { align: 'right' });
+  doc.text('WhatsApp: 3513023476', PAGE_W - MARGIN, y + 41, { align: 'right' });
+  doc.text('Instagram: @puntobio  ·  www.puntobio.com.ar', PAGE_W - MARGIN, y + 52, { align: 'right' });
+  // El bloque de datos a la derecha llega más abajo que el logo, así que bajamos y
+  y += 62;
 
   // Línea separadora azul
   doc.setDrawColor(...AZUL);
@@ -2453,7 +2461,7 @@ function generarPDF(conWhatsApp = false) {
     });
   }
 
-  // ====== ADJUNTOS (lista) ======
+  // ====== ADJUNTOS (lista en la HC) ======
   if (adjElegidos.length) {
     tituloSeccion('Archivos adjuntos');
     doc.setFont('helvetica', 'normal');
@@ -2468,7 +2476,7 @@ function generarPDF(conWhatsApp = false) {
     checkPage(28);
     doc.setFontSize(8.5);
     doc.setTextColor(...GRIS);
-    const nota = doc.splitTextToSize('Los archivos adjuntos (estudios, RX, evaluaciones VALD) se envían por separado junto a este PDF.', CONTENT_W - 8);
+    const nota = doc.splitTextToSize('Los archivos adjuntos (estudios, RX, evaluaciones VALD) están incluidos al final de este documento.', CONTENT_W - 8);
     doc.text(nota, MARGIN + 8, y);
     y += nota.length * 11;
   }
@@ -2477,13 +2485,83 @@ function generarPDF(conWhatsApp = false) {
 
   // Nombre de archivo limpio
   const nombreArch = `HC_${(persona?.nombre || 'paciente').replace(/[^a-zA-Z0-9]/g, '_')}_${formatDate(hc.completado_en).replace(/\//g, '-')}.pdf`;
-  doc.save(nombreArch);
+
+  // ====== UNIR TODO EN UN SOLO PDF ======
+  // Si hay adjuntos elegidos, los descargamos del storage y los unimos al final
+  // del PDF de la HC: los PDF se anexan página por página (pdf-lib) y las imágenes
+  // se pegan cada una en su página. Resultado: UN solo archivo para el paciente.
+  if (adjElegidos.length && window.PDFLib) {
+    mostrarCargandoPDF('Uniendo archivos… esto puede tardar unos segundos.');
+    try {
+      const { PDFDocument } = window.PDFLib;
+      // 1) Partimos del PDF de la HC ya armado
+      const hcBytes = doc.output('arraybuffer');
+      const mergedPdf = await PDFDocument.load(hcBytes);
+
+      // 2) Recorremos cada adjunto, lo bajamos del storage y lo anexamos
+      for (const adj of adjElegidos) {
+        try {
+          const { data: signed, error: sErr } = await sb.storage.from(ADJ_BUCKET)
+            .createSignedUrl(adj.storage_path, 60 * 5);
+          if (sErr) throw sErr;
+          const resp = await fetch(signed.signedUrl);
+          const bytes = await resp.arrayBuffer();
+          const mime = (adj.tipo_mime || '').toLowerCase();
+          const nombre = (adj.nombre_original || '').toLowerCase();
+
+          if (mime.includes('pdf') || nombre.endsWith('.pdf')) {
+            // Anexar todas las páginas del PDF adjunto
+            const adjuntoPdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+            const paginas = await mergedPdf.copyPages(adjuntoPdf, adjuntoPdf.getPageIndices());
+            paginas.forEach(p => mergedPdf.addPage(p));
+          } else if (mime.startsWith('image/') || /\.(jpg|jpeg|png)$/.test(nombre)) {
+            // Pegar la imagen en una página nueva, centrada y escalada
+            let img;
+            if (mime.includes('png') || nombre.endsWith('.png')) {
+              img = await mergedPdf.embedPng(bytes);
+            } else {
+              img = await mergedPdf.embedJpg(bytes);
+            }
+            const pagina = mergedPdf.addPage([595.28, 841.89]); // A4 en pt
+            const margen = 40;
+            const maxW = pagina.getWidth() - margen * 2;
+            const maxH = pagina.getHeight() - margen * 2;
+            const escala = Math.min(maxW / img.width, maxH / img.height, 1);
+            const w = img.width * escala;
+            const h = img.height * escala;
+            pagina.drawImage(img, {
+              x: (pagina.getWidth() - w) / 2,
+              y: (pagina.getHeight() - h) / 2,
+              width: w, height: h
+            });
+          } else {
+            // Tipo no soportado para incrustar (ej: .docx, .xlsx): lo dejamos listado nomás
+            console.warn('Adjunto no incrustable en PDF:', adj.nombre_original);
+          }
+        } catch (eAdj) {
+          console.warn('No se pudo unir el adjunto', adj.nombre_original, eAdj.message);
+        }
+      }
+
+      // 3) Guardar el PDF final único y descargarlo
+      const finalBytes = await mergedPdf.save();
+      descargarBytesPDF(finalBytes, nombreArch);
+      ocultarCargandoPDF();
+    } catch (e) {
+      ocultarCargandoPDF();
+      console.error('Error al unir adjuntos:', e);
+      // Si algo falla al unir, igual entregamos la HC sola para no dejar a Lu sin nada
+      doc.save(nombreArch);
+      alert('Se generó el PDF de la historia clínica, pero hubo un problema al unir algún adjunto (puede ser muy pesado o estar protegido). El PDF de la HC se descargó igual; los adjuntos podés enviarlos aparte.');
+    }
+  } else {
+    // Sin adjuntos: PDF normal
+    doc.save(nombreArch);
+  }
 
   cerrarSelectorPDF();
 
   // Si se pidió enviar por WhatsApp: abrir el chat del paciente con un mensaje listo.
-  // (WhatsApp no permite adjuntar archivos por link, así que el PDF ya se descargó
-  //  y el profesional lo adjunta con el clip 📎 en el chat que se abre).
   if (conWhatsApp) {
     const cel = (persona?.celular || '').replace(/\D/g, '');
     const primer = (persona?.nombre || '').split(' ')[0] || '';
@@ -2496,14 +2574,48 @@ function generarPDF(conWhatsApp = false) {
     if (num.startsWith('0')) num = num.substring(1);
     if (!num.startsWith('54')) num = '549' + num;
     const msg = encodeURIComponent(`Hola ${primer}! Te enviamos tu historia clínica de PuntoBiO 📋\n\nEl archivo PDF que se acaba de descargar adjuntalo acá. Cualquier duda quedamos a disposición.\n\nPuntoBiO · Centro de Rehabilitación y Entrenamiento`);
-    // Pequeña demora para que la descarga arranque antes de cambiar de pestaña
     setTimeout(() => {
       window.open(`https://wa.me/${num}?text=${msg}`, '_blank');
-    }, 600);
+    }, 700);
     showToast('✓ PDF descargado — adjuntalo en el WhatsApp que se abrió');
   } else {
     showToast('✓ PDF generado');
   }
+}
+
+// Descarga un PDF a partir de bytes (Uint8Array) — usado para el PDF unido
+function descargarBytesPDF(bytes, nombre) {
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombre;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// Cartelito de "uniendo archivos…" mientras se procesan los adjuntos
+function mostrarCargandoPDF(texto) {
+  let el = document.getElementById('pdfCargando');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'pdfCargando';
+    el.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:10000; display:flex; align-items:center; justify-content:center;';
+    el.innerHTML = `<div style="background:#fff; padding:28px 32px; border-radius:14px; text-align:center; max-width:340px;">
+      <div class="loader" style="margin:0 auto 14px;"></div>
+      <div id="pdfCargandoTxt" style="font-size:14px; color:#111;">${escapeHtml(texto || 'Generando…')}</div>
+    </div>`;
+    document.body.appendChild(el);
+  } else {
+    document.getElementById('pdfCargandoTxt').textContent = texto || 'Generando…';
+    el.style.display = 'flex';
+  }
+}
+function ocultarCargandoPDF() {
+  const el = document.getElementById('pdfCargando');
+  if (el) el.remove();
 }
 </script>
 </body>
