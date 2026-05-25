@@ -660,8 +660,22 @@
 // =============================================
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+// Fetch con límite de tiempo: si tarda más de 12s, corta y avisa
+// (evita que el botón se quede colgado en "Guardando..." para siempre)
+async function fetchConTimeout(url, opciones = {}, ms = 12000) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opciones, signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('La conexión tardó demasiado. Revisá internet y reintentá.');
+    throw e;
+  } finally {
+    clearTimeout(id);
+  }
+}
 async function supabaseQuery(tabla, params = '') {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
+  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
     headers: {
       'apikey': SUPABASE_KEY,
       'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -672,11 +686,11 @@ async function supabaseQuery(tabla, params = '') {
   return res.json();
 }
 async function supabaseInsert(tabla, data) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}`, {
+  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${obtenerToken() || SUPABASE_KEY}`,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -686,11 +700,11 @@ async function supabaseInsert(tabla, data) {
   return true;
 }
 async function supabaseUpdate(tabla, filtro, data) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
     method: 'PATCH',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${obtenerToken() || SUPABASE_KEY}`,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -701,11 +715,11 @@ async function supabaseUpdate(tabla, filtro, data) {
 }
 // Insert que devuelve la fila creada
 async function supabaseInsertReturn(tabla, data) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}`, {
+  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${obtenerToken() || SUPABASE_KEY}`,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     },
@@ -716,15 +730,16 @@ async function supabaseInsertReturn(tabla, data) {
 }
 // Borrar filas según filtro (ej: "id=eq.5")
 async function supabaseDelete(tabla, filtro) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
     method: 'DELETE',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${obtenerToken() || SUPABASE_KEY}`,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     }
   });
+  if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return res.ok;
 }
 
@@ -1322,7 +1337,9 @@ window.evoAplicarLote = async () => {
     try { await guardarEvolucionAlumno(t, pid, datosBase); ok++; }
     catch (e) { fallaron++; ultimoError = e.message; console.error('evo', pid, e); }
   }
-  await cargarEvolucionesTurno(t);
+  try { await cargarEvolucionesTurno(t); } catch (e) { console.error('recargar evo', e); }
+  // Restaurar el botón pase lo que pase (por si algo falla antes del re-render)
+  if (btn) { btn.disabled = false; btn.textContent = 'Elegí alumnos para aplicar'; }
   if (fallaron > 0) {
     toast(`Se guardaron ${ok}, fallaron ${fallaron}. ${ultimoError}`, 'err');
   } else {
