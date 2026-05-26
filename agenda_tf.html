@@ -1348,6 +1348,9 @@ function renderTurnos() {
     const colorTexto = pct>=100?'var(--rojo)':pct>=75?'var(--amarillo)':'var(--celeste-oscuro)';
     const tipoClass = t.servicio==='Entrenamiento'?'tipo-entrenamiento':'tipo-kinefilaxia';
     const libres = t.capacidad - ocup;
+    // Lugares libres del DÍA para recuperatorios = libres permanentes + ausentes del día.
+    // (un ausente no ocupa lugar ese día, así que se puede meter un recupero ahí)
+    const libresDia = libres + (motivoFeriado ? 0 : estadoEvoClase(t, fechaGrid).ausentes);
     const cerrada = claseEstaCerrada(t.id, fechaGrid);
     // FERIADO manda: si el día es feriado, la tarjeta va con estilo feriado y badge naranja
     const badgeCierre = motivoFeriado
@@ -1383,7 +1386,9 @@ function renderTurnos() {
           </div>
         </div>
         <div class="turno-footer">
-          <span>${libres} lugar${libres!==1?'es':''} libre${libres!==1?'s':''}${ev.ausentes > 0 ? ` · <span class="footer-ausentes">${ev.ausentes} ausente${ev.ausentes !== 1 ? 's' : ''}</span>` : ''}</span>
+          <span>${ev.ausentes > 0 && libresDia > libres
+            ? `<span style="color:var(--celeste-oscuro);font-weight:600">${libresDia} libre${libresDia!==1?'s':''} hoy</span> (${libres} fijo${libres!==1?'s':''} + ${ev.ausentes} x ausentes)`
+            : `${libres} lugar${libres!==1?'es':''} libre${libres!==1?'s':''}`}${ev.ausentes > 0 ? ` · <span class="footer-ausentes">${ev.ausentes} ausente${ev.ausentes !== 1 ? 's' : ''}</span>` : ''}</span>
           <button class="btn-ver" onclick="event.stopPropagation();abrirModal('${t.dia}','${t.hora}','${t.servicio}')">Ver lista</button>
         </div>
       </div>
@@ -2326,7 +2331,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
   const fechaRecupero = fechaDelDia(t.dia);
   const esFeriado = tipoRecup === 'feriado';
   // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
-  if (!chequearCupo(t, 'lo agregás como recuperatorio')) {
+  if (!chequearCupo(t, 'lo agregás como recuperatorio', true, fechaRecupero)) {
     cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
     return;
   }
@@ -2376,17 +2381,31 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
 
 // ---- CONTROL DE CUPO: ¿hay lugar en el turno? Si está lleno, pide autorización ----
 // Devuelve true si se puede agregar (hay lugar O un admin autorizó el sobrecupo).
-function chequearCupo(t, accionTexto) {
+// Para RECUPERATORIOS/SUELTOS (esPuntual=true) los ausentes del día liberan su lugar:
+// el cupo del día = capacidad - (anotados que SÍ vienen ese día).
+// Para FIJOS permanentes (esPuntual=false) el cupo es estricto: los ausentes NO
+// liberan lugar, porque el fijo viene todas las semanas.
+function chequearCupo(t, accionTexto, esPuntual, fecha) {
   const alumnos = getAlumnos(t);          // ya incluye fijos + agregados del día
   const ocup = alumnos.length;
-  const libres = t.capacidad - ocup;
-  if (libres > 0) return true;            // hay lugar, todo normal
+  let libres = t.capacidad - ocup;
+  let ausentesHoy = 0;
+  if (esPuntual) {
+    // Sumar los lugares que liberan los ausentes de ESE día (solo para puntuales)
+    const f = fecha || fechaDelDia(t.dia);
+    ausentesHoy = ausentesDelDia(t, f);
+    libres += ausentesHoy;
+  }
+  if (libres > 0) return true;            // hay lugar (contando ausentes si es puntual)
   // Turno lleno: solo las admin (Lu / Jime) pueden autorizar el sobrecupo.
   if (!puedeAutorizarSobrecupo()) {
+    const infoAusentes = (esPuntual && ausentesHoy > 0)
+      ? `\nHoy hay ${ausentesHoy} ausente(s), pero esos lugares ya están tomados por recuperatorios.`
+      : '';
     alert(
       `🚫 TURNO COMPLETO\n\n` +
       `${t.servicio} · ${t.hora} · ${t.dia}\n` +
-      `Cupo: ${t.capacidad} · Anotados: ${ocup}\n\n` +
+      `Cupo: ${t.capacidad} · Anotados: ${ocup}${infoAusentes}\n\n` +
       `Este turno ya está lleno y no se puede sobrepasar el cupo.\n` +
       `Si hace falta agregar a alguien igual, lo tiene que autorizar Lu o Jime.`
     );
@@ -2847,7 +2866,10 @@ window.confirmarAgregar = async (tipo) => {
   const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
   // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
   const accion = tipo === 'permanente' ? 'lo agregás de forma permanente' : 'lo agregás como suelto';
-  if (!chequearCupo(t, accion)) {
+  // 'permanente' = fijo → cupo estricto (ausentes NO liberan lugar).
+  // 'suelto' = puntual del día → los ausentes del día liberan su lugar.
+  const esPuntual = (tipo !== 'permanente');
+  if (!chequearCupo(t, accion, esPuntual, fechaDelDia(t.dia))) {
     cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
     return;
   }
