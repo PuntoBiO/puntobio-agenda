@@ -1428,14 +1428,30 @@ async function guardarAsistencia(t, personaId, estado, motivo) {
       return;
     }
     if (asistenciaFilaId[key]) {
-      // Ya existía → actualizar
+      // Ya existía (lo sabíamos en memoria) → actualizar
       await supabaseUpdate('asistencia', `id=eq.${asistenciaFilaId[key]}`,
         { estado, motivo: motivo || null });
     } else {
-      // Nuevo → insertar y guardar el id
-      const filas = await supabaseInsertReturn('asistencia',
-        { turno_id: t.id, persona_id: parseInt(personaId), fecha, estado, motivo: motivo || null });
-      if (filas && filas[0]) asistenciaFilaId[key] = filas[0].id;
+      // No lo teníamos en memoria. ANTES de insertar, chequear en la base si ya
+      // existe una fila para este turno+fecha+persona (evita duplicados si la
+      // memoria estaba desactualizada por recarga, error, etc.).
+      let existente = null;
+      try {
+        const prev = await supabaseQuery('asistencia',
+          `?select=id&turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}&limit=1`);
+        if (prev && prev[0]) existente = prev[0];
+      } catch (e) { /* si falla la consulta, seguimos con el insert normal */ }
+      if (existente) {
+        // Ya había una fila igual → la pisamos en vez de crear otra
+        await supabaseUpdate('asistencia', `id=eq.${existente.id}`,
+          { estado, motivo: motivo || null });
+        asistenciaFilaId[key] = existente.id;
+      } else {
+        // Realmente nueva → insertar y guardar el id
+        const filas = await supabaseInsertReturn('asistencia',
+          { turno_id: t.id, persona_id: parseInt(personaId), fecha, estado, motivo: motivo || null });
+        if (filas && filas[0]) asistenciaFilaId[key] = filas[0].id;
+      }
     }
     asistenciaEstados[key] = estado;
     if (motivo) asistenciaMotivos[key] = motivo; else delete asistenciaMotivos[key];
