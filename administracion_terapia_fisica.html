@@ -1180,6 +1180,34 @@ async function abrirModalVer() {
   $('#modalVer').classList.add('activo');
 }
 
+// ===== CUPO DE RECUPERATORIOS POR PLAN =====
+// El número del código de plan = clases por semana (COD1=1, COD2=2, COD3=3...).
+// Sin importar sufijos (DES, DESC, ROT, DIS, BON, etc.): manda el número.
+function clasesSemanaDePlan(codPlan) {
+  if (!codPlan) return 0;
+  const m = String(codPlan).toUpperCase().match(/COD\s*0*([1-9])/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+// Cupo de recuperatorios por ciclo = clases por semana + 2.
+// COD1=3, COD2=4, COD3=5, COD4=6, COD5=7...
+function cupoRecuperatorios(codPlan) {
+  const n = clasesSemanaDePlan(codPlan);
+  return n > 0 ? n + 2 : 0;
+}
+// Nombre de día (Lunes..Viernes) de una fecha YYYY-MM-DD. null si es fin de semana.
+function nombreDiaDeFechaFicha(fechaIso) {
+  const DIAS_SEM = ['Lunes','Martes','Miércoles','Jueves','Viernes'];
+  const f = new Date(fechaIso + 'T00:00:00');
+  const idx = f.getDay();           // 0=Dom, 1=Lun ... 6=Sáb
+  if (idx < 1 || idx > 5) return null;
+  return DIAS_SEM[idx - 1];
+}
+// Días entre dos fechas YYYY-MM-DD (b - a, en días)
+function diasEntreFicha(aIso, bIso) {
+  const a = new Date(aIso + 'T00:00:00'), b = new Date(bIso + 'T00:00:00');
+  return Math.round((b - a) / 86400000);
+}
+
 // ===== FICHA DEL ALUMNO (horarios + asistencia + foto) =====
 let fichaTurnosSistema = [];   // cache de todos los turnos del sistema
 let fichaDatosActual = null;   // datos cargados de la ficha actual (para el PDF)
@@ -1190,12 +1218,16 @@ async function abrirFichaAlumno() {
   $('#modalFicha').classList.add('activo');
   $('#fichaBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando ficha…</div>';
   try {
-    // Traer en paralelo: turnos del sistema, turnos del alumno, su asistencia, sus evoluciones
-    const [turnosRes, misTurnosRes, asisRes, evoRes] = await Promise.all([
+    // Traer en paralelo: turnos del sistema, turnos del alumno, su asistencia, sus evoluciones,
+    // su inscripción (plan), los feriados del calendario y sus recuperatorios
+    const [turnosRes, misTurnosRes, asisRes, evoRes, inscRes, ferRes, recupRes] = await Promise.all([
       fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
       sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false}),
-      sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false})
+      sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false}),
+      sb.from('inscripciones_tf').select('plan,estado,dia_vencimiento,creado_en').eq('persona_id', p.id).order('creado_en', {ascending:false}).limit(1),
+      sb.from('feriados').select('fecha,motivo'),
+      sb.from('recuperatorios_tf').select('fecha_ausencia,tipo,estado').eq('persona_id', p.id).neq('estado','cancelado')
     ]);
     if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
     const misTurnoIds = (misTurnosRes.data || []).map(t => t.turno_id);
@@ -1212,6 +1244,32 @@ async function abrirFichaAlumno() {
     const conAviso = asistencias.filter(a => a.estado === 'ausente-justificada').length;
     const sinAviso = asistencias.filter(a => a.estado === 'ausente').length;
     const totalFaltas = conAviso + sinAviso;
+
+    // ===== CUPO DE RECUPERATORIOS =====
+    // Plan activo del alumno (la inscripción más reciente)
+    const insc = (inscRes.data && inscRes.data[0]) ? inscRes.data[0] : null;
+    const codPlan = insc ? (insc.plan || '') : '';
+    const cupoPlan = cupoRecuperatorios(codPlan);          // ej COD3 -> 5
+    const clasesSem = clasesSemanaDePlan(codPlan);          // ej COD3 -> 3
+
+    // Feriados EXTRA: días feriados que cayeron en un día de turno fijo del alumno,
+    // dentro de los últimos 60 días, que TODAVÍA no recuperó. No gastan cupo, suman aparte.
+    const hoyIsoFicha = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const diasFijosNombres = new Set(misTurnos.map(t => t.dia));   // {"Lunes","Martes"...}
+    const feriados = ferRes.data || [];
+    const recups = recupRes.data || [];
+    // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
+    const feriadosYaRecup = new Set(recups.filter(r => r.tipo === 'feriado').map(r => r.fecha_ausencia));
+    let feriadosExtraPend = 0;
+    feriados.forEach(f => {
+      const fFer = f.fecha;
+      if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
+      const nombreDia = nombreDiaDeFechaFicha(fFer);
+      if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
+      const dias = diasEntreFicha(fFer, hoyIsoFicha);
+      if (dias < 0 || dias > 60) return;                           // futuro o vencido (>60 días)
+      feriadosExtraPend++;
+    });
 
     // Guardar todo para el informe PDF
     fichaDatosActual = { p, misTurnos, asistencias, evoluciones, presentes, conAviso, sinAviso };
@@ -1270,6 +1328,20 @@ async function abrirFichaAlumno() {
         <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:14px;text-align:center">
           <div style="font-size:28px;font-weight:800;color:#b91c1c">${sinAviso}</div>
           <div style="font-size:12px;color:#991b1b">Faltó sin aviso</div>
+        </div>
+      </div>
+
+      <div style="font-size:15px;font-weight:700;margin-bottom:10px">🔁 Recuperatorios que puede tomar</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:22px">
+        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:14px">
+          <div style="font-size:12px;color:#1e40af;font-weight:600;margin-bottom:4px">Cupo del plan${codPlan?` (${codPlan})`:''}</div>
+          <div style="font-size:26px;font-weight:800;color:#1e9fe0;line-height:1">${cupoPlan || '—'}<span style="font-size:13px;font-weight:600;color:#1e40af"> por ciclo</span></div>
+          <div style="font-size:11px;color:#3b82f6;margin-top:4px">${clasesSem?`${clasesSem} clase/sem + 2`:'Sin plan TF activo'}</div>
+        </div>
+        <div style="background:#fff7ed;border:1px solid #fdba74;border-radius:12px;padding:14px">
+          <div style="font-size:12px;color:#9a3412;font-weight:600;margin-bottom:4px">🟠 Feriados extra</div>
+          <div style="font-size:26px;font-weight:800;color:#ea580c;line-height:1">${feriadosExtraPend}<span style="font-size:13px;font-weight:600;color:#9a3412"> pendiente${feriadosExtraPend===1?'':'s'}</span></div>
+          <div style="font-size:11px;color:#c2410c;margin-top:4px">No gastan cupo · suman aparte</div>
         </div>
       </div>
 
