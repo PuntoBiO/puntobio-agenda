@@ -162,6 +162,22 @@
   .feriado-badge { background:#ea580c; color:#fff; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700; display:inline-flex; align-items:center; gap:4px; }
   .feriado-banner { background:#fff7ed; border:1px solid #fdba74; color:#9a3412; border-radius:10px; padding:10px 14px; font-size:13px; font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
   .dia-tab.feriado-tab::after { content:'•'; color:#ea580c; font-size:18px; line-height:0; margin-left:3px; }
+  /* === GRILLA SEMANA COMPLETA === */
+  .gs-tabla { width:100%; border-collapse:collapse; font-size:13px; }
+  .gs-tabla th, .gs-tabla td { border:1px solid #e8eef3; padding:7px 8px; text-align:center; vertical-align:middle; }
+  .gs-tabla th { background:#f8fafc; font-weight:700; color:#334155; position:sticky; top:0; z-index:2; }
+  .gs-tabla th.gs-feriado { background:#fff7ed; color:#9a3412; }
+  .gs-hora { font-weight:700; background:#f8fafc; white-space:nowrap; text-align:left; padding-left:10px; }
+  .gs-celda { font-weight:600; border-radius:0; }
+  .gs-libre { background:#f0fdf4; color:#15803d; }     /* hay lugar */
+  .gs-casi  { background:#fffbeb; color:#a16207; }     /* 1-2 lugares */
+  .gs-lleno { background:#fef2f2; color:#b91c1c; }     /* completo */
+  .gs-sobre { background:#fee2e2; color:#7f1d1d; font-weight:800; } /* sobrecupo (negativo) */
+  .gs-vacia { background:#fff; color:#cbd5e1; }        /* no hay turno */
+  .gs-celda small { display:block; font-size:10px; font-weight:500; opacity:.8; }
+  .gs-leyenda { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; margin-bottom:12px; color:#475569; }
+  .gs-leyenda span { display:inline-flex; align-items:center; gap:5px; }
+  .gs-dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
   .turno-body { padding: 12px 14px; }
   .turno-profes { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .profe-tag {
@@ -665,6 +681,7 @@
   <button class="filtro-btn activo" onclick="filtrar('todos',this)">Todos</button>
   <button class="filtro-btn entrenamiento" onclick="filtrar('Entrenamiento',this)">Entrenamiento</button>
   <button class="filtro-btn kinefilaxia" onclick="filtrar('Kinefilaxia',this)">Kinefilaxia</button>
+  <button class="filtro-btn" onclick="abrirGrillaSemana()" style="margin-left:auto;background:#eff6ff;border-color:#1e9fe0;color:#1e9fe0;font-weight:700">📋 Ver semana completa</button>
 </div>
 <div class="contenido">
   <div class="dias-tabs" id="dias-tabs"></div>
@@ -740,6 +757,19 @@
         style="width:100%;box-sizing:border-box;padding:10px 12px;border:1.5px solid #d8e6f0;border-radius:10px;font-size:14px;outline:none;margin-bottom:10px">
       <div id="agregar-resultados" style="max-height:320px;overflow-y:auto"></div>
     </div>
+  </div>
+</div>
+<!-- GRILLA SEMANA COMPLETA -->
+<div class="hist-overlay" id="grilla-overlay" onclick="if(event.target===this)cerrarGrillaSemana()">
+  <div class="hist-modal" style="max-width:1100px;width:96%">
+    <div class="hist-header">
+      <div>
+        <div class="hist-titulo">📋 Turnos de la semana</div>
+        <div class="hist-nombre" id="grilla-subtitulo">Lugares libres por turno</div>
+      </div>
+      <button class="modal-cerrar" onclick="cerrarGrillaSemana()">✕</button>
+    </div>
+    <div class="hist-body" id="grilla-body" style="padding:14px 18px;max-height:75vh;overflow:auto"></div>
   </div>
 </div>
 <!-- LOGIN -->
@@ -2082,6 +2112,83 @@ function chequearCupo(t, accionTexto) {
     `Si ${accionTexto}, vas a SUPERAR la capacidad operativa (quedaría ${ocup+1}/${t.capacidad}).\n\n` +
     `¿Querés autorizar el sobrecupo igual?`
   );
+}
+
+// =============================================
+// GRILLA SEMANA COMPLETA (turnos disponibles de un vistazo)
+// =============================================
+window.abrirGrillaSemana = () => {
+  renderGrillaSemana();
+  document.getElementById('grilla-overlay').classList.add('activo');
+};
+window.cerrarGrillaSemana = () => {
+  document.getElementById('grilla-overlay').classList.remove('activo');
+};
+function renderGrillaSemana() {
+  const lunes = getLunes(offsetSemana);
+  // Fechas de la semana (Lun..Vie)
+  const fechas = DIAS.map((dia, i) => {
+    const f = new Date(lunes); f.setDate(lunes.getDate() + i);
+    return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+  });
+  // Subtítulo con el rango
+  const v = new Date(lunes); v.setDate(lunes.getDate()+4);
+  document.getElementById('grilla-subtitulo').textContent =
+    `Semana ${formatFecha(lunes)} — ${formatFecha(v)} · número = lugares libres`;
+
+  // Todas las horas que existen en la semana (de todos los turnos), ordenadas
+  const horas = [...new Set(HORARIOS.map(t => t.hora))].sort();
+  // Para cada día+hora puede haber más de un turno (Entrenamiento y Kinefilaxia)
+  function turnosDe(dia, hora) {
+    return HORARIOS.filter(t => t.dia === dia && t.hora === hora);
+  }
+  // Arma la celda de un turno con su color según lugares libres
+  function celdaTurno(t, fecha) {
+    const ocup = getAlumnos(t, fecha).length;
+    const libres = t.capacidad - ocup;
+    let cls = 'gs-libre';
+    if (libres < 0) cls = 'gs-sobre';
+    else if (libres === 0) cls = 'gs-lleno';
+    else if (libres <= 2) cls = 'gs-casi';
+    const ini = t.servicio === 'Entrenamiento' ? 'ENT' : 'KINE';
+    const txt = libres < 0 ? `${libres}` : (libres === 0 ? 'LLENO' : `${libres}`);
+    return `<div class="gs-celda ${cls}" style="border-radius:7px;padding:4px 3px;margin:2px 0">
+      ${txt}<small>${ini} · ${ocup}/${t.capacidad}</small></div>`;
+  }
+
+  let html = `<div class="gs-leyenda">
+    <span><span class="gs-dot" style="background:#bbf7d0"></span> Hay lugar</span>
+    <span><span class="gs-dot" style="background:#fde68a"></span> 1-2 lugares</span>
+    <span><span class="gs-dot" style="background:#fecaca"></span> Completo</span>
+    <span><span class="gs-dot" style="background:#fca5a5"></span> Sobrecupo (revisar)</span>
+  </div>`;
+  html += '<table class="gs-tabla"><thead><tr><th>Hora</th>';
+  DIAS.forEach((dia, i) => {
+    const motivo = feriadoDe(fechas[i]);
+    const fLabel = fechas[i].slice(8,10) + '/' + fechas[i].slice(5,7);
+    html += `<th class="${motivo?'gs-feriado':''}" ${motivo?`title="Feriado: ${motivo}"`:''}>
+      ${dia}<br><span style="font-weight:500;font-size:11px;color:#94a3b8">${fLabel}${motivo?' 🟠':''}</span></th>`;
+  });
+  html += '</tr></thead><tbody>';
+
+  horas.forEach(hora => {
+    html += `<tr><td class="gs-hora">${hora}</td>`;
+    DIAS.forEach((dia, i) => {
+      const motivo = feriadoDe(fechas[i]);
+      const turnos = turnosDe(dia, hora);
+      if (!turnos.length) {
+        html += `<td class="gs-vacia">—</td>`;
+      } else if (motivo) {
+        // Día feriado: la celda muestra FERIADO (clase cerrada)
+        html += `<td class="gs-celda gs-feriado" style="background:repeating-linear-gradient(45deg,#fff7ed,#fff7ed 8px,#ffedd5 8px,#ffedd5 16px);color:#9a3412;font-weight:700">🟠<small>FERIADO</small></td>`;
+      } else {
+        html += `<td>${turnos.map(t => celdaTurno(t, fechas[i])).join('')}</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('grilla-body').innerHTML = html;
 }
 
 window.confirmarAgregar = async (tipo) => {
