@@ -1742,15 +1742,35 @@ async function recuperatoriosDe(personaId) {
     return filas || [];
   } catch (e) { console.warn('No se pudo leer recuperatorios', e); return []; }
 }
+// Devuelve los nombres de día (Lunes..Viernes) en que la persona tiene turno FIJO activo.
+// Sirve para saber qué feriados le corresponden recuperar.
+async function diasFijosDePersona(personaId) {
+  try {
+    const filas = await supabaseQuery('turno_alumnos',
+      `?select=turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
+    const dias = new Set();
+    (filas || []).forEach(f => { if (f.turnos && f.turnos.dia) dias.add(f.turnos.dia); });
+    return dias;  // Set de nombres: {"Lunes","Miércoles"}
+  } catch (e) { console.warn('No se pudo leer días fijos', e); return new Set(); }
+}
+// Nombre de día (Lunes..Viernes) de una fecha YYYY-MM-DD. null si es fin de semana.
+function nombreDiaDeFecha(fechaIso) {
+  const f = new Date(fechaIso + 'T00:00:00');
+  const idx = f.getDay();           // 0=Dom, 1=Lun, ... 6=Sáb
+  if (idx < 1 || idx > 5) return null;
+  return DIAS[idx - 1];             // DIAS = ['Lunes','Martes',...]
+}
+
 // Calcula qué clases puede recuperar HOY una persona y cuántas le quedan por ciclo.
 // El "ciclo" es el mes personal según el día de corte del plan (no el mes calendario).
-// Devuelve: { codPlan, diaCorte, cupoMes, recuperables:[{fecha, diasRestantes, mes}], usadosPorMes:{...} }
+// Devuelve: { codPlan, diaCorte, cupoMes, recuperables:[{fecha, diasRestantes, mes, tipo}], usadosPorMes:{...} }
 async function estadoRecuperatorios(personaId) {
   const { plan: codPlan, diaCorte } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
-  const [ausencias, usados] = await Promise.all([
+  const [ausencias, usados, diasFijos] = await Promise.all([
     ausenciasConAviso(personaId),
-    recuperatoriosDe(personaId)
+    recuperatoriosDe(personaId),
+    diasFijosDePersona(personaId)
   ]);
   const hoy = hoyIso();
   // Recupes normales ya usados, contados por CICLO de la falta (los de feriado NO cuentan)
@@ -1762,14 +1782,35 @@ async function estadoRecuperatorios(personaId) {
     usadosPorMes[ciclo] = (usadosPorMes[ciclo] || 0) + 1;
     fechasYaRecuperadas.add(r.fecha_ausencia);
   });
+  // Feriados YA recuperados (para no ofrecerlos de nuevo)
+  const feriadosYaRecuperados = new Set();
+  usados.forEach(r => { if (r.tipo === 'feriado') feriadosYaRecuperados.add(r.fecha_ausencia); });
+
   // Ausencias recuperables: con aviso, NO recuperadas ya, dentro de los 60 días
   const recuperables = [];
   ausencias.forEach(fAus => {
     if (fechasYaRecuperadas.has(fAus)) return;     // ya la recuperó
     const dias = diasEntre(fAus, hoy);             // días desde que faltó
     if (dias > 60) return;                         // venció el plazo de 60 días
-    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: cicloDe(fAus, diaCorte) });
+    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: cicloDe(fAus, diaCorte), tipo: 'recuperatorio' });
   });
+
+  // FERIADOS recuperables: días feriados que cayeron en un día de turno fijo de la persona.
+  // No gastan cupo y se recuperan dentro de los 60 días. (FERIADOS es el mapa fecha->motivo)
+  Object.keys(FERIADOS || {}).forEach(fFer => {
+    if (feriadosYaRecuperados.has(fFer)) return;            // ya lo recuperó
+    const nombreDia = nombreDiaDeFecha(fFer);
+    if (!nombreDia || !diasFijos.has(nombreDia)) return;    // no tenía clase ese día
+    const dias = diasEntre(fFer, hoy);
+    if (dias < 0) return;                                   // feriado futuro, todavía no
+    if (dias > 60) return;                                  // venció el plazo
+    recuperables.push({
+      fecha: fFer, diasRestantes: 60 - dias,
+      mes: cicloDe(fFer, diaCorte), tipo: 'feriado',
+      motivo: FERIADOS[fFer]
+    });
+  });
+
   return { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes };
 }
 
@@ -2172,9 +2213,12 @@ window.abrirSelectorRecupero = async () => {
     return;
   }
   const { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes } = est;
-  // Filtrar las que todavía tienen cupo en su ciclo
-  const disponibles = recuperables.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
-  const sinCupo     = recuperables.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
+  // Separar feriados (no gastan cupo) de las faltas normales
+  const feriados = recuperables.filter(r => r.tipo === 'feriado');
+  const faltas    = recuperables.filter(r => r.tipo !== 'feriado');
+  // De las faltas normales: las que todavía tienen cupo en su ciclo
+  const disponibles = faltas.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
+  const sinCupo     = faltas.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
 
   let html = `<div style="padding:6px 4px 14px">
     <div style="font-weight:700;font-size:16px;margin-bottom:3px">${nombre}</div>
@@ -2187,17 +2231,31 @@ window.abrirSelectorRecupero = async () => {
       No se encontró un plan de TF activo para esta persona. No puede recuperar.</div>`;
   } else if (!recuperables.length) {
     html += `<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:12px;font-size:13px">
-      No tiene ausencias <b>con aviso</b> pendientes de recuperar (o ya pasaron los 60 días).<br>
-      <span style="font-size:12px">Primero hay que marcarle el ausente justificado en la clase que faltó.</span></div>`;
+      No tiene ausencias <b>con aviso</b> ni feriados pendientes de recuperar (o ya pasaron los 60 días).<br>
+      <span style="font-size:12px">Para una falta normal, primero marcá el ausente justificado en la clase.</span></div>`;
   } else {
+    // FERIADOS primero (no gastan cupo)
+    if (feriados.length) {
+      html += `<div style="font-size:13px;font-weight:600;margin-bottom:8px">🟠 Feriados para recuperar (no gastan cupo):</div>`;
+      html += feriados.map(r => {
+        const venceTxt = r.diasRestantes <= 7
+          ? `<span style="color:#dc2626;font-weight:700">vence en ${r.diasRestantes} día${r.diasRestantes!==1?'s':''}</span>`
+          : `vence en ${r.diasRestantes} días`;
+        return `<button onclick="confirmarRecupero('${r.fecha}','feriado')"
+          style="width:100%;text-align:left;background:#fff7ed;border:1.5px solid #fdba74;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
+          <div style="font-weight:700;font-size:14px;color:#9a3412">🟠 Feriado del ${formatearFechaLarga(r.fecha)}</div>
+          <div style="font-size:12px;color:#c2410c;margin-top:2px">${r.motivo || 'Feriado'} · ${venceTxt} · no gasta cupo</div>
+        </button>`;
+      }).join('');
+    }
     if (disponibles.length) {
-      html += `<div style="font-size:13px;font-weight:600;margin-bottom:8px">Elegí qué clase recupera:</div>`;
+      html += `<div style="font-size:13px;font-weight:600;margin:12px 0 8px">Elegí qué clase recupera:</div>`;
       html += disponibles.map(r => {
         const venceTxt = r.diasRestantes <= 7
           ? `<span style="color:#dc2626;font-weight:700">vence en ${r.diasRestantes} día${r.diasRestantes!==1?'s':''}</span>`
           : `vence en ${r.diasRestantes} días`;
         const usados = usadosPorMes[r.mes] || 0;
-        return `<button onclick="confirmarRecupero('${r.fecha}')"
+        return `<button onclick="confirmarRecupero('${r.fecha}','recuperatorio')"
           style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
           <div style="font-weight:700;font-size:14px;color:#92400e">Faltó el ${formatearFechaLarga(r.fecha)}</div>
           <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · ciclo ${cicloLegible(r.mes)} (${usados}/${cupoMes} usados)</div>
@@ -2216,13 +2274,14 @@ window.abrirSelectorRecupero = async () => {
 };
 
 // ---- RECUPERATORIO: confirmar (guarda en recuperatorios_tf + lo agrega al turno del día) ----
-window.confirmarRecupero = async (fechaAusencia) => {
+window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
   if (!agregarTurno || !agregarPersonaSel) return;
   const cont = document.getElementById('agregar-resultados');
   const t = agregarTurno;
   const pid = parseInt(agregarPersonaSel.id);
   const nombre = agregarPersonaSel.nombre;
   const fechaRecupero = fechaDelDia(t.dia);
+  const esFeriado = tipoRecup === 'feriado';
   // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
   if (!chequearCupo(t, 'lo agregás como recuperatorio')) {
     cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
@@ -2232,18 +2291,19 @@ window.confirmarRecupero = async (fechaAusencia) => {
   try {
     // Re-chequeo de seguridad por si cambió algo (cupo / 60 días)
     const est = await estadoRecuperatorios(pid);
-    const r = est.recuperables.find(x => x.fecha === fechaAusencia);
-    if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa falta ya no está disponible para recuperar.</div>'; return; }
-    if ((est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
+    const r = est.recuperables.find(x => x.fecha === fechaAusencia && (esFeriado ? x.tipo === 'feriado' : x.tipo !== 'feriado'));
+    if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa fecha ya no está disponible para recuperar.</div>'; return; }
+    // El cupo solo aplica a faltas normales; los feriados NO gastan cupo.
+    if (!esFeriado && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
     }
-    // 1) Registrar el recuperatorio (descuenta cupo del mes de la falta)
+    // 1) Registrar el recuperatorio (los de feriado van con tipo 'feriado' y NO descuentan cupo)
     await supabaseInsert('recuperatorios_tf', {
       persona_id: pid,
       fecha_ausencia: fechaAusencia,
       fecha_recupero: fechaRecupero,
       turno_recupero_id: t.id,
-      tipo: 'recuperatorio',
+      tipo: esFeriado ? 'feriado' : 'recuperatorio',
       estado: 'pendiente',
       cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
       cargado_por_email: USUARIO_ACTUAL?.email || null
@@ -2256,7 +2316,9 @@ window.confirmarRecupero = async (fechaAusencia) => {
     const key = `${t.id}-${fechaRecupero}`;
     if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
     AGREGADOS_POR_TURNO[key].push({ id: String(pid), nombre, tipo: 'recuperatorio', agregadoId: agId });
-    toast(`${nombre} recupera la clase del ${formatearFechaLarga(fechaAusencia)}`, 'ok');
+    toast(esFeriado
+      ? `${nombre} recupera el feriado del ${formatearFechaLarga(fechaAusencia)}`
+      : `${nombre} recupera la clase del ${formatearFechaLarga(fechaAusencia)}`, 'ok');
     cerrarAgregar();
     renderModalBody(t.dia, t.hora, t.servicio);
     renderTurnos();
