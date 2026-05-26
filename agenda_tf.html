@@ -792,9 +792,41 @@
         <div class="hist-titulo">📋 Turnos de la semana</div>
         <div class="hist-nombre" id="grilla-subtitulo">Lugares libres por turno</div>
       </div>
-      <button class="modal-cerrar" onclick="cerrarGrillaSemana()">✕</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="abrirCompartir()" style="border:1.5px solid #16a34a;background:#f0fdf4;color:#15803d;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">📤 Compartir disponibles</button>
+        <button class="modal-cerrar" onclick="cerrarGrillaSemana()">✕</button>
+      </div>
     </div>
     <div class="hist-body" id="grilla-body" style="padding:14px 18px;max-height:75vh;overflow:auto"></div>
+  </div>
+</div>
+
+<!-- Modal: compartir turnos disponibles (imagen / PDF) -->
+<div class="hist-overlay" id="compartir-overlay" onclick="if(event.target===this)cerrarCompartir()" style="z-index:60">
+  <div class="hist-modal" style="max-width:460px;width:94%">
+    <div class="hist-header">
+      <div>
+        <div class="hist-titulo">📤 Compartir disponibles</div>
+        <div class="hist-nombre">Para enviar a quien consulta por turnos</div>
+      </div>
+      <button class="modal-cerrar" onclick="cerrarCompartir()">✕</button>
+    </div>
+    <div class="hist-body" style="padding:18px 20px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#475569">¿Qué servicio querés mostrar?</div>
+      <div style="display:flex;gap:8px;margin-bottom:18px">
+        <button class="comp-serv activo" data-serv="ambos" onclick="elegirServCompartir('ambos',this)" style="flex:1;border:1.5px solid var(--celeste);background:var(--celeste);color:#fff;border-radius:9px;padding:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Ambos</button>
+        <button class="comp-serv" data-serv="Entrenamiento" onclick="elegirServCompartir('Entrenamiento',this)" style="flex:1;border:1.5px solid #e2e8f0;background:#fff;color:#64748b;border-radius:9px;padding:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Entrenamiento</button>
+        <button class="comp-serv" data-serv="Kinefilaxia" onclick="elegirServCompartir('Kinefilaxia',this)" style="flex:1;border:1.5px solid #e2e8f0;background:#fff;color:#64748b;border-radius:9px;padding:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">Kinefilaxia</button>
+      </div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#475569">¿Cómo lo querés generar?</div>
+      <div style="display:flex;gap:10px">
+        <button onclick="generarImagen()" style="flex:1;border:none;background:#16a34a;color:#fff;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">🖼️ Imagen (WhatsApp)</button>
+        <button onclick="generarPDF()" style="flex:1;border:none;background:var(--celeste);color:#fff;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">📄 PDF</button>
+      </div>
+      <div id="compartir-estado" style="font-size:12.5px;color:var(--texto-suave);margin-top:14px;text-align:center;min-height:18px"></div>
+      <!-- Lienzo oculto donde se dibuja la imagen para compartir -->
+      <canvas id="compartir-canvas" style="display:none"></canvas>
+    </div>
   </div>
 </div>
 <!-- LOGIN -->
@@ -819,6 +851,7 @@
   </div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 // =============================================
 // TOAST · notificación abajo a la derecha
@@ -2418,6 +2451,226 @@ function renderGrillaSemana() {
       `<div style="text-align:center;padding:24px;color:#64748b;font-size:13px">No hay turnos con lugar disponible en esta semana${grillaFiltroServicio!=='ambos'?` para ${grillaFiltroServicio}`:''}.</div>`;
   }
   document.getElementById('grilla-body').innerHTML = html;
+}
+
+// =============================================
+// COMPARTIR TURNOS DISPONIBLES (imagen para WhatsApp + PDF) — con logo PuntoBiO
+// =============================================
+let compartirServicio = 'ambos';   // 'ambos' | 'Entrenamiento' | 'Kinefilaxia'
+
+window.abrirCompartir = () => {
+  document.getElementById('compartir-estado').textContent = '';
+  document.getElementById('compartir-overlay').classList.add('activo');
+};
+window.cerrarCompartir = () => {
+  document.getElementById('compartir-overlay').classList.remove('activo');
+};
+window.elegirServCompartir = (serv, btn) => {
+  compartirServicio = serv;
+  document.querySelectorAll('.comp-serv').forEach(b => {
+    b.style.background = '#fff'; b.style.color = '#64748b'; b.style.borderColor = '#e2e8f0';
+  });
+  btn.style.background = 'var(--celeste)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--celeste)';
+};
+
+// Arma la lista de turnos DISPONIBLES (cupo fijo > 0) de la semana de la grilla, por día.
+// Devuelve: { rango:"1/6 al 5/6", dias:[{dia, fechaLabel, feriado, turnos:[{hora,servicio}]}] }
+function datosDisponibles() {
+  const lunes = getLunes(grillaOffset);
+  const fechas = DIAS.map((dia, i) => {
+    const f = new Date(lunes); f.setDate(lunes.getDate() + i);
+    return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+  });
+  const v = new Date(lunes); v.setDate(lunes.getDate()+4);
+  const rango = `${formatFecha(lunes)} al ${formatFecha(v)}`;
+  const dias = [];
+  DIAS.forEach((dia, i) => {
+    const motivo = feriadoDe(fechas[i]);
+    const fLabel = fechas[i].slice(8,10) + '/' + fechas[i].slice(5,7);
+    if (motivo) { dias.push({ dia, fechaLabel: fLabel, feriado: motivo, turnos: [] }); return; }
+    // Turnos del día con lugar FIJO real, filtrando por servicio elegido
+    const turnos = HORARIOS
+      .filter(t => t.dia === dia &&
+        (compartirServicio === 'ambos' || t.servicio === compartirServicio))
+      .filter(t => {
+        const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+        return (t.capacidad - fijos) > 0;   // hay lugar para anotar permanente
+      })
+      .sort((a, b) => parseInt(a.hora.replace(':','')) - parseInt(b.hora.replace(':','')) || a.servicio.localeCompare(b.servicio))
+      .map(t => ({ hora: t.hora, servicio: t.servicio }));
+    dias.push({ dia, fechaLabel: fLabel, feriado: null, turnos });
+  });
+  return { rango, dias };
+}
+
+// Texto del servicio para el título
+function tituloServicio() {
+  if (compartirServicio === 'Entrenamiento') return 'Entrenamiento';
+  if (compartirServicio === 'Kinefilaxia') return 'Kinefilaxia';
+  return 'Entrenamiento y Kinefilaxia';
+}
+
+// ---- IMAGEN para WhatsApp (dibuja en canvas con el logo) ----
+window.generarImagen = async () => {
+  const estado = document.getElementById('compartir-estado');
+  estado.textContent = '⟳ Generando imagen…';
+  try {
+    const datos = datosDisponibles();
+    const canvas = document.getElementById('compartir-canvas');
+    const ctx = canvas.getContext('2d');
+    const W = 900;
+    // Calcular alto según contenido
+    let alto = 230;  // encabezado
+    datos.dias.forEach(d => {
+      alto += 46;  // título del día
+      if (d.feriado) alto += 34;
+      else if (!d.turnos.length) alto += 34;
+      else alto += Math.ceil(d.turnos.length / 3) * 40 + 6;
+    });
+    alto += 60;  // pie
+    canvas.width = W; canvas.height = alto;
+
+    // Fondo
+    ctx.fillStyle = '#0a1020'; ctx.fillRect(0, 0, W, alto);
+    ctx.fillStyle = '#0f1729'; roundRect(ctx, 20, 20, W-40, alto-40, 18); ctx.fill();
+
+    // Logo (redondo celeste) — usa la variable CSS --logo-pb
+    const logoUrl = getComputedStyle(document.documentElement).getPropertyValue('--logo-pb').trim().replace(/^url\(['"]?/, '').replace(/['"]?\)$/, '');
+    let y = 50;
+    try {
+      const img = await cargarImagen(logoUrl);
+      ctx.drawImage(img, W/2 - 38, y, 76, 76);
+    } catch (e) { /* si falla el logo, seguimos sin él */ }
+    y += 92;
+
+    // Título
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#1e9fe0'; ctx.font = 'bold 30px Manrope, sans-serif';
+    ctx.fillText('PuntoBiO · Turnos disponibles', W/2, y); y += 30;
+    ctx.fillStyle = '#8a9bb8'; ctx.font = '17px Manrope, sans-serif';
+    ctx.fillText(`${tituloServicio()} · Semana ${datos.rango}`, W/2, y); y += 34;
+
+    // Días
+    ctx.textAlign = 'left';
+    datos.dias.forEach(d => {
+      ctx.fillStyle = '#1e9fe0'; ctx.font = 'bold 19px Manrope, sans-serif';
+      ctx.fillText(`${d.dia} ${d.fechaLabel}`, 48, y); y += 26;
+      if (d.feriado) {
+        ctx.fillStyle = '#fb923c'; ctx.font = 'italic 15px Manrope, sans-serif';
+        ctx.fillText('🟠 Feriado — sin clases', 60, y); y += 26;
+      } else if (!d.turnos.length) {
+        ctx.fillStyle = '#64748b'; ctx.font = 'italic 15px Manrope, sans-serif';
+        ctx.fillText('Sin lugares disponibles', 60, y); y += 26;
+      } else {
+        ctx.font = 'bold 16px JetBrains Mono, monospace';
+        let col = 0;
+        d.turnos.forEach(t => {
+          const x = 60 + col * 270;
+          const esEnt = t.servicio === 'Entrenamiento';
+          // chip
+          ctx.fillStyle = esEnt ? '#0d3b5c' : '#0f3d24';
+          roundRect(ctx, x, y-18, 250, 30, 8); ctx.fill();
+          ctx.fillStyle = esEnt ? '#7cc6f0' : '#86efac';
+          ctx.fillText(`${t.hora}  ${esEnt ? 'Entren.' : 'Kinefilaxia'}`, x+12, y+3);
+          col++;
+          if (col === 3) { col = 0; y += 40; }
+        });
+        if (col !== 0) y += 40;
+        y += 6;
+      }
+      y += 6;
+    });
+
+    // Pie
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#5a6c8a'; ctx.font = '14px Manrope, sans-serif';
+    ctx.fillText('Consultá por estos horarios para anotarte 💪', W/2, alto - 36);
+
+    // Descargar
+    const link = document.createElement('a');
+    link.download = `turnos-disponibles-${datos.rango.replace(/[\/ ]/g,'-')}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    estado.innerHTML = '✓ Imagen lista. Ya la podés compartir por WhatsApp.';
+  } catch (e) {
+    estado.textContent = 'No se pudo generar la imagen: ' + e.message;
+  }
+};
+
+// ---- PDF ----
+window.generarPDF = async () => {
+  const estado = document.getElementById('compartir-estado');
+  estado.textContent = '⟳ Generando PDF…';
+  try {
+    if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('No se cargó la librería de PDF. Reintentá.');
+    const datos = datosDisponibles();
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const W = 210;
+    let y = 18;
+    // Logo
+    const logoUrl = getComputedStyle(document.documentElement).getPropertyValue('--logo-pb').trim().replace(/^url\(['"]?/, '').replace(/['"]?\)$/, '');
+    try {
+      const img = await cargarImagen(logoUrl);
+      doc.addImage(img, 'PNG', W/2 - 12, y, 24, 24);
+    } catch (e) { /* sin logo */ }
+    y += 30;
+    doc.setTextColor(30, 159, 224); doc.setFont('helvetica', 'bold'); doc.setFontSize(18);
+    doc.text('PuntoBiO · Turnos disponibles', W/2, y, { align: 'center' }); y += 8;
+    doc.setTextColor(100, 116, 139); doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+    doc.text(`${tituloServicio()} · Semana ${datos.rango}`, W/2, y, { align: 'center' }); y += 12;
+
+    datos.dias.forEach(d => {
+      if (y > 270) { doc.addPage(); y = 20; }
+      doc.setTextColor(13, 127, 191); doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+      doc.text(`${d.dia} ${d.fechaLabel}`, 16, y); y += 6;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+      if (d.feriado) {
+        doc.setTextColor(234, 88, 12); doc.text('Feriado — sin clases', 22, y); y += 7;
+      } else if (!d.turnos.length) {
+        doc.setTextColor(120, 120, 120); doc.text('Sin lugares disponibles', 22, y); y += 7;
+      } else {
+        doc.setTextColor(40, 40, 40);
+        let col = 0;
+        d.turnos.forEach(t => {
+          const x = 22 + col * 60;
+          const txt = `${t.hora}  ${t.servicio === 'Entrenamiento' ? 'Entren.' : 'Kinefilaxia'}`;
+          doc.text(txt, x, y);
+          col++;
+          if (col === 3) { col = 0; y += 6; }
+        });
+        if (col !== 0) y += 6;
+        y += 3;
+      }
+      y += 3;
+    });
+    doc.setTextColor(120, 120, 120); doc.setFontSize(10);
+    doc.text('Consultá por estos horarios para anotarte', W/2, 287, { align: 'center' });
+
+    doc.save(`turnos-disponibles-${datos.rango.replace(/[\/ ]/g,'-')}.pdf`);
+    estado.innerHTML = '✓ PDF descargado.';
+  } catch (e) {
+    estado.textContent = 'No se pudo generar el PDF: ' + e.message;
+  }
+};
+
+// Helpers de dibujo
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+function cargarImagen(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
 }
 
 window.confirmarAgregar = async (tipo) => {
