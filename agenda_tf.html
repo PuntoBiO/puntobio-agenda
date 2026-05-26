@@ -1523,16 +1523,48 @@ function cupoRecuperatorios(codPlan) {
   const n = clasesSemanaDePlan(codPlan);
   return n > 0 ? n + 2 : 0;   // COD1=3, COD2=4, COD3=5, COD4=6...
 }
-// Plan activo de una persona (lee inscripciones_tf)
+// Plan activo + día de corte del ciclo de una persona (lee inscripciones_tf)
 async function planDePersona(personaId) {
   try {
     const filas = await supabaseQuery('inscripciones_tf',
-      `?select=plan,estado&persona_id=eq.${personaId}&order=creado_en.desc&limit=1`);
-    return (filas && filas[0]) ? (filas[0].plan || '') : '';
-  } catch (e) { console.warn('No se pudo leer el plan', e); return ''; }
+      `?select=plan,estado,dia_vencimiento&persona_id=eq.${personaId}&order=creado_en.desc&limit=1`);
+    const f = (filas && filas[0]) ? filas[0] : null;
+    return {
+      plan: f ? (f.plan || '') : '',
+      diaCorte: (f && f.dia_vencimiento) ? parseInt(f.dia_vencimiento, 10) : 1
+    };
+  } catch (e) { console.warn('No se pudo leer el plan', e); return { plan:'', diaCorte:1 }; }
 }
-// YYYY-MM-DD -> "AAAA-MM" (clave de mes)
+// Ciclo personal de una fecha según el día de corte del alumno.
+// Ej: corte 27 → una falta del 28/5 pertenece al ciclo "2026-05-27" (27/5 al 26/6);
+//     una falta del 26/5 pertenece al ciclo "2026-04-27".
+// Si el día de la fecha es >= corte, el ciclo empieza ese mes; si no, el mes anterior.
+function cicloDe(fechaIso, diaCorte) {
+  const corte = (diaCorte && diaCorte >= 1 && diaCorte <= 31) ? diaCorte : 1;
+  let y = parseInt(fechaIso.slice(0,4), 10);
+  let m = parseInt(fechaIso.slice(5,7), 10);  // 1-12
+  const d = parseInt(fechaIso.slice(8,10), 10);
+  if (d < corte) {            // antes del corte → pertenece al ciclo que arrancó el mes anterior
+    m -= 1;
+    if (m < 1) { m = 12; y -= 1; }
+  }
+  return `${y}-${String(m).padStart(2,'0')}-${String(corte).padStart(2,'0')}`;
+}
+// YYYY-MM-DD -> "AAAA-MM" (mes calendario, respaldo si no hay día de corte)
 function mesDe(fechaIso) { return (fechaIso || '').slice(0, 7); }
+// Muestra un ciclo "2026-05-27" como "27/5 al 26/6" (legible para el mostrador)
+function cicloLegible(cicloIso) {
+  // cicloIso = "AAAA-MM-DD" donde DD es el día de corte
+  const y = parseInt(cicloIso.slice(0,4),10);
+  const m = parseInt(cicloIso.slice(5,7),10);
+  const d = parseInt(cicloIso.slice(8,10),10);
+  // fin = día anterior al corte, del mes siguiente
+  let my = y, mm = m + 1;
+  if (mm > 12) { mm = 1; my += 1; }
+  const finDia = d === 1 ? new Date(my, mm-1, 0).getDate() : d - 1;
+  const finMes = d === 1 ? m : mm;
+  return `${d}/${m} al ${finDia}/${finMes}`;
+}
 // Días entre dos fechas YYYY-MM-DD (b - a) en días enteros
 function diasEntre(aIso, bIso) {
   const a = new Date(aIso + 'T00:00:00');
@@ -1560,23 +1592,24 @@ async function recuperatoriosDe(personaId) {
     return filas || [];
   } catch (e) { console.warn('No se pudo leer recuperatorios', e); return []; }
 }
-// Calcula qué clases puede recuperar HOY una persona y cuántas le quedan por mes.
-// Devuelve: { codPlan, cupoMes, recuperables:[{fecha, diasRestantes, mes}], usadosPorMes:{...} }
+// Calcula qué clases puede recuperar HOY una persona y cuántas le quedan por ciclo.
+// El "ciclo" es el mes personal según el día de corte del plan (no el mes calendario).
+// Devuelve: { codPlan, diaCorte, cupoMes, recuperables:[{fecha, diasRestantes, mes}], usadosPorMes:{...} }
 async function estadoRecuperatorios(personaId) {
-  const codPlan = await planDePersona(personaId);
+  const { plan: codPlan, diaCorte } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
   const [ausencias, usados] = await Promise.all([
     ausenciasConAviso(personaId),
     recuperatoriosDe(personaId)
   ]);
   const hoy = hoyIso();
-  // Recupes normales ya usados, contados por MES de la falta (los de feriado NO cuentan)
+  // Recupes normales ya usados, contados por CICLO de la falta (los de feriado NO cuentan)
   const usadosPorMes = {};
   const fechasYaRecuperadas = new Set();
   usados.forEach(r => {
     if (r.tipo === 'feriado') return;          // los feriados no gastan cupo
-    const mes = mesDe(r.fecha_ausencia);
-    usadosPorMes[mes] = (usadosPorMes[mes] || 0) + 1;
+    const ciclo = cicloDe(r.fecha_ausencia, diaCorte);
+    usadosPorMes[ciclo] = (usadosPorMes[ciclo] || 0) + 1;
     fechasYaRecuperadas.add(r.fecha_ausencia);
   });
   // Ausencias recuperables: con aviso, NO recuperadas ya, dentro de los 60 días
@@ -1585,9 +1618,9 @@ async function estadoRecuperatorios(personaId) {
     if (fechasYaRecuperadas.has(fAus)) return;     // ya la recuperó
     const dias = diasEntre(fAus, hoy);             // días desde que faltó
     if (dias > 60) return;                         // venció el plazo de 60 días
-    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: mesDe(fAus) });
+    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: cicloDe(fAus, diaCorte) });
   });
-  return { codPlan, cupoMes, recuperables, usadosPorMes };
+  return { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes };
 }
 
 // ¿La clase está COMPLETA? (todos los alumnos tienen evolución o están ausentes)
@@ -1988,15 +2021,15 @@ window.abrirSelectorRecupero = async () => {
     cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">No se pudo calcular: ${e.message}</div>`;
     return;
   }
-  const { codPlan, cupoMes, recuperables, usadosPorMes } = est;
-  // Filtrar las que todavía tienen cupo en su mes
+  const { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes } = est;
+  // Filtrar las que todavía tienen cupo en su ciclo
   const disponibles = recuperables.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
   const sinCupo     = recuperables.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
 
   let html = `<div style="padding:6px 4px 14px">
     <div style="font-weight:700;font-size:16px;margin-bottom:3px">${nombre}</div>
     <div style="font-size:12px;color:var(--texto-suave);margin-bottom:14px">
-      Plan ${codPlan || '—'} · cupo ${cupoMes || '?'} recupe/mes
+      Plan ${codPlan || '—'} · cupo ${cupoMes || '?'} recupe/ciclo · corte día ${diaCorte}
     </div>`;
 
   if (!codPlan) {
@@ -2017,14 +2050,14 @@ window.abrirSelectorRecupero = async () => {
         return `<button onclick="confirmarRecupero('${r.fecha}')"
           style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
           <div style="font-weight:700;font-size:14px;color:#92400e">Faltó el ${formatearFechaLarga(r.fecha)}</div>
-          <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · mes ${r.mes} (${usados}/${cupoMes} usados)</div>
+          <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · ciclo ${cicloLegible(r.mes)} (${usados}/${cupoMes} usados)</div>
         </button>`;
       }).join('');
     }
     if (sinCupo.length) {
       html += `<div style="margin-top:6px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:10px 12px;font-size:12px">
-        ⚠️ Estas faltas no se pueden recuperar porque ya usó todo el cupo de su mes:<br>
-        ${sinCupo.map(r => `· ${formatearFechaLarga(r.fecha)} (mes ${r.mes})`).join('<br>')}</div>`;
+        ⚠️ Estas faltas no se pueden recuperar porque ya usó todo el cupo de su ciclo:<br>
+        ${sinCupo.map(r => `· ${formatearFechaLarga(r.fecha)} (ciclo ${cicloLegible(r.mes)})`).join('<br>')}</div>`;
     }
   }
   html += `<button onclick="elegirPersonaAgregar(${pid})" style="background:none;border:none;color:var(--texto-suave);font-size:12px;margin-top:12px;cursor:pointer;text-decoration:underline">← Volver</button>
@@ -2052,7 +2085,7 @@ window.confirmarRecupero = async (fechaAusencia) => {
     const r = est.recuperables.find(x => x.fecha === fechaAusencia);
     if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa falta ya no está disponible para recuperar.</div>'; return; }
     if ((est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
-      cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese mes.</div>'; return;
+      cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
     }
     // 1) Registrar el recuperatorio (descuenta cupo del mes de la falta)
     await supabaseInsert('recuperatorios_tf', {
