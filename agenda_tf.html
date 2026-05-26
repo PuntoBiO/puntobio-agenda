@@ -1254,12 +1254,14 @@ async function cargarAgregadosSemana() {
     const viernes = new Date(lunes);
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
-    // Rango lunes-viernes. PostgREST necesita and=() para dos condiciones
-    // sobre la misma columna (poner fecha= dos veces da error 400).
+    const lunesIso = fmt(lunes), viernesIso = fmt(viernes);
+    // Una sola condición de fecha en la URL (gte) NO da error 400.
+    // El tope (lte viernes) lo aplicamos filtrando en JavaScript.
     const filas = await supabaseQuery('turno_agregados',
-      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre,foto_perfil)&and=(fecha.gte.${fmt(lunes)},fecha.lte.${fmt(viernes)})`);
+      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre,foto_perfil)&fecha=gte.${lunesIso}`);
     (filas || []).forEach(a => {
       if (!a.personas) return;
+      if (a.fecha > viernesIso) return;   // descartar lo que pasa del viernes
       const key = `${a.turno_id}-${a.fecha}`;
       if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
       AGREGADOS_POR_TURNO[key].push({
@@ -1635,10 +1637,12 @@ async function cargarAsistenciaSemana() {
     const viernes = new Date(lunes);
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
-    // Rango lunes-viernes con and=() (poner fecha= dos veces da error 400)
+    const viernesIso = fmt(viernes);
+    // Una sola condición de fecha (gte) en la URL; el tope se filtra en JS.
     const filas = await supabaseQuery('asistencia',
-      `?select=turno_id,fecha,persona_id,estado&and=(fecha.gte.${fmt(lunes)},fecha.lte.${fmt(viernes)})`);
+      `?select=turno_id,fecha,persona_id,estado&fecha=gte.${fmt(lunes)}`);
     (filas || []).forEach(f => {
+      if (f.fecha > viernesIso) return;   // descartar lo que pasa del viernes
       ASISTENCIA_SEMANA[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado;
     });
   } catch (e) { ASISTENCIA_SEMANA = {}; console.warn('No se pudo cargar asistencia de la semana', e); }
