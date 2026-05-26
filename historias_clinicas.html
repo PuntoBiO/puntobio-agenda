@@ -686,6 +686,17 @@ function puedeEditar() {
 function puedeEliminar() {
   return usuarioActual && EMAILS_PUEDEN_ELIMINAR.includes(normEmail(usuarioActual.email));
 }
+
+// Profes TF a SUELDO FIJO (Santi, Lean, Lauti): ven la HC en modo LECTURA PURA.
+// No editan, no eliminan, no marcan revisada, no mandan WhatsApp, no adjuntan, no PDF.
+const EMAILS_PROFE_SOLO_LECTURA = [
+  'santiagoferreira1999@gmail.com',  // Santi
+  'leacrespin97@gmail.com',          // Lean
+  'leut.molina@gmail.com'            // Lauti
+];
+function esProfeSoloLectura() {
+  return usuarioActual && EMAILS_PROFE_SOLO_LECTURA.includes(normEmail(usuarioActual.email));
+}
 // Solo los kinesiólogos (Lu, Jime, Male, Bruno) pueden iniciar una evaluación
 // para un paciente que todavía no completó el formulario público.
 function puedeIniciarEval() {
@@ -910,7 +921,7 @@ function renderSinCompletarInner() {
             <td>${formatDate(p.fecha_alta)}</td>
             <td><div class="table-actions">
               ${puedeIniciarEval() ? `<button class="btn btn-sm btn-success" onclick="iniciarEvaluacion(${p.id})" title="Cargar la evaluación del profesional aunque el paciente no haya completado el formulario">🩺 Iniciar evaluación</button>` : ''}
-              ${p.celular ? `<button class="btn btn-sm" onclick="sendWhatsApp('${p.celular}', '${(p.nombre || '').replace(/'/g, "\\'")}')" title="Enviar link por WhatsApp">📱 WhatsApp</button>` : ''}
+              ${(p.celular && !esProfeSoloLectura()) ? `<button class="btn btn-sm" onclick="sendWhatsApp('${p.celular}', '${(p.nombre || '').replace(/'/g, "\\'")}')" title="Enviar link por WhatsApp">📱 WhatsApp</button>` : ''}
             </div></td>
           </tr>
         `).join('')}
@@ -1055,6 +1066,7 @@ function formatDate(iso) {
    completó el formulario público, y la abre para cargar la evaluación.
 ============================================================= */
 async function iniciarEvaluacion(personaId) {
+  if (esProfeSoloLectura()) return;
   if (!puedeIniciarEval()) {
     alert('Solo los kinesiólogos pueden iniciar una evaluación.');
     return;
@@ -1131,6 +1143,9 @@ function openHC(hcId) {
   if (hc.revisada_en) {
     btn.style.display = 'none';
     status.textContent = `✓ Revisada el ${formatDate(hc.revisada_en)}${hc.revisada_por ? ' por ' + hc.revisada_por : ''}`;
+  } else if (esProfeSoloLectura()) {
+    btn.style.display = 'none';
+    status.textContent = '';
   } else {
     btn.style.display = 'inline-block';
     status.textContent = '🆕 Sin revisar';
@@ -1139,9 +1154,10 @@ function openHC(hcId) {
   document.getElementById('modalHC').classList.add('show');
   document.getElementById('modalHC').scrollTop = 0;
 
-  // Mostrar el botón "Generar PDF" (solo aplica a HC, no a MOPLEX)
+  // Mostrar el botón "Generar PDF" (solo aplica a HC, no a MOPLEX).
+  // Los profes a sueldo NO lo ven (lectura pura).
   const btnPdf = document.getElementById('btnGenerarPDF');
-  if (btnPdf) btnPdf.style.display = 'inline-block';
+  if (btnPdf) btnPdf.style.display = esProfeSoloLectura() ? 'none' : 'inline-block';
 
   // Mostrar el botón "Cargar/editar formulario" solo a los kinesiólogos
   const btnForm = document.getElementById('btnEditarForm');
@@ -1177,6 +1193,9 @@ function openMoplex(moplexId) {
   if (ev.revisada_en) {
     btn.style.display = 'none';
     status.textContent = `✓ Revisada el ${formatDate(ev.revisada_en)}${ev.revisada_por ? ' por ' + ev.revisada_por : ''}`;
+  } else if (esProfeSoloLectura()) {
+    btn.style.display = 'none';
+    status.textContent = '';
   } else {
     btn.style.display = 'inline-block';
     status.textContent = '🆕 Sin revisar';
@@ -1633,6 +1652,8 @@ function pintarObservaciones(historiaId, personaId) {
   const zona = document.getElementById('obsAddZone');
   if (!zona) return;
   if (!usuarioActual) { zona.innerHTML = avisoSinLogin(); return; }
+  // Los profes a sueldo ven las observaciones pero NO las escriben (lectura pura).
+  if (esProfeSoloLectura()) { zona.innerHTML = ''; return; }
   zona.innerHTML = `
     <textarea class="obs-textarea" id="obsInput" placeholder="Agregar observación clínica (lo que viste en la evaluación / mediciones)…"></textarea>
     <div class="obs-add-row">
@@ -1649,6 +1670,8 @@ function pintarNotas(historiaId, personaId) {
   const zona = document.getElementById('notaAddZone');
   if (!zona) return;
   if (!usuarioActual) { zona.innerHTML = avisoSinLogin(); return; }
+  // Los profes a sueldo ven las notas pero NO las escriben (lectura pura).
+  if (esProfeSoloLectura()) { zona.innerHTML = ''; return; }
   zona.innerHTML = `
     <textarea class="obs-textarea nota" id="notaInput" placeholder="Nota interna para el equipo (no se le muestra al paciente)…"></textarea>
     <div class="obs-add-row">
@@ -1658,6 +1681,7 @@ function pintarNotas(historiaId, personaId) {
 }
 
 async function guardarCaja(historiaId, personaId, tipo) {
+  if (esProfeSoloLectura()) return;
   const inputId = tipo === 'nota' ? 'notaInput' : 'obsInput';
   const btnId = tipo === 'nota' ? 'btnAddNota' : 'btnAddObs';
   const input = document.getElementById(inputId);
@@ -1729,6 +1753,8 @@ function pintarAdjuntos(historiaId, personaId) {
   const zona = document.getElementById('adjAddZone');
   if (!zona) return;
   if (!usuarioActual) { zona.innerHTML = avisoSinLogin(); return; }
+  // Los profes a sueldo ven los adjuntos pero NO pueden subir (lectura pura).
+  if (esProfeSoloLectura()) { zona.innerHTML = ''; return; }
   zona.innerHTML = `
     <div class="adj-drop" id="adjDrop">📎 Tocá acá para subir un archivo (RX, estudio, PDF, foto…)</div>
     <input type="file" id="adjFile" style="display:none;" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx">`;
@@ -1739,6 +1765,7 @@ function pintarAdjuntos(historiaId, personaId) {
 }
 
 async function subirAdjunto(historiaId, personaId, archivo) {
+  if (esProfeSoloLectura()) return;
   if (!usuarioActual) { alert('Iniciá sesión para subir archivos.'); return; }
   // Límite de tamaño defensivo (20 MB)
   if (archivo.size > 20 * 1024 * 1024) { alert('El archivo es muy grande (máx 20 MB).'); return; }
@@ -1830,6 +1857,7 @@ function escapeHtml(s) {
 }
 
 async function marcarRevisada() {
+  if (esProfeSoloLectura()) return;
   const btn = document.getElementById('btnMarcarRevisada');
   btn.disabled = true;
   btn.textContent = 'Guardando...';
@@ -1884,6 +1912,7 @@ function copyMoplexLink() {
 }
 
 function sendWhatsApp(celular, nombre) {
+  if (esProfeSoloLectura()) return;
   // Normaliza celular para WhatsApp (Argentina): 54 9 + número
   let num = (celular || '').replace(/\D/g, '');
   if (num.startsWith('0')) num = num.substring(1);
@@ -2184,6 +2213,7 @@ async function guardarFormularioPaciente() {
 
 // Paso 1: abrir un selector liviano para elegir qué observaciones incluir
 function abrirSelectorPDF() {
+  if (esProfeSoloLectura()) return;
   if (!currentHCId) return;
   const hc = allHCs.find(h => h.id === currentHCId);
   if (!hc) return;
@@ -2267,6 +2297,7 @@ function cerrarSelectorPDF() {
 
 // Paso 2: generar el PDF con jsPDF
 async function generarPDF(conWhatsApp = false) {
+  if (esProfeSoloLectura()) return;
   if (!currentHCId) return;
   if (!window.jspdf || !window.jspdf.jsPDF) {
     alert('No se pudo cargar el generador de PDF. Revisá tu conexión a internet y probá de nuevo.');
