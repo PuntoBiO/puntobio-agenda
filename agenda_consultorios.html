@@ -1539,19 +1539,23 @@ async function onGuardarTurno() {
         mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones. Probá de nuevo.', 'error');
         return;
       }
-      let yaUsadas = (turnosTto || []).length;
-      // Sumar sesiones históricas migradas (tabla `sesiones`) que NO estén ya
-      // representadas por un turno (para no doble contar).
-      const idsTurnoUsados = new Set((turnosTto || []).map(x => x.id));
+      // Las sesiones del paciente viven en DOS tablas que describen las MISMAS visitas:
+      //   1) turnos_consultorio (PENDIENTE/PRESENTE) -> turnos en agenda nueva
+      //   2) sesiones -> sesiones cumplidas, muchas migradas del Excel con turno_id NULL
+      // NUNCA se suman: un turno PRESENTE y una sesión cumplida son el mismo evento físico.
+      // El consumo real = el MÁXIMO entre las dos fuentes (no la suma).
+      // Ej. Barbara tto 247: 8 turnos PRESENTE y 9 sesiones histó -> consumo = 9, no 17.
+      const turnosQueConsumen = (turnosTto || []).length;
       const { data: sesHist } = await supa
         .from('sesiones')
-        .select('numero_sesion, turno_id')
+        .select('numero_sesion')
         .eq('tratamiento_id', datosForm.tratamiento_id);
-      if (sesHist && sesHist.length) {
-        const historicasSinTurno = sesHist.filter(s => !s.turno_id || !idsTurnoUsados.has(s.turno_id)).length;
-        // Usamos el mayor entre el conteo de turnos y las históricas para no perder ninguna
-        yaUsadas = Math.max(yaUsadas, yaUsadas + historicasSinTurno);
-      }
+      // Sesiones cumplidas registradas = el número de sesión más alto de la tabla `sesiones`.
+      const sesionesCumplidas = (sesHist && sesHist.length)
+        ? sesHist.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0)
+        : 0;
+      // Consumo real: el mayor de las dos fuentes (mismas visitas, no se suman).
+      const yaUsadas = Math.max(turnosQueConsumen, sesionesCumplidas);
       const aCrear = slotsForm.length;
       const cupoLibre = ttoTope.total_sesiones - yaUsadas;
       if (cupoLibre <= 0) {
