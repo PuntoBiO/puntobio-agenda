@@ -758,6 +758,7 @@
     <div class="login-error" id="login-error">Email o contraseña incorrectos</div>
   </div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // =============================================
 // TOAST · notificación abajo a la derecha
@@ -786,6 +787,13 @@ function toast(mensaje, tipo) {
 // =============================================
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+// Cliente oficial de Supabase (para Storage de fotos, igual que el padrón)
+let sbCliente = null;
+try {
+  if (window.supabase && window.supabase.createClient) {
+    sbCliente = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  }
+} catch (e) { console.warn('[FOTO] no se pudo crear el cliente Supabase', e.message); }
 // Fetch con límite de tiempo: si tarda más de 12s, corta y avisa
 // (evita que el botón se quede colgado en "Guardando..." para siempre)
 async function fetchConTimeout(url, opciones = {}, ms = 12000) {
@@ -820,34 +828,39 @@ function inicialesDe(nombre) {
   if (partes.length === 1) return partes[0].substring(0,2).toUpperCase();
   return (partes[0][0] + partes[partes.length-1][0]).toUpperCase();
 }
-// Firma una URL de Storage vía la API REST (la agenda no usa el cliente sb)
+// Firma una URL de Storage. Usa el cliente oficial (igual que el padrón); si no está, cae al fetch.
 async function urlFotoPerfil(personaId, fotoPath) {
   if (!fotoPath) return null;
   if (fotoUrlCache[personaId]) return fotoUrlCache[personaId];
-  const endpoint = `${SUPABASE_URL}/storage/v1/object/sign/${FOTO_BUCKET}/${fotoPath}`;
+  // 1) Método principal: cliente oficial de Supabase (maneja bien la key publishable)
+  if (sbCliente) {
+    try {
+      const { data, error } = await sbCliente.storage.from(FOTO_BUCKET).createSignedUrl(fotoPath, 3600);
+      if (!error && data && data.signedUrl) {
+        fotoUrlCache[personaId] = data.signedUrl;
+        return data.signedUrl;
+      }
+      if (error) console.warn('[FOTO] cliente error', fotoPath, error.message);
+    } catch (e) { console.warn('[FOTO] cliente excepción', e.message); }
+  }
+  // 2) Respaldo: fetch crudo
   try {
-    const res = await fetch(endpoint, {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${FOTO_BUCKET}/${fotoPath}`, {
       method: 'POST',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ expiresIn: 3600 })
     });
-    const txt = await res.text();
-    if (!res.ok) {
-      console.warn('[FOTO] status', res.status, 'path', fotoPath, '→', txt);
-      return null;
-    }
-    let data; try { data = JSON.parse(txt); } catch(e){ console.warn('[FOTO] respuesta no JSON', txt); return null; }
+    if (!res.ok) { console.warn('[FOTO] fetch status', res.status, await res.text()); return null; }
+    const data = await res.json();
     let signed = data.signedURL || data.signedUrl || '';
-    if (!signed) { console.warn('[FOTO] sin signedURL', data); return null; }
-    let url;
-    if (signed.startsWith('http')) url = signed;
-    else if (signed.startsWith('/storage/v1')) url = `${SUPABASE_URL}${signed}`;
-    else if (signed.startsWith('/')) url = `${SUPABASE_URL}/storage/v1${signed}`;
-    else url = `${SUPABASE_URL}/storage/v1/${signed}`;
-    console.log('[FOTO] OK', personaId, '→', url.substring(0,80));
+    if (!signed) return null;
+    let url = signed.startsWith('http') ? signed
+            : signed.startsWith('/storage/v1') ? `${SUPABASE_URL}${signed}`
+            : signed.startsWith('/') ? `${SUPABASE_URL}/storage/v1${signed}`
+            : `${SUPABASE_URL}/storage/v1/${signed}`;
     fotoUrlCache[personaId] = url;
     return url;
-  } catch (e) { console.warn('[FOTO] excepción', e.message); return null; }
+  } catch (e) { console.warn('[FOTO] fetch excepción', e.message); return null; }
 }
 async function supabaseInsert(tabla, data) {
   const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
