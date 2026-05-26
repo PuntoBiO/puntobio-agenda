@@ -824,28 +824,30 @@ function inicialesDe(nombre) {
 async function urlFotoPerfil(personaId, fotoPath) {
   if (!fotoPath) return null;
   if (fotoUrlCache[personaId]) return fotoUrlCache[personaId];
+  const endpoint = `${SUPABASE_URL}/storage/v1/object/sign/${FOTO_BUCKET}/${fotoPath}`;
   try {
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${FOTO_BUCKET}/${fotoPath}`, {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ expiresIn: 3600 })
     });
+    const txt = await res.text();
     if (!res.ok) {
-      console.warn('Foto: error', res.status, 'al firmar', fotoPath, await res.text());
+      console.warn('[FOTO] status', res.status, 'path', fotoPath, '→', txt);
       return null;
     }
-    const data = await res.json();
-    // El campo puede venir como signedURL o signedUrl, y la ruta puede ser relativa o absoluta
+    let data; try { data = JSON.parse(txt); } catch(e){ console.warn('[FOTO] respuesta no JSON', txt); return null; }
     let signed = data.signedURL || data.signedUrl || '';
-    if (!signed) { console.warn('Foto: respuesta sin signedURL', data); return null; }
+    if (!signed) { console.warn('[FOTO] sin signedURL', data); return null; }
     let url;
     if (signed.startsWith('http')) url = signed;
     else if (signed.startsWith('/storage/v1')) url = `${SUPABASE_URL}${signed}`;
     else if (signed.startsWith('/')) url = `${SUPABASE_URL}/storage/v1${signed}`;
     else url = `${SUPABASE_URL}/storage/v1/${signed}`;
+    console.log('[FOTO] OK', personaId, '→', url.substring(0,80));
     fotoUrlCache[personaId] = url;
     return url;
-  } catch (e) { console.warn('Foto: excepción', e.message); return null; }
+  } catch (e) { console.warn('[FOTO] excepción', e.message); return null; }
 }
 async function supabaseInsert(tabla, data) {
   const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
@@ -2071,6 +2073,8 @@ function renderModalBody(dia, hora, servicio) {
   `;
   renderPanelEvo();
   // Cargar fotos de perfil (asíncrono)
+  const conFoto = alumnos.filter(a => a.foto);
+  console.log('[FOTO] alumnos en este turno:', alumnos.length, '· con foto:', conFoto.length, conFoto.map(a=>a.nombre));
   alumnos.forEach(a => {
     if (!a.foto) return;
     urlFotoPerfil(a.id, a.foto).then(url => {
