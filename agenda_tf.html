@@ -1255,19 +1255,29 @@ async function cargarAgregadosSemana() {
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const lunesIso = fmt(lunes), viernesIso = fmt(viernes);
-    // Una sola condición de fecha en la URL (gte) NO da error 400.
-    // El tope (lte viernes) lo aplicamos filtrando en JavaScript.
+    // 1) Traer los agregados SIN join a personas (el join personas() daba error 400
+    //    por falta de relación FK declarada). Una sola condición de fecha (gte).
     const filas = await supabaseQuery('turno_agregados',
-      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre,foto_perfil)&fecha=gte.${lunesIso}`);
-    (filas || []).forEach(a => {
-      if (!a.personas) return;
-      if (a.fecha > viernesIso) return;   // descartar lo que pasa del viernes
+      `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${lunesIso}`);
+    const dentro = (filas || []).filter(a => a.fecha <= viernesIso);
+    if (dentro.length === 0) return;
+    // 2) Traer los datos de esas personas en una consulta aparte (sin join).
+    const ids = [...new Set(dentro.map(a => a.persona_id))].filter(Boolean);
+    const personasMap = {};
+    if (ids.length) {
+      const pers = await supabaseQuery('personas',
+        `?select=id,nombre,foto_perfil&id=in.(${ids.join(',')})`);
+      (pers || []).forEach(p => { personasMap[p.id] = p; });
+    }
+    dentro.forEach(a => {
+      const p = personasMap[a.persona_id];
+      if (!p) return;
       const key = `${a.turno_id}-${a.fecha}`;
       if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
       AGREGADOS_POR_TURNO[key].push({
-        id: String(a.personas.id),
-        nombre: a.personas.nombre,
-        foto: a.personas.foto_perfil || null,
+        id: String(p.id),
+        nombre: p.nombre,
+        foto: p.foto_perfil || null,
         tipo: a.tipo,            // 'recuperatorio' | 'suelto'
         agregadoId: a.id
       });
