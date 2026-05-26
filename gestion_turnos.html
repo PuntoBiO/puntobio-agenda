@@ -76,6 +76,7 @@
   }
   .gt-cap-input:focus { outline: none; border-color: var(--celeste); }
   .gt-cap-input.cambiado { border-color: var(--ambar); background: #fffbeb; }
+  .gt-cap-input.error { border-color: var(--rojo); background: #fef2f2; color: var(--rojo); }
   .gt-guardar {
     border: none; background: var(--celeste); color: #fff; border-radius: 8px;
     padding: 7px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
@@ -209,6 +210,7 @@ const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 
 const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'];
 let TURNOS = [];          // todos los turnos cargados
+let FIJOS_POR_TURNO = {}; // turno_id -> cantidad de alumnos fijos activos
 let filtroActivo = 'todos';
 
 // ---- Token del usuario logueado (compartido con el resto del sistema vía sessionStorage) ----
@@ -255,11 +257,18 @@ function toast(msg, tipo = '') {
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = '.3s'; setTimeout(() => el.remove(), 300); }, 2600);
 }
 
-// ---- Cargar turnos ----
+// ---- Cargar turnos + cantidad de alumnos fijos de cada uno ----
 async function cargarTurnos() {
   try {
-    const filas = await sbQuery('turnos', '?select=id,dia,hora,servicio,capacidad&order=dia,hora,servicio');
+    const [filas, fijos] = await Promise.all([
+      sbQuery('turnos', '?select=id,dia,hora,servicio,capacidad&order=dia,hora,servicio'),
+      sbQuery('turno_alumnos', '?select=turno_id&activo=eq.true')
+    ]);
     TURNOS = filas || [];
+    FIJOS_POR_TURNO = {};
+    (fijos || []).forEach(f => {
+      FIJOS_POR_TURNO[f.turno_id] = (FIJOS_POR_TURNO[f.turno_id] || 0) + 1;
+    });
     render();
   } catch (e) {
     document.getElementById('gt-contenido').innerHTML =
@@ -289,17 +298,25 @@ function render() {
     }
     const servCls = t.servicio === 'Entrenamiento' ? 'gt-serv-ent' : 'gt-serv-kine';
     const servTxt = t.servicio === 'Entrenamiento' ? 'ENTRENAMIENTO' : 'KINEFILAXIA';
+    const fijos = FIJOS_POR_TURNO[t.id] || 0;
+    // Color del contador de fijos según qué tan lleno está
+    let fijosColor = 'var(--texto-suave)';
+    if (fijos >= t.capacidad && t.capacidad > 0) fijosColor = 'var(--rojo)';
+    else if (fijos >= t.capacidad - 2) fijosColor = 'var(--ambar)';
     html += `
       <div class="gt-card">
         <div class="gt-card-info">
           <div class="gt-card-hora">${t.hora}</div>
           <span class="gt-card-serv ${servCls}">${servTxt}</span>
+          <div style="font-size:11.5px;font-weight:700;margin-top:5px;color:${fijosColor}">
+            👤 ${fijos} fijo${fijos!==1?'s':''} de ${t.capacidad}
+          </div>
         </div>
         <div class="gt-cap-control">
           <span class="gt-cap-label">cupo</span>
           <input class="gt-cap-input" type="number" min="0" max="50"
                  id="cap-${t.id}" value="${t.capacidad}"
-                 data-original="${t.capacidad}" oninput="marcarCambio(${t.id})">
+                 data-original="${t.capacidad}" data-fijos="${fijos}" oninput="marcarCambio(${t.id})">
         </div>
         <button class="gt-guardar" id="btn-${t.id}" onclick="guardarCapacidad(${t.id})" disabled>Guardar</button>
       </div>`;
@@ -308,16 +325,27 @@ function render() {
   cont.innerHTML = html;
 }
 
-// ---- Marcar cambio (habilita el botón guardar) ----
+// ---- Marcar cambio (habilita el botón guardar, salvo que quede bajo los fijos) ----
 function marcarCambio(id) {
   const input = document.getElementById(`cap-${id}`);
   const btn = document.getElementById(`btn-${id}`);
   const original = input.getAttribute('data-original');
-  const cambiado = input.value !== original && input.value !== '';
-  input.classList.toggle('cambiado', cambiado);
-  btn.disabled = !cambiado;
+  const fijos = parseInt(input.getAttribute('data-fijos'), 10) || 0;
+  const valor = input.value;
+  const num = parseInt(valor, 10);
+  const cambiado = valor !== original && valor !== '';
+  // No se puede dejar la capacidad por debajo de los alumnos fijos anotados
+  const bajoFijos = !isNaN(num) && num < fijos;
+  input.classList.toggle('cambiado', cambiado && !bajoFijos);
+  input.classList.toggle('error', bajoFijos);
   btn.classList.remove('ok');
-  btn.textContent = 'Guardar';
+  if (bajoFijos) {
+    btn.disabled = true;
+    btn.textContent = `Mín. ${fijos}`;
+  } else {
+    btn.disabled = !cambiado;
+    btn.textContent = 'Guardar';
+  }
 }
 
 // ---- Guardar capacidad de un turno ----
@@ -325,7 +353,13 @@ window.guardarCapacidad = async (id) => {
   const input = document.getElementById(`cap-${id}`);
   const btn = document.getElementById(`btn-${id}`);
   const nueva = parseInt(input.value, 10);
+  const fijos = parseInt(input.getAttribute('data-fijos'), 10) || 0;
   if (isNaN(nueva) || nueva < 0) { toast('Poné un número válido (0 o más)', 'err'); return; }
+  // Seguridad: no permitir bajar la capacidad por debajo de los fijos anotados
+  if (nueva < fijos) {
+    toast(`No se puede: hay ${fijos} alumno${fijos!==1?'s':''} fijo${fijos!==1?'s':''} anotado${fijos!==1?'s':''}`, 'err');
+    return;
+  }
   btn.disabled = true; btn.textContent = '⟳';
   try {
     await sbUpdate('turnos', `id=eq.${id}`, { capacidad: nueva });
