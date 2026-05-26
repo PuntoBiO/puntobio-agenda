@@ -2345,6 +2345,17 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     if (!esFeriado && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
     }
+    // 0) Anti-duplicado: si ya existe un recuperatorio PENDIENTE para este mismo
+    //    día (misma persona + misma fecha_ausencia + mismo tipo), no crear otro.
+    //    Evita que un feriado/falta quede reprogramado dos veces.
+    try {
+      const yaExiste = await supabaseQuery('recuperatorios_tf',
+        `?select=id&persona_id=eq.${pid}&fecha_ausencia=eq.${fechaAusencia}&tipo=eq.${esFeriado?'feriado':'recuperatorio'}&estado=eq.pendiente`);
+      if (yaExiste && yaExiste.length) {
+        cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esta clase ya está reprogramada. Si querés cambiar el día, primero quitá al alumno del turno donde está reservado.</div>';
+        return;
+      }
+    } catch (e0) { console.warn('No se pudo verificar duplicado de recuperatorio', e0); }
     // 1) Registrar el recuperatorio (los de feriado van con tipo 'feriado' y NO descuentan cupo)
     await supabaseInsert('recuperatorios_tf', {
       persona_id: pid,
@@ -2933,12 +2944,29 @@ window.quitarFijo = async (personaId, nombre, dia, hora, servicio) => {
 };
 
 // Quitar un agregado puntual (recuperatorio/suelto) — NO toca a los fijos
-window.quitarAgregado = async (agregadoId, dia, hora, servicio) => {
+// Si era un RECUPERATORIO, también borra su fila en recuperatorios_tf,
+// para que el feriado/falta se REACTIVE y vuelva a estar disponible para reprogramar.
+window.quitarAgregado = async (agregadoId, dia, hora, servicio, personaId, tipoAgregado) => {
   if (!puedeBorrarAlumno()) { toast('Solo un admin puede sacar alumnos del turno', 'error'); return; }
   if (!agregadoId) return;
   if (!confirm('¿Quitar este alumno del turno (solo de este día)?')) return;
   try {
     await supabaseDelete('turno_agregados', `id=eq.${agregadoId}`);
+    // Si era un recuperatorio, borrar también la reserva en recuperatorios_tf
+    // (así la clase pendiente se reactiva y se puede reprogramar otro día).
+    if (tipoAgregado === 'recuperatorio' && personaId) {
+      const t = HORARIOS.find(x=>x.dia===dia&&x.hora===hora&&x.servicio===servicio);
+      const fechaRec = fechaDelDia(dia);
+      if (t && fechaRec) {
+        try {
+          await supabaseDelete('recuperatorios_tf',
+            `persona_id=eq.${personaId}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fechaRec}&estado=eq.pendiente`);
+        } catch (e2) {
+          console.warn('No se pudo reactivar la clase pendiente', e2);
+          toast('Se quitó del turno, pero revisá la reserva del recuperatorio', 'warn');
+        }
+      }
+    }
     // Limpiar de memoria
     Object.keys(AGREGADOS_POR_TURNO).forEach(k => {
       AGREGADOS_POR_TURNO[k] = AGREGADOS_POR_TURNO[k].filter(a => a.agregadoId !== agregadoId);
@@ -3107,7 +3135,7 @@ function renderModalBody(dia, hora, servicio) {
             ? ''
             : a.tipoAgregado
             ? `<button class="btn-asistencia" style="background:#fef2f2;color:#dc2626;border-color:#fecaca;"
-                onclick="quitarAgregado(${a.agregadoId},'${dia}','${hora}','${servicio}')"
+                onclick="quitarAgregado(${a.agregadoId},'${dia}','${hora}','${servicio}',${a.id},'${a.tipoAgregado}')"
                 title="Quitar este agregado del turno">🗑️</button>`
             : `<button class="btn-asistencia" style="background:#fef2f2;color:#dc2626;border-color:#fecaca;"
                 onclick="quitarFijo(${a.id},'${(a.nombre||'').replace(/'/g,'')}','${dia}','${hora}','${servicio}')"
