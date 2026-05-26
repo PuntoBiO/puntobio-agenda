@@ -426,6 +426,21 @@ const DISPONIBILIDAD = {
 
 const PROFESIONALES = ['Vero'];
 
+// ===== APERTURAS EXTRA POR FECHA PUNTUAL =====
+// Bloques que se abren SOLO en una fecha concreta (no todos los días de esa semana).
+// Formato: 'YYYY-MM-DD': { hora: ['PROFESIONAL', ...] }
+// Ej: abrir Vero el miércoles 27/5/2026 a las 16hs para masaje.
+// Para sacar una apertura, borrá su línea. No afecta la disponibilidad fija.
+const APERTURAS_EXTRA = {
+  '2026-05-27': { 16: ['Vero'] }
+};
+// ¿La fecha (YYYY-MM-DD) + hora tiene una apertura extra? Devuelve los profesionales habilitados o [].
+function profesExtraEn(fechaIso, hora) {
+  if (!fechaIso) return [];
+  const dia = APERTURAS_EXTRA[fechaIso];
+  return (dia && dia[hora]) ? dia[hora] : [];
+}
+
 const REGLAS_PRACTICA = {
   MASAJES: { label:'Masoterapia', cap_normal:1, permite_sobreturno:false, espacios:['CONSULTORIO_ESPECIALIDADES'], modalidad:'INDIVIDUAL' }
 };
@@ -459,11 +474,13 @@ const MAP_PRACTICA_TARIFARIO = {
 const HORAS = [8,9,10,11,12,13,14,15,16,17,18,19,20];
 const DIAS = ['LUNES','MARTES','MIERCOLES','JUEVES','VIERNES'];
 
-function esBloqueoFijo(diaNumero, hora) {
+function esBloqueoFijo(diaNumero, hora, fechaIso) {
   // Maso: el "bloqueo" se calcula contra la disponibilidad real de Vero,
   // NO contra las reglas generales de la clínica (que aplican a kines).
   // Si Vero atiende ese día/hora → no hay bloqueo (libre).
   // Si no atiende → CERRADO (o ALMUERZO para 13:00).
+  // EXCEPCIÓN: si hay una apertura extra para esa fecha puntual → libre.
+  if (profesExtraEn(fechaIso, hora).length > 0) return null;   // apertura puntual → no bloqueo
   const veroDispDia = DISPONIBILIDAD.Vero?.[diaNumero] || {};
   if (veroDispDia[hora]) return null;          // Vero atiende → no bloqueo
   if (hora === 13) return 'ALMUERZO';          // todos almuerzan
@@ -507,9 +524,13 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
   }
 
   const out = [];
+  const profsExtra = profesExtraEn(fecha, hora);   // profesionales habilitados por apertura puntual
   for (const prof of PROFESIONALES) {
     const practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora] || [];
-    if (!practicas.includes(real)) continue;
+    // El prof puede dar la práctica si está en su disponibilidad fija, O si hay una
+    // apertura extra para esa fecha que lo habilita (y la práctica pedida es masaje).
+    const habilitadoExtra = profsExtra.includes(prof) && (real === 'MASAJES');
+    if (!practicas.includes(real) && !habilitadoExtra) continue;
 
     if (fecha) {
       // Chequear si el profesional ya tiene un turno en esta franja
@@ -863,7 +884,7 @@ function renderWeek(container) {
       const diaNumero = idx+1;
       const iso = toISODate(d);
       if (feriadosMap.has(iso)) { cells.push(`<div class="grid-cell is-feriado"><div class="feriado-label">Feriado</div></div>`); return; }
-      const bloqueo = esBloqueoFijo(diaNumero, h);
+      const bloqueo = esBloqueoFijo(diaNumero, h, iso);
       if (bloqueo) { cells.push(`<div class="grid-cell is-bloqueo"><div class="bloqueo-label">${bloqueo}</div></div>`); return; }
       const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
       const turnosHTML = slotTurnos.map(renderTurno).join('');
@@ -973,6 +994,8 @@ function abrirModalConSlots(slots) {
       dispProfs = profesionalesParaPracticaEn(s.diaNumero, s.hora, practicaFiltro, s.fecha);
     } else {
       dispProfs = disponiblesEn(s.diaNumero, s.hora).map(d => d.profesional);
+      // Sumar profesionales habilitados por apertura extra en esa fecha puntual
+      profesExtraEn(s.fecha, s.hora).forEach(p => { if (!dispProfs.includes(p)) dispProfs.push(p); });
     }
     return {
       ...s,
@@ -1050,6 +1073,8 @@ function recalcularPracticaComun() {
   let comun = null;
   for (const s of slotsForm) {
     const ps = new Set(DISPONIBILIDAD[s.profesional]?.[s.diaNumero]?.[s.hora] || []);
+    // Si hay apertura extra para esa fecha que habilita al profesional, sumar MASAJES.
+    if (profesExtraEn(s.fecha, s.hora).includes(s.profesional)) ps.add('MASAJES');
     comun = comun === null ? ps : new Set([...comun].filter(x => ps.has(x)));
     if (comun.size === 0) break;
   }
@@ -1399,10 +1424,13 @@ function validarUnSlot(slot, datosForm) {
     const fechaTxt = slot.fecha.split('-').reverse().join('/');
     return { ok:false, errores:[`${fechaTxt} ${pad(slot.hora)}:00 ya pasó. No se pueden cargar turnos en el pasado.`] };
   }
-  if (esBloqueoFijo(slot.diaNumero, slot.hora)) return { ok:false, errores:[`${slot.fecha} ${pad(slot.hora)}:00 está cerrado.`] };
+  if (esBloqueoFijo(slot.diaNumero, slot.hora, slot.fecha)) return { ok:false, errores:[`${slot.fecha} ${pad(slot.hora)}:00 está cerrado.`] };
 
   const practicasDisp = DISPONIBILIDAD[profesional]?.[slot.diaNumero]?.[slot.hora] || [];
-  if (!practicasDisp.includes(practica)) return { ok:false, errores:[`${profesional} no atiende ${practica} el ${slot.fecha} a las ${pad(slot.hora)}:00.`] };
+  // El turno es válido si la práctica está en la disponibilidad fija, O si hay una
+  // apertura extra para esa fecha que habilita al profesional para masaje.
+  const habilitadoExtra = profesExtraEn(slot.fecha, slot.hora).includes(profesional) && esTurnoMasajes(practica);
+  if (!practicasDisp.includes(practica) && !habilitadoExtra) return { ok:false, errores:[`${profesional} no atiende ${practica} el ${slot.fecha} a las ${pad(slot.hora)}:00.`] };
 
   const slotTurnos = turnos.filter(t => t.fecha===slot.fecha && parseInt(t.hora_inicio.slice(0,2),10)===slot.hora);
   const delProf = slotTurnos.filter(t => t.profesional===profesional);
