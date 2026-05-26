@@ -178,6 +178,23 @@
   .gs-leyenda { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; margin-bottom:12px; color:#475569; }
   .gs-leyenda span { display:inline-flex; align-items:center; gap:5px; }
   .gs-dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  /* === VISTA SEMANAL DE LA AGENDA (5 columnas) === */
+  .vs-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; align-items:start; }
+  .vs-col { background:#f8fafc; border:1px solid #e8eef3; border-radius:12px; padding:8px; min-height:80px; }
+  .vs-col-head { text-align:center; font-weight:700; font-size:13px; color:#334155; padding:6px 0 8px; border-bottom:1px solid #e8eef3; margin-bottom:8px; }
+  .vs-col-head small { display:block; font-weight:500; font-size:11px; color:#94a3b8; }
+  .vs-col-head.feriado { color:#9a3412; }
+  .vs-card { background:#fff; border:1px solid #e2e8f0; border-radius:9px; padding:8px 9px; margin-bottom:7px; cursor:pointer; transition:.15s; }
+  .vs-card:hover { border-color:var(--celeste); box-shadow:0 2px 8px rgba(30,159,224,.12); }
+  .vs-card-top { display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:5px; }
+  .vs-hora { font-weight:700; font-size:13px; }
+  .vs-serv { font-size:9px; font-weight:700; padding:1px 6px; border-radius:5px; }
+  .vs-serv.ent { background:var(--celeste-claro); color:var(--celeste-oscuro); }
+  .vs-serv.kine { background:#dcfce7; color:#166534; }
+  .vs-ocup { font-size:11px; font-weight:600; }
+  .vs-barra { height:4px; background:#e2e8f0; border-radius:99px; overflow:hidden; margin-top:4px; }
+  .vs-fill { height:100%; border-radius:99px; }
+  .vs-col.feriado-col { background:repeating-linear-gradient(45deg,#fff7ed,#fff7ed 10px,#ffedd5 10px,#ffedd5 20px); border-color:#fdba74; }
   .turno-body { padding: 12px 14px; }
   .turno-profes { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .profe-tag {
@@ -681,12 +698,20 @@
   <button class="filtro-btn activo" onclick="filtrar('todos',this)">Todos</button>
   <button class="filtro-btn entrenamiento" onclick="filtrar('Entrenamiento',this)">Entrenamiento</button>
   <button class="filtro-btn kinefilaxia" onclick="filtrar('Kinefilaxia',this)">Kinefilaxia</button>
-  <button class="filtro-btn" onclick="abrirGrillaSemana()" style="margin-left:auto;background:#eff6ff;border-color:#1e9fe0;color:#1e9fe0;font-weight:700">📋 Ver semana completa</button>
+  <span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center">
+    <span style="font-size:12px;color:var(--texto-suave);font-weight:600">Vista:</span>
+    <button id="vista-dia-btn" class="filtro-btn activo" onclick="cambiarVista('dia')" style="padding:6px 14px">📆 Día</button>
+    <button id="vista-semana-btn" class="filtro-btn" onclick="cambiarVista('semana')" style="padding:6px 14px">🗓️ Semana</button>
+    <button class="filtro-btn" onclick="abrirGrillaSemana()" style="background:#eff6ff;border-color:#1e9fe0;color:#1e9fe0;font-weight:700">📋 Ver semana completa</button>
+  </span>
 </div>
 <div class="contenido">
-  <div class="dias-tabs" id="dias-tabs"></div>
-  <div class="resumen-top" id="resumen-top"></div>
-  <div class="turnos-grid" id="turnos-grid"></div>
+  <div id="vista-dia">
+    <div class="dias-tabs" id="dias-tabs"></div>
+    <div class="resumen-top" id="resumen-top"></div>
+    <div class="turnos-grid" id="turnos-grid"></div>
+  </div>
+  <div id="vista-semana" style="display:none"></div>
 </div>
 <div class="modal-overlay" id="modal-overlay" onclick="cerrarModal(event)">
   <div class="modal">
@@ -1090,6 +1115,7 @@ async function cargarDatos() {
     await cargarAgregadosSemana();
     await cargarClasesCerradas();
     await cargarFeriados();
+    await cargarAsistenciaSemana();
     renderDiasTabs();
     renderTurnos();
   } catch(err) {
@@ -1138,11 +1164,12 @@ function actualizarSemanaLabel() {
   viernes.setDate(lunes.getDate() + 4);
   document.getElementById('semana-label').textContent = formatFecha(lunes) + ' — ' + formatFecha(viernes);
 }
-function cambiarSemana(delta) {
+async function cambiarSemana(delta) {
   offsetSemana += delta;
   actualizarSemanaLabel();
-  renderDiasTabs();
-  renderTurnos();
+  await cargarDatos();   // recarga agregados + asistencia + feriados de la nueva semana
+  if (vistaActual === 'semana') renderVistaSemana();
+  else { renderDiasTabs(); renderTurnos(); }
 }
 function renderDiasTabs() {
   const lunes = getLunes(offsetSemana);
@@ -1506,6 +1533,36 @@ async function cargarFeriados() {
 // ¿Esta fecha (YYYY-MM-DD) es feriado? Devuelve el motivo o null.
 function feriadoDe(fecha) {
   return FERIADOS[fecha] || null;
+}
+
+// Asistencia (presente/ausente) de la semana visible, para calcular "lugares del día".
+// Clave: `${turno_id}-${fecha}-${persona_id}` -> estado
+let ASISTENCIA_SEMANA = {};
+async function cargarAsistenciaSemana() {
+  ASISTENCIA_SEMANA = {};
+  try {
+    const lunes = getLunes(offsetSemana);
+    const fechas = [];
+    for (let i = 0; i < 5; i++) {
+      const f = new Date(lunes); f.setDate(lunes.getDate() + i);
+      fechas.push(`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`);
+    }
+    const filas = await supabaseQuery('asistencia',
+      `?select=turno_id,fecha,persona_id,estado&fecha=in.(${fechas.join(',')})`);
+    (filas || []).forEach(f => {
+      ASISTENCIA_SEMANA[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado;
+    });
+  } catch (e) { ASISTENCIA_SEMANA = {}; console.warn('No se pudo cargar asistencia de la semana', e); }
+}
+// ¿Cuántos alumnos FIJOS de un turno están ausentes en una fecha? (para el lugar del día)
+function ausentesDelDia(t, fecha) {
+  const fijos = ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || [];
+  let n = 0;
+  fijos.forEach(a => {
+    const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
+    if (est === 'ausente' || est === 'ausente-justificada') n++;
+  });
+  return n;
 }
 
 // =============================================
@@ -2148,26 +2205,110 @@ function chequearCupo(t, accionTexto) {
 }
 
 // =============================================
+// VISTA SEMANAL DE LA AGENDA (toggle Día / Semana, para trabajar)
+// =============================================
+let vistaActual = 'dia';   // 'dia' o 'semana'
+window.cambiarVista = (modo) => {
+  vistaActual = modo;
+  document.getElementById('vista-dia-btn').classList.toggle('activo', modo === 'dia');
+  document.getElementById('vista-semana-btn').classList.toggle('activo', modo === 'semana');
+  document.getElementById('vista-dia').style.display = (modo === 'dia') ? '' : 'none';
+  document.getElementById('vista-semana').style.display = (modo === 'semana') ? '' : 'none';
+  if (modo === 'semana') renderVistaSemana();
+  else { renderDiasTabs(); renderTurnos(); }
+};
+function renderVistaSemana() {
+  const cont = document.getElementById('vista-semana');
+  if (!cont) return;
+  const lunes = getLunes(offsetSemana);
+  const fechas = DIAS.map((dia, i) => {
+    const f = new Date(lunes); f.setDate(lunes.getDate() + i);
+    return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+  });
+  let html = '<div class="vs-grid">';
+  DIAS.forEach((dia, i) => {
+    const motivo = feriadoDe(fechas[i]);
+    const fLabel = fechas[i].slice(8,10) + '/' + fechas[i].slice(5,7);
+    // Turnos de ese día (respetando el filtro de servicio)
+    const turnos = HORARIOS.filter(t => t.dia === dia &&
+        (filtroActivo === 'todos' || t.servicio === filtroActivo))
+      .sort((a,b) => parseInt(a.hora.replace(':','')) - parseInt(b.hora.replace(':','')));
+    html += `<div class="vs-col${motivo?' feriado-col':''}">
+      <div class="vs-col-head${motivo?' feriado':''}">${dia}<small>${fLabel}${motivo?' 🟠 FERIADO':''}</small></div>`;
+    if (motivo) {
+      html += `<div style="text-align:center;font-size:11px;color:#9a3412;padding:10px 0">Clases cerradas</div>`;
+    } else if (!turnos.length) {
+      html += `<div style="text-align:center;font-size:11px;color:#cbd5e1;padding:10px 0">Sin turnos</div>`;
+    } else {
+      turnos.forEach(t => {
+        const ocup = getAlumnos(t, fechas[i]).length;
+        const pct = Math.round(ocup / t.capacidad * 100);
+        const color = pct>=100 ? 'var(--rojo)' : pct>=75 ? '#a16207' : '#15803d';
+        const fill = pct>=100 ? '#dc2626' : pct>=75 ? '#eab308' : '#22c55e';
+        const serv = t.servicio === 'Entrenamiento' ? 'ent' : 'kine';
+        const ini = t.servicio === 'Entrenamiento' ? 'ENT' : 'KINE';
+        html += `<div class="vs-card" onclick="abrirModalSemana('${dia}','${t.hora}','${t.servicio}',${i})">
+          <div class="vs-card-top">
+            <span class="vs-hora">${t.hora}</span>
+            <span class="vs-serv ${serv}">${ini}</span>
+          </div>
+          <div class="vs-ocup" style="color:${color}">${ocup}/${t.capacidad}</div>
+          <div class="vs-barra"><div class="vs-fill" style="width:${Math.min(pct,100)}%;background:${fill}"></div></div>
+        </div>`;
+      });
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  cont.innerHTML = html;
+}
+// Abrir el modal de un turno desde la vista semanal (selecciona ese día primero)
+window.abrirModalSemana = (dia, hora, servicio, diaIdx) => {
+  diaActivo = dia;   // el modal usa el día activo para fechas
+  abrirModal(dia, hora, servicio);
+};
+
+// =============================================
 // GRILLA SEMANA COMPLETA (turnos disponibles de un vistazo)
 // =============================================
+let grillaOffset = 0;   // offset de semana propio de la grilla (independiente de la agenda)
 window.abrirGrillaSemana = () => {
+  grillaOffset = offsetSemana;   // arranca en la semana que estás viendo
   renderGrillaSemana();
   document.getElementById('grilla-overlay').classList.add('activo');
 };
 window.cerrarGrillaSemana = () => {
   document.getElementById('grilla-overlay').classList.remove('activo');
 };
+// Cambiar de semana DENTRO de la grilla (sin cerrarla). Recarga datos de esa semana.
+window.grillaCambiarSemana = async (delta) => {
+  grillaOffset += delta;
+  const cuerpo = document.getElementById('grilla-body');
+  if (cuerpo) cuerpo.innerHTML = '<div style="padding:30px;text-align:center;color:var(--celeste)">⟳ Cargando semana…</div>';
+  // Mover la agenda a esa semana y recargar los datos (agregados, asistencia, etc.)
+  offsetSemana = grillaOffset;
+  actualizarSemanaLabel();
+  await cargarDatos();        // recarga agregados + asistencia + feriados de la nueva semana
+  renderGrillaSemana();
+};
 function renderGrillaSemana() {
-  const lunes = getLunes(offsetSemana);
+  const lunes = getLunes(grillaOffset);
   // Fechas de la semana (Lun..Vie)
   const fechas = DIAS.map((dia, i) => {
     const f = new Date(lunes); f.setDate(lunes.getDate() + i);
     return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
   });
-  // Subtítulo con el rango
+  // Subtítulo con el rango + flechas para navegar semanas
   const v = new Date(lunes); v.setDate(lunes.getDate()+4);
-  document.getElementById('grilla-subtitulo').textContent =
-    `Semana ${formatFecha(lunes)} — ${formatFecha(v)} · número = lugares libres`;
+  const sub = document.getElementById('grilla-subtitulo');
+  if (sub) {
+    sub.innerHTML =
+      `<span style="display:inline-flex;align-items:center;gap:10px">
+        <button onclick="grillaCambiarSemana(-1)" style="border:1px solid #c4b5fd;background:#f5f3ff;color:#7c3aed;border-radius:7px;width:28px;height:26px;cursor:pointer;font-size:14px">&#8592;</button>
+        <b style="color:#334155">Semana ${formatFecha(lunes)} — ${formatFecha(v)}</b>
+        <button onclick="grillaCambiarSemana(1)" style="border:1px solid #c4b5fd;background:#f5f3ff;color:#7c3aed;border-radius:7px;width:28px;height:26px;cursor:pointer;font-size:14px">&#8594;</button>
+      </span>`;
+  }
 
   // Todas las horas que existen en la semana (de todos los turnos), ordenadas
   const horas = [...new Set(HORARIOS.map(t => t.hora))].sort();
@@ -2177,22 +2318,32 @@ function renderGrillaSemana() {
   }
   // Arma la celda de un turno con su color según lugares libres
   function celdaTurno(t, fecha) {
-    const ocup = getAlumnos(t, fecha).length;
-    const libres = t.capacidad - ocup;
+    const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+    // Lugar FIJO real: capacidad − alumnos fijos (lo que sirve para anotar permanente)
+    const libreFijo = t.capacidad - fijos;
+    // Lugar del DÍA: además se libera el lugar de los fijos ausentes (solo para recuperatorio)
+    const ausentes = ausentesDelDia(t, fecha);
+    const ocupDia = getAlumnos(t, fecha).length - ausentes;  // los que realmente van ese día
+    const libreDia = t.capacidad - ocupDia;
+    // Color según el cupo FIJO (que es el que importa para turno permanente)
     let cls = 'gs-libre';
-    if (libres < 0) cls = 'gs-sobre';
-    else if (libres === 0) cls = 'gs-lleno';
-    else if (libres <= 2) cls = 'gs-casi';
+    if (libreFijo < 0) cls = 'gs-sobre';
+    else if (libreFijo === 0) cls = 'gs-lleno';
+    else if (libreFijo <= 2) cls = 'gs-casi';
     const ini = t.servicio === 'Entrenamiento' ? 'ENT' : 'KINE';
-    const txt = libres < 0 ? `${libres}` : (libres === 0 ? 'LLENO' : `${libres}`);
-    return `<div class="gs-celda ${cls}" style="border-radius:7px;padding:4px 3px;margin:2px 0">
-      ${txt}<small>${ini} · ${ocup}/${t.capacidad}</small></div>`;
+    const grande = libreFijo < 0 ? `${libreFijo}` : (libreFijo === 0 ? 'LLENO' : `${libreFijo} fijo`);
+    // Si hay ausentes, hay lugar extra solo para recuperatorio
+    const extra = (libreDia > libreFijo)
+      ? `<small style="color:#7c3aed">+${libreDia - libreFijo} recupe</small>` : '';
+    return `<div class="gs-celda ${cls}" style="border-radius:7px;padding:4px 3px;margin:2px 0" title="${ini} ${t.hora} · Capacidad ${t.capacidad} · Fijos ${fijos}${ausentes?` · ${ausentes} ausente(s) este día`:''}">
+      ${grande}<small>${ini} · ${fijos}/${t.capacidad}</small>${extra}</div>`;
   }
 
   let html = `<div class="gs-leyenda">
-    <span><span class="gs-dot" style="background:#bbf7d0"></span> Hay lugar</span>
-    <span><span class="gs-dot" style="background:#fde68a"></span> 1-2 lugares</span>
+    <span><span class="gs-dot" style="background:#bbf7d0"></span> Lugar fijo (anotar permanente)</span>
+    <span><span class="gs-dot" style="background:#fde68a"></span> 1-2 lugares fijos</span>
     <span><span class="gs-dot" style="background:#fecaca"></span> Completo</span>
+    <span><span class="gs-dot" style="background:#ede9fe;border:1px solid #c4b5fd"></span> +recupe = lugar solo p/recuperatorio (hay ausente)</span>
     <span><span class="gs-dot" style="background:#fca5a5"></span> Sobrecupo (revisar)</span>
   </div>`;
   html += '<table class="gs-tabla"><thead><tr><th>Hora</th>';
@@ -2661,9 +2812,12 @@ function cerrarModal(e) { if (e.target===document.getElementById('modal-overlay'
 function cerrarModalBtn() { document.getElementById('modal-overlay').classList.remove('activo'); }
 function filtrar(tipo, btn) {
   filtroActivo = tipo;
-  document.querySelectorAll('.filtro-btn').forEach(b=>b.classList.remove('activo'));
+  // Solo desmarcar los 3 filtros de servicio (no el toggle Día/Semana)
+  ['todos','Entrenamiento','Kinefilaxia'].forEach(()=>{});
+  document.querySelectorAll('.filtros > button.filtro-btn').forEach(b=>b.classList.remove('activo'));
   btn.classList.add('activo');
-  renderTurnos();
+  if (vistaActual === 'semana') renderVistaSemana();
+  else renderTurnos();
 }
 // Justificación de ausencias
 let justifDia = '', justifHora = '', justifServicio = '', justifId = '', justifNombreAlumno = '';
