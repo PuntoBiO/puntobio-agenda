@@ -2272,6 +2272,8 @@ window.abrirModalSemana = (dia, hora, servicio, diaIdx) => {
 // GRILLA SEMANA COMPLETA (turnos disponibles de un vistazo)
 // =============================================
 let grillaOffset = 0;   // offset de semana propio de la grilla (independiente de la agenda)
+let grillaFiltroServicio = 'ambos';   // 'ambos' | 'Entrenamiento' | 'Kinefilaxia'
+let grillaSoloDisponibles = false;    // si true, esconde los turnos sin lugar fijo
 window.abrirGrillaSemana = () => {
   grillaOffset = offsetSemana;   // arranca en la semana que estás viendo
   renderGrillaSemana();
@@ -2289,6 +2291,16 @@ window.grillaCambiarSemana = async (delta) => {
   offsetSemana = grillaOffset;
   actualizarSemanaLabel();
   await cargarDatos();        // recarga agregados + asistencia + feriados de la nueva semana
+  renderGrillaSemana();
+};
+// Cambiar el filtro de servicio de la grilla (ambos / Entrenamiento / Kinefilaxia)
+window.grillaFiltroServ = (serv) => {
+  grillaFiltroServicio = serv;
+  renderGrillaSemana();
+};
+// Activar/desactivar "ver solo turnos con lugar disponible"
+window.grillaToggleDisponibles = () => {
+  grillaSoloDisponibles = !grillaSoloDisponibles;
   renderGrillaSemana();
 };
 function renderGrillaSemana() {
@@ -2314,7 +2326,13 @@ function renderGrillaSemana() {
   const horas = [...new Set(HORARIOS.map(t => t.hora))].sort();
   // Para cada día+hora puede haber más de un turno (Entrenamiento y Kinefilaxia)
   function turnosDe(dia, hora) {
-    return HORARIOS.filter(t => t.dia === dia && t.hora === hora);
+    return HORARIOS.filter(t => t.dia === dia && t.hora === hora &&
+      (grillaFiltroServicio === 'ambos' || t.servicio === grillaFiltroServicio));
+  }
+  // ¿Este turno tiene lugar fijo disponible? (para el filtro "solo disponibles")
+  function tieneLugar(t) {
+    const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+    return (t.capacidad - fijos) > 0;
   }
   // Arma la celda de un turno con su color según lugares libres
   function celdaTurno(t, fecha) {
@@ -2339,7 +2357,26 @@ function renderGrillaSemana() {
       ${grande}<small>${ini} · ${fijos}/${t.capacidad}</small>${extra}</div>`;
   }
 
-  let html = `<div class="gs-leyenda">
+  // Botones de filtro (servicio + solo disponibles)
+  const btnServ = (val, txt) => {
+    const activo = grillaFiltroServicio === val;
+    const bg = activo ? '#1e9fe0' : '#fff';
+    const col = activo ? '#fff' : '#64748b';
+    const bd = activo ? '#1e9fe0' : '#cbd5e1';
+    return `<button onclick="grillaFiltroServ('${val}')" style="border:1.5px solid ${bd};background:${bg};color:${col};border-radius:8px;padding:5px 13px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit">${txt}</button>`;
+  };
+  const dispActivo = grillaSoloDisponibles;
+  let html = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    <span style="font-size:12px;color:#64748b;font-weight:700;margin-right:2px">Ver:</span>
+    ${btnServ('ambos','Ambos')}
+    ${btnServ('Entrenamiento','Entrenamiento')}
+    ${btnServ('Kinefilaxia','Kinefilaxia')}
+    <button onclick="grillaToggleDisponibles()" style="margin-left:auto;border:1.5px solid ${dispActivo?'#15803d':'#cbd5e1'};background:${dispActivo?'#15803d':'#fff'};color:${dispActivo?'#fff':'#64748b'};border-radius:8px;padding:5px 13px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit">
+      ${dispActivo?'✓ ':''}Solo con lugar
+    </button>
+  </div>`;
+
+  html += `<div class="gs-leyenda">
     <span><span class="gs-dot" style="background:#bbf7d0"></span> Lugar fijo (anotar permanente)</span>
     <span><span class="gs-dot" style="background:#fde68a"></span> 1-2 lugares fijos</span>
     <span><span class="gs-dot" style="background:#fecaca"></span> Completo</span>
@@ -2356,22 +2393,30 @@ function renderGrillaSemana() {
   html += '</tr></thead><tbody>';
 
   horas.forEach(hora => {
-    html += `<tr><td class="gs-hora">${hora}</td>`;
-    DIAS.forEach((dia, i) => {
+    // Armar las celdas de esta hora; si "solo disponibles", esconder los turnos sin lugar
+    const celdas = DIAS.map((dia, i) => {
       const motivo = feriadoDe(fechas[i]);
-      const turnos = turnosDe(dia, hora);
-      if (!turnos.length) {
-        html += `<td class="gs-vacia">—</td>`;
-      } else if (motivo) {
+      let turnos = turnosDe(dia, hora);
+      if (grillaSoloDisponibles) turnos = turnos.filter(t => tieneLugar(t));
+      if (motivo && !grillaSoloDisponibles) {
         // Día feriado: la celda muestra FERIADO (clase cerrada)
-        html += `<td class="gs-celda gs-feriado" style="background:repeating-linear-gradient(45deg,#fff7ed,#fff7ed 8px,#ffedd5 8px,#ffedd5 16px);color:#9a3412;font-weight:700">🟠<small>FERIADO</small></td>`;
+        return `<td class="gs-celda gs-feriado" style="background:repeating-linear-gradient(45deg,#fff7ed,#fff7ed 8px,#ffedd5 8px,#ffedd5 16px);color:#9a3412;font-weight:700">🟠<small>FERIADO</small></td>`;
+      } else if (!turnos.length) {
+        return `<td class="gs-vacia">—</td>`;
       } else {
-        html += `<td>${turnos.map(t => celdaTurno(t, fechas[i])).join('')}</td>`;
+        return `<td>${turnos.map(t => celdaTurno(t, fechas[i])).join('')}</td>`;
       }
     });
-    html += '</tr>';
+    // Si "solo disponibles" y toda la fila quedó vacía, saltear esa hora
+    if (grillaSoloDisponibles && celdas.every(c => c.includes('gs-vacia'))) return;
+    html += `<tr><td class="gs-hora">${hora}</td>${celdas.join('')}</tr>`;
   });
   html += '</tbody></table>';
+  // Si con "solo disponibles" no quedó ningún turno, avisar
+  if (grillaSoloDisponibles && !html.includes('gs-celda')) {
+    html = html.replace('</tbody></table>', '</tbody></table>') +
+      `<div style="text-align:center;padding:24px;color:#64748b;font-size:13px">No hay turnos con lugar disponible en esta semana${grillaFiltroServicio!=='ambos'?` para ${grillaFiltroServicio}`:''}.</div>`;
+  }
   document.getElementById('grilla-body').innerHTML = html;
 }
 
