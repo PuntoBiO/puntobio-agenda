@@ -1251,14 +1251,13 @@ async function cargarAgregadosSemana() {
   AGREGADOS_POR_TURNO = {};
   try {
     const lunes = getLunes(offsetSemana);
-    const fechas = [];
-    for (let i = 0; i < 5; i++) {
-      const f = new Date(lunes);
-      f.setDate(lunes.getDate() + i);
-      fechas.push(`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`);
-    }
+    const viernes = new Date(lunes);
+    viernes.setDate(lunes.getDate() + 4);
+    const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+    // Usamos rango (lunes a viernes) con gte/lte en vez de in.(lista de fechas):
+    // el in.() con fechas daba error 400 en PostgREST por el guion de las fechas.
     const filas = await supabaseQuery('turno_agregados',
-      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre,foto_perfil)&fecha=in.(${fechas.map(f=>`"${f}"`).join(',')})`);
+      `?select=id,turno_id,persona_id,fecha,tipo,personas(id,nombre,foto_perfil)&fecha=gte.${fmt(lunes)}&fecha=lte.${fmt(viernes)}`);
     (filas || []).forEach(a => {
       if (!a.personas) return;
       const key = `${a.turno_id}-${a.fecha}`;
@@ -1633,13 +1632,12 @@ async function cargarAsistenciaSemana() {
   ASISTENCIA_SEMANA = {};
   try {
     const lunes = getLunes(offsetSemana);
-    const fechas = [];
-    for (let i = 0; i < 5; i++) {
-      const f = new Date(lunes); f.setDate(lunes.getDate() + i);
-      fechas.push(`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`);
-    }
+    const viernes = new Date(lunes);
+    viernes.setDate(lunes.getDate() + 4);
+    const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+    // Rango lunes-viernes con gte/lte (el in.() con fechas daba error 400)
     const filas = await supabaseQuery('asistencia',
-      `?select=turno_id,fecha,persona_id,estado&fecha=in.(${fechas.map(f=>`"${f}"`).join(',')})`);
+      `?select=turno_id,fecha,persona_id,estado&fecha=gte.${fmt(lunes)}&fecha=lte.${fmt(viernes)}`);
     (filas || []).forEach(f => {
       ASISTENCIA_SEMANA[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado;
     });
@@ -1753,7 +1751,17 @@ async function ausenciasConAviso(personaId) {
     return (filas || [])
       .filter(f => f.estado === 'ausente-justificada')
       .map(f => f.fecha);
-  } catch (e) { console.warn('No se pudo leer ausencias', e); return []; }
+  } catch (e) {
+    console.warn('No se pudo leer ausencias', e);
+    // Mostramos el error en pantalla para no esconderlo. Si es 401, la sesión venció.
+    const msg = (e && e.message) ? e.message : 'error desconocido';
+    if (/401|JWT|expired/i.test(msg)) {
+      toast('Tu sesión venció. Cerrá sesión y volvé a entrar para ver los recuperatorios.', 'err');
+    } else {
+      toast('No se pudieron leer las faltas: ' + msg, 'err');
+    }
+    return [];
+  }
 }
 // Trae los recuperatorios YA usados de una persona (para descontar cupo)
 async function recuperatoriosDe(personaId) {
@@ -1834,20 +1842,6 @@ async function estadoRecuperatorios(personaId) {
 
   return { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes };
 }
-
-// === DIAGNÓSTICO TEMPORAL (se puede borrar después) ===
-// Para depurar por qué a veces no aparecen recuperatorios. Mira en la consola (F12).
-async function diagRecupe(personaId) {
-  const aus = await ausenciasConAviso(personaId);
-  const est = await estadoRecuperatorios(personaId);
-  console.log('🔍 DIAG RECUPERATORIOS persona', personaId);
-  console.log('   Plan:', est.codPlan, '| cupo:', est.cupoMes, '| corte día:', est.diaCorte);
-  console.log('   Ausencias con aviso encontradas:', aus);
-  console.log('   Recuperables calculados:', est.recuperables);
-  console.log('   Usados por ciclo:', est.usadosPorMes);
-  return est;
-}
-window.diagRecupe = diagRecupe;
 
 // ¿La clase está COMPLETA? (todos los alumnos tienen evolución o están ausentes)
 function claseCompleta(t) {
