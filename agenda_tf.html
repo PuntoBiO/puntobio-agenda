@@ -157,6 +157,11 @@
   .cb-ok { background: #16a34a; color: white; }
   .cb-falta { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
   .card-cerrada { background: #fafffe; }
+  /* === FERIADO === */
+  .card-feriado { background: repeating-linear-gradient(45deg,#fff7ed,#fff7ed 12px,#ffedd5 12px,#ffedd5 24px); border-color:#fdba74; opacity:.92; }
+  .feriado-badge { background:#ea580c; color:#fff; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700; display:inline-flex; align-items:center; gap:4px; }
+  .feriado-banner { background:#fff7ed; border:1px solid #fdba74; color:#9a3412; border-radius:10px; padding:10px 14px; font-size:13px; font-weight:600; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+  .dia-tab.feriado-tab::after { content:'•'; color:#ea580c; font-size:18px; line-height:0; margin-left:3px; }
   .turno-body { padding: 12px 14px; }
   .turno-profes { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
   .profe-tag {
@@ -808,11 +813,19 @@ async function fetchConTimeout(url, opciones = {}, ms = 12000) {
     clearTimeout(id);
   }
 }
+// Devuelve el token a usar en Authorization: el del usuario logueado si existe
+// (necesario para tablas con RLS authenticated), o la key anon como respaldo.
+function authBearer() {
+  try {
+    const t = (typeof obtenerToken === 'function') ? obtenerToken() : '';
+    return t && t.length > 20 ? t : SUPABASE_KEY;
+  } catch (e) { return SUPABASE_KEY; }
+}
 async function supabaseQuery(tabla, params = '') {
   const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json'
     }
   });
@@ -867,7 +880,7 @@ async function supabaseInsert(tabla, data) {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -881,7 +894,7 @@ async function supabaseUpdate(tabla, filtro, data) {
     method: 'PATCH',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -896,7 +909,7 @@ async function supabaseInsertReturn(tabla, data) {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     },
@@ -911,7 +924,7 @@ async function supabaseDelete(tabla, filtro) {
     method: 'DELETE',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     }
@@ -1046,6 +1059,7 @@ async function cargarDatos() {
     });
     await cargarAgregadosSemana();
     await cargarClasesCerradas();
+    await cargarFeriados();
     renderDiasTabs();
     renderTurnos();
   } catch(err) {
@@ -1107,8 +1121,12 @@ function renderDiasTabs() {
   DIAS.forEach((dia, i) => {
     const fecha = getDiaFecha(i, lunes);
     const hoy = esHoy(fecha);
+    // ¿Esta fecha es feriado? (para el puntito naranja en la pestaña)
+    const fIso = `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}-${String(fecha.getDate()).padStart(2,'0')}`;
+    const esFeriado = !!feriadoDe(fIso);
     const btn = document.createElement('button');
-    btn.className = 'dia-tab' + (dia===diaActivo?' activo':'') + (hoy?' hoy':'');
+    btn.className = 'dia-tab' + (dia===diaActivo?' activo':'') + (hoy?' hoy':'') + (esFeriado?' feriado-tab':'');
+    if (esFeriado) btn.title = 'Feriado: ' + feriadoDe(fIso);
     btn.innerHTML = `<span class="dia-nombre">${dia}</span><span class="dia-fecha">${formatFecha(fecha)}</span>`;
     btn.onclick = () => seleccionarDia(dia);
     container.appendChild(btn);
@@ -1208,7 +1226,12 @@ function renderTurnos() {
     return;
   }
   const fechaGrid = fechaRealDiaActivo();
-  container.innerHTML = turnos.map(t => {
+  const motivoFeriado = feriadoDe(fechaGrid);
+  // Si el día es feriado: cartel arriba + tarjetas cerradas
+  const bannerFeriado = motivoFeriado
+    ? `<div class="feriado-banner">🟠 FERIADO — ${motivoFeriado}. Las clases están cerradas. Las recuperan SIN gastar recuperatorios.</div>`
+    : '';
+  container.innerHTML = bannerFeriado + turnos.map(t => {
     const alumnos = getAlumnos(t);
     const ocup = alumnos.length;
     const pct = Math.round(ocup/t.capacidad*100);
@@ -1217,11 +1240,15 @@ function renderTurnos() {
     const tipoClass = t.servicio==='Entrenamiento'?'tipo-entrenamiento':'tipo-kinefilaxia';
     const libres = t.capacidad - ocup;
     const cerrada = claseEstaCerrada(t.id, fechaGrid);
-    const badgeCierre = cerrada
-      ? `<span class="cierre-badge cb-ok" title="Clase cerrada">✓</span>`
-      : `<span class="cierre-badge cb-falta" title="Falta cerrar">✗</span>`;
+    // FERIADO manda: si el día es feriado, la tarjeta va con estilo feriado y badge naranja
+    const badgeCierre = motivoFeriado
+      ? `<span class="feriado-badge" title="${motivoFeriado}">🟠 FERIADO</span>`
+      : (cerrada
+        ? `<span class="cierre-badge cb-ok" title="Clase cerrada">✓</span>`
+        : `<span class="cierre-badge cb-falta" title="Falta cerrar">✗</span>`);
+    const claseCard = motivoFeriado ? ' card-feriado' : (cerrada?' card-cerrada':'');
     return `
-      <div class="turno-card${cerrada?' card-cerrada':''}" onclick="abrirModal('${t.dia}','${t.hora}','${t.servicio}')">
+      <div class="turno-card${claseCard}" onclick="abrirModal('${t.dia}','${t.hora}','${t.servicio}')">
         <div class="turno-header">
           <span class="turno-hora">${t.hora}</span>
           <span class="turno-head-right">
@@ -1426,6 +1453,105 @@ async function cargarClasesCerradas() {
 // ¿Está cerrada esta clase (turno) en la fecha dada?
 function claseEstaCerrada(turnoId, fecha) {
   return CLASES_CERRADAS.has(`${turnoId}-${fecha}`);
+}
+
+// =============================================
+// FERIADOS (tabla `feriados`: fecha, motivo)
+// =============================================
+// Mapa fecha (YYYY-MM-DD) -> motivo del feriado
+let FERIADOS = {};
+async function cargarFeriados() {
+  try {
+    const filas = await supabaseQuery('feriados', `?select=fecha,motivo`);
+    FERIADOS = {};
+    (filas || []).forEach(f => { FERIADOS[f.fecha] = f.motivo || 'Feriado'; });
+  } catch (e) { FERIADOS = {}; console.warn('No se pudo cargar feriados', e); }
+}
+// ¿Esta fecha (YYYY-MM-DD) es feriado? Devuelve el motivo o null.
+function feriadoDe(fecha) {
+  return FERIADOS[fecha] || null;
+}
+
+// =============================================
+// RECUPERATORIOS (tabla `recuperatorios_tf`)
+// =============================================
+// Cupo mensual = (clases por semana del plan) + 2. El número del código
+// es la cantidad de clases por semana: COD1=1/sem, COD2=2/sem, COD3=3/sem...
+// Sin importar sufijos (DESC, ROT, DIS, BON, etc.): manda el número.
+function clasesSemanaDePlan(codPlan) {
+  if (!codPlan) return 0;
+  const m = String(codPlan).toUpperCase().match(/COD\s*0*([1-9])/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+function cupoRecuperatorios(codPlan) {
+  const n = clasesSemanaDePlan(codPlan);
+  return n > 0 ? n + 2 : 0;   // COD1=3, COD2=4, COD3=5, COD4=6...
+}
+// Plan activo de una persona (lee inscripciones_tf)
+async function planDePersona(personaId) {
+  try {
+    const filas = await supabaseQuery('inscripciones_tf',
+      `?select=plan,estado&persona_id=eq.${personaId}&order=creado_en.desc&limit=1`);
+    return (filas && filas[0]) ? (filas[0].plan || '') : '';
+  } catch (e) { console.warn('No se pudo leer el plan', e); return ''; }
+}
+// YYYY-MM-DD -> "AAAA-MM" (clave de mes)
+function mesDe(fechaIso) { return (fechaIso || '').slice(0, 7); }
+// Días entre dos fechas YYYY-MM-DD (b - a) en días enteros
+function diasEntre(aIso, bIso) {
+  const a = new Date(aIso + 'T00:00:00');
+  const b = new Date(bIso + 'T00:00:00');
+  return Math.round((b - a) / 86400000);
+}
+// Hoy en YYYY-MM-DD (horario local AR)
+function hoyIso() {
+  const f = new Date();
+  return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+}
+// Trae las ausencias CON aviso (justificadas) de una persona
+async function ausenciasConAviso(personaId) {
+  try {
+    const filas = await supabaseQuery('asistencia',
+      `?select=fecha,estado&persona_id=eq.${personaId}&estado=eq.ausente-justificada&order=fecha.desc`);
+    return (filas || []).map(f => f.fecha);
+  } catch (e) { console.warn('No se pudo leer ausencias', e); return []; }
+}
+// Trae los recuperatorios YA usados de una persona (para descontar cupo)
+async function recuperatoriosDe(personaId) {
+  try {
+    const filas = await supabaseQuery('recuperatorios_tf',
+      `?select=fecha_ausencia,fecha_recupero,tipo,estado&persona_id=eq.${personaId}&estado=neq.cancelado`);
+    return filas || [];
+  } catch (e) { console.warn('No se pudo leer recuperatorios', e); return []; }
+}
+// Calcula qué clases puede recuperar HOY una persona y cuántas le quedan por mes.
+// Devuelve: { codPlan, cupoMes, recuperables:[{fecha, diasRestantes, mes}], usadosPorMes:{...} }
+async function estadoRecuperatorios(personaId) {
+  const codPlan = await planDePersona(personaId);
+  const cupoMes = cupoRecuperatorios(codPlan);
+  const [ausencias, usados] = await Promise.all([
+    ausenciasConAviso(personaId),
+    recuperatoriosDe(personaId)
+  ]);
+  const hoy = hoyIso();
+  // Recupes normales ya usados, contados por MES de la falta (los de feriado NO cuentan)
+  const usadosPorMes = {};
+  const fechasYaRecuperadas = new Set();
+  usados.forEach(r => {
+    if (r.tipo === 'feriado') return;          // los feriados no gastan cupo
+    const mes = mesDe(r.fecha_ausencia);
+    usadosPorMes[mes] = (usadosPorMes[mes] || 0) + 1;
+    fechasYaRecuperadas.add(r.fecha_ausencia);
+  });
+  // Ausencias recuperables: con aviso, NO recuperadas ya, dentro de los 60 días
+  const recuperables = [];
+  ausencias.forEach(fAus => {
+    if (fechasYaRecuperadas.has(fAus)) return;     // ya la recuperó
+    const dias = diasEntre(fAus, hoy);             // días desde que faltó
+    if (dias > 60) return;                         // venció el plazo de 60 días
+    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: mesDe(fAus) });
+  });
+  return { codPlan, cupoMes, recuperables, usadosPorMes };
 }
 
 // ¿La clase está COMPLETA? (todos los alumnos tienen evolución o están ausentes)
@@ -1800,7 +1926,7 @@ window.elegirPersonaAgregar = (personaId) => {
         <div style="font-weight:700;font-size:14px;color:#15803d">📌 Permanente</div>
         <div style="font-size:12px;color:#166534;margin-top:2px">Queda fijo en este turno todas las semanas</div>
       </button>
-      <button onclick="confirmarAgregar('recuperatorio')" style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:12px 14px;margin-bottom:9px;cursor:pointer">
+      <button onclick="abrirSelectorRecupero()" style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:12px 14px;margin-bottom:9px;cursor:pointer">
         <div style="font-weight:700;font-size:14px;color:#92400e">🔁 Recuperatorio</div>
         <div style="font-size:12px;color:#a16207;margin-top:2px">Solo este día — recupera una clase que faltó</div>
       </button>
@@ -1812,14 +1938,149 @@ window.elegirPersonaAgregar = (personaId) => {
     </div>`;
 };
 
+// ---- RECUPERATORIO: paso intermedio (elegir qué falta recupera) ----
+window.abrirSelectorRecupero = async () => {
+  if (!agregarTurno || !agregarPersonaSel) return;
+  const cont = document.getElementById('agregar-resultados');
+  const pid = parseInt(agregarPersonaSel.id);
+  const nombre = agregarPersonaSel.nombre;
+  cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:12px 4px">⟳ Calculando recuperatorios…</div>';
+  let est;
+  try {
+    est = await estadoRecuperatorios(pid);
+  } catch (e) {
+    cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">No se pudo calcular: ${e.message}</div>`;
+    return;
+  }
+  const { codPlan, cupoMes, recuperables, usadosPorMes } = est;
+  // Filtrar las que todavía tienen cupo en su mes
+  const disponibles = recuperables.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
+  const sinCupo     = recuperables.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
+
+  let html = `<div style="padding:6px 4px 14px">
+    <div style="font-weight:700;font-size:16px;margin-bottom:3px">${nombre}</div>
+    <div style="font-size:12px;color:var(--texto-suave);margin-bottom:14px">
+      Plan ${codPlan || '—'} · cupo ${cupoMes || '?'} recupe/mes
+    </div>`;
+
+  if (!codPlan) {
+    html += `<div style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:12px;font-size:13px">
+      No se encontró un plan de TF activo para esta persona. No puede recuperar.</div>`;
+  } else if (!recuperables.length) {
+    html += `<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:12px;font-size:13px">
+      No tiene ausencias <b>con aviso</b> pendientes de recuperar (o ya pasaron los 60 días).<br>
+      <span style="font-size:12px">Primero hay que marcarle el ausente justificado en la clase que faltó.</span></div>`;
+  } else {
+    if (disponibles.length) {
+      html += `<div style="font-size:13px;font-weight:600;margin-bottom:8px">Elegí qué clase recupera:</div>`;
+      html += disponibles.map(r => {
+        const venceTxt = r.diasRestantes <= 7
+          ? `<span style="color:#dc2626;font-weight:700">vence en ${r.diasRestantes} día${r.diasRestantes!==1?'s':''}</span>`
+          : `vence en ${r.diasRestantes} días`;
+        const usados = usadosPorMes[r.mes] || 0;
+        return `<button onclick="confirmarRecupero('${r.fecha}')"
+          style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
+          <div style="font-weight:700;font-size:14px;color:#92400e">Faltó el ${formatearFechaLarga(r.fecha)}</div>
+          <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · mes ${r.mes} (${usados}/${cupoMes} usados)</div>
+        </button>`;
+      }).join('');
+    }
+    if (sinCupo.length) {
+      html += `<div style="margin-top:6px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:10px 12px;font-size:12px">
+        ⚠️ Estas faltas no se pueden recuperar porque ya usó todo el cupo de su mes:<br>
+        ${sinCupo.map(r => `· ${formatearFechaLarga(r.fecha)} (mes ${r.mes})`).join('<br>')}</div>`;
+    }
+  }
+  html += `<button onclick="elegirPersonaAgregar(${pid})" style="background:none;border:none;color:var(--texto-suave);font-size:12px;margin-top:12px;cursor:pointer;text-decoration:underline">← Volver</button>
+  </div>`;
+  cont.innerHTML = html;
+};
+
+// ---- RECUPERATORIO: confirmar (guarda en recuperatorios_tf + lo agrega al turno del día) ----
+window.confirmarRecupero = async (fechaAusencia) => {
+  if (!agregarTurno || !agregarPersonaSel) return;
+  const cont = document.getElementById('agregar-resultados');
+  const t = agregarTurno;
+  const pid = parseInt(agregarPersonaSel.id);
+  const nombre = agregarPersonaSel.nombre;
+  const fechaRecupero = fechaDelDia(t.dia);
+  // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
+  if (!chequearCupo(t, 'lo agregás como recuperatorio')) {
+    cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
+    return;
+  }
+  cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:12px 4px">⟳ Guardando recuperatorio…</div>';
+  try {
+    // Re-chequeo de seguridad por si cambió algo (cupo / 60 días)
+    const est = await estadoRecuperatorios(pid);
+    const r = est.recuperables.find(x => x.fecha === fechaAusencia);
+    if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa falta ya no está disponible para recuperar.</div>'; return; }
+    if ((est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
+      cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese mes.</div>'; return;
+    }
+    // 1) Registrar el recuperatorio (descuenta cupo del mes de la falta)
+    await supabaseInsert('recuperatorios_tf', {
+      persona_id: pid,
+      fecha_ausencia: fechaAusencia,
+      fecha_recupero: fechaRecupero,
+      turno_recupero_id: t.id,
+      tipo: 'recuperatorio',
+      estado: 'pendiente',
+      cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+      cargado_por_email: USUARIO_ACTUAL?.email || null
+    });
+    // 2) Agregarlo al turno del día (igual que un agregado puntual)
+    const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+    const filas = await supabaseInsertReturn('turno_agregados',
+      { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien });
+    const agId = (filas && filas[0]) ? filas[0].id : null;
+    const key = `${t.id}-${fechaRecupero}`;
+    if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
+    AGREGADOS_POR_TURNO[key].push({ id: String(pid), nombre, tipo: 'recuperatorio', agregadoId: agId });
+    toast(`${nombre} recupera la clase del ${formatearFechaLarga(fechaAusencia)}`, 'ok');
+    cerrarAgregar();
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos();
+  } catch (e) {
+    const msg = /duplicate|unique/i.test(e.message || '')
+      ? 'Ese alumno ya está agregado en este turno y día.'
+      : e.message;
+    toast(`No se pudo guardar el recuperatorio: ${msg}`, 'error');
+    cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">${msg}</div>`;
+  }
+};
+
+// ---- CONTROL DE CUPO: ¿hay lugar en el turno? Si está lleno, pide autorización ----
+// Devuelve true si se puede agregar (hay lugar O el usuario autorizó el sobrecupo).
+function chequearCupo(t, accionTexto) {
+  const alumnos = getAlumnos(t);          // ya incluye fijos + agregados del día
+  const ocup = alumnos.length;
+  const libres = t.capacidad - ocup;
+  if (libres > 0) return true;            // hay lugar, todo normal
+  // Turno lleno (o sobrepasado): NO se agrega salvo autorización explícita
+  return confirm(
+    `⚠️ ESTE TURNO YA ESTÁ COMPLETO\n\n` +
+    `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+    `Cupo: ${t.capacidad} · Anotados: ${ocup}\n\n` +
+    `Si ${accionTexto}, vas a SUPERAR la capacidad operativa (quedaría ${ocup+1}/${t.capacidad}).\n\n` +
+    `¿Querés autorizar el sobrecupo igual?`
+  );
+}
+
 window.confirmarAgregar = async (tipo) => {
   if (!agregarTurno || !agregarPersonaSel) return;
   const cont = document.getElementById('agregar-resultados');
-  cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:12px 4px">⟳ Guardando…</div>';
   const t = agregarTurno;
   const pid = parseInt(agregarPersonaSel.id);
   const nombre = agregarPersonaSel.nombre;
   const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+  // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
+  const accion = tipo === 'permanente' ? 'lo agregás de forma permanente' : 'lo agregás como suelto';
+  if (!chequearCupo(t, accion)) {
+    cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
+    return;
+  }
+  cont.innerHTML = '<div style="color:var(--celeste);font-size:13px;padding:12px 4px">⟳ Guardando…</div>';
   try {
     if (tipo === 'permanente') {
       // Va a turno_alumnos (fijo). Si ya existía (aunque inactivo), reactivar; si no, insertar.
