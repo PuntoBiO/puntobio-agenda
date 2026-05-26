@@ -664,6 +664,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadAllData();
   renderStats();
   renderTab();
+
+  // Si se abrió desde la agenda con ?persona_id=X (o ?dni=X), abrir esa HC directo.
+  const _p = new URLSearchParams(window.location.search);
+  const _pid = _p.get('persona_id');
+  const _dni = _p.get('dni');
+  if (_pid || _dni) {
+    // Buscar la HC de ese paciente (la más reciente).
+    let hc = null;
+    if (_pid) hc = allHCs.find(h => String(h.persona_id) === String(_pid));
+    if (!hc && _dni) hc = allHCs.find(h => String(h.dni) === String(_dni));
+    if (hc) {
+      openHC(hc.id);
+    } else {
+      // No tiene HC general: buscar MOPLEX, o avisar.
+      let mp = null;
+      if (_pid) mp = allMoplex.find(m => String(m.persona_id) === String(_pid));
+      if (!mp && _dni) mp = allMoplex.find(m => String(m.dni) === String(_dni));
+      if (mp) openMoplex(mp.id);
+      else {
+        // Paciente sin HC ni MOPLEX cargada: avisar de forma simple.
+        const nombre = (allPersonas.find(p => String(p.id) === String(_pid)) || {}).nombre || '';
+        alert((nombre ? nombre + ': ' : '') + 'Todavía no tiene historia clínica cargada.');
+      }
+    }
+  }
 });
 
 // Detecta el profesional logueado (mismo patrón que el resto del sistema)
@@ -694,7 +719,11 @@ const EMAILS_PROFE_SOLO_LECTURA = [
   'leacrespin97@gmail.com',          // Lean
   'leut.molina@gmail.com'            // Lauti
 ];
+// ¿Vino con ro=1 en la URL? (cuando se abre desde la agenda para un profe).
+// Esto fuerza modo lectura aunque el email no esté en la lista (red de seguridad).
+const RO_URL = new URLSearchParams(window.location.search).get('ro') === '1';
 function esProfeSoloLectura() {
+  if (RO_URL) return true;
   return usuarioActual && EMAILS_PROFE_SOLO_LECTURA.includes(normEmail(usuarioActual.email));
 }
 // Solo los kinesiólogos (Lu, Jime, Male, Bruno) pueden iniciar una evaluación
@@ -1217,6 +1246,11 @@ function closeModal() {
   currentMoplexId = null;
   obsActual = [];
   adjActual = [];
+  // Si se abrió desde la agenda (ro=1) dentro del overlay del shell,
+  // avisar al padre para que cierre todo el overlay y no quede la lista de fondo.
+  if (RO_URL) {
+    try { parent.postMessage({ tipo: 'CERRAR_HC' }, '*'); } catch (e) {}
+  }
 }
 
 document.getElementById('modalHC').addEventListener('click', e => {
