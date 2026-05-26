@@ -909,42 +909,59 @@ function calcularNumeroSesion(t) {
 // Calcula cuántos turnos faltan asignar para completar un tratamiento.
 // Útil para avisar a la secretaria que tiene que reagendar sesiones canceladas o ausentes.
 // Devuelve { faltantes, totalEsperado, cumplidas, futurasValidas } o null si no aplica.
+// Usa la misma lógica anti-doble-conteo que contarSesionesConsumidas: las sesiones del
+// Excel (turno_id null) y los turnos PRESENTE describen las mismas visitas, no se suman.
 function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
   if (!tratamientoId || !totalSesiones) return null;
   const sesiones = sesionesPorTto.get(tratamientoId) || [];
-  const cumplidas = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
-  const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
   const todos = turnosPorTto.get(tratamientoId) || [];
-  // Cuento turnos válidos pendientes (que van a contar como sesión cuando se cumplan)
-  const futurasValidas = todos.filter(x =>
-    x.estado !== 'CANCELADO' &&
-    x.estado !== 'AUSENTE' &&
-    x.estado !== 'SOBRETURNO' &&
-    x.estado !== 'PRESENTE' &&   // PRESENTE ya cumplió su sesión, no es futura
-    !turnIdsConSesion.has(x.id)
-  ).length;
-  const totalPrevisto = cumplidas + futurasValidas;
-  const faltantes = totalSesiones - totalPrevisto;
+
+  // Sesiones ya cumplidas/consumidas (máximo entre las dos fuentes, sin duplicar).
+  const cumplidas = contarSesionesConsumidas(tratamientoId);
+
+  // Turnos PENDIENTE futuros (todavía no cumplidos): los que sumarán cuando se marquen presentes.
+  // Estos ya están incluidos dentro de `cumplidas` porque PENDIENTE cuenta en el consumo,
+  // así que las "faltantes" son simplemente el total menos lo ya previsto.
+  const futurasValidas = todos.filter(x => x.estado === 'PENDIENTE').length;
+
+  const faltantes = Math.max(0, totalSesiones - cumplidas);
   return { faltantes, totalEsperado: totalSesiones, cumplidas, futurasValidas };
 }
 
 // === TOPE DE SESIONES ===
 // Cuenta cuántas sesiones YA CONSUMEN un tratamiento (las que cuentan contra el tope).
 // Regla: PENDIENTE + PRESENTE cuentan. AUSENTE, CANCELADO y SOBRETURNO NO cuentan.
-// Incluye sesiones históricas cumplidas (migradas del Excel) sin doble contar.
+//
+// Hay DOS fuentes de verdad que representan la MISMA realidad (las visitas del paciente):
+//   1) tabla `sesiones` -> sesiones cumplidas, muchas migradas del Excel con turno_id NULL.
+//   2) tabla `turnos_consultorio` -> turnos en agenda (PENDIENTE/PRESENTE consumen).
+// NUNCA se suman entre sí: un turno PRESENTE y una sesión cumplida del mismo día son
+// el mismo evento físico. Si se sumaran, los pacientes migrados contarían doble
+// (ej. 10 del Excel + 10 turnos PRESENTE = 20, cuando en realidad son 10).
+//
+// Lógica correcta:
+//   - Turnos que tienen turno_id emparejado con una sesión -> ya están contados en `sesiones`.
+//   - Turnos PENDIENTE/PRESENTE SIN sesión emparejada -> son visitas extra reales.
+//   - El consumo = max(sesiones del Excel SIN turno_id emparejado, turnos PRESENTE sin sesión)
+//     + las sesiones que SÍ tienen turno + los turnos PENDIENTE futuros sin sesión.
+// En la práctica: tomamos el MAYOR entre "sesiones cumplidas registradas" y
+// "turnos que consumen", para no duplicar el histórico migrado.
 function contarSesionesConsumidas(tratamientoId) {
   if (!tratamientoId) return 0;
   const sesiones = sesionesPorTto.get(tratamientoId) || [];
-  // Sesiones históricas cumplidas (vienen de la tabla `sesiones`, ej. migración Excel)
-  const cumplidasHist = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
-  const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
   const todos = turnosPorTto.get(tratamientoId) || [];
-  // Turnos que consumen sesión y NO están ya contados en `sesiones`
-  const consumenTurno = todos.filter(x =>
-    (x.estado === 'PENDIENTE' || x.estado === 'PRESENTE') &&
-    !turnIdsConSesion.has(x.id)
+
+  // Fuente 1: sesiones cumplidas registradas (Excel + agenda). El número más alto = total cumplido.
+  const cumplidasHist = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
+
+  // Fuente 2: turnos de la agenda que consumen sesión (PENDIENTE + PRESENTE).
+  const turnosQueConsumen = todos.filter(x =>
+    x.estado === 'PENDIENTE' || x.estado === 'PRESENTE'
   ).length;
-  return cumplidasHist + consumenTurno;
+
+  // Las dos fuentes describen las mismas visitas. Tomamos el MÁXIMO, no la suma,
+  // para que los pacientes migrados (sesiones con turno_id null) no cuenten doble.
+  return Math.max(cumplidasHist, turnosQueConsumen);
 }
 
 function renderTurno(t) {
