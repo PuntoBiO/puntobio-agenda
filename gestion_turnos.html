@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gestión de Turnos · PuntoBiO</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+  :root {
+    --celeste: #1e9fe0;
+    --celeste-oscuro: #0d7fbf;
+    --celeste-claro: #e8f6fd;
+    --rojo: #dc2626;
+    --verde: #15803d;
+    --ambar: #a16207;
+    --texto: #1e293b;
+    --texto-suave: #64748b;
+    --borde: #e2e8f0;
+    --fondo: #f8fafc;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Manrope', sans-serif;
+    background: var(--fondo);
+    color: var(--texto);
+    padding: 22px 26px 80px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .gt-header { margin-bottom: 18px; }
+  .gt-titulo { font-size: 22px; font-weight: 800; display: flex; align-items: center; gap: 9px; }
+  .gt-sub { font-size: 13px; color: var(--texto-suave); margin-top: 3px; }
+  .gt-aviso {
+    background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+    border-radius: 10px; padding: 10px 14px; font-size: 12.5px; margin: 14px 0 18px;
+    line-height: 1.5;
+  }
+  /* Filtros */
+  .gt-filtros { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+  .gt-btn {
+    border: 1.5px solid var(--borde); background: #fff; color: var(--texto-suave);
+    border-radius: 9px; padding: 8px 16px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: inherit; transition: .15s;
+  }
+  .gt-btn:hover { border-color: var(--celeste); color: var(--celeste); }
+  .gt-btn.activo { background: var(--celeste); border-color: var(--celeste); color: #fff; }
+  .gt-btn-nuevo {
+    margin-left: auto; background: var(--verde); border-color: var(--verde); color: #fff;
+  }
+  .gt-btn-nuevo:hover { background: #166534; border-color: #166534; color: #fff; }
+  /* Tabla de turnos */
+  .gt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .gt-dia-bloque { margin-bottom: 8px; }
+  .gt-dia-titulo {
+    font-size: 14px; font-weight: 800; color: var(--celeste-oscuro);
+    margin: 18px 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--celeste-claro);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .gt-card {
+    background: var(--card); border: 1px solid var(--borde); border-radius: 12px;
+    padding: 13px 15px; display: flex; align-items: center; gap: 12px; transition: .15s;
+  }
+  .gt-card:hover { box-shadow: 0 2px 10px rgba(30,159,224,.10); }
+  .gt-card-info { flex: 1; min-width: 0; }
+  .gt-card-hora { font-size: 16px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+  .gt-card-serv { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 5px; display: inline-block; margin-top: 3px; }
+  .gt-serv-ent { background: var(--celeste-claro); color: var(--celeste-oscuro); }
+  .gt-serv-kine { background: #dcfce7; color: var(--verde); }
+  .gt-cap-control { display: flex; align-items: center; gap: 7px; }
+  .gt-cap-label { font-size: 11px; color: var(--texto-suave); font-weight: 600; }
+  .gt-cap-input {
+    width: 56px; text-align: center; font-size: 16px; font-weight: 700;
+    border: 1.5px solid var(--borde); border-radius: 8px; padding: 6px 4px;
+    font-family: 'JetBrains Mono', monospace; color: var(--texto);
+  }
+  .gt-cap-input:focus { outline: none; border-color: var(--celeste); }
+  .gt-cap-input.cambiado { border-color: var(--ambar); background: #fffbeb; }
+  .gt-guardar {
+    border: none; background: var(--celeste); color: #fff; border-radius: 8px;
+    padding: 7px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit;
+    white-space: nowrap; transition: .15s;
+  }
+  .gt-guardar:hover { background: var(--celeste-oscuro); }
+  .gt-guardar:disabled { background: #cbd5e1; cursor: default; }
+  .gt-guardar.ok { background: var(--verde); }
+  /* Estado vacío / carga */
+  .gt-estado { text-align: center; padding: 50px 20px; color: var(--texto-suave); font-size: 14px; }
+  /* Modal nuevo turno */
+  .gt-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,41,.55); display: none;
+    align-items: center; justify-content: center; z-index: 100; padding: 20px;
+  }
+  .gt-overlay.activo { display: flex; }
+  .gt-modal {
+    background: #fff; border-radius: 16px; width: 100%; max-width: 440px;
+    padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  }
+  .gt-modal h2 { font-size: 18px; font-weight: 800; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+  .gt-modal .gt-modal-sub { font-size: 12.5px; color: var(--texto-suave); margin-bottom: 18px; }
+  .gt-campo { margin-bottom: 14px; }
+  .gt-campo label { display: block; font-size: 12px; font-weight: 700; color: var(--texto-suave); margin-bottom: 5px; }
+  .gt-campo select, .gt-campo input {
+    width: 100%; border: 1.5px solid var(--borde); border-radius: 9px; padding: 10px 12px;
+    font-size: 14px; font-family: inherit; color: var(--texto);
+  }
+  .gt-campo select:focus, .gt-campo input:focus { outline: none; border-color: var(--celeste); }
+  .gt-modal-acciones { display: flex; gap: 10px; margin-top: 20px; }
+  .gt-modal-acciones button { flex: 1; padding: 11px; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; border: none; }
+  .gt-cancelar { background: #f1f5f9; color: var(--texto-suave); }
+  .gt-crear { background: var(--verde); color: #fff; }
+  .gt-crear:disabled { background: #cbd5e1; }
+  .gt-modal-error { color: var(--rojo); font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  /* Toast */
+  #gt-toast-cont { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .gt-toast {
+    background: #0f1729; color: #fff; padding: 11px 20px; border-radius: 10px;
+    font-size: 13px; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    animation: gtIn .25s ease; max-width: 90vw;
+  }
+  .gt-toast.ok { background: var(--verde); }
+  .gt-toast.err { background: var(--rojo); }
+  @keyframes gtIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+
+<div class="gt-header">
+  <div class="gt-titulo">⚙️ Gestión de Turnos</div>
+  <div class="gt-sub">Cambiá la capacidad de cada turno o abrí horarios nuevos · Terapia Física</div>
+</div>
+
+<div class="gt-aviso">
+  ⚠️ <b>Importante:</b> cambiar la capacidad afecta los cupos de la agenda. Si bajás la capacidad por debajo
+  de los alumnos ya anotados, el turno va a quedar en sobrecupo (no se borra a nadie). Para "cerrar" un turno,
+  ponele capacidad <b>0</b> en vez de borrarlo.
+</div>
+
+<div class="gt-filtros">
+  <button class="gt-btn activo" id="f-todos" onclick="filtrar('todos', this)">Todos</button>
+  <button class="gt-btn" id="f-ent" onclick="filtrar('Entrenamiento', this)">Entrenamiento</button>
+  <button class="gt-btn" id="f-kine" onclick="filtrar('Kinefilaxia', this)">Kinefilaxia</button>
+  <button class="gt-btn gt-btn-nuevo" onclick="abrirNuevo()">+ Abrir horario nuevo</button>
+</div>
+
+<div id="gt-contenido">
+  <div class="gt-estado">⟳ Cargando turnos…</div>
+</div>
+
+<!-- Modal nuevo turno -->
+<div class="gt-overlay" id="gt-overlay" onclick="if(event.target===this)cerrarNuevo()">
+  <div class="gt-modal">
+    <h2>➕ Abrir horario nuevo</h2>
+    <div class="gt-modal-sub">Se va a crear un turno nuevo en la agenda de Terapia Física.</div>
+    <div class="gt-campo">
+      <label>Día</label>
+      <select id="nuevo-dia">
+        <option value="Lunes">Lunes</option>
+        <option value="Martes">Martes</option>
+        <option value="Miércoles">Miércoles</option>
+        <option value="Jueves">Jueves</option>
+        <option value="Viernes">Viernes</option>
+      </select>
+    </div>
+    <div class="gt-campo">
+      <label>Hora</label>
+      <select id="nuevo-hora">
+        <option value="07:00">07:00</option>
+        <option value="08:00">08:00</option>
+        <option value="09:00">09:00</option>
+        <option value="10:00">10:00</option>
+        <option value="11:00">11:00</option>
+        <option value="12:00">12:00</option>
+        <option value="13:00">13:00</option>
+        <option value="14:00">14:00</option>
+        <option value="15:00">15:00</option>
+        <option value="16:00">16:00</option>
+        <option value="17:00">17:00</option>
+        <option value="18:00">18:00</option>
+        <option value="19:00">19:00</option>
+        <option value="20:00">20:00</option>
+        <option value="21:00">21:00</option>
+      </select>
+    </div>
+    <div class="gt-campo">
+      <label>Servicio</label>
+      <select id="nuevo-servicio">
+        <option value="Entrenamiento">Entrenamiento</option>
+        <option value="Kinefilaxia">Kinefilaxia</option>
+      </select>
+    </div>
+    <div class="gt-campo">
+      <label>Capacidad (cuántos alumnos entran)</label>
+      <input type="number" id="nuevo-capacidad" min="1" max="50" value="8">
+    </div>
+    <div class="gt-modal-error" id="nuevo-error"></div>
+    <div class="gt-modal-acciones">
+      <button class="gt-cancelar" onclick="cerrarNuevo()">Cancelar</button>
+      <button class="gt-crear" id="nuevo-crear" onclick="crearTurno()">Crear turno</button>
+    </div>
+  </div>
+</div>
+
+<div id="gt-toast-cont"></div>
+
+<script>
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+
+const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'];
+let TURNOS = [];          // todos los turnos cargados
+let filtroActivo = 'todos';
+
+// ---- Token del usuario logueado (compartido con el resto del sistema vía sessionStorage) ----
+function obtenerToken() { return sessionStorage.getItem('pb_token') || ''; }
+function authBearer() {
+  const t = obtenerToken();
+  return t && t.length > 20 ? t : SUPABASE_KEY;
+}
+
+// ---- Helpers Supabase ----
+async function sbQuery(tabla, params = '') {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+async function sbUpdate(tabla, filtro, data) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+    method: 'PATCH',
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+  return true;
+}
+async function sbInsert(tabla, data) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}`, {
+    method: 'POST',
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+// ---- Toast ----
+function toast(msg, tipo = '') {
+  const cont = document.getElementById('gt-toast-cont');
+  const el = document.createElement('div');
+  el.className = 'gt-toast ' + tipo;
+  el.textContent = msg;
+  cont.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = '.3s'; setTimeout(() => el.remove(), 300); }, 2600);
+}
+
+// ---- Cargar turnos ----
+async function cargarTurnos() {
+  try {
+    const filas = await sbQuery('turnos', '?select=id,dia,hora,servicio,capacidad&order=dia,hora,servicio');
+    TURNOS = filas || [];
+    render();
+  } catch (e) {
+    document.getElementById('gt-contenido').innerHTML =
+      `<div class="gt-estado" style="color:var(--rojo)">No se pudieron cargar los turnos.<br><span style="font-size:12px">${e.message}</span></div>`;
+  }
+}
+
+// ---- Render ----
+function ordenDia(d) { const i = DIAS.indexOf(d); return i < 0 ? 99 : i; }
+function render() {
+  const cont = document.getElementById('gt-contenido');
+  let lista = TURNOS.slice();
+  if (filtroActivo !== 'todos') lista = lista.filter(t => t.servicio === filtroActivo);
+  if (!lista.length) { cont.innerHTML = '<div class="gt-estado">No hay turnos para mostrar.</div>'; return; }
+  // Ordenar por día y hora
+  lista.sort((a, b) => ordenDia(a.dia) - ordenDia(b.dia) ||
+    parseInt(a.hora.replace(':', '')) - parseInt(b.hora.replace(':', '')) ||
+    a.servicio.localeCompare(b.servicio));
+
+  let html = '';
+  let diaActual = null;
+  lista.forEach(t => {
+    if (t.dia !== diaActual) {
+      if (diaActual !== null) html += '</div>';   // cierra grid anterior
+      diaActual = t.dia;
+      html += `<div class="gt-dia-titulo">📅 ${t.dia}</div><div class="gt-grid">`;
+    }
+    const servCls = t.servicio === 'Entrenamiento' ? 'gt-serv-ent' : 'gt-serv-kine';
+    const servTxt = t.servicio === 'Entrenamiento' ? 'ENTRENAMIENTO' : 'KINEFILAXIA';
+    html += `
+      <div class="gt-card">
+        <div class="gt-card-info">
+          <div class="gt-card-hora">${t.hora}</div>
+          <span class="gt-card-serv ${servCls}">${servTxt}</span>
+        </div>
+        <div class="gt-cap-control">
+          <span class="gt-cap-label">cupo</span>
+          <input class="gt-cap-input" type="number" min="0" max="50"
+                 id="cap-${t.id}" value="${t.capacidad}"
+                 data-original="${t.capacidad}" oninput="marcarCambio(${t.id})">
+        </div>
+        <button class="gt-guardar" id="btn-${t.id}" onclick="guardarCapacidad(${t.id})" disabled>Guardar</button>
+      </div>`;
+  });
+  if (diaActual !== null) html += '</div>';
+  cont.innerHTML = html;
+}
+
+// ---- Marcar cambio (habilita el botón guardar) ----
+function marcarCambio(id) {
+  const input = document.getElementById(`cap-${id}`);
+  const btn = document.getElementById(`btn-${id}`);
+  const original = input.getAttribute('data-original');
+  const cambiado = input.value !== original && input.value !== '';
+  input.classList.toggle('cambiado', cambiado);
+  btn.disabled = !cambiado;
+  btn.classList.remove('ok');
+  btn.textContent = 'Guardar';
+}
+
+// ---- Guardar capacidad de un turno ----
+window.guardarCapacidad = async (id) => {
+  const input = document.getElementById(`cap-${id}`);
+  const btn = document.getElementById(`btn-${id}`);
+  const nueva = parseInt(input.value, 10);
+  if (isNaN(nueva) || nueva < 0) { toast('Poné un número válido (0 o más)', 'err'); return; }
+  btn.disabled = true; btn.textContent = '⟳';
+  try {
+    await sbUpdate('turnos', `id=eq.${id}`, { capacidad: nueva });
+    input.setAttribute('data-original', String(nueva));
+    input.classList.remove('cambiado');
+    btn.textContent = '✓ Listo'; btn.classList.add('ok');
+    // Actualizar el dato local
+    const t = TURNOS.find(x => x.id === id);
+    if (t) t.capacidad = nueva;
+    toast('Capacidad actualizada', 'ok');
+    setTimeout(() => { btn.textContent = 'Guardar'; btn.classList.remove('ok'); }, 1600);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Guardar';
+    toast('No se pudo guardar: ' + e.message, 'err');
+  }
+};
+
+// ---- Filtro ----
+window.filtrar = (tipo, btn) => {
+  filtroActivo = tipo;
+  document.querySelectorAll('.gt-filtros .gt-btn').forEach(b => { if (!b.classList.contains('gt-btn-nuevo')) b.classList.remove('activo'); });
+  btn.classList.add('activo');
+  render();
+};
+
+// ---- Modal nuevo turno ----
+window.abrirNuevo = () => {
+  document.getElementById('nuevo-error').textContent = '';
+  document.getElementById('gt-overlay').classList.add('activo');
+};
+window.cerrarNuevo = () => { document.getElementById('gt-overlay').classList.remove('activo'); };
+
+window.crearTurno = async () => {
+  const dia = document.getElementById('nuevo-dia').value;
+  const hora = document.getElementById('nuevo-hora').value;
+  const servicio = document.getElementById('nuevo-servicio').value;
+  const capacidad = parseInt(document.getElementById('nuevo-capacidad').value, 10);
+  const err = document.getElementById('nuevo-error');
+  const btn = document.getElementById('nuevo-crear');
+  err.textContent = '';
+  if (isNaN(capacidad) || capacidad < 1) { err.textContent = 'Poné una capacidad válida (1 o más).'; return; }
+  // ¿Ya existe ese turno?
+  const yaExiste = TURNOS.some(t => t.dia === dia && t.hora === hora && t.servicio === servicio);
+  if (yaExiste) { err.textContent = `Ya existe un turno de ${servicio} el ${dia} a las ${hora}. Cambiá su capacidad desde la lista.`; return; }
+  btn.disabled = true; btn.textContent = 'Creando…';
+  try {
+    const filas = await sbInsert('turnos', { dia, hora, servicio, capacidad });
+    const nuevo = (filas && filas[0]) ? filas[0] : { id: Date.now(), dia, hora, servicio, capacidad };
+    TURNOS.push({ id: nuevo.id, dia, hora, servicio, capacidad });
+    cerrarNuevo();
+    render();
+    toast(`Turno creado: ${servicio} ${dia} ${hora}`, 'ok');
+  } catch (e) {
+    err.textContent = 'No se pudo crear: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Crear turno';
+  }
+};
+
+// ---- Inicio ----
+cargarTurnos();
+</script>
+</body>
+</html>
