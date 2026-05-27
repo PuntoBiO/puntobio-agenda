@@ -2544,6 +2544,15 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
   const nombre = agregarPersonaSel.nombre;
   const fechaRecupero = fechaDelDia(t.dia);
   const esFeriado = tipoRecup === 'feriado';
+  // === REGLA 15 DÍAS: un recuperatorio solo se puede agendar dentro de los 15 días
+  // desde hoy hacia adelante (para no tapar plazas que sirven a los turnos fijos).
+  const diasAdelante = diasEntre(hoyIso(), fechaRecupero);
+  if (diasAdelante > 15) {
+    cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">' +
+      '🗓️ Los recuperatorios solo se pueden programar dentro de los próximos 15 días. ' +
+      'Elegí una clase más cercana (no se pueden ocupar plazas tan a futuro).</div>';
+    return;
+  }
   // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
   if (!chequearCupo(t, 'lo agregás como recuperatorio', true, fechaRecupero)) {
     cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
@@ -3637,6 +3646,25 @@ function filtrar(tipo, btn) {
 // Justificación de ausencias
 let justifDia = '', justifHora = '', justifServicio = '', justifId = '', justifNombreAlumno = '';
 let justifSeleccion = '';
+
+// === REGLA: solo se puede JUSTIFICAR (o cambiar de área) hasta 2 horas antes del turno ===
+// Devuelve los milisegundos que faltan para el inicio del turno (negativo si ya empezó).
+// La fecha la sacamos del día activo de la agenda; la hora del turno viene "HH:MM".
+function msHastaTurno(dia, hora) {
+  const fechaIso = fechaDelDia(dia);                       // 'YYYY-MM-DD' del turno
+  const hhmm = String(hora || '').match(/(\d{1,2}):(\d{2})/);
+  if (!fechaIso || !hhmm) return null;                     // sin datos, no bloqueamos
+  const [y, m, d] = fechaIso.split('-').map(n => parseInt(n, 10));
+  const inicio = new Date(y, m - 1, d, parseInt(hhmm[1], 10), parseInt(hhmm[2], 10), 0, 0);
+  return inicio.getTime() - Date.now();
+}
+// ¿Ya pasó la ventana de 2 horas para justificar este turno?
+function fueraDeVentanaJustif(dia, hora) {
+  const ms = msHastaTurno(dia, hora);
+  if (ms === null) return false;                           // si no se pudo calcular, no bloquea
+  return ms < 2 * 60 * 60 * 1000;                          // menos de 2 hs (o ya empezó)
+}
+
 function abrirJustif(dia, hora, servicio, id, nombre) {
   justifDia = dia; justifHora = hora; justifServicio = servicio;
   justifId = id; justifNombreAlumno = nombre;
@@ -3691,6 +3719,22 @@ async function confirmarJustif() {
   }
   const t = HORARIOS.find(x=>x.dia===justifDia&&x.hora===justifHora&&x.servicio===justifServicio);
   if (!t) { cancelarJustif(); return; }
+
+  // === REGLA 2 HORAS: justificar o cambiar de área solo hasta 2 hs antes del turno.
+  // Si ya pasó la ventana, la falta NO se puede justificar (ni el alumno ni el equipo):
+  // la clase se pierde y no genera recuperatorio. Solo se permite "No justificada".
+  if ((justifSeleccion === 'si' || justifSeleccion === 'cambio')
+      && fueraDeVentanaJustif(justifDia, justifHora)) {
+    alert(
+      '⏰ FUERA DE TIEMPO PARA JUSTIFICAR\n\n' +
+      `${t.servicio} · ${t.hora} · ${t.dia}\n\n` +
+      'La justificación solo se puede hacer hasta 2 horas antes del turno.\n' +
+      'Como ya pasó ese plazo, esta falta NO se puede justificar y la clase se pierde ' +
+      '(no genera recuperatorio).\n\n' +
+      'Si igual querés dejar registrado que faltó, marcala como "No justificada".'
+    );
+    return;
+  }
 
   // === CAMBIO DE ÁREA: ausente justificada acá + agregado en el destino (sin gastar recuperatorio) ===
   if (justifSeleccion === 'cambio') {
