@@ -572,6 +572,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNuevoForm();
     await cargarRolUsuario();
     await Promise.all([loadPersonas(), refresh()]);
+    iniciarRealtime();
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
 });
 
@@ -652,6 +653,36 @@ function refreshMultiBar() {
 function navigate(delta) {
   anchorDate = addDays(anchorDate, delta * (currentView==='week' ? 7 : 28));
   refresh();
+}
+
+// =============================================
+// TIEMPO REAL (Supabase Realtime)
+// Refresca la grilla sola cuando otra persona cambia algo.
+// =============================================
+let realtimeCanal = null;
+let realtimeTimer = null;
+function recargarPorRealtime() {
+  clearTimeout(realtimeTimer);
+  realtimeTimer = setTimeout(() => {
+    const modalAbierto = document.querySelector('.modal-overlay.is-open');
+    if (modalAbierto) return;  // no interrumpir si hay un modal abierto
+    refresh();
+  }, 1200);
+}
+async function iniciarRealtime() {
+  if (!supa || realtimeCanal) return;
+  try {
+    realtimeCanal = supa
+      .channel('agenda-maso-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turnos_masoterapia' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones' }, recargarPorRealtime)
+      .subscribe((status, err) => {
+        console.log('[REALTIME maso] estado:', status, err || '');
+        if (status === 'SUBSCRIBED') console.log('[REALTIME maso] ✅ conectado');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+          console.warn('[REALTIME maso] ⚠️ no conectó:', status, err || '');
+      });
+  } catch (e) { console.warn('[REALTIME maso] error al iniciar', e); }
 }
 
 async function refresh() {
