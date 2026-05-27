@@ -604,6 +604,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNuevoForm();
     await cargarRolUsuario();
     await Promise.all([loadPersonas(), refresh()]);
+    iniciarRealtime();
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
 });
 
@@ -684,6 +685,39 @@ function refreshMultiBar() {
 function navigate(delta) {
   anchorDate = addDays(anchorDate, delta * (currentView==='week' ? 7 : 28));
   refresh();
+}
+
+// =============================================
+// TIEMPO REAL (Supabase Realtime)
+// Escucha cambios hechos por otras personas y refresca la grilla sola.
+// El cliente `supa` ya está autenticado (supa.auth), así que respeta RLS.
+// =============================================
+let realtimeCanal = null;
+let realtimeTimer = null;
+function recargarPorRealtime() {
+  clearTimeout(realtimeTimer);
+  realtimeTimer = setTimeout(() => {
+    // No recargar si hay un modal abierto (clase is-open), para no interrumpir.
+    const modalAbierto = document.querySelector('.modal-overlay.is-open');
+    if (modalAbierto) return;
+    refresh();
+  }, 1200);
+}
+async function iniciarRealtime() {
+  if (!supa || realtimeCanal) return;
+  try {
+    realtimeCanal = supa
+      .channel('agenda-consultorios-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turnos_consultorio' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pagos_consultorio' }, recargarPorRealtime)
+      .subscribe((status, err) => {
+        console.log('[REALTIME consultorios] estado:', status, err || '');
+        if (status === 'SUBSCRIBED') console.log('[REALTIME consultorios] ✅ conectado');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+          console.warn('[REALTIME consultorios] ⚠️ no conectó:', status, err || '');
+      });
+  } catch (e) { console.warn('[REALTIME consultorios] error al iniciar', e); }
 }
 
 async function refresh() {
