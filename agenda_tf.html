@@ -1192,6 +1192,7 @@ async function cargarDatos() {
     await cargarEvosPorTurno();
     await cargarFeriados();
     await cargarAsistenciaSemana();
+    await cerrarClasesViejasAuto();   // respaldo: cierra clases de días pasados sin cerrar
     renderDiasTabs();
     renderTurnos();
   } catch(err) {
@@ -1695,6 +1696,41 @@ async function cargarClasesCerradas() {
   } catch (e) { CLASES_CERRADAS = new Set(); console.warn('No se pudo cargar clases cerradas', e); }
 }
 
+// RESPALDO del cierre automático (por si el cron de Supabase fallara un día).
+// Al abrir la agenda, cierra las clases de DÍAS YA PASADOS (anteriores a hoy)
+// de la semana visible que quedaron sin cerrar. No toca el día de hoy ni futuros.
+async function cerrarClasesViejasAuto() {
+  try {
+    const hoy = hoyIso();
+    const lunes = getLunes(offsetSemana);
+    const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+    const aCerrar = [];
+    DIAS.forEach((dia, i) => {
+      const fObj = getDiaFecha(i, lunes);
+      const fIso = fmt(fObj);
+      if (fIso >= hoy) return;                 // solo días YA pasados (no hoy ni futuro)
+      if (feriadoDe(fIso)) return;             // los feriados no se cierran (no hubo clase)
+      HORARIOS.filter(t => t.dia === dia).forEach(t => {
+        if (!CLASES_CERRADAS.has(`${t.id}-${fIso}`)) {
+          aCerrar.push({ turno_id: t.id, fecha: fIso });
+        }
+      });
+    });
+    if (!aCerrar.length) return;
+    for (const c of aCerrar) {
+      try {
+        await supabaseInsert('clases_cerradas', {
+          turno_id: c.turno_id,
+          fecha: c.fecha,
+          cerrada_por_nombre: 'Cierre automático',
+          cerrada_por_email: 'sistema@puntobio'
+        });
+        CLASES_CERRADAS.add(`${c.turno_id}-${c.fecha}`);
+      } catch (e) { /* si ya existía u otro error, seguimos */ }
+    }
+  } catch (e) { console.warn('No se pudo cerrar clases viejas automáticamente', e); }
+}
+
 // Evoluciones cargadas, por alumno: clave "turnoId-fecha-personaId" -> true.
 // Sirve para saber QUÉ presentes tienen evolución (no solo cuántos).
 let EVO_ALUMNO = {};
@@ -2145,6 +2181,15 @@ window.evoAdminModulos = async () => {
 window.evoAplicarLote = async () => {
   if (evoSeleccion.size === 0) return;
   const t = evoTurnoActual;
+  const fecha = fechaRealDiaActivo();
+  // BLOQUEO: si la clase ya está cerrada, no se puede evolucionar. Hay que reabrirla primero.
+  if (claseEstaCerrada(t.id, fecha)) {
+    alert('🔒 ESTA CLASE YA ESTÁ CERRADA\n\n' +
+      `${t.servicio} · ${t.hora} · ${t.dia}\n\n` +
+      'Para cargar o cambiar una evolución, primero tenés que ABRIR la clase ' +
+      '(botón "Reabrir" abajo), hacer la evolución, y después volver a cerrarla.');
+    return;
+  }
   const datosBase = leerPanelEvo();
   if (!datosBase.modulo && !datosBase.contenido && !datosBase.observacion && !datosBase.como_se_sintio && !datosBase.dolor && !datosBase.sala) {
     toast('Escribí algo en la evolución antes de aplicar', 'err'); return;
@@ -3106,6 +3151,10 @@ window.evoSetDolor = (v) => {
 // día/turno/horario, pisa la anterior en vez de duplicar.
 async function guardarEvolucionAlumno(t, personaId, datos) {
   const fecha = fechaRealDiaActivo();
+  // Respaldo: nunca guardar en una clase cerrada (el bloqueo principal está en evoAplicarLote).
+  if (claseEstaCerrada(t.id, fecha)) {
+    throw new Error('La clase está cerrada. Reabrila para evolucionar.');
+  }
   const fila = {
     turno_id: t.id,
     persona_id: parseInt(personaId),
