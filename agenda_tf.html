@@ -1588,6 +1588,13 @@ async function guardarAsistencia(t, personaId, estado, motivo) {
       delete asistenciaMotivos[key];
       // Limpiar también el mapa de la grilla (vuelve a "presente esperado")
       delete ASISTENCIA_SEMANA[`${t.id}-${fecha}-${personaId}`];
+      // Si habíamos cancelado un recuperatorio por una ausencia con aviso previa,
+      // reactivarlo (vuelve a estado 'pendiente').
+      try {
+        await supabaseUpdate('recuperatorios_tf',
+          `persona_id=eq.${parseInt(personaId)}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fecha}&estado=eq.cancelado`,
+          { estado: 'pendiente' });
+      } catch (eRec) { console.warn('No se pudo reactivar recuperatorios_tf', eRec); }
       return;
     }
     if (asistenciaFilaId[key]) {
@@ -1621,6 +1628,26 @@ async function guardarAsistencia(t, personaId, estado, motivo) {
     // Sincronizar también el mapa de la GRILLA para que el badge de evolución
     // (que se mide sobre presentes) se actualice sin recargar la página.
     ASISTENCIA_SEMANA[`${t.id}-${fecha}-${personaId}`] = estado;
+
+    // === RECUPERATORIO: si el alumno estaba en esta clase como recuperatorio
+    // y avisa que no viene (ausente-justificada), le DEVOLVEMOS el cupo:
+    // marcamos la fila en recuperatorios_tf como 'cancelado' para que el
+    // feriado/falta vuelva a aparecer como disponible para reprogramar.
+    // Si después lo vuelven a poner como 'reservado' o 'presente', reactivamos.
+    try {
+      if (estado === 'ausente-justificada') {
+        await supabaseUpdate('recuperatorios_tf',
+          `persona_id=eq.${parseInt(personaId)}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fecha}&estado=eq.pendiente`,
+          { estado: 'cancelado' });
+      } else if (estado === 'reservado' || estado === 'presente') {
+        // Reactivar si lo habíamos cancelado por una ausencia con aviso previa
+        await supabaseUpdate('recuperatorios_tf',
+          `persona_id=eq.${parseInt(personaId)}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fecha}&estado=eq.cancelado`,
+          { estado: 'pendiente' });
+      }
+    } catch (eRec) {
+      console.warn('No se pudo sincronizar recuperatorios_tf', eRec);
+    }
   } catch (e) {
     console.error('Error guardando asistencia', e);
     toast('No se pudo guardar la asistencia: ' + e.message, 'err');
@@ -1968,15 +1995,28 @@ function hoyIso() {
   return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
 }
 // Trae las ausencias CON aviso (justificadas) de una persona
+// IMPORTANTE: excluye las que cayeron en una clase a la que el alumno asistía
+// como RECUPERATORIO (no como turno fijo). Esas no generan nueva ausencia
+// recuperable — sino sería un recuperatorio del recuperatorio.
 async function ausenciasConAviso(personaId) {
   try {
     // Traemos TODAS las filas de asistencia de la persona y filtramos el estado
     // en JavaScript. Antes filtrábamos por &estado=eq.ausente-justificada en la
     // URL, pero el guion del valor hacía que PostgREST no encontrara nada.
     const filas = await supabaseQuery('asistencia',
-      `?select=fecha,estado&persona_id=eq.${personaId}&order=fecha.desc`);
-    return (filas || [])
-      .filter(f => f.estado === 'ausente-justificada')
+      `?select=fecha,turno_id,estado&persona_id=eq.${personaId}&order=fecha.desc`);
+    const justificadas = (filas || []).filter(f => f.estado === 'ausente-justificada');
+    if (!justificadas.length) return [];
+    // Traer los recuperatorios de la persona (cualquier estado) para excluir
+    // las asistencias que correspondan a una clase tomada como recuperatorio.
+    let recups = [];
+    try {
+      recups = await supabaseQuery('recuperatorios_tf',
+        `?select=turno_recupero_id,fecha_recupero&persona_id=eq.${personaId}`) || [];
+    } catch (eRec) { console.warn('No se pudo leer recuperatorios para filtrar', eRec); }
+    const claveRecup = new Set(recups.map(r => `${r.turno_recupero_id}-${r.fecha_recupero}`));
+    return justificadas
+      .filter(f => !claveRecup.has(`${f.turno_id}-${f.fecha}`))
       .map(f => f.fecha);
   } catch (e) {
     console.warn('No se pudo leer ausencias', e);
