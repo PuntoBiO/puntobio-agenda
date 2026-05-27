@@ -830,6 +830,17 @@ const calcAntiguedad = (fechaAlta) => {
   const mResto = meses%12;
   return mResto ? `${años}a ${mResto}m` : `${años} ${años===1?'año':'años'}`;
 };
+// Devuelve el código de plan que corresponde a un pago, para mostrarlo en la lista.
+// Los pagos nuevos guardan el plan en observaciones como "[Plan: XXX]".
+// Los pagos viejos (sin ese dato) muestran el plan ACTUAL de la inscripción con * (vigente).
+function planDePago(pg, insc) {
+  const obs = pg && pg.observaciones ? pg.observaciones : '';
+  const m = obs.match(/\[Plan:\s*([^\]]+)\]/);
+  if (m) return m[1].trim();
+  // Sin plan guardado en el pago → usar el plan actual de la inscripción
+  if (insc && insc.plan) return insc.plan + ' *';
+  return 'plan —';
+}
 const toast = (msg, esError=false) => {
   const t = $('#toast');
   t.textContent = msg;
@@ -1145,82 +1156,157 @@ async function abrirModalVer() {
     if (!error) hcsPersona = data || [];
   } catch (e) { console.error('Error cargando HCs:', e); }
 
-  const ultimos = i ? (pagosPorInsc[i.id] || []).slice(0, 5) : [];
   const item = (label, val) => `<div class="info-item"><div class="info-item-label">${label}</div><div class="info-item-value${(val===null||val===''||val===undefined)?' empty':''}">${(val===null||val===''||val===undefined)?'—':val}</div></div>`;
-  let pagosHtml;
-  if (!i) pagosHtml = '<div class="empty" style="padding:14px;">No tiene inscripción TF</div>';
-  else if (ultimos.length === 0) pagosHtml = '<div class="empty" style="padding:14px;">Sin pagos registrados</div>';
-  else pagosHtml = '<div class="pagos-list">' + ultimos.map(pg => `
-    <div class="pago-row">
-      <div>
-        <div class="pago-fecha">${fmtFechaArg(pg.fecha)} · ${pg.medio || '—'}</div>
-        <div style="font-size:11px; color:var(--text-dim); margin-top:2px;">Imputado: ${pg.mes_imputado || '—'} ${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? '· ' + pg.tipo_cobro : ''}</div>
-      </div>
-      <div style="display:flex; align-items:center; gap:10px;">
-        <div class="pago-monto">${fmt$(pg.importe)}</div>
-        <button class="btn-editar-pago" title="Editar monto y medio de pago" onclick="abrirEditarPago('${pg.id}')">✏️</button>
-      </div>
-    </div>
-  `).join('') + '</div>';
-
-  const tfSection = i ? `
-    <div class="section-title">Inscripción TF</div>
-    <div class="info-list">
-      ${item('Plan', i.plan)}
-      ${item('Actividad', i.actividad)}
-      ${item('Día vencimiento', i.dia_vencimiento)}
-      ${item('Cuota base', fmt$(f.cuota))}
-      ${item('Descuento libre', i.descuento_libre ? fmt$(i.descuento_libre) : '—')}
-      ${item('Estado', f.estadoTF.replace('TF_',''))}
-      ${item('Fecha alta', fmtFechaArg(i.fecha_alta))}
-      ${item('Antigüedad', calcAntiguedad(i.fecha_alta))}
-      ${i.fecha_baja ? item('Fecha baja', fmtFechaArg(i.fecha_baja)) : ''}
-      ${i.motivo_baja ? `<div class="info-list-full">${item('Motivo baja', i.motivo_baja)}</div>` : ''}
-      ${i.fecha_reingreso ? item('Fecha reingreso', fmtFechaArg(i.fecha_reingreso)) : ''}
-      ${i.motivo_reingreso ? `<div class="info-list-full">${item('Motivo reingreso', i.motivo_reingreso)}</div>` : ''}
-      <div class="info-list-full">${item('Observaciones inscripción', i.observaciones)}</div>
-      ${f.cantInscripciones > 1 ? `<div class="info-list-full">${item('Inscripciones históricas', f.cantInscripciones + ' (incluye bajas anteriores)')}</div>` : ''}
-    </div>
-
-    <div class="section-title">Últimos pagos TF (hasta 5)</div>
-    ${pagosHtml}
-
-    <div class="section-title">🔄 Historial de cambios de plan</div>
-    <div id="verHistorialCambios">${renderHistorialCambios(f)}</div>
-  ` : `
-    <div class="section-title">Terapia Física</div>
-    <div class="modal-info" style="margin:0;">Esta persona <strong>no tiene inscripción a TF</strong>. Es paciente o contacto.</div>
-  `;
 
   $('#verBody').innerHTML = `
-    <div class="section-title">Datos personales</div>
-    <div class="info-list">
-      ${item('Nombre', p.nombre)}
-      ${item('ID interno', '#' + p.id)}
-      ${item('DNI', p.dni)}
-      ${item('Fecha nacimiento', fmtFechaArg(p.fecha_nacimiento))}
-      ${item('Celular', p.celular)}
-      ${item('Teléfono alt.', p.telefono)}
-      <div class="info-list-full">${item('Email', p.email || p.mail)}</div>
-      <div class="info-list-full">${item('Dirección', p.direccion)}</div>
-      ${item('Obra social', p.obra_social)}
-      ${item('N° afiliado OS', p.nro_afiliado_os)}
-      ${item('Contacto urgencia', p.contacto_urgencia_nombre)}
-      ${item('Tel. contacto urg.', p.contacto_urgencia_celular)}
-      ${item('Médico que atendió', p.medico_que_atendio)}
-      ${item('Quién recomendó', p.quien_recomendo)}
-      <div class="info-list-full">${item('Observaciones admin', p.observaciones_admin)}</div>
-    </div>
-
-    ${tfSection}
+    ${renderResumenAlumno(f)}
+    ${renderPlanesYCobros(f)}
 
     <div class="section-title">Historia clínica</div>
     ${renderHCResumenSection(p)}
 
-    <div class="section-title">Otras áreas</div>
-    <div class="modal-info" style="margin:0;">🚧 Consultorios, Especialidades, BioLab y Masoterapia se van a integrar cuando esas tablas estén cargadas.</div>
+    <details style="margin-top:18px;">
+      <summary style="cursor:pointer; font-weight:600; color:var(--azul); font-size:14px; padding:6px 0; list-style:none;">▸ Ver datos personales completos</summary>
+      <div class="info-list" style="margin-top:10px;">
+        ${item('Nombre', p.nombre)}
+        ${item('ID interno', '#' + p.id)}
+        ${item('DNI', p.dni)}
+        ${item('Fecha nacimiento', fmtFechaArg(p.fecha_nacimiento))}
+        ${item('Celular', p.celular)}
+        ${item('Teléfono alt.', p.telefono)}
+        <div class="info-list-full">${item('Email', p.email || p.mail)}</div>
+        <div class="info-list-full">${item('Dirección', p.direccion)}</div>
+        ${item('Obra social', p.obra_social)}
+        ${item('N° afiliado OS', p.nro_afiliado_os)}
+        ${item('Contacto urgencia', p.contacto_urgencia_nombre)}
+        ${item('Tel. contacto urg.', p.contacto_urgencia_celular)}
+        ${item('Médico que atendió', p.medico_que_atendio)}
+        ${item('Quién recomendó', p.quien_recomendo)}
+        <div class="info-list-full">${item('Observaciones admin', p.observaciones_admin)}</div>
+        ${i ? `
+          ${item('Actividad', i.actividad)}
+          ${item('Fecha alta', fmtFechaArg(i.fecha_alta))}
+          ${item('Antigüedad', calcAntiguedad(i.fecha_alta))}
+          ${i.fecha_baja ? item('Fecha baja', fmtFechaArg(i.fecha_baja)) : ''}
+          ${i.motivo_baja ? `<div class="info-list-full">${item('Motivo baja', i.motivo_baja)}</div>` : ''}
+          ${i.fecha_reingreso ? item('Fecha reingreso', fmtFechaArg(i.fecha_reingreso)) : ''}
+          <div class="info-list-full">${item('Observaciones inscripción', i.observaciones)}</div>
+        ` : ''}
+      </div>
+    </details>
+
+    <details style="margin-top:10px;">
+      <summary style="cursor:pointer; font-weight:600; color:var(--text-dim); font-size:13px; padding:6px 0; list-style:none;">▸ Otras áreas</summary>
+      <div class="modal-info" style="margin:8px 0 0;">🚧 Consultorios, Especialidades, BioLab y Masoterapia se van a integrar cuando esas tablas estén cargadas.</div>
+    </details>
   `;
   $('#modalVer').classList.add('activo');
+}
+
+// ===== BLOQUE 1: RESUMEN DE UN VISTAZO (plan actual + deuda + contacto) =====
+function renderResumenAlumno(f) {
+  const p = f.persona, i = f.inscripcion;
+  if (!i) {
+    return `
+      <div style="background:var(--bg-soft,#f8fafc); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:6px;">
+        <div style="font-size:18px; font-weight:700;">${p.nombre} <span style="color:var(--text-dim); font-weight:400; font-size:14px;">#${p.id}</span></div>
+        <div class="modal-info" style="margin:10px 0 0;">Esta persona <strong>no tiene inscripción a TF</strong>. Es paciente o contacto.</div>
+      </div>`;
+  }
+  // ¿Pagó el mes actual? (misma lógica que usa el sistema para morosos)
+  const pagosIns = pagosPorInsc[i.id] || [];
+  const pagoMesActual = pagosIns.some(pg => pg.mes_imputado === MES_ACTUAL);
+  const esBonif = f.estadoTF === 'TF_BONIF';
+  const esBaja = f.estadoTF === 'TF_BAJA';
+
+  let estadoChip;
+  if (esBaja) estadoChip = `<span style="background:#fee2e2;color:#dc2626;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">❌ De baja</span>`;
+  else if (esBonif) estadoChip = `<span style="background:#ede9fe;color:#6d28d9;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">💜 Bonificado</span>`;
+  else if (pagoMesActual) estadoChip = `<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">✅ Al día</span>`;
+  else estadoChip = `<span style="background:#fee2e2;color:#dc2626;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">⚠️ Debe ${nombreMes(MES_ACTUAL)}</span>`;
+
+  // Cambio de plan programado (si hay)
+  const cambioChip = (i.plan_futuro && i.mes_aplica_plan)
+    ? `<span style="background:#dbeafe;color:#1e40af;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">🔄 ${i.plan}→${i.plan_futuro} desde ${nombreMes(i.mes_aplica_plan)}</span>`
+    : '';
+
+  const tel = p.celular || p.telefono || '—';
+  const telLink = (p.celular || p.telefono) ? `<a href="https://wa.me/549${(p.celular||p.telefono).replace(/\D/g,'')}" target="_blank" style="color:var(--azul); text-decoration:none;">${tel} 💬</a>` : '—';
+  const urg = p.contacto_urgencia_nombre ? `${p.contacto_urgencia_nombre}${p.contacto_urgencia_celular ? ' · ' + p.contacto_urgencia_celular : ''}` : '—';
+
+  return `
+    <div style="background:var(--bg-soft,#f8fafc); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:6px;">
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
+        <div style="font-size:18px; font-weight:700;">${p.nombre} <span style="color:var(--text-dim); font-weight:400; font-size:14px;">#${p.id}</span></div>
+        ${estadoChip}
+        ${cambioChip}
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; font-size:13px;">
+        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Plan actual</div><div style="font-weight:600; font-size:15px;">${i.plan} · ${fmt$(f.cuota)}</div></div>
+        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Día vencimiento</div><div style="font-weight:600;">Día ${i.dia_vencimiento || '—'}</div></div>
+        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Celular</div><div style="font-weight:600;">${telLink}</div></div>
+        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Contacto urgencia</div><div style="font-weight:600;">${urg}</div></div>
+      </div>
+    </div>`;
+}
+
+// ===== BLOQUE 2: HISTORIAL DE PLANES CON SUS COBROS =====
+// Agrupa los pagos por el plan al que pertenecen. El plan actual va arriba.
+function renderPlanesYCobros(f) {
+  const i = f.inscripcion;
+  if (!i) return '';
+  const pagos = (pagosPorInsc[i.id] || []).slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+  // Agrupar pagos por plan (leído de la observación; los viejos sin plan van al plan actual con *)
+  const grupos = {};        // plan -> [pagos]
+  const ordenPlanes = [];   // para mantener orden de aparición
+  pagos.forEach(pg => {
+    const m = (pg.observaciones || '').match(/\[Plan:\s*([^\]]+)\]/);
+    const plan = m ? m[1].trim() : (i.plan + ' *');
+    if (!grupos[plan]) { grupos[plan] = []; ordenPlanes.push(plan); }
+    grupos[plan].push(pg);
+  });
+
+  // Asegurar que el plan actual aparezca primero aunque no tenga pagos todavía
+  const planActualKey = ordenPlanes.find(pl => pl.replace(' *','') === i.plan) || i.plan;
+  const ordenFinal = [planActualKey, ...ordenPlanes.filter(pl => pl !== planActualKey)];
+
+  let html = `<div class="section-title">🔄 Planes y cobros</div>`;
+
+  ordenFinal.forEach((plan, idx) => {
+    const lista = grupos[plan] || [];
+    const esActual = plan.replace(' *','') === i.plan && idx === 0;
+    const total = lista.reduce((s, pg) => s + (Number(pg.importe) || 0), 0);
+    const cabecera = `
+      <div style="display:flex; justify-content:space-between; align-items:center; background:${esActual ? '#eff6ff' : 'var(--bg-soft,#f8fafc)'}; border:1px solid ${esActual ? 'var(--azul)' : 'var(--border)'}; border-radius:8px 8px ${lista.length?'0 0':'8px 8px'}; padding:10px 14px;">
+        <div style="font-weight:700;">${plan} ${esActual ? '<span style="background:var(--azul);color:#fff;border-radius:5px;padding:1px 7px;font-size:11px;margin-left:4px;">ACTUAL</span>' : ''}</div>
+        <div style="font-size:12px; color:var(--text-dim);">${lista.length} cobro(s) · ${fmt$(total)}</div>
+      </div>`;
+    let filas = '';
+    if (lista.length) {
+      filas = '<div style="border:1px solid var(--border); border-top:none; border-radius:0 0 8px 8px; overflow:hidden;">' +
+        lista.map(pg => `
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:9px 14px; border-top:1px solid var(--border);">
+            <div>
+              <div style="font-size:13px;">${fmtFechaArg(pg.fecha)} · ${pg.medio || '—'}</div>
+              <div style="font-size:11px; color:var(--text-dim);">Imputado: ${pg.mes_imputado || '—'}${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? ' · ' + pg.tipo_cobro : ''}</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <div style="font-weight:700; color:var(--verde,#166534);">${fmt$(pg.importe)}</div>
+              <button class="btn-editar-pago" title="Editar monto y medio" onclick="abrirEditarPago('${pg.id}')">✏️</button>
+            </div>
+          </div>`).join('') + '</div>';
+    }
+    html += `<div style="margin-bottom:12px;">${cabecera}${filas}</div>`;
+  });
+
+  if (!pagos.length) {
+    html += `<div class="empty" style="padding:14px;">Sin cobros registrados todavía.</div>`;
+  }
+  if (ordenFinal.some(pl => pl.includes('*'))) {
+    html += `<div style="font-size:11px; color:var(--text-dim); margin-top:-4px;">* Cobros cargados antes de que guardáramos el plan en cada pago — se muestran bajo el plan actual.</div>`;
+  }
+  return html;
 }
 
 // ===== CUPO DE RECUPERATORIOS POR PLAN =====
@@ -2360,6 +2446,10 @@ window.confirmarCobro = async () => {
   btn.disabled = true; btn.textContent = 'Guardando...';
   try {
     const hoyISO = HOY.toISOString().split('T')[0];
+    // Guardamos el plan vigente en la observación para que el pago quede asociado a su plan.
+    const planActual = alumnoActivo.inscripcion.plan || '';
+    const obsManual = $('#cobrarObs').value.trim();
+    const obsFinal = `[Plan: ${planActual}]` + (obsManual ? ' ' + obsManual : '');
     const { error } = await sb.from('pagos_tf').insert({
       inscripcion_id: alumnoActivo.inscripcion.id,
       mes_imputado: $('#cobrarMesImputado').value,
@@ -2367,7 +2457,7 @@ window.confirmarCobro = async () => {
       importe: importe,
       medio: $('#cobrarMedio').value,
       tipo_cobro: 'NORMAL',
-      observaciones: $('#cobrarObs').value.trim() || null,
+      observaciones: obsFinal,
       cargado_por: usuarioId
     });
     if (error) throw error;
