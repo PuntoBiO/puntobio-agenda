@@ -3739,6 +3739,47 @@ async function confirmarJustif() {
 // =============================================
 // AUTENTICACIÓN
 // =============================================
+// =============================================
+// TIEMPO REAL (Supabase Realtime)
+// Escucha cambios en las tablas de la agenda hechos por OTRAS personas
+// y recarga los datos solo, sin que el usuario tenga que refrescar.
+// =============================================
+let realtimeCanal = null;
+let realtimeTimer = null;
+function recargarPorRealtime() {
+  // Debounce: si llegan varios cambios juntos, esperamos un toque y recargamos 1 vez.
+  clearTimeout(realtimeTimer);
+  realtimeTimer = setTimeout(() => {
+    // Si hay un modal de turno abierto, NO recargamos: el usuario podría estar
+    // escribiendo una evolución o marcando asistencia y no queremos pisarle nada.
+    // Al cerrar el modal verá los datos frescos. Si no hay modal abierto, recarga
+    // la grilla para mostrar en vivo lo que hicieron otras personas.
+    const modalAbierto = document.getElementById('modal-overlay')?.classList.contains('activo');
+    const agregarAbierto = document.getElementById('agregar-overlay')?.classList.contains('activo');
+    if (modalAbierto || agregarAbierto) return;
+    cargarDatos();
+  }, 1200);
+}
+function iniciarRealtime() {
+  if (!sbCliente || realtimeCanal) return;  // ya iniciado o sin cliente
+  try {
+    // Que Realtime escuche con el token del usuario logueado (respeta RLS)
+    const token = obtenerToken();
+    if (token && sbCliente.realtime && sbCliente.realtime.setAuth) {
+      sbCliente.realtime.setAuth(token);
+    }
+    realtimeCanal = sbCliente
+      .channel('agenda-tf-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'asistencia' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_agregados' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_alumnos' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clases_cerradas' }, recargarPorRealtime)
+      .subscribe();
+  } catch (e) {
+    console.warn('No se pudo iniciar el tiempo real', e);
+  }
+}
+
 let sesionActiva = false;
 async function verificarSesion() {
   try {
@@ -3753,6 +3794,7 @@ async function verificarSesion() {
       document.getElementById('login-overlay').classList.add('oculto');
       cargarUsuarioActual();
       cargarDatos();
+      iniciarRealtime();
     } else {
       document.getElementById('login-overlay').classList.remove('oculto');
     }
@@ -3791,6 +3833,7 @@ async function hacerLogin() {
       document.getElementById('login-overlay').classList.add('oculto');
       cargarUsuarioActual();
       cargarDatos();
+      iniciarRealtime();
     } else {
       error.classList.add('visible');
     }
