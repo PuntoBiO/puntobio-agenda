@@ -3634,14 +3634,25 @@ function seleccionarJustif(opcion) {
   document.getElementById('justif-destino-box').style.display = esCambio ? 'block' : 'none';
   document.getElementById('justif-motivo').className = 'justif-motivo' + (esCambio ? '' : ' visible');
   if (esCambio) {
-    // Llenar el selector con los turnos del MISMO día, menos el turno actual
+    // Llenar el selector SOLO con turnos del mismo día que tengan cupo disponible
+    // ese día (mismo cálculo que chequearCupo: anotados - ausentes vs capacidad).
     const sel = document.getElementById('justif-destino');
-    const otros = HORARIOS
+    const fechaSel = fechaDelDia(justifDia);
+    const conLugar = HORARIOS
       .filter(t => t.dia === justifDia && !(t.hora === justifHora && t.servicio === justifServicio))
+      .filter(t => {
+        const anotados = getAlumnos(t, fechaSel).length;
+        const ausentes = ausentesDelDia(t, fechaSel);
+        const libres = t.capacidad - anotados + ausentes;
+        return libres > 0;   // solo los que tienen al menos 1 lugar real
+      })
       .sort((a,b) => (a.hora||'').localeCompare(b.hora||''));
-    sel.innerHTML = otros.length
-      ? otros.map(t => `<option value="${t.id}">${t.servicio} · ${t.hora}</option>`).join('')
-      : '<option value="">(no hay otras clases ese día)</option>';
+    sel.innerHTML = conLugar.length
+      ? conLugar.map(t => {
+          const libres = t.capacidad - getAlumnos(t, fechaSel).length + ausentesDelDia(t, fechaSel);
+          return `<option value="${t.id}">${t.servicio} · ${t.hora} — ${libres} lugar${libres!==1?'es':''}</option>`;
+        }).join('')
+      : '<option value="">(no hay clases con lugar ese día)</option>';
   }
 }
 function cancelarJustif() {
@@ -3659,7 +3670,7 @@ async function confirmarJustif() {
   if (justifSeleccion === 'cambio') {
     const destId = parseInt(document.getElementById('justif-destino').value);
     const destino = HORARIOS.find(x => x.id === destId);
-    if (!destino) { toast('Elegí a qué clase pasó ese día', 'error'); return; }
+    if (!destino) { toast('Elegí una clase con lugar para el cambio de área', 'error'); return; }
     const fecha = fechaDelDia(justifDia);
     // ¿Hay lugar en el destino? Mismo control de cupo que un agregado puntual (ausentes liberan).
     if (!chequearCupo(destino, `lo pasás a ${destino.servicio} ${destino.hora}`, true, fecha)) {
