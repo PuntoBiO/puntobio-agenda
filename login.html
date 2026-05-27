@@ -452,6 +452,32 @@ input::placeholder {
       <button class="btn-back" onclick="volverASignin()">← Ya tengo cuenta</button>
     </div>
 
+    <!-- SELECTOR DE ROL (solo para quienes son equipo Y alumno) -->
+    <div id="step-rol" class="step hidden">
+      <h2 class="card-title">¿Cómo querés entrar hoy?</h2>
+      <p class="card-subtitle">Tenés acceso de equipo y también tu espacio personal</p>
+
+      <div class="choice-grid">
+        <button class="choice-btn" onclick="entrarComo('equipo')">
+          <div class="choice-icon">🤝</div>
+          <div class="choice-text">
+            <div class="choice-title">Como equipo</div>
+            <div class="choice-desc">Panel de administración y agendas</div>
+          </div>
+          <div class="choice-arrow">→</div>
+        </button>
+
+        <button class="choice-btn" onclick="entrarComo('alumno')">
+          <div class="choice-icon">👤</div>
+          <div class="choice-text">
+            <div class="choice-title">Como alumno/paciente</div>
+            <div class="choice-desc">Mi plan, mis clases, mi historia</div>
+          </div>
+          <div class="choice-arrow">→</div>
+        </button>
+      </div>
+    </div>
+
   </div>
 
   <div class="footer">
@@ -470,18 +496,50 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 
 // Decide a dónde mandar a una persona logueada según si es equipo o alumno.
 // Equipo -> app.html (panel completo). Alumno/paciente -> mi_espacio.html.
-async function rutaSegunRol() {
+// Averigua el rol de la persona logueada.
+// Devuelve: 'alumno' | 'equipo' | 'ambos'
+async function detectarRol() {
   try {
+    const uid = (await supabase.auth.getUser()).data.user.id
     const { data: per } = await supabase
       .from('personas')
-      .select('es_equipo')
-      .eq('auth_user_id', (await supabase.auth.getUser()).data.user.id)
+      .select('id, es_equipo')
+      .eq('auth_user_id', uid)
       .maybeSingle()
-    return (per && per.es_equipo) ? 'app.html' : 'mi_espacio.html'
+
+    if (!per) return 'alumno' // sin ficha de equipo -> tratamos como alumno
+    if (!per.es_equipo) return 'alumno'
+
+    // Es equipo. ¿También tiene plan TF activo? -> doble rol
+    let tienePlan = false
+    try {
+      const { data: r } = await supabase.rpc('tiene_plan_tf_activo', { p_persona_id: per.id })
+      tienePlan = (r === true)
+    } catch (e) { tienePlan = false }
+
+    return tienePlan ? 'ambos' : 'equipo'
   } catch (e) {
-    // Ante cualquier duda, mandamos a mi_espacio (no expone nada del equipo)
-    return 'mi_espacio.html'
+    return 'alumno' // ante la duda, lo más restrictivo
   }
+}
+
+// Decide a dónde ir. Si es 'ambos', NO redirige: muestra el selector.
+async function irSegunRol() {
+  const rol = await detectarRol()
+  if (rol === 'equipo') { window.location.href = 'app.html'; return }
+  if (rol === 'alumno') { window.location.href = 'mi_espacio.html'; return }
+  // ambos -> mostrar selector de "¿cómo querés entrar?"
+  mostrarSelectorRol()
+}
+
+// Muestra el selector solo para quienes son equipo Y alumno
+function mostrarSelectorRol() {
+  document.getElementById('step-login').classList.add('hidden')
+  document.getElementById('step-signup').classList.add('hidden')
+  document.getElementById('step-rol').classList.remove('hidden')
+}
+window.entrarComo = function(destino) {
+  window.location.href = (destino === 'equipo') ? 'app.html' : 'mi_espacio.html'
 }
 
 // Si ya hay sesión activa, ir directo al lugar que corresponda
@@ -489,7 +547,7 @@ const { data: { session } } = await supabase.auth.getSession()
 if (session) {
   // Antes de redirigir, intentamos vincular la cuenta del alumno a su ficha (idempotente)
   try { await supabase.rpc('vincular_mi_cuenta') } catch (e) {}
-  window.location.href = await rutaSegunRol()
+  await irSegunRol()
 }
 
 // Mostrar el formulario de crear cuenta
@@ -590,8 +648,8 @@ window.loginEmail = async function() {
   // Intentamos vincular la cuenta a su ficha del padrón (solo aplica a alumnos; es idempotente)
   try { await supabase.rpc('vincular_mi_cuenta') } catch (e) {}
 
-  // El sistema decide el destino según si es equipo o alumno
-  window.location.href = await rutaSegunRol()
+  // El sistema decide el destino: alumno -> mi espacio, equipo -> panel, ambos -> pregunta
+  await irSegunRol()
 }
 
 function mostrarError(tipo, mensaje) {
