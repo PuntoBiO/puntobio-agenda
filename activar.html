@@ -323,7 +323,7 @@ input::placeholder {
 
   <div class="card">
 
-    <!-- ESTADO 1: CARGANDO (mientras procesamos el token del mail) -->
+    <!-- ESTADO 1: CARGANDO (brevemente mientras leemos la URL) -->
     <div id="step-loading" class="step">
       <div class="spinner-big"></div>
       <h2 class="card-title">Procesando tu link</h2>
@@ -350,7 +350,7 @@ input::placeholder {
       <button class="btn-primary" id="btn-invite" onclick="guardarPasswordInvite()">Activar mi cuenta</button>
     </div>
 
-    <!-- ESTADO 3: RECOVERY (alumno olvidó la contraseña, viene del mail "Recuperá tu contraseña") -->
+    <!-- ESTADO 3: RECOVERY (alumno olvido la contrasena, viene del mail "Recuperá tu contraseña") -->
     <div id="step-recovery" class="step hidden">
       <h2 class="card-title">Elegí tu nueva contraseña</h2>
       <p class="card-subtitle">Después vas a iniciar sesión con la nueva</p>
@@ -370,16 +370,27 @@ input::placeholder {
       <button class="btn-primary" id="btn-recovery" onclick="guardarPasswordRecovery()">Guardar y entrar</button>
     </div>
 
-    <!-- ESTADO 4: ERROR (link inválido, expirado o sin tokens) -->
+    <!-- ESTADO 4: SIGNUP CONFIRM (alumno se registro solo via "Primera vez? Creá tu cuenta") -->
+    <div id="step-signup-confirm" class="step hidden">
+      <div style="text-align:center;font-size:48px;margin-bottom:12px">📧</div>
+      <h2 class="card-title">Confirmá tu mail</h2>
+      <p class="card-subtitle">Un click más para confirmar tu cuenta y entrar a tu espacio personal.</p>
+
+      <div id="alert-signup-confirm" class="alert"></div>
+
+      <button class="btn-primary" id="btn-signup-confirm" onclick="confirmarSignup()">Confirmar mi mail</button>
+    </div>
+
+    <!-- ESTADO 5: ERROR (link invalido, expirado o sin tokens) -->
     <div id="step-error" class="step hidden">
       <h2 class="card-title">El link no funcionó 😕</h2>
       <p class="card-subtitle" id="error-msg">Puede que ya haya expirado o que se haya usado antes.</p>
 
       <button class="btn-primary" onclick="window.location.href='login.html'">Ir al login</button>
-      <p class="hint" style="text-align:center;margin-top:16px">Si ya activaste tu cuenta, entrá con tu email y contraseña. Si olvidaste la clave, pedí un nuevo link desde "Olvidé mi clave" en el login.</p>
+      <p class="hint" style="text-align:center;margin-top:16px">Si ya activaste tu cuenta, entrá con tu email y contraseña. Si olvidaste la clave, pedí un nuevo link desde "¿Olvidaste tu clave?" en el login.</p>
     </div>
 
-    <!-- ESTADO 5: EXITO (breve confirmacion antes de redirigir) -->
+    <!-- ESTADO 6: EXITO (breve confirmacion antes de redirigir) -->
     <div id="step-success" class="step hidden">
       <div class="success-icon">✓</div>
       <h2 class="card-title" id="success-title">¡Listo!</h2>
@@ -400,8 +411,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co'
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi'
 
-// IMPORTANTE: detectSessionInUrl en false para que NOSOTROS controlemos el hash,
-// no la libreria. Asi sabemos si vino de invite, recovery, signup, etc.
+// detectSessionInUrl=false porque manejamos manualmente el flow (PKCE o legacy).
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { detectSessionInUrl: false, persistSession: true }
 })
@@ -423,53 +433,79 @@ function mostrarAlertaEnPaso(tipo, mensaje) {
   a.className = 'alert error'
 }
 
-// --- PARSEO DEL HASH (lo que Supabase manda en el mail) ---
-function parseHash() {
-  const hash = window.location.hash.replace(/^#/, '')
-  if (!hash) return {}
-  const p = new URLSearchParams(hash)
+// --- LECTURA DE PARAMETROS (soporta ambos formatos: PKCE en query y legacy en hash) ---
+function parseUrlParams() {
+  const q = new URLSearchParams(window.location.search)
+  const h = window.location.hash.replace(/^#/, '')
+  const hashParams = h ? new URLSearchParams(h) : new URLSearchParams()
+
   return {
-    access_token: p.get('access_token'),
-    refresh_token: p.get('refresh_token'),
-    type: p.get('type'),
-    error: p.get('error') || p.get('error_code') || null,
-    error_description: p.get('error_description')
+    // PKCE (nuevo, inmune al prefetch de Gmail): token_hash en query string
+    token_hash: q.get('token_hash'),
+    type: q.get('type') || hashParams.get('type'),
+
+    // Legacy (formato viejo, hash con access_token): para compatibilidad con mails ya enviados
+    access_token: hashParams.get('access_token'),
+    refresh_token: hashParams.get('refresh_token'),
+
+    // Errores pueden venir en query o en hash
+    error: hashParams.get('error') || q.get('error') || hashParams.get('error_code') || q.get('error_code'),
+    error_description: hashParams.get('error_description') || q.get('error_description')
   }
 }
 
-// --- ARRANQUE: decidimos que pantalla mostrar ---
-const params = parseHash()
+// Guardamos el token_hash para usarlo DESPUES (cuando el usuario haga click),
+// no ahora. Esto es lo que neutraliza el prefetch de Gmail.
+let pkceTokenHash = null
+let pkceType = null
 
-// Caso A: el link viene con error (ej. expirado)
+const params = parseUrlParams()
+
+// --- ARRANQUE: decidimos que pantalla mostrar ---
+
+// Caso A: el link viene con error explicito
 if (params.error) {
   const msg = params.error_description
     ? decodeURIComponent(params.error_description.replace(/\+/g, ' '))
     : 'El link ya no es valido.'
   mostrarError(msg)
 }
-// Caso B: no hay tokens en la URL — alguien entro a /activar.html directo
-else if (!params.access_token) {
-  // Si ya tiene sesion activa, lo mandamos a su lugar
-  const { data: { session } } = await supabase.auth.getSession()
-  if (session) {
-    window.location.replace('mi_espacio.html')
+// Caso B: NUEVO flow PKCE — tenemos token_hash + type
+else if (params.token_hash && params.type) {
+  // IMPORTANTE: NO llamamos verifyOtp ahora. Lo hacemos cuando el usuario hace click.
+  // Asi, si Gmail pre-visita el link, no consume el token.
+  pkceTokenHash = params.token_hash
+  pkceType = params.type
+
+  // Limpiamos la URL (estetico)
+  history.replaceState(null, '', window.location.pathname)
+
+  if (params.type === 'invite') {
+    mostrarPaso('step-invite')
+    document.getElementById('pass1-inv').focus()
+  } else if (params.type === 'recovery') {
+    mostrarPaso('step-recovery')
+    document.getElementById('pass1-rec').focus()
+  } else if (params.type === 'signup' || params.type === 'email') {
+    mostrarPaso('step-signup-confirm')
   } else {
-    window.location.replace('login.html')
+    // Tipo desconocido (magiclink u otro): asumimos que solo confirma, redirigimos.
+    // Para ser seguros, igual hacemos verify ahora porque magiclink no requiere accion extra.
+    const { error } = await supabase.auth.verifyOtp({ type: params.type, token_hash: params.token_hash })
+    if (error) mostrarError('El link ya no es valido o expiro.')
+    else window.location.replace('mi_espacio.html')
   }
 }
-// Caso C: tenemos tokens — los seteamos manualmente y mostramos el form correcto
-else {
+// Caso C: LEGACY flow — vino con access_token en el hash (mails viejos)
+else if (params.access_token) {
   const { error: errSet } = await supabase.auth.setSession({
     access_token: params.access_token,
     refresh_token: params.refresh_token || ''
   })
-
   if (errSet) {
     mostrarError('El link ya no es valido o expiro. Pedi uno nuevo desde el login.')
   } else {
-    // Limpiamos el hash de la URL (estetico, no es estrictamente necesario)
     history.replaceState(null, '', window.location.pathname)
-
     if (params.type === 'invite') {
       mostrarPaso('step-invite')
       document.getElementById('pass1-inv').focus()
@@ -477,16 +513,40 @@ else {
       mostrarPaso('step-recovery')
       document.getElementById('pass1-rec').focus()
     } else {
-      // signup, magiclink u otros: el usuario ya tiene contrasena (signup) o no la necesita (magic).
-      // Ya quedo logueado al setSession, lo mandamos a su espacio.
       window.location.replace('mi_espacio.html')
     }
   }
 }
+// Caso D: ni token_hash ni access_token — alguien entro a /activar.html directo
+else {
+  const { data: { session } } = await supabase.auth.getSession()
+  if (session) {
+    window.location.replace('mi_espacio.html')
+  } else {
+    window.location.replace('login.html')
+  }
+}
 
-// --- ACCIONES ---
+// --- HELPER: verifica el token PKCE (crea la sesion). Solo se ejecuta cuando el USUARIO hace click. ---
+async function verifyPkceToken() {
+  if (!pkceTokenHash || !pkceType) {
+    // Flow legacy o ya verificado: la sesion ya existe.
+    return { ok: true }
+  }
+  const { error } = await supabase.auth.verifyOtp({
+    type: pkceType,
+    token_hash: pkceTokenHash
+  })
+  if (error) {
+    return { ok: false, error: 'El link ya no es valido o expiro. Pedi uno nuevo desde el login.' }
+  }
+  // Limpio para no volver a verificar (un solo uso)
+  pkceTokenHash = null
+  pkceType = null
+  return { ok: true }
+}
 
-// Validacion comun de password
+// --- VALIDACION COMUN DE PASSWORD ---
 function validar(p1, p2, alertaTipo) {
   if (!p1 || !p2) {
     mostrarAlertaEnPaso(alertaTipo, 'Completa los dos campos de contrasena.')
@@ -503,7 +563,7 @@ function validar(p1, p2, alertaTipo) {
   return true
 }
 
-// INVITE: el alumno elige su contrasena por primera vez
+// --- INVITE: el alumno elige su contrasena por primera vez ---
 window.guardarPasswordInvite = async function() {
   const p1 = document.getElementById('pass1-inv').value
   const p2 = document.getElementById('pass2-inv').value
@@ -513,8 +573,17 @@ window.guardarPasswordInvite = async function() {
   btn.disabled = true
   btn.innerHTML = '<span class="spinner"></span>Guardando...'
 
-  const { error } = await supabase.auth.updateUser({ password: p1 })
+  // 1. Verificamos el token PKCE (si aplica). Esto crea la sesion.
+  const v = await verifyPkceToken()
+  if (!v.ok) {
+    btn.disabled = false
+    btn.textContent = 'Activar mi cuenta'
+    mostrarAlertaEnPaso('invite', v.error)
+    return
+  }
 
+  // 2. Seteamos la contrasena
+  const { error } = await supabase.auth.updateUser({ password: p1 })
   if (error) {
     btn.disabled = false
     btn.textContent = 'Activar mi cuenta'
@@ -522,17 +591,17 @@ window.guardarPasswordInvite = async function() {
     return
   }
 
-  // Vinculamos la cuenta al padron (idempotente)
+  // 3. Vinculamos la cuenta al padron (idempotente)
   try { await supabase.rpc('vincular_mi_cuenta') } catch (e) {}
 
-  // Mostramos confirmacion y redirigimos a Mi Espacio
+  // 4. Confirmacion + redirect
   document.getElementById('success-title').textContent = '¡Cuenta activada!'
   document.getElementById('success-msg').textContent = 'Te llevamos a tu espacio personal...'
   mostrarPaso('step-success')
   setTimeout(() => { window.location.href = 'mi_espacio.html' }, 1400)
 }
 
-// RECOVERY: el alumno setea una contrasena nueva (olvido la anterior)
+// --- RECOVERY: el alumno setea una contrasena nueva ---
 window.guardarPasswordRecovery = async function() {
   const p1 = document.getElementById('pass1-rec').value
   const p2 = document.getElementById('pass2-rec').value
@@ -542,8 +611,17 @@ window.guardarPasswordRecovery = async function() {
   btn.disabled = true
   btn.innerHTML = '<span class="spinner"></span>Guardando...'
 
-  const { error } = await supabase.auth.updateUser({ password: p1 })
+  // 1. Verificamos token PKCE
+  const v = await verifyPkceToken()
+  if (!v.ok) {
+    btn.disabled = false
+    btn.textContent = 'Guardar y entrar'
+    mostrarAlertaEnPaso('recovery', v.error)
+    return
+  }
 
+  // 2. Seteamos la contrasena nueva
+  const { error } = await supabase.auth.updateUser({ password: p1 })
   if (error) {
     btn.disabled = false
     btn.textContent = 'Guardar y entrar'
@@ -551,16 +629,42 @@ window.guardarPasswordRecovery = async function() {
     return
   }
 
-  // Cerramos esta sesion (forzamos a que entre con la nueva contrasena para confirmar que la recuerda)
+  // 3. Cerramos la sesion (forzamos re-login con la nueva clave)
   try { await supabase.auth.signOut() } catch (e) {}
 
+  // 4. Confirmacion + redirect a login
   document.getElementById('success-title').textContent = '¡Contrasena cambiada!'
   document.getElementById('success-msg').textContent = 'Ahora inicia sesion con la nueva...'
   mostrarPaso('step-success')
   setTimeout(() => { window.location.href = 'login.html?reset=ok' }, 1400)
 }
 
-// Enter en cualquier input dispara el boton correspondiente
+// --- SIGNUP CONFIRM: alumno se registro solo y viene del mail "Confirmá tu cuenta" ---
+window.confirmarSignup = async function() {
+  const btn = document.getElementById('btn-signup-confirm')
+  btn.disabled = true
+  btn.innerHTML = '<span class="spinner"></span>Confirmando...'
+
+  // 1. Verify (consume el token y crea la sesion)
+  const v = await verifyPkceToken()
+  if (!v.ok) {
+    btn.disabled = false
+    btn.textContent = 'Confirmar mi mail'
+    mostrarAlertaEnPaso('signup-confirm', v.error)
+    return
+  }
+
+  // 2. Vinculamos al padron
+  try { await supabase.rpc('vincular_mi_cuenta') } catch (e) {}
+
+  // 3. Confirmacion + redirect a Mi Espacio
+  document.getElementById('success-title').textContent = '¡Mail confirmado!'
+  document.getElementById('success-msg').textContent = 'Te llevamos a tu espacio personal...'
+  mostrarPaso('step-success')
+  setTimeout(() => { window.location.href = 'mi_espacio.html' }, 1400)
+}
+
+// Enter en los inputs dispara el boton correspondiente
 document.querySelectorAll('input').forEach(input => {
   input.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
