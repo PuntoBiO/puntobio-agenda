@@ -3749,6 +3749,18 @@ let justifDia = '', justifHora = '', justifServicio = '', justifId = '', justifN
 let justifSeleccion = '';
 
 // === REGLA: solo se puede JUSTIFICAR (o cambiar de área) hasta 2 horas antes del turno ===
+// Excepción: las ADMIN pueden forzar la justificación fuera de plazo (con confirmación).
+// Quienes pueden saltarse la ventana de 2 horas (admin generales + administrativas):
+const EMAILS_JUSTIF_FORZADA = [
+  'liclucianavelaz@gmail.com',     // Lu
+  'jimenahllorente@gmail.com',     // Jime
+  'PEGAR_EMAIL_PAU@gmail.com',     // Pau   ← REEMPLAZAR
+  'PEGAR_EMAIL_ALE@gmail.com'      // Ale   ← REEMPLAZAR
+];
+function puedeJustificarFueraDePlazo() {
+  const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
+  return EMAILS_JUSTIF_FORZADA.includes(e);
+}
 // Devuelve los milisegundos que faltan para el inicio del turno (negativo si ya empezó).
 // La fecha la sacamos del día activo de la agenda; la hora del turno viene "HH:MM".
 function msHastaTurno(dia, hora) {
@@ -3824,17 +3836,33 @@ async function confirmarJustif() {
   // === REGLA 2 HORAS: justificar o cambiar de área solo hasta 2 hs antes del turno.
   // Si ya pasó la ventana, la falta NO se puede justificar (ni el alumno ni el equipo):
   // la clase se pierde y no genera recuperatorio. Solo se permite "No justificada".
+  // EXCEPCIÓN: las admin (Lu, Jime, Pau, Ale) pueden FORZAR la justificación
+  // fuera de plazo, con una confirmación explícita. Queda registrado en el motivo.
+  let justifForzada = false;
   if ((justifSeleccion === 'si' || justifSeleccion === 'cambio')
       && fueraDeVentanaJustif(justifDia, justifHora)) {
-    alert(
-      '⏰ FUERA DE TIEMPO PARA JUSTIFICAR\n\n' +
-      `${t.servicio} · ${t.hora} · ${t.dia}\n\n` +
-      'La justificación solo se puede hacer hasta 2 horas antes del turno.\n' +
-      'Como ya pasó ese plazo, esta falta NO se puede justificar y la clase se pierde ' +
-      '(no genera recuperatorio).\n\n' +
-      'Si igual querés dejar registrado que faltó, marcala como "No justificada".'
-    );
-    return;
+    if (puedeJustificarFueraDePlazo()) {
+      const ok = confirm(
+        '⏰ FUERA DE PLAZO (más de 2 hs después del turno)\n\n' +
+        `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+        `Alumno: ${justifNombreAlumno}\n\n` +
+        'Normalmente esta falta NO se podría justificar.\n' +
+        'Como sos admin, podés forzarla igual.\n\n' +
+        '¿Justificar igual? (quedará registrado como justificación forzada)'
+      );
+      if (!ok) return;
+      justifForzada = true;
+    } else {
+      alert(
+        '⏰ FUERA DE TIEMPO PARA JUSTIFICAR\n\n' +
+        `${t.servicio} · ${t.hora} · ${t.dia}\n\n` +
+        'La justificación solo se puede hacer hasta 2 horas antes del turno.\n' +
+        'Como ya pasó ese plazo, esta falta NO se puede justificar y la clase se pierde ' +
+        '(no genera recuperatorio).\n\n' +
+        'Si igual querés dejar registrado que faltó, marcala como "No justificada".'
+      );
+      return;
+    }
   }
 
   // === CAMBIO DE ÁREA: ausente justificada acá + agregado en el destino (sin gastar recuperatorio) ===
@@ -3850,7 +3878,11 @@ async function confirmarJustif() {
     document.getElementById('justif-overlay').classList.remove('activo');
     try {
       // 1) Marcar ausente justificada en el turno original, con motivo claro
-      const motivoCambio = `Cambio de área → ${destino.servicio} ${destino.hora}`;
+      let motivoCambio = `Cambio de área → ${destino.servicio} ${destino.hora}`;
+      if (justifForzada) {
+        const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || 'admin';
+        motivoCambio = `[Justif. forzada fuera de plazo por ${quien}] ${motivoCambio}`;
+      }
       await guardarAsistencia(t, justifId, 'ausente-justificada', motivoCambio);
       // 2) Anotar en el turno destino como 'cambio_area' (NO recuperatorio → no gasta cupo)
       const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
@@ -3873,8 +3905,14 @@ async function confirmarJustif() {
   }
 
   // === Ausencia normal (justificada / no justificada) ===
-  const motivo = document.getElementById('justif-motivo').value.trim();
+  let motivo = document.getElementById('justif-motivo').value.trim();
   const estado = justifSeleccion === 'si' ? 'ausente-justificada' : 'ausente';
+  // Si fue una justificación FORZADA fuera de plazo por admin, lo dejamos asentado en el motivo
+  if (justifForzada) {
+    const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || 'admin';
+    const sello = `[Justif. forzada fuera de plazo por ${quien}]`;
+    motivo = motivo ? `${sello} ${motivo}` : sello;
+  }
   document.getElementById('justif-overlay').classList.remove('activo');
   guardarAsistencia(t, justifId, estado, motivo).then(() => {
     renderModalBody(justifDia, justifHora, justifServicio);
