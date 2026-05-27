@@ -3760,13 +3760,15 @@ function recargarPorRealtime() {
     cargarDatos();
   }, 1200);
 }
-function iniciarRealtime() {
+async function iniciarRealtime() {
   if (!sbCliente || realtimeCanal) return;  // ya iniciado o sin cliente
   try {
-    // Que Realtime escuche con el token del usuario logueado (respeta RLS)
+    // IMPORTANTE: con RLS prendido, Realtime debe ir AUTENTICADO con el token del
+    // usuario logueado (postgres_changes respeta las RLS de las tablas que escucha).
+    // Sin token, RLS filtra los cambios y no llega nada.
     const token = obtenerToken();
     if (token && sbCliente.realtime && sbCliente.realtime.setAuth) {
-      sbCliente.realtime.setAuth(token);
+      await sbCliente.realtime.setAuth(token);
     }
     realtimeCanal = sbCliente
       .channel('agenda-tf-vivo')
@@ -3774,9 +3776,17 @@ function iniciarRealtime() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_agregados' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_alumnos' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clases_cerradas' }, recargarPorRealtime)
-      .subscribe();
+      .subscribe((status, err) => {
+        // Log de estado para diagnosticar en la consola del navegador
+        console.log('[REALTIME] estado del canal:', status, err || '');
+        if (status === 'SUBSCRIBED') {
+          console.log('[REALTIME] ✅ conectado: la agenda escucha cambios en vivo');
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn('[REALTIME] ⚠️ no se pudo conectar el canal:', status, err || '');
+        }
+      });
   } catch (e) {
-    console.warn('No se pudo iniciar el tiempo real', e);
+    console.warn('[REALTIME] No se pudo iniciar el tiempo real', e);
   }
 }
 
