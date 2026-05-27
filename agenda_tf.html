@@ -355,7 +355,7 @@
   .btn-presente:hover, .btn-presente.activo { background: #16a34a; color: white; }
   .btn-ausente { background: #fee2e2; color: #991b1b; }
   .btn-ausente:hover, .btn-ausente.activo { background: #dc2626; color: white; }
-  .alumno-acciones { display: flex; gap: 5px; align-items: center; }
+  .alumno-acciones { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   .alumno-item { cursor: default; }
   .resumen-asistencia {
     display: flex; gap: 12px; margin-bottom: 16px;
@@ -1619,6 +1619,12 @@ function puedeAutorizarSobrecupo() {
 function puedeBorrarAlumno() {
   const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
   return EMAILS_ADMIN.includes(e);
+}
+// ¿Quién puede BORRAR una evolución cargada? (SOLO Lu)
+const EMAILS_BORRAN_EVO = ['liclucianavelaz@gmail.com'];
+function puedeBorrarEvolucion() {
+  const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
+  return EMAILS_BORRAN_EVO.includes(e);
 }
 
 // Cache de módulos y notas predeterminadas
@@ -3095,10 +3101,11 @@ window.evoSetDolor = (v) => {
   document.getElementById('evo-dolor-no')?.classList.toggle('sel', !v);
 };
 
-// Guarda la evolución de UN alumno (insert o update)
+// Guarda la evolución de UN alumno. Si ya existe una para ESE turno+fecha+persona,
+// la SOBREESCRIBE (update). Así, si alguien se equivocó y vuelve a cargar el mismo
+// día/turno/horario, pisa la anterior en vez de duplicar.
 async function guardarEvolucionAlumno(t, personaId, datos) {
   const fecha = fechaRealDiaActivo();
-  const existente = EVO_TURNO[String(personaId)];
   const fila = {
     turno_id: t.id,
     persona_id: parseInt(personaId),
@@ -3112,7 +3119,18 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
     observacion: datos.observacion || null,
     score: scoreDesdeCarita(datos.como_se_sintio)
   };
+  // 1) ¿Ya existe en cache local?
+  let existente = EVO_TURNO[String(personaId)];
+  // 2) Verificación directa en la base (por si la cache no estaba al día) → nunca duplica
+  if (!existente) {
+    try {
+      const previas = await supabaseQuery('evoluciones_tf',
+        `?select=id&turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}&limit=1`);
+      if (previas && previas.length) existente = previas[0];
+    } catch (e) { console.warn('No se pudo verificar evolución previa', e); }
+  }
   if (existente) {
+    // SOBREESCRIBE la existente
     fila.editado_en = new Date().toISOString();
     fila.editado_por_nombre = USUARIO_ACTUAL?.nombre || null;
     fila.editado_por_email = USUARIO_ACTUAL?.email || null;
@@ -3122,9 +3140,9 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
     fila.autor_nombre = USUARIO_ACTUAL?.nombre || null;
     fila.autor_email = USUARIO_ACTUAL?.email || null;
     await supabaseInsert('evoluciones_tf', fila);
-    // Marcar en la grilla que este alumno ya tiene evolución (turno+fecha+persona)
-    EVO_ALUMNO[`${t.id}-${fecha}-${personaId}`] = true;
   }
+  // Marcar en la grilla que este alumno ya tiene evolución (turno+fecha+persona)
+  EVO_ALUMNO[`${t.id}-${fecha}-${personaId}`] = true;
   // Marcar presente automáticamente si estaba sin marcar (cargó evolución = vino)
   const key = `${t.dia}-${t.hora}-${t.servicio}-${personaId}`;
   if ((asistenciaEstados[key] || 'reservado') === 'reservado') {
@@ -3132,7 +3150,30 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   }
 }
 
-// Abrir el panel de evolución individual de un alumno (precargado si ya tiene)
+// BORRAR la evolución de hoy de un alumno. SOLO Lu. Borra de la base la fila
+// de ESTE turno+fecha+persona, limpia la cache y refresca el modal y la agenda.
+window.borrarEvolucion = async (personaId, nombre) => {
+  if (!puedeBorrarEvolucion()) { toast('Solo Lu puede borrar evoluciones', 'error'); return; }
+  const t = evoTurnoActual;
+  if (!t) { toast('No se pudo identificar el turno', 'error'); return; }
+  const fecha = fechaRealDiaActivo();
+  if (!confirm(`¿Borrar la evolución de hoy de ${nombre || 'este alumno'}?\n\n${t.servicio} · ${t.hora} · ${t.dia}\n\nEsta acción no se puede deshacer.`)) return;
+  try {
+    await supabaseDelete('evoluciones_tf',
+      `turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}`);
+    // Limpiar cache: la del modal y la de la grilla
+    delete EVO_TURNO[String(personaId)];
+    delete EVO_ALUMNO[`${t.id}-${fecha}-${personaId}`];
+    toast('🗑️ Evolución borrada');
+    // Refrescar el modal y, atrás, la agenda (para que el badge se actualice)
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos();
+    if (vistaActual === 'semana') renderVistaSemana();
+  } catch (e) {
+    toast('No se pudo borrar la evolución: ' + e.message, 'error');
+  }
+};
+
 window.abrirEvoIndividual = (personaId) => {
   const ev = EVO_TURNO[String(personaId)];
   // Cargar al panel los datos del alumno (o vacío) y seleccionarlo solo a él
@@ -3227,6 +3268,12 @@ function renderModalBody(dia, hora, servicio) {
             : `<button class="btn-asistencia" style="background:#fef2f2;color:#dc2626;border-color:#fecaca;"
                 onclick="quitarFijo(${a.id},'${(a.nombre||'').replace(/'/g,'')}','${dia}','${hora}','${servicio}')"
                 title="Sacar a este alumno del turno (fijo)">🗑️</button>`;
+          // Botón BORRAR EVOLUCIÓN: SOLO Lu, y solo si el alumno tiene evolución cargada.
+          const btnBorrarEvo = (tieneEvo && puedeBorrarEvolucion())
+            ? `<button class="btn-asistencia" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa;"
+                onclick="borrarEvolucion(${a.id},'${(a.nombre||'').replace(/'/g,'')}')"
+                title="Borrar la evolución de hoy (solo Lu)">🗑️📝</button>`
+            : '';
           return `
           <div class="alumno-item" style="background:${est==='presente'?'#f0fdf4':esAusente?'#fef2f2':'transparent'}">
             <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
@@ -3248,6 +3295,7 @@ function renderModalBody(dia, hora, servicio) {
               <button class="btn-asistencia ${tieneEvo?'evo-hecha':''}" style="${tieneEvo?'background:#16a34a;color:white;border-color:#16a34a;':'background:#f0f9ff;color:#1e9fe0;border-color:#b8dcf0;'}"
                 onclick="abrirEvoIndividual(${a.id})"
                 title="${tieneEvo?'Ver / editar evolución':'Cargar evolución'}">📝</button>
+              ${btnBorrarEvo}
               <button class="btn-asistencia" style="background:#f5f3ff;color:#7c3aed;border-color:#ddd6fe;"
                 onclick="abrirHistorico(${a.id}, '${(a.nombre||'').replace(/'/g,'')}')"
                 title="Ver histórico de evoluciones">📊</button>
