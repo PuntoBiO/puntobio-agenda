@@ -723,8 +723,10 @@
   <div class="header-right">
     <div class="semana-nav">
       <button onclick="cambiarSemana(-1)">&#8592;</button>
-      <span class="semana-label" id="semana-label">Cargando...</span>
+      <span class="semana-label" id="semana-label" onclick="abrirCalendarioSemana()" title="Clic para saltar a una fecha" style="cursor:pointer">Cargando...</span>
       <button onclick="cambiarSemana(1)">&#8594;</button>
+      <button onclick="volverAHoy()" title="Volver a la semana actual" style="margin-left:6px;font-size:12px;font-weight:600;padding:4px 10px">Hoy</button>
+      <input type="date" id="semana-datepicker" onchange="irASemanaDeFecha(this.value)" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none">
     </div>
     <div class="user-box" id="user-box" style="display:none">
       <div class="user-avatar" id="user-avatar">··</div>
@@ -1246,7 +1248,18 @@ function actualizarSemanaLabel() {
   const lunes = getLunes(offsetSemana);
   const viernes = new Date(lunes);
   viernes.setDate(lunes.getDate() + 4);
-  document.getElementById('semana-label').textContent = formatFecha(lunes) + ' — ' + formatFecha(viernes);
+  const lbl = document.getElementById('semana-label');
+  lbl.textContent = formatFecha(lunes) + ' — ' + formatFecha(viernes);
+  // Aviso visual: si NO estás en la semana actual, el rango se pinta para que se note
+  if (offsetSemana !== 0) {
+    lbl.style.color = '#f59e0b';
+    lbl.style.fontWeight = '700';
+    lbl.title = 'No estás en la semana actual · clic para saltar a una fecha';
+  } else {
+    lbl.style.color = '';
+    lbl.style.fontWeight = '';
+    lbl.title = 'Clic para saltar a una fecha';
+  }
 }
 async function cambiarSemana(delta) {
   offsetSemana += delta;
@@ -1255,6 +1268,47 @@ async function cambiarSemana(delta) {
   if (vistaActual === 'semana') renderVistaSemana();
   else { renderDiasTabs(); renderTurnos(); }
 }
+
+// Abre el calendario nativo para saltar a cualquier fecha
+window.abrirCalendarioSemana = () => {
+  const inp = document.getElementById('semana-datepicker');
+  if (!inp) return;
+  // Arranca posicionado en el lunes de la semana que se está viendo
+  const lunes = getLunes(offsetSemana);
+  inp.value = `${lunes.getFullYear()}-${String(lunes.getMonth()+1).padStart(2,'0')}-${String(lunes.getDate()).padStart(2,'0')}`;
+  if (inp.showPicker) inp.showPicker();   // navegadores modernos
+  else { inp.style.pointerEvents = 'auto'; inp.focus(); inp.click(); }
+};
+
+// Salta a la semana que contiene la fecha elegida en el calendario
+window.irASemanaDeFecha = async (fechaIso) => {
+  if (!fechaIso) return;
+  const [y, m, d] = fechaIso.split('-').map(n => parseInt(n, 10));
+  const elegida = new Date(y, m - 1, d);
+  // Lunes de la semana elegida
+  const diaSem = elegida.getDay();
+  const diff = diaSem === 0 ? -6 : 1 - diaSem;
+  const lunesElegido = new Date(elegida);
+  lunesElegido.setDate(elegida.getDate() + diff);
+  lunesElegido.setHours(0,0,0,0);
+  // Lunes de esta semana (offset 0)
+  const lunesHoy = getLunes(0);
+  // Cuántas semanas de diferencia
+  offsetSemana = Math.round((lunesElegido - lunesHoy) / (7 * 86400000));
+  actualizarSemanaLabel();
+  await cargarDatos();
+  if (vistaActual === 'semana') renderVistaSemana();
+  else { renderDiasTabs(); renderTurnos(); }
+};
+
+// Vuelve a la semana actual
+window.volverAHoy = async () => {
+  offsetSemana = 0;
+  actualizarSemanaLabel();
+  await cargarDatos();
+  if (vistaActual === 'semana') renderVistaSemana();
+  else { renderDiasTabs(); renderTurnos(); }
+};
 function renderDiasTabs() {
   const lunes = getLunes(offsetSemana);
   const container = document.getElementById('dias-tabs');
@@ -3362,7 +3416,14 @@ function renderModalBody(dia, hora, servicio) {
   const ausentes = ausentesJust + ausentesSinJust;
   const pendientes = alumnos.length - presentes - ausentes;
   document.getElementById('modal-titulo').textContent = `${servicio} · ${hora}`;
-  document.getElementById('modal-subtitulo').textContent = dia;
+  // Subtítulo con la fecha real del día (ej: "Martes 9/6"), para no confundirse de semana
+  const fechaModalIso = fechaDelDia(dia);
+  let subtituloModal = dia;
+  if (fechaModalIso) {
+    const _p = fechaModalIso.split('-');
+    subtituloModal = `${dia} ${parseInt(_p[2],10)}/${parseInt(_p[1],10)}`;
+  }
+  document.getElementById('modal-subtitulo').textContent = subtituloModal;
   document.getElementById('modal-body').innerHTML = `
     <div class="modal-chips">
       <span class="turno-tipo ${tipoClass}">${iconoServicio} ${servicio}</span>
