@@ -833,13 +833,12 @@ const calcAntiguedad = (fechaAlta) => {
 // Devuelve el código de plan que corresponde a un pago, para mostrarlo en la lista.
 // Los pagos nuevos guardan el plan en observaciones como "[Plan: XXX]".
 // Los pagos viejos (sin ese dato) muestran el plan ACTUAL de la inscripción con * (vigente).
-function planDePago(pg, insc) {
+// Devuelve el código de plan guardado en el pago [Plan: XXX], o null si no se guardó (pagos viejos).
+// No se deduce por monto: si no está guardado, no inventamos.
+function planDePago(pg) {
   const obs = pg && pg.observaciones ? pg.observaciones : '';
   const m = obs.match(/\[Plan:\s*([^\]]+)\]/);
-  if (m) return m[1].trim();
-  // Sin plan guardado en el pago → usar el plan actual de la inscripción
-  if (insc && insc.plan) return insc.plan + ' *';
-  return 'plan —';
+  return m ? m[1].trim() : null;
 }
 const toast = (msg, esError=false) => {
   const t = $('#toast');
@@ -1219,15 +1218,31 @@ function renderResumenAlumno(f) {
   const esBonif = f.estadoTF === 'TF_BONIF';
   const esBaja = f.estadoTF === 'TF_BAJA';
 
+  // ¿Hay un cambio de plan PROGRAMADO a futuro? (mes_aplica_plan posterior al mes actual)
+  const hayCambioFuturo = !!(i.plan_futuro && i.mes_aplica_plan && String(i.mes_aplica_plan) > MES_ACTUAL);
+
+  // Plan VIGENTE hoy: el código guardado en el último pago tiene prioridad sobre i.plan,
+  // porque i.plan puede haber quedado "adelantado" al plan futuro por un cambio mal hecho.
+  let planVigente = i.plan;
+  const pagoConPlan = pagosIns.slice().sort((a,b) => (b.fecha||'').localeCompare(a.fecha||'')).find(pg => planDePago(pg));
+  if (pagoConPlan) planVigente = planDePago(pagoConPlan);
+  else if (hayCambioFuturo && i.plan === i.plan_futuro) {
+    // Caso Betiana: el plan quedó igual al futuro pero el cambio es a futuro → el vigente es otro.
+    // No tenemos dato del anterior; mostramos i.plan pero avisamos.
+    planVigente = i.plan;
+  }
+  const tarVig = tarifario[planVigente] || {};
+  const cuotaVig = tarVig.valor_lista || f.cuota || 0;
+
   let estadoChip;
   if (esBaja) estadoChip = `<span style="background:#fee2e2;color:#dc2626;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">❌ De baja</span>`;
   else if (esBonif) estadoChip = `<span style="background:#ede9fe;color:#6d28d9;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">💜 Bonificado</span>`;
   else if (pagoMesActual) estadoChip = `<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">✅ Al día</span>`;
   else estadoChip = `<span style="background:#fee2e2;color:#dc2626;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">⚠️ Debe ${nombreMes(MES_ACTUAL)}</span>`;
 
-  // Cambio de plan programado (si hay)
-  const cambioChip = (i.plan_futuro && i.mes_aplica_plan)
-    ? `<span style="background:#dbeafe;color:#1e40af;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">🔄 ${i.plan}→${i.plan_futuro} desde ${nombreMes(i.mes_aplica_plan)}</span>`
+  // Chip del cambio programado a futuro
+  const cambioChip = hayCambioFuturo
+    ? `<span style="background:#dbeafe;color:#1e40af;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:600;">🔄 Pasa a ${i.plan_futuro} desde ${nombreMes(i.mes_aplica_plan)}</span>`
     : '';
 
   const tel = p.celular || p.telefono || '—';
@@ -1242,7 +1257,7 @@ function renderResumenAlumno(f) {
         ${cambioChip}
       </div>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; font-size:13px;">
-        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Plan actual</div><div style="font-weight:600; font-size:15px;">${i.plan} · ${fmt$(f.cuota)}</div></div>
+        <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Plan vigente</div><div style="font-weight:600; font-size:15px;">${planVigente} · ${fmt$(cuotaVig)}</div></div>
         <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Día vencimiento</div><div style="font-weight:600;">Día ${i.dia_vencimiento || '—'}</div></div>
         <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Celular</div><div style="font-weight:600;">${telLink}</div></div>
         <div><div style="color:var(--text-dim); font-size:11px; text-transform:uppercase;">Contacto urgencia</div><div style="font-weight:600;">${urg}</div></div>
@@ -1250,52 +1265,77 @@ function renderResumenAlumno(f) {
     </div>`;
 }
 
-// ===== BLOQUE 2: HISTORIAL DE PLANES CON SUS COBROS =====
-// Agrupa los pagos por el plan al que pertenecen. El plan actual va arriba.
+// ===== BLOQUE 2: PLANES Y COBROS =====
+// Agrupa los pagos por el código de plan guardado en cada uno.
+// Los pagos viejos (sin código) van a una caja aparte "sin plan registrado".
+// El plan programado a futuro se muestra como tal, sin pagos.
 function renderPlanesYCobros(f) {
   const i = f.inscripcion;
   if (!i) return '';
   const pagos = (pagosPorInsc[i.id] || []).slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
 
-  // Agrupar pagos por plan (leído de la observación; los viejos sin plan van al plan actual con *)
-  const grupos = {};        // plan -> [pagos]
-  const ordenPlanes = [];   // para mantener orden de aparición
+  // Agrupar por código de plan guardado. Los que no lo tienen van a '__SIN__'.
+  const grupos = {};
+  const orden = [];
   pagos.forEach(pg => {
-    const m = (pg.observaciones || '').match(/\[Plan:\s*([^\]]+)\]/);
-    const plan = m ? m[1].trim() : (i.plan + ' *');
-    if (!grupos[plan]) { grupos[plan] = []; ordenPlanes.push(plan); }
+    const plan = planDePago(pg) || '__SIN__';
+    if (!grupos[plan]) { grupos[plan] = []; orden.push(plan); }
     grupos[plan].push(pg);
   });
-
-  // Asegurar que el plan actual aparezca primero aunque no tenga pagos todavía
-  const planActualKey = ordenPlanes.find(pl => pl.replace(' *','') === i.plan) || i.plan;
-  const ordenFinal = [planActualKey, ...ordenPlanes.filter(pl => pl !== planActualKey)];
+  // Que '__SIN__' quede siempre al final
+  const ordenFinal = orden.filter(k => k !== '__SIN__').concat(orden.includes('__SIN__') ? ['__SIN__'] : []);
 
   let html = `<div class="section-title">🔄 Planes y cobros</div>`;
 
+  // Caja del plan PROGRAMADO a futuro (si lo hay y todavía no llegó)
+  if (i.plan_futuro && i.mes_aplica_plan && String(i.mes_aplica_plan) > MES_ACTUAL) {
+    const tarF = tarifario[i.plan_futuro] || {};
+    html += `
+      <div style="margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#eff6ff; border:1px dashed var(--azul); border-radius:8px; padding:10px 14px;">
+          <div style="font-weight:700;">${i.plan_futuro} <span style="background:var(--azul);color:#fff;border-radius:5px;padding:1px 7px;font-size:11px;margin-left:4px;">PROGRAMADO</span></div>
+          <div style="font-size:12px; color:var(--azul);">Arranca ${nombreMes(i.mes_aplica_plan)} · ${fmt$(tarF.valor_lista||0)}</div>
+        </div>
+      </div>`;
+  }
+
   ordenFinal.forEach((plan, idx) => {
     const lista = grupos[plan] || [];
-    const esActual = plan.replace(' *','') === i.plan && idx === 0;
     const total = lista.reduce((s, pg) => s + (Number(pg.importe) || 0), 0);
+    const esSinPlan = plan === '__SIN__';
+    const tarPlan = !esSinPlan ? (tarifario[plan] || {}) : {};
+    const valorLista = tarPlan.valor_lista || 0;
+    const titulo = esSinPlan
+      ? `Cobros anteriores <span style="font-weight:400; color:var(--text-dim); font-size:12px;">(sin plan registrado)</span>`
+      : `${plan}`;
+    const esActual = !esSinPlan && idx === 0;
+
     const cabecera = `
       <div style="display:flex; justify-content:space-between; align-items:center; background:${esActual ? '#eff6ff' : 'var(--bg-soft,#f8fafc)'}; border:1px solid ${esActual ? 'var(--azul)' : 'var(--border)'}; border-radius:8px 8px ${lista.length?'0 0':'8px 8px'}; padding:10px 14px;">
-        <div style="font-weight:700;">${plan} ${esActual ? '<span style="background:var(--azul);color:#fff;border-radius:5px;padding:1px 7px;font-size:11px;margin-left:4px;">ACTUAL</span>' : ''}</div>
+        <div style="font-weight:700;">${titulo} ${esActual ? '<span style="background:#dcfce7;color:#166534;border-radius:5px;padding:1px 7px;font-size:11px;margin-left:4px;">ÚLTIMO COBRADO</span>' : ''}</div>
         <div style="font-size:12px; color:var(--text-dim);">${lista.length} cobro(s) · ${fmt$(total)}</div>
       </div>`;
+
     let filas = '';
     if (lista.length) {
       filas = '<div style="border:1px solid var(--border); border-top:none; border-radius:0 0 8px 8px; overflow:hidden;">' +
-        lista.map(pg => `
+        lista.map(pg => {
+          const imp = Number(pg.importe) || 0;
+          // ¿Hubo descuento? Solo lo marcamos para planes seguros (no en la caja de viejos)
+          const conDesc = (!esSinPlan && valorLista > 0 && imp > 0 && imp < valorLista && pg.tipo_cobro === 'NORMAL');
+          const descTxt = conDesc ? ` · 🏷️ con descuento (lista ${fmt$(valorLista)})` : '';
+          return `
           <div style="display:flex; justify-content:space-between; align-items:center; padding:9px 14px; border-top:1px solid var(--border);">
             <div>
               <div style="font-size:13px;">${fmtFechaArg(pg.fecha)} · ${pg.medio || '—'}</div>
-              <div style="font-size:11px; color:var(--text-dim);">Imputado: ${pg.mes_imputado || '—'}${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? ' · ' + pg.tipo_cobro : ''}</div>
+              <div style="font-size:11px; color:var(--text-dim);">Imputado: ${pg.mes_imputado || '—'}${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? ' · ' + pg.tipo_cobro : ''}${descTxt}</div>
             </div>
             <div style="display:flex; align-items:center; gap:10px;">
               <div style="font-weight:700; color:var(--verde,#166534);">${fmt$(pg.importe)}</div>
               <button class="btn-editar-pago" title="Editar monto y medio" onclick="abrirEditarPago('${pg.id}')">✏️</button>
             </div>
-          </div>`).join('') + '</div>';
+          </div>`;
+        }).join('') + '</div>';
     }
     html += `<div style="margin-bottom:12px;">${cabecera}${filas}</div>`;
   });
@@ -1303,8 +1343,8 @@ function renderPlanesYCobros(f) {
   if (!pagos.length) {
     html += `<div class="empty" style="padding:14px;">Sin cobros registrados todavía.</div>`;
   }
-  if (ordenFinal.some(pl => pl.includes('*'))) {
-    html += `<div style="font-size:11px; color:var(--text-dim); margin-top:-4px;">* Cobros cargados antes de que guardáramos el plan en cada pago — se muestran bajo el plan actual.</div>`;
+  if (grupos['__SIN__']) {
+    html += `<div style="font-size:11px; color:var(--text-dim); margin-top:-4px;">Los cobros anteriores no tienen el plan guardado. Los cobros nuevos sí registran su código de plan automáticamente.</div>`;
   }
   return html;
 }
