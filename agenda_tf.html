@@ -787,7 +787,14 @@
         <button class="justif-opcion" id="justif-si" onclick="seleccionarJustif('si')">✓ Sí, justificada</button>
         <button class="justif-opcion" id="justif-no" onclick="seleccionarJustif('no')">✗ No justificada</button>
       </div>
+      <button class="justif-opcion" id="justif-cambio" onclick="seleccionarJustif('cambio')" style="width:100%;margin-bottom:12px">🔄 Cambio de área (mismo día)</button>
       <textarea class="justif-motivo" id="justif-motivo" rows="3" placeholder="Motivo (opcional)..."></textarea>
+      <!-- Selector de turno destino (solo aparece en Cambio de área) -->
+      <div id="justif-destino-box" style="display:none;margin-top:4px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--texto)">¿A qué clase pasó ese día?</div>
+        <select id="justif-destino" style="width:100%;padding:10px 12px;border:1.5px solid var(--gris-borde);border-radius:9px;font-size:14px;font-family:inherit;background:#fff"></select>
+        <div style="font-size:12px;color:var(--texto-suave);margin-top:6px">Queda ausente justificada acá y se anota en la otra clase, solo por hoy. No gasta recuperatorio.</div>
+      </div>
     </div>
     <div class="justif-footer">
       <button class="btn-modal" onclick="cancelarJustif()">Cancelar</button>
@@ -3363,7 +3370,9 @@ function renderModalBody(dia, hora, servicio) {
               ? `<span class="chip-evo chip-evo-ok">✅ Evolucionado</span>`
               : `<span class="chip-evo chip-evo-falta">⏳ Falta evolución</span>`);
           const etiquetaAgregado = a.tipoAgregado
-            ? `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;${a.tipoAgregado==='recuperatorio'?'background:#fef3c7;color:#92400e':'background:#e0e7ff;color:#3730a3'}">${a.tipoAgregado==='recuperatorio'?'RECUPERATORIO':'SUELTO'}</span>`
+            ? (a.tipoAgregado === 'cambio_area'
+                ? `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;background:#cffafe;color:#155e75">🔄 CAMBIO DE ÁREA</span>`
+                : `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;${a.tipoAgregado==='recuperatorio'?'background:#fef3c7;color:#92400e':'background:#e0e7ff;color:#3730a3'}">${a.tipoAgregado==='recuperatorio'?'RECUPERATORIO':'SUELTO'}</span>`)
             : '';
           const btnQuitarAgregado = !puedeBorrarAlumno()
             ? ''
@@ -3609,34 +3618,86 @@ function abrirJustif(dia, hora, servicio, id, nombre) {
   document.getElementById('justif-nombre').textContent = nombre;
   document.getElementById('justif-si').className = 'justif-opcion';
   document.getElementById('justif-no').className = 'justif-opcion';
+  document.getElementById('justif-cambio').className = 'justif-opcion';
   document.getElementById('justif-motivo').value = '';
   document.getElementById('justif-motivo').className = 'justif-motivo';
+  document.getElementById('justif-destino-box').style.display = 'none';
   document.getElementById('justif-overlay').classList.add('activo');
 }
 function seleccionarJustif(opcion) {
   justifSeleccion = opcion;
   document.getElementById('justif-si').className = 'justif-opcion' + (opcion==='si'?' seleccionado-si':'');
   document.getElementById('justif-no').className = 'justif-opcion' + (opcion==='no'?' seleccionado-no':'');
-  document.getElementById('justif-motivo').className = 'justif-motivo visible';
+  document.getElementById('justif-cambio').className = 'justif-opcion' + (opcion==='cambio'?' seleccionado-si':'');
+  const esCambio = (opcion === 'cambio');
+  // En cambio de área mostramos el selector de destino y ocultamos el motivo libre
+  document.getElementById('justif-destino-box').style.display = esCambio ? 'block' : 'none';
+  document.getElementById('justif-motivo').className = 'justif-motivo' + (esCambio ? '' : ' visible');
+  if (esCambio) {
+    // Llenar el selector con los turnos del MISMO día, menos el turno actual
+    const sel = document.getElementById('justif-destino');
+    const otros = HORARIOS
+      .filter(t => t.dia === justifDia && !(t.hora === justifHora && t.servicio === justifServicio))
+      .sort((a,b) => (a.hora||'').localeCompare(b.hora||''));
+    sel.innerHTML = otros.length
+      ? otros.map(t => `<option value="${t.id}">${t.servicio} · ${t.hora}</option>`).join('')
+      : '<option value="">(no hay otras clases ese día)</option>';
+  }
 }
 function cancelarJustif() {
   document.getElementById('justif-overlay').classList.remove('activo');
 }
-function confirmarJustif() {
+async function confirmarJustif() {
   if (!justifSeleccion) {
     document.getElementById('justif-si').style.borderColor = 'var(--rojo)';
     return;
   }
   const t = HORARIOS.find(x=>x.dia===justifDia&&x.hora===justifHora&&x.servicio===justifServicio);
+  if (!t) { cancelarJustif(); return; }
+
+  // === CAMBIO DE ÁREA: ausente justificada acá + agregado en el destino (sin gastar recuperatorio) ===
+  if (justifSeleccion === 'cambio') {
+    const destId = parseInt(document.getElementById('justif-destino').value);
+    const destino = HORARIOS.find(x => x.id === destId);
+    if (!destino) { toast('Elegí a qué clase pasó ese día', 'error'); return; }
+    const fecha = fechaDelDia(justifDia);
+    // ¿Hay lugar en el destino? Mismo control de cupo que un agregado puntual (ausentes liberan).
+    if (!chequearCupo(destino, `lo pasás a ${destino.servicio} ${destino.hora}`, true, fecha)) {
+      return; // chequearCupo ya avisó (turno completo / no autorizado)
+    }
+    document.getElementById('justif-overlay').classList.remove('activo');
+    try {
+      // 1) Marcar ausente justificada en el turno original, con motivo claro
+      const motivoCambio = `Cambio de área → ${destino.servicio} ${destino.hora}`;
+      await guardarAsistencia(t, justifId, 'ausente-justificada', motivoCambio);
+      // 2) Anotar en el turno destino como 'cambio_area' (NO recuperatorio → no gasta cupo)
+      const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+      const filas = await supabaseInsertReturn('turno_agregados',
+        { turno_id: destino.id, persona_id: parseInt(justifId), fecha, tipo: 'cambio_area', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
+      const agId = (filas && filas[0]) ? filas[0].id : null;
+      const key = `${destino.id}-${fecha}`;
+      if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
+      AGREGADOS_POR_TURNO[key].push({ id: String(justifId), nombre: justifNombreAlumno, tipo: 'cambio_area', agregadoId: agId });
+      toast(`${justifNombreAlumno}: cambio de área a ${destino.servicio} ${destino.hora}`, 'ok');
+      renderModalBody(justifDia, justifHora, justifServicio);
+      renderTurnos();
+    } catch (e) {
+      const msg = /duplicate|unique/i.test(e.message || '')
+        ? 'Ese alumno ya está anotado en la clase destino ese día.'
+        : e.message;
+      toast(`No se pudo hacer el cambio de área: ${msg}`, 'error');
+    }
+    return;
+  }
+
+  // === Ausencia normal (justificada / no justificada) ===
   const motivo = document.getElementById('justif-motivo').value.trim();
   const estado = justifSeleccion === 'si' ? 'ausente-justificada' : 'ausente';
   document.getElementById('justif-overlay').classList.remove('activo');
-  if (t) {
-    guardarAsistencia(t, justifId, estado, motivo).then(() => {
-      renderModalBody(justifDia, justifHora, justifServicio);
-      renderTurnos();
-    });
-  }
+  guardarAsistencia(t, justifId, estado, motivo).then(() => {
+    renderModalBody(justifDia, justifHora, justifServicio);
+    renderTurnos();
+  });
 }
 // =============================================
 // AUTENTICACIÓN
