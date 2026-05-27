@@ -2350,7 +2350,29 @@ window.buscarPersonaAgregar = (texto) => {
         cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:10px 4px">No se encontró nadie con ese nombre.</div>';
         return;
       }
-      cont.innerHTML = PERSONAS_CACHE_AGREGAR.map(p => `
+      // === PLAN TF de cada persona encontrada ===
+      // Mismo criterio que Administración TF: tiene plan si su inscripción está
+      // en estado ACTIVO o BONIFICADO. Sirve para distinguir duplicados:
+      // el que tiene plan vigente es el registro "bueno", el otro es el fantasma.
+      const planPorPersona = {};   // { personaId: 'COD3' | 'BONIF' }
+      try {
+        const ids = PERSONAS_CACHE_AGREGAR.map(p => p.id).join(',');
+        const insc = await supabaseQuery('inscripciones_tf',
+          `?select=persona_id,plan,estado&persona_id=in.(${ids})&estado=in.(ACTIVO,BONIFICADO)`);
+        (insc || []).forEach(i => {
+          // Si por algún motivo hay más de una, nos quedamos con la primera ACTIVO/BONIFICADO
+          if (!planPorPersona[i.persona_id]) {
+            planPorPersona[i.persona_id] = (i.estado === 'BONIFICADO') ? 'BONIF' : (i.plan || 'ACTIVO');
+          }
+        });
+      } catch (ePlan) { console.warn('No se pudieron leer los planes TF', ePlan); }
+
+      cont.innerHTML = PERSONAS_CACHE_AGREGAR.map(p => {
+        const plan = planPorPersona[p.id];
+        const badge = plan
+          ? `<span style="display:inline-block;background:#dcfce7;color:#166534;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap">🟢 Con plan${plan==='BONIF'?' · Bonif.':' · '+plan}</span>`
+          : `<span style="display:inline-block;background:#f1f5f9;color:#94a3b8;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap">⚪ Sin plan TF</span>`;
+        return `
         <div onclick="elegirPersonaAgregar(${p.id})"
           style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer"
           onmouseover="this.style.background='#f0f9ff'" onmouseout="this.style.background='transparent'">
@@ -2358,8 +2380,10 @@ window.buscarPersonaAgregar = (texto) => {
             <div style="font-weight:600;font-size:14px">${p.nombre}</div>
             <div style="font-size:11px;color:var(--texto-suave)">#${p.id}${p.dni?' · DNI '+p.dni:''}</div>
           </div>
+          ${badge}
           <span style="color:#1e9fe0;font-size:12px;font-weight:600">Elegir →</span>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     } catch (e) {
       cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:10px 4px">Error buscando: ${e.message}</div>`;
     }
