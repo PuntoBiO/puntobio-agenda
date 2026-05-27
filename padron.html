@@ -2999,9 +2999,43 @@ async function cargarUsuario() {
   }
 }
 
+// =============================================
+// TIEMPO REAL (Supabase Realtime)
+// Refresca el padrón solo cuando otra persona agrega/edita gente, pagos o inscripciones.
+// Como acá se EDITA mucho, NO recarga si hay un modal abierto (no interrumpe la edición).
+// =============================================
+let realtimeCanal = null;
+let realtimeTimer = null;
+function recargarPorRealtime() {
+  clearTimeout(realtimeTimer);
+  realtimeTimer = setTimeout(() => {
+    // No recargar si hay un modal abierto (clase .modal-backdrop.activo): estás editando.
+    const modalAbierto = document.querySelector('.modal-backdrop.activo');
+    if (modalAbierto) return;
+    cargarTodo();
+  }, 2000);  // 2s: un poco más largo porque acá se edita seguido
+}
+async function iniciarRealtime() {
+  if (!sb || realtimeCanal) return;
+  try {
+    realtimeCanal = sb
+      .channel('padron-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'personas' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inscripciones_tf' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pagos_tf' }, recargarPorRealtime)
+      .subscribe((status, err) => {
+        console.log('[REALTIME padron] estado:', status, err || '');
+        if (status === 'SUBSCRIBED') console.log('[REALTIME padron] ✅ conectado');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+          console.warn('[REALTIME padron] ⚠️ no conectó:', status, err || '');
+      });
+  } catch (e) { console.warn('[REALTIME padron] error al iniciar', e); }
+}
+
 (async () => {
   await cargarUsuario();
   await cargarTodo();
+  iniciarRealtime();
 })();
 </script>
 </body>

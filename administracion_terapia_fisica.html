@@ -3235,9 +3235,42 @@ async function cargarUsuario() {
   }
 }
 
+// =============================================
+// TIEMPO REAL (Supabase Realtime)
+// Refresca la lista sola cuando otra persona cambia personas, inscripciones o pagos.
+// NO recarga si hay un modal abierto (no interrumpe ediciones / cobros en curso).
+// =============================================
+let realtimeCanal = null;
+let realtimeTimer = null;
+function recargarPorRealtime() {
+  clearTimeout(realtimeTimer);
+  realtimeTimer = setTimeout(() => {
+    const modalAbierto = document.querySelector('.modal-backdrop.activo');
+    if (modalAbierto) return;  // estás editando/cobrando: no interrumpir
+    cargarTodo();
+  }, 2000);
+}
+async function iniciarRealtime() {
+  if (!sb || realtimeCanal) return;
+  try {
+    realtimeCanal = sb
+      .channel('admin-tf-vivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'personas' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inscripciones_tf' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pagos_tf' }, recargarPorRealtime)
+      .subscribe((status, err) => {
+        console.log('[REALTIME admin-tf] estado:', status, err || '');
+        if (status === 'SUBSCRIBED') console.log('[REALTIME admin-tf] ✅ conectado');
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+          console.warn('[REALTIME admin-tf] ⚠️ no conectó:', status, err || '');
+      });
+  } catch (e) { console.warn('[REALTIME admin-tf] error al iniciar', e); }
+}
+
 (async () => {
   await cargarUsuario();
   await cargarTodo();
+  iniciarRealtime();
 })();
 </script>
 </body>
