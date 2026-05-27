@@ -169,7 +169,34 @@
 
   .reveal{opacity:0;transform:translateY(10px);animation:rise .5s ease forwards}
   @keyframes rise{to{opacity:1;transform:translateY(0)}}
-  .d1{animation-delay:.05s}.d2{animation-delay:.12s}.d3{animation-delay:.19s}.d4{animation-delay:.26s}.d5{animation-delay:.33s}.d6{animation-delay:.40s}
+  .d1{animation-delay:.05s}.d2{animation-delay:.12s}.d2b{animation-delay:.16s}.d3{animation-delay:.19s}.d4{animation-delay:.26s}.d5{animation-delay:.33s}.d6{animation-delay:.40s}
+
+  /* ---------- Mis clases fijas + Avisar falta ---------- */
+  .clase-fija{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-radius:13px;border:1px solid var(--gris-borde);background:rgba(255,255,255,.025);margin-bottom:10px;flex-wrap:wrap}
+  .clase-fija:last-child{margin-bottom:0}
+  .clase-fija .cf-info{flex:1;min-width:160px}
+  .clase-fija .cf-dia{font-weight:600;font-size:14.5px}
+  .clase-fija .cf-sub{font-size:12.5px;color:var(--texto-tenue);margin-top:3px}
+  .btn-faltar{
+    background:transparent;border:1px solid var(--ambar);color:var(--ambar);
+    padding:8px 14px;border-radius:10px;font-size:12.5px;font-weight:600;cursor:pointer;
+    transition:.15s;white-space:nowrap;
+  }
+  .btn-faltar:hover{background:var(--ambar-soft)}
+  .btn-faltar:disabled{opacity:.5;cursor:not-allowed}
+  .falta-slot{width:100%}
+  .aviso-falta{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:11px 13px;border-radius:11px;background:var(--verde-soft);border:1px solid rgba(39,192,138,.3);
+    font-size:13px;color:var(--verde);margin-top:8px;flex-wrap:wrap;
+  }
+  .aviso-falta .cd{font-family:'DM Mono','Courier New',monospace;font-weight:700}
+  .aviso-falta .deshacer{
+    background:transparent;border:1px solid var(--verde);color:var(--verde);
+    padding:6px 14px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+  }
+  .aviso-falta .deshacer:hover{background:rgba(39,192,138,.22)}
+  .aviso-falta.firme{background:rgba(255,255,255,.04);border-color:var(--gris-borde);color:var(--texto-tenue)}
 </style>
 </head>
 <body>
@@ -321,13 +348,22 @@ async function cargarEspacio(per){
   const misInscIds = (inscAll.data||[]).map(r => r.id);
   const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
 
-  const [asis, recus, evos, hc, moplex] = await Promise.all([
+  const [asis, recus, evos, hc, moplex, misTurnosRes] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
     sb.from('historias_clinicas').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
     sb.from('evaluaciones_moplex').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
+    // Turnos fijos del alumno (JOIN con tabla turnos para traer dia/hora/servicio)
+    sb.from('turno_alumnos')
+      .select('turno_id, turnos!inner(id, dia, hora, servicio, capacidad)')
+      .eq('persona_id', pid)
+      .eq('activo', true),
   ]);
+  // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
+  const misTurnos = (misTurnosRes.data || [])
+    .map(r => r.turnos)
+    .filter(t => t && t.id);
 
   // Pagos: SOLO los de MIS inscripciones. Si no tengo inscripciones, no hay pagos.
   let misPagos = [];
@@ -338,6 +374,7 @@ async function cargarEspacio(per){
 
   const html = [
     bloquePlan(inscripcion),
+    bloqueMisClases(misTurnos),
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
     bloquePagos(misPagos),
@@ -381,6 +418,176 @@ function bloquePlan(i){
     </div>
   </section>`;
 }
+
+// ============================================================
+//  MIS CLASES FIJAS + AVISAR FALTA
+// ============================================================
+const ORDEN_DIAS = {'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':7};
+const DIAS_SEM_NUM = {'Domingo':0,'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6};
+const TIMERS_DESHACER = {}; // {turnoId: intervalId}
+
+// Devuelve ISO YYYY-MM-DD de la próxima vez que ese turno se dicta.
+// Si hoy es ese día y faltan más de 2 horas para la hora del turno -> hoy.
+// Si ya pasó la hora o quedan menos de 2hs -> la próxima semana.
+function proximaFechaDelTurno(diaSemana, hora){
+  const ahora = new Date();
+  const targetDia = DIAS_SEM_NUM[diaSemana];
+  if(targetDia==null) return hoyISO();
+  const hoyDia = ahora.getDay();
+  if(hoyDia === targetDia){
+    const [hh,mm] = String(hora||'00:00').split(':').map(Number);
+    const horaTurno = new Date(ahora);
+    horaTurno.setHours(hh||0, mm||0, 0, 0);
+    if(horaTurno - ahora > 2*3600*1000) return fechaToISO(ahora);
+    const next = new Date(ahora); next.setDate(next.getDate()+7);
+    return fechaToISO(next);
+  }
+  let diasFaltan = targetDia - hoyDia;
+  if(diasFaltan <= 0) diasFaltan += 7;
+  const prox = new Date(ahora); prox.setDate(prox.getDate() + diasFaltan);
+  return fechaToISO(prox);
+}
+function fechaToISO(d){
+  const off = d.getTimezoneOffset();
+  const l = new Date(d.getTime() - off*60000);
+  return l.toISOString().slice(0,10);
+}
+function fmtFechaCorta(iso){
+  if(!iso) return '—';
+  const d = new Date(iso+'T00:00:00');
+  if(isNaN(d)) return '—';
+  const DIAS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  return `${DIAS[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`;
+}
+
+function bloqueMisClases(turnos){
+  if(!turnos || turnos.length===0){
+    return `<section class="card reveal d2b">
+      <h2><span class="dot"></span>Mis clases fijas</h2>
+      <p class="empty">No tenés horarios fijos asignados. Si esperabas tener, escribinos.</p>
+    </section>`;
+  }
+  // Ordenar por día y hora
+  turnos.sort((a,b)=> (ORDEN_DIAS[a.dia]||99) - (ORDEN_DIAS[b.dia]||99) || (a.hora||'').localeCompare(b.hora||''));
+
+  let rows='';
+  turnos.forEach(t=>{
+    const proxISO = proximaFechaDelTurno(t.dia, t.hora);
+    const proxLegible = fmtFechaCorta(proxISO);
+    const dia = esc(t.dia||'');
+    const hora = esc(t.hora||'');
+    const serv = esc(t.servicio||'');
+    rows += `<div class="clase-fija">
+      <div class="cf-info">
+        <div class="cf-dia">${dia} · ${hora}</div>
+        <div class="cf-sub">${serv} · Próxima: ${proxLegible}</div>
+      </div>
+      <button class="btn-faltar" id="btn-${t.id}" onclick="avisarFalta(${t.id},'${dia}','${hora}','${serv}','${proxISO}')">🚫 Avisar falta</button>
+      <div class="falta-slot" id="falta-${t.id}"></div>
+    </div>`;
+  });
+
+  return `<section class="card reveal d2b">
+    <h2><span class="dot"></span>Mis clases fijas</h2>
+    ${rows}
+    <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Si avisás a último momento, esa clase se pierde.</div>
+  </section>`;
+}
+
+window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
+  const btn = document.getElementById('btn-'+turnoId);
+  const slot = document.getElementById('falta-'+turnoId);
+  if(!confirm(`¿Avisar que vas a faltar al turno del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?`)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Avisando…';
+
+  try {
+    const { error } = await sb.rpc('alumno_avisar_falta', {
+      p_turno_id: turnoId,
+      p_fecha: fechaISO
+    });
+    if(error) throw error;
+
+    // Éxito: ocultar botón, mostrar aviso con deshacer + countdown
+    btn.style.display = 'none';
+    slot.innerHTML = `<div class="aviso-falta" id="aviso-${turnoId}">
+      <div>✓ Falta avisada para <b>${fmtFechaCorta(fechaISO)}</b>. Podés deshacer en <span class="cd" id="cd-${turnoId}">5:00</span></div>
+      <button class="deshacer" onclick="deshacerFalta(${turnoId},'${fechaISO}')">Deshacer</button>
+    </div>`;
+    iniciarCountdown(turnoId, fechaISO);
+  } catch(e){
+    btn.disabled = false;
+    btn.textContent = '🚫 Avisar falta';
+    const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+    let msg = 'No se pudo avisar tu falta.';
+    if(raw.includes('2 hora') || raw.includes('tarde') || raw.includes('horas antes')) msg = 'Llegaste tarde: el turno empieza en menos de 2 horas. Esta clase ya no se puede recuperar.';
+    else if(raw.includes('plan')) msg = 'No tenés un plan TF activo. Escribinos para resolverlo.';
+    else if(raw.includes('ya') && (raw.includes('avis') || raw.includes('exist'))) msg = 'Ya avisaste esta falta antes.';
+    else if(raw.includes('turno') && raw.includes('tuy')) msg = 'Este turno no figura como tuyo. Hablá con el centro.';
+    else if(raw.includes('fecha')) msg = 'La fecha no es válida para este turno.';
+    else if(e && e.message) msg = 'No se pudo avisar: '+e.message;
+    alert(msg);
+  }
+};
+
+function iniciarCountdown(turnoId, fechaISO){
+  const FIN = Date.now() + 5*60*1000;
+  const tick = ()=>{
+    const cd = document.getElementById('cd-'+turnoId);
+    const aviso = document.getElementById('aviso-'+turnoId);
+    if(!cd || !aviso) { clearInterval(TIMERS_DESHACER[turnoId]); return; }
+    const rest = FIN - Date.now();
+    if(rest <= 0){
+      // Se acabó el deshacer: aviso firme
+      aviso.classList.add('firme');
+      aviso.innerHTML = `<div>✓ Falta avisada para <b>${fmtFechaCorta(fechaISO)}</b> (ya no se puede deshacer)</div>`;
+      clearInterval(TIMERS_DESHACER[turnoId]);
+      delete TIMERS_DESHACER[turnoId];
+      return;
+    }
+    const mm = Math.floor(rest/60000);
+    const ss = Math.floor((rest%60000)/1000);
+    cd.textContent = `${mm}:${String(ss).padStart(2,'0')}`;
+  };
+  tick();
+  TIMERS_DESHACER[turnoId] = setInterval(tick, 1000);
+}
+
+window.deshacerFalta = async function(turnoId, fechaISO){
+  if(!confirm('¿Deshacer el aviso de falta? Volvés a quedar como reservado en esa clase.')) return;
+  try {
+    let ok = false;
+    // Intento 1: RPC alumno_deshacer_falta (si Lu la creó en Supabase)
+    try {
+      const { error } = await sb.rpc('alumno_deshacer_falta', {
+        p_turno_id: turnoId,
+        p_fecha: fechaISO
+      });
+      if(!error) ok = true;
+    } catch(_){ /* la función puede no existir, intentamos fallback */ }
+
+    // Intento 2 (fallback): DELETE directo sobre asistencia
+    if(!ok){
+      const { error } = await sb.from('asistencia')
+        .delete()
+        .eq('turno_id', turnoId)
+        .eq('fecha', fechaISO)
+        .eq('estado', 'ausente-justificada');
+      if(error) throw error;
+    }
+
+    // Limpiar UI: volver al estado inicial
+    clearInterval(TIMERS_DESHACER[turnoId]);
+    delete TIMERS_DESHACER[turnoId];
+    const slot = document.getElementById('falta-'+turnoId);
+    const btn = document.getElementById('btn-'+turnoId);
+    if(slot) slot.innerHTML = '';
+    if(btn){ btn.style.display = ''; btn.disabled = false; btn.textContent = '🚫 Avisar falta'; }
+  } catch(e){
+    alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
+  }
+};
 
 function bloqueAsistencia(asis){
   let pres=0, aus=0, rec=0;
