@@ -812,6 +812,8 @@ async function urlFotoPerfil(personaId, fotoPath) {
 
 // ===== ESTADO =====
 let personas = [];       // 1 fila por persona (las 420)
+let personasConHC = new Set();    // persona_id con HC cargada (la llena el paciente)
+let personasConEval = new Set();  // persona_id con evaluación nuestra (obs o adjunto)
 let pagosPorInsc = {};   // id_inscripcion -> [pagos]
 let tarifario = {};      // plan -> {valor_lista, ...}
 let planesUnicos = [];
@@ -914,16 +916,29 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, hcR, obsR, adjR] = await Promise.all([
       sb.from('personas').select('*').eq('es_equipo', false),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
-      sb.from('tarifario_tf').select('*')
+      sb.from('tarifario_tf').select('*'),
+      sb.from('historias_clinicas').select('persona_id'),
+      sb.from('hc_observaciones').select('persona_id'),
+      sb.from('hc_adjuntos').select('persona_id')
     ]);
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
     if (pagosR.error) throw pagosR.error;
     if (tarR.error) throw tarR.error;
+    if (hcR.error) console.warn('HC:', hcR.error.message);
+    if (obsR.error) console.warn('obs:', obsR.error.message);
+    if (adjR.error) console.warn('adj:', adjR.error.message);
+
+    // Sets de HC y evaluación (la HC la llena el paciente; la evaluación la hacemos nosotros)
+    personasConHC = new Set();
+    (hcR.data || []).forEach(h => { if (h.persona_id) personasConHC.add(h.persona_id); });
+    personasConEval = new Set();
+    (obsR.data || []).forEach(o => { if (o.persona_id) personasConEval.add(o.persona_id); });
+    (adjR.data || []).forEach(a => { if (a.persona_id) personasConEval.add(a.persona_id); });
 
     // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
     // Misma lógica que morosos_tf.html: si un alumno tiene un cambio programado
@@ -992,6 +1007,8 @@ async function cargarTodo() {
         todasInscripciones: inscripciones,
         cuota,
         estadoTF,
+        tieneHC: personasConHC.has(persona.id),
+        tieneEval: personasConEval.has(persona.id),
         // Placeholders para futuras áreas
         tieneConsultorios: false,
         tieneBioLab: false,
@@ -1061,8 +1078,9 @@ function chipsAreas(f) {
   if (f.estadoTF === 'TF_ACTIVO') chips.push(`<span class="area-chip tf-act">🏋️ TF ${f.inscripcion.plan}</span>`);
   else if (f.estadoTF === 'TF_BONIF') chips.push(`<span class="area-chip tf-bon">💜 TF Bonif.</span>`);
   else if (f.estadoTF === 'TF_BAJA') chips.push(`<span class="area-chip tf-baja">❌ TF Baja</span>`);
-  // Placeholders para otras áreas (mostrar solo si la persona tiene actividad ahí — pendiente)
-  // Por ahora ninguna, hasta que carguemos esas tablas
+  // Faltantes: HC la llena el paciente; evaluación la hacemos nosotros (obs o adjunto)
+  if (!f.tieneHC) chips.push(`<span class="area-chip" style="background:#fee2e2;color:#dc2626;">⚠️ Sin HC</span>`);
+  if (!f.tieneEval) chips.push(`<span class="area-chip" style="background:#fef3c7;color:#b45309;">⚠️ Sin evaluación</span>`);
   if (chips.length === 0) chips.push(`<span class="area-chip vacio">Sin actividad</span>`);
   return `<div class="areas-chips">${chips.join('')}</div>`;
 }

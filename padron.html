@@ -716,6 +716,7 @@ let tarifario = {};      // plan -> {valor_lista, ...}
 let planesUnicos = [];
 let personasConTratActivo = new Set();  // persona_id con tratamiento en curso
 let personasConHC = new Set();          // persona_id que ya completó su HC
+let personasConEval = new Set();        // persona_id con evaluación nuestra (obs o adjunto)
 let filtroEstado = 'TODOS';
 let filtroPlan = '';
 let filtroDia = '';
@@ -847,21 +848,25 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR, tratR, hcR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, tratR, hcR, obsR, adjR] = await Promise.all([
       sb.from('personas').select('*').eq('es_equipo', false),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
       sb.from('tarifario_tf').select('*'),
       sb.from('tratamientos').select('persona_id, estado'),
-      sb.from('historias_clinicas').select('persona_id')
+      sb.from('historias_clinicas').select('persona_id'),
+      sb.from('hc_observaciones').select('persona_id'),
+      sb.from('hc_adjuntos').select('persona_id')
     ]);
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
     if (pagosR.error) throw pagosR.error;
     if (tarR.error) throw tarR.error;
-    // tratamientos e HC: si fallan, no rompemos el padrón (quedan vacíos)
+    // tratamientos, HC y evaluación: si fallan, no rompemos el padrón (quedan vacíos)
     if (tratR.error) console.warn('No se pudieron cargar tratamientos:', tratR.error.message);
     if (hcR.error) console.warn('No se pudieron cargar historias clínicas:', hcR.error.message);
+    if (obsR.error) console.warn('No se pudieron cargar observaciones:', obsR.error.message);
+    if (adjR.error) console.warn('No se pudieron cargar adjuntos:', adjR.error.message);
 
     // Set de personas con tratamiento ACTIVO (en curso): ACTIVO / PARCIAL / Pendiente
     const ESTADOS_TRAT_ACTIVO = ['ACTIVO', 'PARCIAL', 'PENDIENTE'];
@@ -875,6 +880,11 @@ async function cargarTodo() {
     // Set de personas que YA completaron su historia clínica
     personasConHC = new Set();
     (hcR.data || []).forEach(h => { if (h.persona_id) personasConHC.add(h.persona_id); });
+
+    // Set de personas que YA tienen evaluación nuestra (observación O adjunto)
+    personasConEval = new Set();
+    (obsR.data || []).forEach(o => { if (o.persona_id) personasConEval.add(o.persona_id); });
+    (adjR.data || []).forEach(a => { if (a.persona_id) personasConEval.add(a.persona_id); });
 
     // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
     // Misma lógica que morosos_tf.html: si un alumno tiene un cambio programado
@@ -945,6 +955,7 @@ async function cargarTodo() {
         estadoTF,
         tieneTratActivo: personasConTratActivo.has(persona.id),
         tieneHC: personasConHC.has(persona.id),
+        tieneEval: personasConEval.has(persona.id),
         // Placeholders para futuras áreas
         tieneConsultorios: false,
         tieneBioLab: false,
@@ -1051,11 +1062,15 @@ function renderTabla(lista) {
     const urgTxt = (urgNombre || urgCel)
       ? `${urgNombre || '—'}${urgCel ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">${urgCel}</div>` : ''}`
       : '<span style="color:var(--text-dim);">—</span>';
-    // Estado HC: si tiene, chip verde; si no, botón para mandar el link por WhatsApp
+    // Estado HC (la llena el paciente) + Evaluación (la hacemos nosotros: obs o adjunto)
     const celNum = (p.celular || p.telefono || '').replace(/\D/g, '');
-    const hcCell = f.tieneHC
-      ? '<span class="area-chip tf-act">✓ Cargada</span>'
-      : `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="wsphc" title="Enviar link de HC por WhatsApp" style="font-size:11px; padding:5px 8px; white-space:nowrap;">📱 Mandar link</button>`;
+    const chipHC = f.tieneHC
+      ? '<span class="area-chip tf-act">✓ HC</span>'
+      : `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="wsphc" title="Enviar link de HC por WhatsApp" style="font-size:11px; padding:4px 8px; white-space:nowrap;">⚠️ Sin HC · mandar link</button>`;
+    const chipEval = f.tieneEval
+      ? '<span class="area-chip tf-act">✓ Evaluación</span>'
+      : '<span class="area-chip" style="background:#fee2e2;color:#dc2626;">⚠️ Sin evaluación</span>';
+    const hcCell = `<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;">${chipHC}${chipEval}</div>`;
     const acciones = `
       <button class="btn-accion btn-wsp" data-idx="${idx}" data-accion="wsp" title="Enviar WhatsApp" style="background:#25D366;color:#fff;border:none;">📱 WhatsApp</button>
     `;
@@ -1227,9 +1242,48 @@ async function abrirModalVer() {
       }
     });
   }
+  // Botón de borrar persona — SOLO visible para Lu, con doble confirmación
+  const footerVer = $('#modalVer').querySelector('.modal-footer');
+  if (footerVer) {
+    let extra = '';
+    if (esLu) {
+      extra = `<button class="btn-modal" style="background:var(--rojo,#dc2626);color:#fff;border:none;margin-right:auto;" onclick="borrarPersonaDesdeModal()">🗑️ Borrar persona</button>`;
+    }
+    footerVer.innerHTML = extra + `<button class="btn-modal btn-cancelar" onclick="cerrarModal('modalVer')">Cerrar</button>`;
+  }
   $('#modalVer').classList.add('activo');
 }
 
+// Borrado de persona con DOBLE confirmación (solo Lu)
+window.borrarPersonaDesdeModal = async () => {
+  if (!esLu) { toast('No autorizado.', true); return; }
+  if (!alumnoActivo) return;
+  const p = alumnoActivo.persona;
+  const nombre = p.nombre || '(sin nombre)';
+
+  // Primera confirmación
+  if (!confirm(`⚠️ ¿Borrar a "${nombre}" (#${p.id})?\n\nEsto elimina PARA SIEMPRE todos sus datos: inscripciones, pagos, turnos, historia clínica y evoluciones.\n\nNo se puede deshacer.`)) return;
+
+  // Segunda confirmación: escribir el nombre
+  const tipeo = prompt(`Para confirmar, escribí el nombre EXACTO de la persona:\n\n${nombre}`);
+  if (tipeo === null) return;
+  if ((tipeo || '').trim().toLowerCase() !== nombre.trim().toLowerCase()) {
+    toast('El nombre no coincide. No se borró nada.', true);
+    return;
+  }
+
+  toast('Borrando…');
+  try {
+    const { data, error } = await sb.rpc('borrar_persona_total', { p_persona_id: p.id });
+    if (error) throw error;
+    toast('✓ ' + (data || 'Persona eliminada'));
+    cerrarModal('modalVer');
+    await cargarTodo();   // recargar el padrón
+  } catch (e) {
+    console.error(e);
+    toast('No se pudo borrar: ' + (e.message || 'error'), true);
+  }
+};
 // ===== MODAL EDITAR =====
 function abrirModalEditar() {
   const f = alumnoActivo;
