@@ -2516,7 +2516,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     // 2) Agregarlo al turno del día (igual que un agregado puntual)
     const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
     const filas = await supabaseInsertReturn('turno_agregados',
-      { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien });
+      { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
     const agId = (filas && filas[0]) ? filas[0].id : null;
     const key = `${t.id}-${fechaRecupero}`;
     if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
@@ -2542,7 +2542,13 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
 // el cupo del día = capacidad - (anotados que SÍ vienen ese día).
 // Para FIJOS permanentes (esPuntual=false) el cupo es estricto: los ausentes NO
 // liberan lugar, porque el fijo viene todas las semanas.
+// Bandera: queda en true cuando una admin (Lu/Jime) autorizó un sobrecupo en el
+// último chequearCupo(). Los inserts la leen para mandar forzado:true a la base.
+// El trigger de la base SOLO deja pasar el sobrecupo si forzado=true y el que lo
+// hace es admin (valida el email del login). Así el cupo es estricto para todos.
+let SOBRECUPO_AUTORIZADO = false;
 function chequearCupo(t, accionTexto, esPuntual, fecha) {
+  SOBRECUPO_AUTORIZADO = false;           // arranca siempre en false
   const alumnos = getAlumnos(t);          // ya incluye fijos + agregados del día
   const ocup = alumnos.length;
   let libres = t.capacidad - ocup;
@@ -2569,13 +2575,16 @@ function chequearCupo(t, accionTexto, esPuntual, fecha) {
     return false;
   }
   // Es admin → puede autorizar el sobrecupo explícitamente
-  return confirm(
+  const ok = confirm(
     `⚠️ ESTE TURNO YA ESTÁ COMPLETO\n\n` +
     `${t.servicio} · ${t.hora} · ${t.dia}\n` +
     `Cupo: ${t.capacidad} · Anotados: ${ocup}\n\n` +
     `Si ${accionTexto}, vas a SUPERAR la capacidad operativa (quedaría ${ocup+1}/${t.capacidad}).\n\n` +
     `¿Querés autorizar el sobrecupo igual?`
   );
+  // Si la admin confirmó, marcamos que este agregado va FORZADO.
+  if (ok) SOBRECUPO_AUTORIZADO = true;
+  return ok;
 }
 
 // =============================================
@@ -3022,12 +3031,13 @@ window.confirmarAgregar = async (tipo) => {
   try {
     if (tipo === 'permanente') {
       // Va a turno_alumnos (fijo). Si ya existía (aunque inactivo), reactivar; si no, insertar.
+      const fz = SOBRECUPO_AUTORIZADO;   // ¿la admin autorizó sobrecupo recién?
       const existe = await supabaseQuery('turno_alumnos',
         `?select=persona_id&turno_id=eq.${t.id}&persona_id=eq.${pid}`);
       if (existe && existe.length) {
-        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true });
+        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true, forzado: fz });
       } else {
-        await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true });
+        await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true, forzado: fz });
       }
       const key = `${t.dia}-${t.hora}-${t.servicio}`;
       if (!ALUMNOS_POR_TURNO[key]) ALUMNOS_POR_TURNO[key] = [];
@@ -3038,7 +3048,7 @@ window.confirmarAgregar = async (tipo) => {
       // Recuperatorio o suelto: agregado puntual de la fecha
       const fecha = fechaDelDia(t.dia);
       const filas = await supabaseInsertReturn('turno_agregados',
-        { turno_id: t.id, persona_id: pid, fecha, tipo, agregado_por: quien });
+        { turno_id: t.id, persona_id: pid, fecha, tipo, agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
       const agId = (filas && filas[0]) ? filas[0].id : null;
       const key = `${t.id}-${fecha}`;
       if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
