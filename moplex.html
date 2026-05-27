@@ -493,11 +493,19 @@ document.getElementById('btnStep1').addEventListener('click', async () => {
   btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Buscando...';
 
   try {
-    const { data, error } = await sb.from('personas')
-      .select('id, nombre, fecha_nacimiento, celular, mail, direccion, ciudad, provincia, codigo_postal, profesion')
-      .eq('dni', dni).maybeSingle();
+    // Por seguridad NO leemos personas directamente (queda blindada).
+    // Usamos chequear_dni: solo dice si existe + id + nombre + campos cargados.
+    const { data, error } = await sb.rpc('chequear_dni', { p_dni: dni });
     if (error) throw error;
-    existingPerson = data;
+    if (data && data.existe) {
+      existingPerson = {
+        id: data.id,
+        nombre: data.nombre || '',
+        campos_cargados: data.campos_cargados || []
+      };
+    } else {
+      existingPerson = null;
+    }
     dniValidado = dni;
     prefillStep2();
     goStep(2);
@@ -514,19 +522,19 @@ function prefillStep2() {
   const desc = document.getElementById('step2desc');
   lockedFields = [];
   if (existingPerson) {
-    desc.textContent = '¡Bienvenido de vuelta! Ya tenemos algunos datos tuyos cargados (los marcados con 🔒).';
-    const fields = ['nombre', 'fecha_nacimiento', 'celular', 'mail', 'direccion', 'ciudad', 'provincia', 'codigo_postal', 'profesion'];
-    fields.forEach(f => {
-      const val = existingPerson[f];
-      if (val !== null && val !== undefined && val !== '') {
-        const input = document.getElementById(f);
-        if (input) {
-          input.value = val;
-          input.disabled = true;
-          lockedFields.push(f);
-          const lockSpan = document.getElementById(`lock-${f}`);
-          if (lockSpan) lockSpan.textContent = '🔒';
-        }
+    const nom = existingPerson.nombre ? `, ${existingPerson.nombre}` : '';
+    desc.textContent = `¡Bienvenido de vuelta${nom}! Ya te tenemos registrado. Si tus datos no cambiaron, dejá los campos vacíos y seguí. Si algo cambió, completalo.`;
+    // Por seguridad NO mostramos datos viejos. Marcamos qué campos ya están
+    // cargados (quedan vacíos: si no se tocan, no se pisan al guardar).
+    const yaCargados = existingPerson.campos_cargados || [];
+    yaCargados.forEach(f => {
+      const input = document.getElementById(f);
+      if (input) {
+        const ph = input.getAttribute('placeholder') || '';
+        input.setAttribute('placeholder', ph ? ph + ' (ya cargado)' : 'Ya cargado · dejá vacío si no cambió');
+        lockedFields.push(f);
+        const lockSpan = document.getElementById(`lock-${f}`);
+        if (lockSpan) lockSpan.textContent = '✓';
       }
     });
   } else {
@@ -540,9 +548,11 @@ window.validateStep2 = () => {
   const required = ['nombre', 'fecha_nacimiento', 'celular', 'mail'];
   let valid = true;
   required.forEach(f => {
+    // Si el paciente ya tiene ese campo cargado, puede dejarlo vacío
+    if (!txtVal(f) && lockedFields.includes(f)) return;
     if (!txtVal(f)) { showError(f); valid = false; }
   });
-  // Validar email
+  // Validar email (solo si lo escribió)
   const mail = txtVal('mail');
   if (mail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mail)) {
     showError('mail'); valid = false;
@@ -556,6 +566,8 @@ window.validateStep3 = () => {
   const required = ['direccion', 'ciudad', 'provincia', 'codigo_postal', 'profesion'];
   let valid = true;
   required.forEach(f => {
+    // Si el paciente ya tiene ese campo cargado, puede dejarlo vacío
+    if (!txtVal(f) && lockedFields.includes(f)) return;
     if (!txtVal(f)) { showError(f); valid = false; }
   });
   if (valid) goStep(4);
@@ -614,11 +626,13 @@ window.enviarFormulario = async () => {
     };
 
     if (existingPerson) {
-      // UPDATE solo de los campos que NO estaban lockeados (lo que vino vacío y el usuario completó)
+      // Paciente que vuelve: actualizamos SOLO lo que escribió (campos con valor).
+      // Lo que dejó vacío no se toca (se conservan los datos viejos).
       personaId = existingPerson.id;
       const updateData = {};
       Object.keys(personaData).forEach(k => {
-        if (!lockedFields.includes(k) && personaData[k]) {
+        if (k === 'dni') return;
+        if (personaData[k]) {   // solo si escribió algo
           updateData[k] = personaData[k];
         }
       });

@@ -1091,16 +1091,24 @@ async function checkDNI() {
   btn.innerHTML = '<span class="loader"></span>Buscando...';
 
   try {
-    const { data, error } = await sb
-      .from('personas')
-      .select('id, nombre, fecha_nacimiento, celular, mail, direccion, obra_social, nro_afiliado_os, contacto_urgencia_nombre, contacto_urgencia_celular')
-      .eq('dni', dni)
-      .order('id', { ascending: true })
-      .limit(1);
+    // Por seguridad NO leemos la tabla personas directamente (queda blindada).
+    // Usamos la función chequear_dni, que solo nos dice si existe + id + nombre
+    // + qué campos ya tiene cargados, SIN exponer los datos del paciente.
+    const { data, error } = await sb.rpc('chequear_dni', { p_dni: dni });
 
     if (error) throw error;
 
-    existingPerson = (data && data.length > 0) ? data[0] : null;
+    if (data && data.existe) {
+      // Paciente que vuelve: guardamos id, nombre (para saludar) y qué campos ya están.
+      // NO traemos los valores de esos campos (no se muestran en pantalla).
+      existingPerson = {
+        id: data.id,
+        nombre: data.nombre || '',
+        campos_cargados: data.campos_cargados || []
+      };
+    } else {
+      existingPerson = null;
+    }
     prefillStep2();
     goToStep(2);
   } catch (err) {
@@ -1162,25 +1170,20 @@ function prefillStep2() {
   lockedFields = [];
 
   if (existingPerson) {
-    desc.textContent = '¡Bienvenido de vuelta! Ya tenemos tus datos. Completá los que falten (los que tienen 🔒 ya están cargados).';
-    const fields = ['nombre', 'fecha_nacimiento', 'celular', 'mail', 'direccion', 'obra_social', 'nro_afiliado_os', 'contacto_urgencia_nombre', 'contacto_urgencia_celular'];
-    fields.forEach(f => {
-      const val = existingPerson[f];
-      if (val !== null && val !== undefined && val !== '') {
-        const input = document.getElementById(f);
-        if (input) {
-          // Caso especial: obra_social es un <select>, usar matching tolerante
-          if (f === 'obra_social') {
-            const ok = setObraSocialPrefill(val);
-            if (!ok) return;
-          } else {
-            input.value = val;
-          }
-          input.disabled = true;
-          lockedFields.push(f);
-          const lockSpan = document.getElementById(`lock-${f}`);
-          if (lockSpan) lockSpan.textContent = '🔒';
-        }
+    const nom = existingPerson.nombre ? `, ${existingPerson.nombre}` : '';
+    desc.textContent = `¡Bienvenido de vuelta${nom}! Ya te tenemos registrado. Si tus datos no cambiaron, dejá los campos vacíos y seguí. Si algo cambió (ej: nuevo celular), completalo.`;
+    // Por seguridad NO mostramos los datos viejos en pantalla.
+    // Marcamos qué campos YA tienen dato (para no exigirlos como obligatorios),
+    // pero quedan vacíos: si el paciente no los toca, no se pisan al guardar.
+    const yaCargados = existingPerson.campos_cargados || [];
+    yaCargados.forEach(f => {
+      const input = document.getElementById(f);
+      if (input) {
+        const ph = input.getAttribute('placeholder') || '';
+        input.setAttribute('placeholder', ph ? ph + ' (ya cargado)' : 'Ya cargado · dejá vacío si no cambió');
+        lockedFields.push(f);
+        const lockSpan = document.getElementById(`lock-${f}`);
+        if (lockSpan) lockSpan.textContent = '✓';
       }
     });
   } else {
@@ -1199,6 +1202,13 @@ function validateStep2() {
     const input = document.getElementById(id);
     const field = input.closest('.field');
     const val = input.value.trim();
+
+    // Si el paciente YA tiene este campo cargado (paciente que vuelve),
+    // puede dejarlo vacío: no se pisa al guardar. No lo exigimos.
+    if (!val && lockedFields.includes(id)) {
+      field.classList.remove('has-error');
+      return;
+    }
 
     if (!val) {
       field.classList.add('has-error');
@@ -1544,11 +1554,14 @@ async function submitForm() {
     let personaId;
 
     if (existingPerson) {
-      // UPDATE solo de campos vacíos (los locked no se pisan)
+      // Paciente que vuelve: actualizamos SOLO los campos que el paciente
+      // efectivamente escribió (tienen valor). Los que dejó vacíos NO se tocan
+      // (se conservan los datos viejos). Si escribió un valor nuevo en un campo
+      // que ya tenía dato (ej: nuevo celular), se actualiza con lo nuevo.
       const updates = { actualizado_via_form_publico: personalData.actualizado_via_form_publico, ip_ultimo_registro: userIP };
       Object.keys(personalData).forEach(k => {
         if (k === 'dni' || k === 'actualizado_via_form_publico' || k === 'ip_ultimo_registro') return;
-        if (!lockedFields.includes(k) && personalData[k]) {
+        if (personalData[k]) {   // solo si el paciente escribió algo en ese campo
           updates[k] = personalData[k];
         }
       });
