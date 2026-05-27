@@ -312,12 +312,16 @@ async function cargarEspacio(per){
   const nombre = (per.nombre||'').trim() || 'alumno';
   $('nombre').textContent = nombre;
 
-  // Traemos todo lo del alumno en paralelo. El RLS ya garantiza
-  // que solo vuelven SUS filas (Seguridad Nivel C).
+  // Traemos todo lo del alumno en paralelo, filtrando SIEMPRE por su persona_id.
+  // (No dependemos solo del RLS: el equipo con doble rol no debe ver datos de otros aquí.)
   const pid = per.id;
-  const [insc, pagos, asis, recus, evos, hc, moplex] = await Promise.all([
-    sb.from('inscripciones_tf').select('*').eq('persona_id',pid).eq('estado','ACTIVO').order('id',{ascending:false}).limit(1),
-    sb.from('pagos_tf').select('*'),                       // RLS filtra a los míos (vía inscripción)
+
+  // Primero: TODAS las inscripciones de esta persona (para poder filtrar sus pagos por inscripcion_id)
+  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, dia_vencimiento').eq('persona_id', pid).order('id', {ascending:false});
+  const misInscIds = (inscAll.data||[]).map(r => r.id);
+  const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
+
+  const [asis, recus, evos, hc, moplex] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
@@ -325,12 +329,18 @@ async function cargarEspacio(per){
     sb.from('evaluaciones_moplex').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
   ]);
 
-  const inscripcion = (insc.data&&insc.data[0])||null;
+  // Pagos: SOLO los de MIS inscripciones. Si no tengo inscripciones, no hay pagos.
+  let misPagos = [];
+  if (misInscIds.length > 0) {
+    const pagosRes = await sb.from('pagos_tf').select('*').in('inscripcion_id', misInscIds).order('fecha',{ascending:false});
+    misPagos = pagosRes.data || [];
+  }
+
   const html = [
     bloquePlan(inscripcion),
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
-    bloquePagos(pagos.data||[]),
+    bloquePagos(misPagos),
     bloqueEvoluciones(evos.data||[]),
     bloqueHC(hc.data&&hc.data[0], moplex.data&&moplex.data[0]),
     bloqueContacto()
