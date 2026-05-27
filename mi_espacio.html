@@ -197,6 +197,27 @@
   }
   .aviso-falta .deshacer:hover{background:rgba(39,192,138,.22)}
   .aviso-falta.firme{background:rgba(255,255,255,.04);border-color:var(--gris-borde);color:var(--texto-tenue)}
+
+  /* ---------- Panel: Agenda de la semana ---------- */
+  .ag-tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .ag-tab{
+    padding:9px 14px;border-radius:10px;border:1px solid var(--gris-borde);
+    background:rgba(255,255,255,.025);color:var(--texto-tenue);
+    font-size:12.5px;font-weight:600;cursor:pointer;transition:.15s;
+    display:flex;flex-direction:column;align-items:center;gap:2px;line-height:1;min-width:54px;
+  }
+  .ag-tab .ag-tab-num{font-size:14.5px;font-weight:700;color:var(--texto)}
+  .ag-tab:hover:not(.activo):not(:disabled){border-color:var(--celeste)}
+  .ag-tab.activo{background:var(--celeste-soft);border-color:var(--celeste);color:var(--celeste)}
+  .ag-tab.activo .ag-tab-num{color:var(--celeste)}
+  .ag-tab:disabled{opacity:.35;cursor:not-allowed}
+  .ag-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border-radius:11px;border:1px solid var(--gris-borde);background:rgba(255,255,255,.02);margin-bottom:7px}
+  .ag-row:last-child{margin-bottom:0}
+  .ag-row .ag-hora{font-weight:700;font-size:14.5px;min-width:58px}
+  .ag-row .ag-serv{font-size:12px;color:var(--texto-tenue);flex:1;margin-left:6px}
+  .ag-cupo{font-size:13px;font-weight:700;padding:5px 10px;border-radius:8px;white-space:nowrap}
+  .ag-cupo.libre{color:var(--verde);background:var(--verde-soft);border:1px solid rgba(39,192,138,.3)}
+  .ag-cupo.lleno{color:var(--texto-tenue);background:rgba(255,255,255,.04);border:1px solid var(--gris-borde)}
 </style>
 </head>
 <body>
@@ -348,7 +369,12 @@ async function cargarEspacio(per){
   const misInscIds = (inscAll.data||[]).map(r => r.id);
   const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
 
-  const [asis, recus, evos, hc, moplex, misTurnosRes] = await Promise.all([
+  // Rango de fechas para el panel "Agenda de la semana": de hoy hasta 7 días más
+  const _hoyD = new Date();
+  const _hoyISO = (function(){ const d=_hoyD; const o=d.getTimezoneOffset(); return new Date(d-o*60000).toISOString().slice(0,10); })();
+  const _hastaISO = (function(){ const d=new Date(_hoyD); d.setDate(d.getDate()+9); const o=d.getTimezoneOffset(); return new Date(d-o*60000).toISOString().slice(0,10); })();
+
+  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, allFijosRes, agregadosRes, ausentesRes] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
@@ -359,6 +385,14 @@ async function cargarEspacio(per){
       .select('turno_id, turnos!inner(id, dia, hora, servicio, capacidad)')
       .eq('persona_id', pid)
       .eq('activo', true),
+    // Todos los turnos del centro (para el panel "Agenda de la semana")
+    sb.from('turnos').select('id, dia, hora, servicio, capacidad'),
+    // Conteo de inscriptos fijos por turno (solo activos, sin nombres)
+    sb.from('turno_alumnos').select('turno_id').eq('activo', true),
+    // Agregados puntuales (recuperatorios/sueltos) de los próximos 9 días
+    sb.from('turno_agregados').select('turno_id, fecha').gte('fecha', _hoyISO).lte('fecha', _hastaISO),
+    // Ausencias (no van) de los próximos 9 días — solo cuento para restar
+    sb.from('asistencia').select('turno_id, fecha').gte('fecha', _hoyISO).lte('fecha', _hastaISO).in('estado', ['ausente','ausente-justificada']),
   ]);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = (misTurnosRes.data || [])
@@ -372,9 +406,38 @@ async function cargarEspacio(per){
     misPagos = pagosRes.data || [];
   }
 
+  // ===== Datos pre-procesados para el panel "Agenda de la semana" =====
+  // Conteo de fijos activos por turno_id
+  const fijosPorTurno = {};
+  (allFijosRes.data || []).forEach(r => {
+    fijosPorTurno[r.turno_id] = (fijosPorTurno[r.turno_id]||0) + 1;
+  });
+  // Conteo de agregados por "turno_id|fecha"
+  const agregadosPorClave = {};
+  (agregadosRes.data || []).forEach(r => {
+    const k = r.turno_id+'|'+r.fecha;
+    agregadosPorClave[k] = (agregadosPorClave[k]||0) + 1;
+  });
+  // Conteo de ausentes por "turno_id|fecha"
+  const ausentesPorClave = {};
+  (ausentesRes.data || []).forEach(r => {
+    const k = r.turno_id+'|'+r.fecha;
+    ausentesPorClave[k] = (ausentesPorClave[k]||0) + 1;
+  });
+  // Datos consolidados para pasarle al bloque (sin nombres ni datos personales)
+  window._agendaData = {
+    turnos: todosTurnosRes.data || [],
+    fijosPorTurno,
+    agregadosPorClave,
+    ausentesPorClave,
+    actividadAlumno: (inscripcion && inscripcion.actividad) ? inscripcion.actividad : 'AMBOS',
+    esBonificado: inscripcion ? /BON/i.test(inscripcion.plan||'') : false,
+  };
+
   const html = [
     bloquePlan(inscripcion),
     bloqueMisClases(misTurnos),
+    bloqueAgenda(window._agendaData),
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
     bloquePagos(misPagos),
@@ -386,6 +449,7 @@ async function cargarEspacio(per){
   $('contenido').innerHTML = html;
   $('boot').style.display='none';
   $('app').style.display='block';
+  _renderAgendaInicial();
 }
 
 // ============================================================
@@ -588,6 +652,117 @@ window.deshacerFalta = async function(turnoId, fechaISO){
     alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
   }
 };
+
+// ============================================================
+//  AGENDA DE LA SEMANA (solo lectura, sin nombres)
+// ============================================================
+// Mapea actividad de la inscripción -> filtro para turnos.servicio
+function turnoCoincideConActividad(servicio, actividadAlumno, esBonificado){
+  if(esBonificado) return true;                                  // bonificados ven todo
+  if(!actividadAlumno || actividadAlumno === 'AMBOS') return true;
+  const s = String(servicio||'').toUpperCase();
+  if(actividadAlumno === 'ENTRENAMIENTO') return s.includes('ENTREN') || s.includes('PILATES');
+  if(actividadAlumno === 'KINEFILAXIA')    return s.includes('KINE') || s.includes('REHAB');
+  return true;
+}
+
+// Devuelve ISO YYYY-MM-DD del próximo día de semana correspondiente.
+// targetDia: 1=Lun, 2=Mar... 5=Vie. Devuelve siempre fecha >= hoy.
+function fechaDelDiaDeEstaSemana(targetDia){
+  const ahora = new Date();
+  const hoyDia = ahora.getDay() === 0 ? 7 : ahora.getDay(); // Domingo->7
+  let diff = targetDia - hoyDia;
+  if(diff < 0) diff += 7; // ya pasó esta semana -> próxima semana
+  const d = new Date(ahora);
+  d.setDate(d.getDate() + diff);
+  return fechaToISO(d);
+}
+
+function bloqueAgenda(data){
+  if(!data || !data.turnos || data.turnos.length === 0){
+    return `<section class="card reveal d2b">
+      <h2><span class="dot"></span>Agenda de la semana</h2>
+      <p class="empty">No pudimos cargar la agenda. Si seguís sin verla, escribinos por WhatsApp.</p>
+    </section>`;
+  }
+  // Día por defecto: hoy si es lun-vie, sino el lunes próximo
+  const hoyDia = new Date().getDay(); // 0=dom, 6=sab
+  const diaDefault = (hoyDia>=1 && hoyDia<=5) ? hoyDia : 1;
+
+  // Tabs Lun-Vie con la fecha real
+  const DIA_LBL = {1:'Lun',2:'Mar',3:'Mié',4:'Jue',5:'Vie'};
+  let tabs = '<div class="ag-tabs">';
+  for(let d=1; d<=5; d++){
+    const fecha = fechaDelDiaDeEstaSemana(d);
+    const partes = fecha.split('-'); // YYYY-MM-DD
+    const dm = `${parseInt(partes[2],10)}/${parseInt(partes[1],10)}`;
+    const cls = (d===diaDefault) ? 'ag-tab activo' : 'ag-tab';
+    tabs += `<button class="${cls}" data-dia="${d}" onclick="cambiarDiaAgenda(${d})"><span>${DIA_LBL[d]}</span><span class="ag-tab-num">${dm}</span></button>`;
+  }
+  tabs += '</div>';
+
+  return `<section class="card reveal d2b">
+    <h2><span class="dot"></span>Agenda de la semana</h2>
+    ${tabs}
+    <div id="agenda-lista"></div>
+    <div class="nota" style="margin-top:14px">Mostramos cuántos compañeros van a estar en cada clase. Si avisaron falta, no los contamos. Pronto vas a poder anotarte directo en un recuperatorio desde acá.</div>
+  </section>`;
+}
+
+const _ORDEN_DIAS_AG = {'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':7};
+
+window.cambiarDiaAgenda = function(dia){
+  // Actualizar estado visual de los tabs
+  document.querySelectorAll('.ag-tab').forEach(b=>{
+    if(parseInt(b.dataset.dia,10) === dia) b.classList.add('activo');
+    else b.classList.remove('activo');
+  });
+  renderAgendaDia(dia);
+};
+
+function renderAgendaDia(dia){
+  const cont = document.getElementById('agenda-lista');
+  const data = window._agendaData;
+  if(!cont || !data) return;
+  const fechaISO = fechaDelDiaDeEstaSemana(dia);
+
+  // Filtrar turnos: día de semana coincide + actividad del alumno
+  const turnos = data.turnos.filter(t =>
+    _ORDEN_DIAS_AG[t.dia] === dia &&
+    turnoCoincideConActividad(t.servicio, data.actividadAlumno, data.esBonificado)
+  );
+  turnos.sort((a,b)=> (a.hora||'').localeCompare(b.hora||''));
+
+  if(turnos.length === 0){
+    cont.innerHTML = `<p class="empty">No hay turnos disponibles para tu actividad ese día.</p>`;
+    return;
+  }
+
+  let rows = '';
+  turnos.forEach(t => {
+    const fijos = data.fijosPorTurno[t.id] || 0;
+    const agreg = data.agregadosPorClave[t.id+'|'+fechaISO] || 0;
+    const aus   = data.ausentesPorClave[t.id+'|'+fechaISO] || 0;
+    const efectivos = Math.max(0, fijos + agreg - aus);
+    const cap = t.capacidad || 0;
+    const hayLugar = (cap > 0) ? (efectivos < cap) : true;
+    const cls = hayLugar ? 'libre' : 'lleno';
+    rows += `<div class="ag-row">
+      <div class="ag-hora">${esc(t.hora||'—')}</div>
+      <div class="ag-serv">${esc(t.servicio||'')}</div>
+      <div class="ag-cupo ${cls}">${efectivos} / ${cap || '?'}</div>
+    </div>`;
+  });
+  cont.innerHTML = rows;
+}
+
+// Renderizar el día por defecto apenas se construye el bloque (corre al final del cargarEspacio)
+function _renderAgendaInicial(){
+  const hoyDia = new Date().getDay();
+  const dia = (hoyDia>=1 && hoyDia<=5) ? hoyDia : 1;
+  // Esperar un tick a que el DOM exista
+  setTimeout(()=> renderAgendaDia(dia), 0);
+}
 
 function bloqueAsistencia(asis){
   let pres=0, aus=0, rec=0;
