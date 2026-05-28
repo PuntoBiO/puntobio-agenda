@@ -837,7 +837,17 @@ async function cargarEspacio(per){
         .filter(r => r.tipo === 'cambio_area')
         .map(r => r.turno_id + '|' + r.fecha)
     ),
+    // Info de cupo de clases sueltas (se completa después con RPC)
+    cupoSueltas: null,
   };
+
+  // Traer info de cupo de sueltas en paralelo (no bloqueante si falla)
+  try {
+    const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas');
+    window._agendaData.cupoSueltas = cs || null;
+  } catch (e) {
+    window._agendaData.cupoSueltas = null;
+  }
 
   // Aplanar agregados puntuales propios (sueltos/recuperatorios)
   // Mapa rápido turno_id -> {dia, hora, servicio} usando los turnos ya cargados
@@ -1409,12 +1419,29 @@ function renderAgendaDia(fechaISO){
         }
       }
 
-      // BOTÓN RECUPERAR ACÁ · solo si NO es mi fijo + tengo recupes pendientes + cupo + actividad + no bloqueado + dentro 15 días
+      // BOTÓN PROGRAMAR ACÁ · unifica recuperatorio + clase suelta
       const tieneRecupes = (data.recuperatoriosPendientes||[]).length > 0;
+      const cupoS = data.cupoSueltas;
+      const puedeSuelta = cupoS && cupoS.puede_sueltas && cupoS.disponibles > 0;
       const actividadOK = turnoCoincideConActividad(t.servicio, data.actividadAlumno, data.esBonificado);
       const dentro15 = diasFaltan >= 0 && diasFaltan <= 15;
-      if (!esMiTurnoFijo && tieneRecupes && actividadOK && hayCupo && !estaBloqueado && dentro15 && haceFalta2h) {
-        botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirRecuperar(${t.id}, '${fechaISO}')">🎯 Recuperar acá</button>`;
+      // 10 días hábiles vista (solo para sueltas)
+      let diasHabiles = 0;
+      if (diasFaltan >= 0) {
+        const _hoyD = new Date(hoy + 'T00:00:00');
+        let _d = new Date(_hoyD);
+        while (_d <= fechaD) {
+          const dow = _d.getDay();
+          if (dow !== 0 && dow !== 6) diasHabiles++;
+          _d.setDate(_d.getDate() + 1);
+        }
+      }
+      const dentro10Hab = diasHabiles >= 1 && diasHabiles <= 10;
+      // Mostrar botón si: NO es mi fijo + ((recupes + dentro15) O (puede suelta + dentro10Hab)) + cupo + actividad + no bloqueado + +2h
+      const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15;
+      const puedeSueltaAca = puedeSuelta && actividadOK && dentro10Hab;
+      if (!esMiTurnoFijo && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta2h) {
+        botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirProgramar(${t.id}, '${fechaISO}', ${puedeRecuperarAca}, ${puedeSueltaAca})">📅 Programar acá</button>`;
       }
 
       // BOTÓN REVERTIR CAMBIO DE ÁREA · si tengo un cambio_area en este turno + falta +2h
@@ -1755,6 +1782,76 @@ window.pbConfirmarRecupero = async function(recuperatorioId, turnoDestinoId, fec
   } catch (e) {
     btns.forEach(b => b.disabled = false);
     alert('No se pudo agendar el recupero:\n\n' + (e.message || e));
+  }
+};
+
+// PROGRAMAR ACÁ · unifica recuperatorio + clase suelta según opciones disponibles
+window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeSuelta) {
+  const data = window._agendaData;
+  const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
+  if (!destino) { alert('Turno no encontrado.'); return; }
+  const recupes = data.recuperatoriosPendientes || [];
+  const cupoS = data.cupoSueltas;
+  const fechaTxt = fechaISO.split('-').reverse().join('/');
+
+  // Caso A: solo puede recupe → flujo de recupe (igual que antes)
+  if (puedeRecupe && !puedeSuelta) {
+    return pbAbrirRecuperar(turnoDestinoId, fechaISO);
+  }
+
+  // Caso B: solo puede suelta → confirmación directa de suelta
+  if (!puedeRecupe && puedeSuelta) {
+    const disp = cupoS.disponibles;
+    pbAbrirModal({
+      titulo: '📅 Anotarme suelta',
+      subtitulo: `Vas a anotarte a <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b> como <b>clase suelta</b>.`,
+      infoBox: `✅ Te quedan <b>${disp}</b> sueltas en este ciclo (${cupoS.usadas}/${cupoS.tope} usadas).<br>✅ No consume recuperatorio.`,
+      cuerpoHTML: '',
+      botones: [
+        { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+        { label: 'Confirmar suelta', cls: 'confirm', onclick: `pbConfirmarClaseSuelta(${destino.id}, '${fechaISO}')` },
+      ],
+    });
+    return;
+  }
+
+  // Caso C: tiene AMBAS opciones → modal con elección
+  let opcionesHtml = '';
+  recupes.forEach(r => {
+    const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
+    opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
+      🎯 <b>Usar recuperatorio</b> de la falta del ${esc(fAus)}
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">No suma al cupo de sueltas</div>
+    </button>`;
+  });
+  opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarClaseSuelta(${destino.id}, '${fechaISO}')">
+    📅 <b>Anotarme suelta</b>
+    <div style="font-size:11.5px;color:#64748b;margin-top:2px">Te quedan ${cupoS.disponibles} sueltas en el ciclo</div>
+  </button>`;
+
+  pbAbrirModal({
+    titulo: '📅 Programar acá',
+    subtitulo: `Elegí cómo querés anotarte a <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>:`,
+    infoBox: '',
+    cuerpoHTML: opcionesHtml,
+  });
+};
+
+window.pbConfirmarClaseSuelta = async function(turnoDestinoId, fechaISO) {
+  const btns = document.querySelectorAll('#pbModal button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const { data: res, error } = await sb.rpc('alumno_clase_suelta', {
+      p_turno_destino_id: turnoDestinoId,
+      p_fecha: fechaISO,
+    });
+    if (error) throw error;
+    pbCerrarModal();
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Clase suelta agendada'));
+    location.reload();
+  } catch (e) {
+    btns.forEach(b => b.disabled = false);
+    alert('No se pudo anotar:\n\n' + (e.message || e));
   }
 };
 
