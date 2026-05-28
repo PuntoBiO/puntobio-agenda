@@ -729,8 +729,9 @@ async function cargarEspacio(per){
     // Ausencias (no van) en el rango de 2 semanas — solo cuento para restar
     sb.from('asistencia').select('turno_id, fecha').gte('fecha', _desdeISO).lte('fecha', _hastaISO).in('estado', ['ausente','ausente-justificada']),
     // MIS agregados puntuales (sueltos/recuperatorios cargados para mí) en el rango de 2 semanas
+    // Nota: select plano sin embed — el JOIN con turnos lo resolvemos en JS abajo
     sb.from('turno_agregados')
-      .select('id, turno_id, fecha, tipo, turnos!inner(id, dia, hora, servicio)')
+      .select('id, turno_id, fecha, tipo')
       .eq('persona_id', pid)
       .gte('fecha', _desdeISO)
       .lte('fecha', _hastaISO)
@@ -779,17 +780,25 @@ async function cargarEspacio(per){
   };
 
   // Aplanar agregados puntuales propios (sueltos/recuperatorios)
+  // Mapa rápido turno_id -> {dia, hora, servicio} usando los turnos ya cargados
+  const _turnosById = {};
+  (todosTurnosRes.data || []).forEach(t => { if (t && t.id) _turnosById[t.id] = t; });
+
   const misAgregados = (misAgregadosRes.data || [])
-    .filter(r => r && r.turnos)
-    .map(r => ({
-      id: r.id,
-      turno_id: r.turno_id,
-      fecha: r.fecha,
-      tipo: r.tipo,
-      dia: r.turnos.dia,
-      hora: r.turnos.hora,
-      servicio: r.turnos.servicio,
-    }));
+    .map(r => {
+      const t = _turnosById[r.turno_id];
+      if (!t) return null; // turno_id huérfano, lo salteamos
+      return {
+        id: r.id,
+        turno_id: r.turno_id,
+        fecha: r.fecha,
+        tipo: r.tipo,
+        dia: t.dia,
+        hora: t.hora,
+        servicio: t.servicio,
+      };
+    })
+    .filter(Boolean);
 
   const html = [
     bloquePlan(inscripcion),
