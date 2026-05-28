@@ -383,6 +383,33 @@
   .ag-bar-fill.medio{background:var(--ambar)}
   .ag-bar-fill.casi{background:#ff9966}
   .ag-bar-fill.lleno{background:var(--gris)}
+/* SELF-SERVICE · botones de acción en cada turno de la agenda */
+.ag-acciones { grid-column: 1 / -1; display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.ag-btn { background: transparent; border: 1.5px solid; border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all .15s; }
+.ag-btn:hover { transform: translateY(-1px); }
+.ag-btn:active { transform: translateY(0); }
+.ag-btn-azul { border-color: #1e9fe0; color: #1e9fe0; background: rgba(30,159,224,0.08); }
+.ag-btn-azul:hover { background: #1e9fe0; color: #fff; }
+.ag-btn-verde { border-color: #16a34a; color: #16a34a; background: rgba(22,163,74,0.08); }
+.ag-btn-verde:hover { background: #16a34a; color: #fff; }
+
+/* SELF-SERVICE · modal compartido para confirmaciones */
+.pb-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 20px; }
+.pb-modal-overlay.open { display: flex; }
+.pb-modal { background: #fff; border-radius: 16px; padding: 22px; max-width: 480px; width: 100%; box-shadow: 0 24px 50px rgba(0,0,0,.3); }
+.pb-modal h3 { font-size: 18px; font-weight: 800; margin-bottom: 8px; color: #0f172a; }
+.pb-modal-sub { font-size: 13.5px; color: #64748b; margin-bottom: 16px; line-height: 1.5; }
+.pb-modal-opciones { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; max-height: 240px; overflow-y: auto; }
+.pb-modal-opcion { background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-size: 13.5px; transition: all .15s; text-align: left; }
+.pb-modal-opcion:hover { border-color: #1e9fe0; background: #eff6ff; }
+.pb-modal-acciones { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+.pb-modal-btn { padding: 10px 16px; border-radius: 10px; font-family: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer; border: 1.5px solid; }
+.pb-modal-btn.cancel { background: transparent; border-color: #cbd5e1; color: #64748b; }
+.pb-modal-btn.confirm { background: #1e9fe0; border-color: #1e9fe0; color: #fff; }
+.pb-modal-btn:disabled { opacity: .5; cursor: not-allowed; }
+.pb-info-box { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: #166534; margin-bottom: 12px; line-height: 1.5; }
+.pb-warn-box { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: #92400e; margin-bottom: 12px; line-height: 1.5; }
+
 </style>
 </head>
 <body>
@@ -792,6 +819,16 @@ async function cargarEspacio(per){
     esBonificado: inscripcion ? /BON/i.test(inscripcion.plan||'') : false,
     diasHabiles: _diasHabiles,
     hoyISO: _hoyISO,
+    // SELF-SERVICE · datos del alumno para mostrar/ocultar botones
+    personaId: per.id,
+    misTurnosIds: new Set((misTurnosRes.data || []).map(r => r.turno_id)),
+    // Ausencias recuperables PENDIENTES (no asignadas todavía y dentro de 60 días)
+    recuperatoriosPendientes: (recus.data || []).filter(r => {
+      if (r.estado !== 'pendiente') return false;
+      const f = r.fecha_ausencia;
+      const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
+      return new Date(f) >= hace60;
+    }),
   };
 
   // Aplanar agregados puntuales propios (sueltos/recuperatorios)
@@ -1309,24 +1346,85 @@ function renderAgendaDia(fechaISO){
       // BLOQUEOS · chequear si este turno puntual está bloqueado
       let bloqMark = '';
       let bloqCls = '';
+      let estaBloqueado = false;
       if (window.Bloqueos) {
         const horaIni = (t.hora || '').slice(0,5);
         const horaFin = horaIni ? String(parseInt(horaIni.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
         const b = Bloqueos.queAplica('TF', fechaISO, horaIni, horaFin, null, null);
         if (b) {
+          estaBloqueado = true;
           bloqMark = `<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;margin-left:6px">🚫 NO DISPONIBLE</span>`;
           bloqCls = 'style="opacity:0.55"';
         }
       }
+
+      // SELF-SERVICE · botones condicionales
+      let botonesHtml = '';
+      const esMiTurnoFijo = data.misTurnosIds && data.misTurnosIds.has(t.id);
+      const hayCupo = (cap > 0) && (efectivos < cap);
+      const haceFalta2h = (() => {
+        try {
+          const ahora = new Date();
+          const inicio = new Date(fechaISO + 'T' + (t.hora || '00:00') + ':00');
+          return (inicio - ahora) >= 2*60*60*1000;
+        } catch(e) { return false; }
+      })();
+      const hoy = data.hoyISO;
+      const hoyD = new Date(hoy + 'T00:00:00');
+      const fechaD = new Date(fechaISO + 'T00:00:00');
+      const diasFaltan = Math.round((fechaD - hoyD) / 86400000);
+
+      // BOTÓN CAMBIAR DE ÁREA · solo si es mi turno fijo + 2h antes + no bloqueado
+      if (esMiTurnoFijo && haceFalta2h && !estaBloqueado) {
+        // Hay alternativa? buscamos otro turno del MISMO HORARIO con cupo + actividad
+        const alternativas = (data.turnos || []).filter(otro => {
+          if (otro.id === t.id) return false;
+          if ((otro.hora||'').slice(0,5) !== (t.hora||'').slice(0,5)) return false; // mismo horario
+          if (!turnoCoincideConActividad(otro.servicio, data.actividadAlumno, data.esBonificado)) return false;
+          // mismo día de semana de la fecha
+          const _dn = {'lunes':1,'martes':2,'miércoles':3,'miercoles':3,'jueves':4,'viernes':5};
+          if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
+          // tiene cupo
+          const fOtro = data.fijosPorTurno[otro.id]||0;
+          const aOtro = data.agregadosPorClave[otro.id+'|'+fechaISO]||0;
+          const auOtro = data.ausentesPorClave[otro.id+'|'+fechaISO]||0;
+          if ((otro.capacidad||0) <= Math.max(0, fOtro+aOtro-auOtro)) return false;
+          // no bloqueado
+          if (window.Bloqueos) {
+            const hi = (otro.hora||'').slice(0,5);
+            const hf = hi ? String(parseInt(hi.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
+            if (Bloqueos.queAplica('TF', fechaISO, hi, hf, null, null)) return false;
+          }
+          return true;
+        });
+        if (alternativas.length > 0) {
+          botonesHtml += `<button class="ag-btn ag-btn-azul" onclick="pbAbrirCambioArea(${t.id}, '${fechaISO}')">🔄 Cambiar de área</button>`;
+        }
+      }
+
+      // BOTÓN RECUPERAR ACÁ · solo si NO es mi fijo + tengo recupes pendientes + cupo + actividad + no bloqueado + dentro 15 días
+      const tieneRecupes = (data.recuperatoriosPendientes||[]).length > 0;
+      const actividadOK = turnoCoincideConActividad(t.servicio, data.actividadAlumno, data.esBonificado);
+      const dentro15 = diasFaltan >= 0 && diasFaltan <= 15;
+      if (!esMiTurnoFijo && tieneRecupes && actividadOK && hayCupo && !estaBloqueado && dentro15 && haceFalta2h) {
+        botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirRecuperar(${t.id}, '${fechaISO}')">🎯 Recuperar acá</button>`;
+      }
+
+      // Etiqueta "MI CLASE" si es turno fijo del alumno
+      const miClaseTag = esMiTurnoFijo
+        ? `<span style="display:inline-block;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">MI CLASE</span>`
+        : '';
+
       filas += `<div class="ag-turno" ${bloqCls}>
         <div class="ag-turno-info">
           <span class="ag-dot ${dot}"></span>
-          <span class="ag-turno-nombre">${esc(nom)}${bloqMark}</span>
+          <span class="ag-turno-nombre">${esc(nom)}${miClaseTag}${bloqMark}</span>
         </div>
         <div class="ag-turno-right">
           <div class="ag-cupo-num ${niv.cls}">${efectivos} / ${cap || '?'}</div>
           <div class="ag-bar"><div class="ag-bar-fill ${niv.cls}" style="width:${niv.pct}%"></div></div>
         </div>
+        ${botonesHtml ? `<div class="ag-acciones">${botonesHtml}</div>` : ''}
       </div>`;
     });
 
@@ -1503,6 +1601,176 @@ function bloqueContacto(){
       Escribir por WhatsApp
     </a>
   </section>`;
+}
+
+// ============================================================
+//  SELF-SERVICE · Cambio de área y Recuperatorio
+// ============================================================
+
+// Cerrar modal genérico
+function pbCerrarModal() {
+  const m = document.getElementById('pbModal');
+  if (m) m.classList.remove('open');
+}
+
+// Abrir modal Cambiar de Área (origen = mi turno fijo; ofrecemos otros del mismo horario)
+window.pbAbrirCambioArea = function(turnoOrigenId, fechaISO) {
+  const data = window._agendaData;
+  const origen = (data.turnos||[]).find(t => t.id === turnoOrigenId);
+  if (!origen) { alert('Turno no encontrado.'); return; }
+
+  // Buscar destinos del MISMO HORARIO ese día, con cupo, actividad coincide, no bloqueado
+  const fechaD = new Date(fechaISO + 'T00:00:00');
+  const _dn = {'lunes':1,'martes':2,'miércoles':3,'miercoles':3,'jueves':4,'viernes':5};
+  const destinos = (data.turnos||[]).filter(otro => {
+    if (otro.id === origen.id) return false;
+    if ((otro.hora||'').slice(0,5) !== (origen.hora||'').slice(0,5)) return false;
+    if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
+    if (!turnoCoincideConActividad(otro.servicio, data.actividadAlumno, data.esBonificado)) return false;
+    const fOtro = data.fijosPorTurno[otro.id]||0;
+    const aOtro = data.agregadosPorClave[otro.id+'|'+fechaISO]||0;
+    const auOtro = data.ausentesPorClave[otro.id+'|'+fechaISO]||0;
+    if ((otro.capacidad||0) <= Math.max(0, fOtro+aOtro-auOtro)) return false;
+    if (window.Bloqueos) {
+      const hi = (otro.hora||'').slice(0,5);
+      const hf = hi ? String(parseInt(hi.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
+      if (Bloqueos.queAplica('TF', fechaISO, hi, hf, null, null)) return false;
+    }
+    return true;
+  });
+
+  if (destinos.length === 0) {
+    alert('No hay clases alternativas de otra área a las ' + origen.hora + ' con cupo.');
+    return;
+  }
+
+  const fechaTxt = fechaISO.split('-').reverse().join('/');
+  let opcionesHTML = destinos.map(d => `
+    <button class="pb-modal-opcion" onclick="pbConfirmarCambioArea(${origen.id}, ${d.id}, '${fechaISO}')">
+      <b>${esc(nombreServicio(d.servicio))}</b> · ${esc(d.hora)}
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">Hacé click para confirmar el cambio</div>
+    </button>
+  `).join('');
+
+  pbAbrirModal({
+    titulo: '🔄 Cambiar de área',
+    subtitulo: `Tu turno de <b>${esc(nombreServicio(origen.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(origen.hora)}</b>.`,
+    infoBox: '✅ El cambio es solo para esta fecha. Tu turno fijo no se modifica.<br>✅ <b>No gasta recuperatorios.</b>',
+    cuerpoHTML: opcionesHTML,
+  });
+};
+
+window.pbConfirmarCambioArea = async function(turnoOrigenId, turnoDestinoId, fechaISO) {
+  const btns = document.querySelectorAll('#pbModal button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const { data: res, error } = await sb.rpc('alumno_cambio_area', {
+      p_turno_origen_id: turnoOrigenId,
+      p_turno_destino_id: turnoDestinoId,
+      p_fecha: fechaISO,
+    });
+    if (error) throw error;
+    pbCerrarModal();
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Cambio de área hecho'));
+    // Recargar la pantalla para reflejar el cambio
+    location.reload();
+  } catch (e) {
+    btns.forEach(b => b.disabled = false);
+    alert('No se pudo hacer el cambio:\n\n' + (e.message || e));
+  }
+};
+
+// Abrir modal Recuperar Acá
+window.pbAbrirRecuperar = function(turnoDestinoId, fechaISO) {
+  const data = window._agendaData;
+  const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
+  const recupes = data.recuperatoriosPendientes || [];
+  if (!destino) { alert('Turno no encontrado.'); return; }
+  if (recupes.length === 0) { alert('No tenés ausencias pendientes para recuperar.'); return; }
+
+  const fechaTxt = fechaISO.split('-').reverse().join('/');
+
+  // Si tiene 1 sola ausencia → confirmación directa.
+  // Si tiene varias → modal para elegir.
+  if (recupes.length === 1) {
+    const r = recupes[0];
+    const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
+    pbAbrirModal({
+      titulo: '🎯 Recuperar acá',
+      subtitulo: `Vas a recuperar la falta del <b>${esc(fAus)}</b> en <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>.`,
+      infoBox: '✅ Esta acción usa tu cupo de recuperatorios.<br>✅ Recordá que solo se puede recuperar dentro de los 60 días desde la falta, y programar hasta 15 días vista.',
+      cuerpoHTML: '',
+      botones: [
+        { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+        { label: 'Confirmar recupero', cls: 'confirm', onclick: `pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')` },
+      ],
+    });
+  } else {
+    const opciones = recupes.map(r => {
+      const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
+      return `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
+        Falta del <b>${esc(fAus)}</b>
+        <div style="font-size:11.5px;color:#64748b;margin-top:2px">Tipo: ${esc(r.tipo||'')}</div>
+      </button>`;
+    }).join('');
+    pbAbrirModal({
+      titulo: '🎯 Recuperar acá',
+      subtitulo: `Elegí qué ausencia querés recuperar en <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>:`,
+      infoBox: '',
+      cuerpoHTML: opciones,
+    });
+  }
+};
+
+window.pbConfirmarRecupero = async function(recuperatorioId, turnoDestinoId, fechaISO) {
+  const btns = document.querySelectorAll('#pbModal button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const { data: res, error } = await sb.rpc('alumno_agendar_recupero', {
+      p_recuperatorio_id: recuperatorioId,
+      p_turno_destino_id: turnoDestinoId,
+      p_fecha_recupero: fechaISO,
+    });
+    if (error) throw error;
+    pbCerrarModal();
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Recupero agendado con éxito'));
+    location.reload();
+  } catch (e) {
+    btns.forEach(b => b.disabled = false);
+    alert('No se pudo agendar el recupero:\n\n' + (e.message || e));
+  }
+};
+
+// Modal genérico
+function pbAbrirModal(cfg) {
+  let modal = document.getElementById('pbModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'pbModal';
+    modal.className = 'pb-modal-overlay';
+    document.body.appendChild(modal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) pbCerrarModal();
+    });
+  }
+  const infoHtml = cfg.infoBox
+    ? `<div class="pb-info-box">${cfg.infoBox}</div>`
+    : '';
+  const botones = cfg.botones || [
+    { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+  ];
+  const botonesHtml = botones.map(b =>
+    `<button class="pb-modal-btn ${b.cls}" onclick="${b.onclick}">${esc(b.label)}</button>`
+  ).join('');
+  modal.innerHTML = `
+    <div class="pb-modal">
+      <h3>${cfg.titulo || ''}</h3>
+      <div class="pb-modal-sub">${cfg.subtitulo || ''}</div>
+      ${infoHtml}
+      ${cfg.cuerpoHTML ? `<div class="pb-modal-opciones">${cfg.cuerpoHTML}</div>` : ''}
+      <div class="pb-modal-acciones">${botonesHtml}</div>
+    </div>`;
+  modal.classList.add('open');
 }
 </script>
 </body>
