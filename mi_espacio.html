@@ -877,7 +877,7 @@ async function cargarEspacio(per){
 
   const html = [
     bloquePlan(inscripcion),
-    bloqueMisClases(misTurnos),
+    bloqueMisClases(misTurnos, (asis.data||[])),
     bloqueClasesPuntuales(misAgregados),
     bloqueAgenda(window._agendaData),
     bloqueAsistencia(asis.data||[]),
@@ -966,7 +966,7 @@ function fmtFechaCorta(iso){
   return `${DIAS[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`;
 }
 
-function bloqueMisClases(turnos){
+function bloqueMisClases(turnos, asistencias){
   if(!turnos || turnos.length===0){
     return `<section class="card reveal d2b">
       <h2><span class="dot"></span>Mis clases fijas</h2>
@@ -976,6 +976,17 @@ function bloqueMisClases(turnos){
   // Ordenar por día y hora
   turnos.sort((a,b)=> (ORDEN_DIAS[a.dia]||99) - (ORDEN_DIAS[b.dia]||99) || (a.hora||'').localeCompare(b.hora||''));
 
+  // Set de faltas avisadas para "turnoId|fechaISO" (solo futuras, motivo del alumno)
+  const _hoyISO = hoyISO();
+  const faltasAvisadas = new Set();
+  (asistencias||[]).forEach(a => {
+    if (a.estado === 'ausente-justificada'
+        && a.fecha >= _hoyISO
+        && String(a.motivo||'').toLowerCase().includes('aviso del alumno')) {
+      faltasAvisadas.add(a.turno_id + '|' + a.fecha);
+    }
+  });
+
   let rows='';
   turnos.forEach(t=>{
     const proxISO = proximaFechaDelTurno(t.dia, t.hora);
@@ -983,13 +994,20 @@ function bloqueMisClases(turnos){
     const dia = esc(t.dia||'');
     const hora = esc(t.hora||'');
     const serv = esc(t.servicio||'');
+    const yaAvisada = faltasAvisadas.has(t.id + '|' + proxISO);
+    const accionHTML = yaAvisada
+      ? `<div class="aviso-falta firme" style="grid-column: 1 / -1; margin-top: 8px;">
+          <div>✓ Falta avisada para <b>${proxLegible}</b></div>
+          <button class="deshacer" onclick="deshacerFalta(${t.id},'${proxISO}')">Deshacer</button>
+        </div>`
+      : `<button class="btn-faltar" id="btn-${t.id}" onclick="avisarFalta(${t.id},'${dia}','${hora}','${serv}','${proxISO}')">🚫 Avisar falta</button>
+        <div class="falta-slot" id="falta-${t.id}"></div>`;
     rows += `<div class="clase-fija">
       <div class="cf-info">
         <div class="cf-dia">${dia} · ${hora}</div>
         <div class="cf-sub">${serv} · Próxima: ${proxLegible}</div>
       </div>
-      <button class="btn-faltar" id="btn-${t.id}" onclick="avisarFalta(${t.id},'${dia}','${hora}','${serv}','${proxISO}')">🚫 Avisar falta</button>
-      <div class="falta-slot" id="falta-${t.id}"></div>
+      ${accionHTML}
     </div>`;
   });
 
