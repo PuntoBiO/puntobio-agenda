@@ -392,6 +392,8 @@
 .ag-btn-azul:hover { background: #1e9fe0; color: #fff; }
 .ag-btn-verde { border-color: #16a34a; color: #16a34a; background: rgba(22,163,74,0.08); }
 .ag-btn-verde:hover { background: #16a34a; color: #fff; }
+.ag-btn-naranja { border-color: #ea580c; color: #ea580c; background: rgba(234,88,12,0.08); }
+.ag-btn-naranja:hover { background: #ea580c; color: #fff; }
 
 /* SELF-SERVICE · modal compartido para confirmaciones */
 .pb-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 20px; }
@@ -829,6 +831,12 @@ async function cargarEspacio(per){
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
       return new Date(f) >= hace60;
     }),
+    // Set de "turnoId|fechaISO" que son cambios de área del alumno (para mostrar botón revertir)
+    misCambiosArea: new Set(
+      (misAgregadosRes.data || [])
+        .filter(r => r.tipo === 'cambio_area')
+        .map(r => r.turno_id + '|' + r.fecha)
+    ),
   };
 
   // Aplanar agregados puntuales propios (sueltos/recuperatorios)
@@ -1409,15 +1417,25 @@ function renderAgendaDia(fechaISO){
         botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirRecuperar(${t.id}, '${fechaISO}')">🎯 Recuperar acá</button>`;
       }
 
+      // BOTÓN REVERTIR CAMBIO DE ÁREA · si tengo un cambio_area en este turno + falta +2h
+      const esMiCambioArea = data.misCambiosArea && data.misCambiosArea.has(t.id + '|' + fechaISO);
+      if (esMiCambioArea && haceFalta2h) {
+        botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbAbrirRevertir(${t.id}, '${fechaISO}')">↩️ Revertir cambio</button>`;
+      }
+
       // Etiqueta "MI CLASE" si es turno fijo del alumno
       const miClaseTag = esMiTurnoFijo
         ? `<span style="display:inline-block;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">MI CLASE</span>`
+        : '';
+      // Etiqueta "CAMBIÉ ACÁ" si es un cambio de área del alumno
+      const cambioTag = esMiCambioArea
+        ? `<span style="display:inline-block;background:#ffedd5;color:#9a3412;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">CAMBIÉ ACÁ</span>`
         : '';
 
       filas += `<div class="ag-turno" ${bloqCls}>
         <div class="ag-turno-info">
           <span class="ag-dot ${dot}"></span>
-          <span class="ag-turno-nombre">${esc(nom)}${miClaseTag}${bloqMark}</span>
+          <span class="ag-turno-nombre">${esc(nom)}${miClaseTag}${cambioTag}${bloqMark}</span>
         </div>
         <div class="ag-turno-right">
           <div class="ag-cupo-num ${niv.cls}">${efectivos} / ${cap || '?'}</div>
@@ -1737,6 +1755,42 @@ window.pbConfirmarRecupero = async function(recuperatorioId, turnoDestinoId, fec
   } catch (e) {
     btns.forEach(b => b.disabled = false);
     alert('No se pudo agendar el recupero:\n\n' + (e.message || e));
+  }
+};
+
+// REVERTIR CAMBIO DE ÁREA
+window.pbAbrirRevertir = function(turnoDestinoId, fechaISO) {
+  const data = window._agendaData;
+  const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
+  if (!destino) { alert('Turno no encontrado.'); return; }
+  const fechaTxt = fechaISO.split('-').reverse().join('/');
+  pbAbrirModal({
+    titulo: '↩️ Revertir cambio de área',
+    subtitulo: `Vas a cancelar el cambio a <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>.`,
+    infoBox: '✅ Tu turno original vuelve a quedar vigente para esa fecha.<br>✅ No gastás ni recuperás nada.',
+    cuerpoHTML: '',
+    botones: [
+      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: 'Sí, revertir', cls: 'confirm', onclick: `pbConfirmarRevertir(${destino.id}, '${fechaISO}')` },
+    ],
+  });
+};
+
+window.pbConfirmarRevertir = async function(turnoDestinoId, fechaISO) {
+  const btns = document.querySelectorAll('#pbModal button');
+  btns.forEach(b => b.disabled = true);
+  try {
+    const { data: res, error } = await sb.rpc('alumno_revertir_cambio_area', {
+      p_turno_destino_id: turnoDestinoId,
+      p_fecha: fechaISO,
+    });
+    if (error) throw error;
+    pbCerrarModal();
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Cambio revertido'));
+    location.reload();
+  } catch (e) {
+    btns.forEach(b => b.disabled = false);
+    alert('No se pudo revertir:\n\n' + (e.message || e));
   }
 };
 
