@@ -831,11 +831,16 @@ async function cargarEspacio(per){
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
       return new Date(f) >= hace60;
     }),
-    // Set de "turnoId|fechaISO" que son cambios de área del alumno (para mostrar botón revertir)
+    // Set de "turnoId|fechaISO" que son cambios de área del alumno (LEGACY, mantenido por compat)
     misCambiosArea: new Set(
       (misAgregadosRes.data || [])
         .filter(r => r.tipo === 'cambio_area')
         .map(r => r.turno_id + '|' + r.fecha)
+    ),
+    // Map "turnoId|fechaISO" → tipo ('cambio_area' / 'suelta' / 'recuperatorio')
+    // para mostrar etiquetas y botón "↩️ Revertir" en cada uno
+    misAnotaciones: new Map(
+      (misAgregadosRes.data || []).map(r => [r.turno_id + '|' + r.fecha, r.tipo])
     ),
     // Info de cupo de clases sueltas (se completa después con RPC)
     cupoSueltas: null,
@@ -1437,27 +1442,33 @@ function renderAgendaDia(fechaISO){
         }
       }
       const dentro10Hab = diasHabiles >= 1 && diasHabiles <= 10;
-      // Mostrar botón si: NO es mi fijo + ((recupes + dentro15) O (puede suelta + dentro10Hab)) + cupo + actividad + no bloqueado + +2h
+      // Mostrar botón "Programar acá" si: NO es mi fijo + NO ya estoy anotada acá + ((recupes + dentro15) O (puede suelta + dentro10Hab)) + cupo + actividad + no bloqueado + +2h
+      const yaAnotadaEnTurno = data.misAnotaciones && data.misAnotaciones.has(t.id + '|' + fechaISO);
       const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15;
       const puedeSueltaAca = puedeSuelta && actividadOK && dentro10Hab;
-      if (!esMiTurnoFijo && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta2h) {
+      if (!esMiTurnoFijo && !yaAnotadaEnTurno && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta2h) {
         botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirProgramar(${t.id}, '${fechaISO}', ${puedeRecuperarAca}, ${puedeSueltaAca})">📅 Programar acá</button>`;
       }
 
-      // BOTÓN REVERTIR CAMBIO DE ÁREA · si tengo un cambio_area en este turno + falta +2h
-      const esMiCambioArea = data.misCambiosArea && data.misCambiosArea.has(t.id + '|' + fechaISO);
-      if (esMiCambioArea && haceFalta2h) {
-        botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbAbrirRevertir(${t.id}, '${fechaISO}')">↩️ Revertir cambio</button>`;
+      // BOTÓN REVERTIR · si tengo CUALQUIER anotación en este turno + falta +2h
+      const miTipoAnot = data.misAnotaciones ? data.misAnotaciones.get(t.id + '|' + fechaISO) : null;
+      if (miTipoAnot && haceFalta2h) {
+        botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbAbrirRevertir(${t.id}, '${fechaISO}')">↩️ Revertir</button>`;
       }
 
       // Etiqueta "MI CLASE" si es turno fijo del alumno
       const miClaseTag = esMiTurnoFijo
         ? `<span style="display:inline-block;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">MI CLASE</span>`
         : '';
-      // Etiqueta "CAMBIÉ ACÁ" si es un cambio de área del alumno
-      const cambioTag = esMiCambioArea
-        ? `<span style="display:inline-block;background:#ffedd5;color:#9a3412;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">CAMBIÉ ACÁ</span>`
-        : '';
+      // Etiqueta según tipo de anotación del alumno en este turno
+      let cambioTag = '';
+      if (miTipoAnot === 'cambio_area') {
+        cambioTag = `<span style="display:inline-block;background:#ffedd5;color:#9a3412;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">CAMBIÉ ACÁ</span>`;
+      } else if (miTipoAnot === 'suelta') {
+        cambioTag = `<span style="display:inline-block;background:#ede9fe;color:#6d28d9;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">SUELTA</span>`;
+      } else if (miTipoAnot === 'recuperatorio') {
+        cambioTag = `<span style="display:inline-block;background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">RECUPERO</span>`;
+      }
 
       filas += `<div class="ag-turno" ${bloqCls}>
         <div class="ag-turno-info">
@@ -1855,35 +1866,52 @@ window.pbConfirmarClaseSuelta = async function(turnoDestinoId, fechaISO) {
   }
 };
 
-// REVERTIR CAMBIO DE ÁREA
-window.pbAbrirRevertir = function(turnoDestinoId, fechaISO) {
+// REVERTIR CUALQUIER ANOTACIÓN (cambio_area / suelta / recuperatorio)
+window.pbAbrirRevertir = function(turnoId, fechaISO) {
   const data = window._agendaData;
-  const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
-  if (!destino) { alert('Turno no encontrado.'); return; }
+  const t = (data.turnos||[]).find(x => x.id === turnoId);
+  if (!t) { alert('Turno no encontrado.'); return; }
+  const tipo = data.misAnotaciones ? data.misAnotaciones.get(turnoId + '|' + fechaISO) : null;
+  if (!tipo) { alert('No tenés una anotación en ese turno.'); return; }
   const fechaTxt = fechaISO.split('-').reverse().join('/');
+
+  let titulo = '↩️ Revertir anotación';
+  let infoBox = '';
+  let textoBtn = 'Sí, revertir';
+  if (tipo === 'cambio_area') {
+    titulo = '↩️ Revertir cambio de área';
+    infoBox = '✅ Tu turno original vuelve a quedar vigente para esa fecha.<br>✅ No gastás ni recuperás nada.';
+  } else if (tipo === 'suelta') {
+    titulo = '↩️ Cancelar clase suelta';
+    infoBox = '✅ Liberás 1 lugar del cupo de tu ciclo.<br>✅ Vas a poder anotarte de nuevo a otra clase suelta.';
+  } else if (tipo === 'recuperatorio') {
+    titulo = '↩️ Cancelar recuperatorio';
+    infoBox = '✅ Tu falta vuelve a quedar pendiente.<br>✅ Vas a poder reprogramar el recupe en otra clase.';
+  }
+
   pbAbrirModal({
-    titulo: '↩️ Revertir cambio de área',
-    subtitulo: `Vas a cancelar el cambio a <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>.`,
-    infoBox: '✅ Tu turno original vuelve a quedar vigente para esa fecha.<br>✅ No gastás ni recuperás nada.',
+    titulo,
+    subtitulo: `Vas a cancelar tu anotación en <b>${esc(nombreServicio(t.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(t.hora)}</b>.`,
+    infoBox,
     cuerpoHTML: '',
     botones: [
-      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
-      { label: 'Sí, revertir', cls: 'confirm', onclick: `pbConfirmarRevertir(${destino.id}, '${fechaISO}')` },
+      { label: 'No, dejar como está', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: textoBtn, cls: 'confirm', onclick: `pbConfirmarRevertir(${turnoId}, '${fechaISO}')` },
     ],
   });
 };
 
-window.pbConfirmarRevertir = async function(turnoDestinoId, fechaISO) {
+window.pbConfirmarRevertir = async function(turnoId, fechaISO) {
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_revertir_cambio_area', {
-      p_turno_destino_id: turnoDestinoId,
+    const { data: res, error } = await sb.rpc('alumno_revertir_anotacion', {
+      p_turno_id: turnoId,
       p_fecha: fechaISO,
     });
     if (error) throw error;
     pbCerrarModal();
-    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Cambio revertido'));
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Anotación cancelada'));
     location.reload();
   } catch (e) {
     btns.forEach(b => b.disabled = false);
