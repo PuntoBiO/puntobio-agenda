@@ -945,14 +945,67 @@ function bloqueClasesPuntuales(agregados){
         <div class="cf-dia">${fechaLeg} · ${hora}</div>
         <div class="cf-sub">${serv} <span class="cp-chip ${chipCls}">${chipTxt}</span></div>
       </div>
+      <button class="btn-faltar" id="btn-cp-${a.id}"
+        onclick="cancelarPuntual(${a.id},'${a.fecha}','${hora}','${esc(a.dia||'')}','${serv}','${tipo}')">
+        🚫 Cancelar
+      </button>
+      <div class="falta-slot" id="cp-slot-${a.id}"></div>
     </div>`;
   });
   return `<section class="card reveal d2b">
     <h2><span class="dot"></span>Mis próximas clases puntuales</h2>
     ${rows}
-    <div class="nota">Estas son clases <b>sueltas o de recuperación</b> que te cargó el centro para esta semana o la próxima. Si no podés venir, avisanos cuanto antes.</div>
+    <div class="nota">Estas son clases <b>sueltas o de recuperación</b> que te cargó el centro. Podés cancelarlas con al menos <b>2 horas de anticipación</b>. Si avisás más tarde, esa clase la perdés.</div>
   </section>`;
 }
+
+// Cancela un agregado puntual del alumno (suelto o recuperatorio)
+window.cancelarPuntual = async function(agregadoId, fechaISO, hora, dia, servicio, tipo){
+  const btn = document.getElementById('btn-cp-'+agregadoId);
+  const slot = document.getElementById('cp-slot-'+agregadoId);
+  if(!btn || !slot) return;
+
+  // Validación de 2 horas — calculamos el inicio del turno
+  const [hh, mm] = String(hora||'00:00').split(':').map(Number);
+  const inicio = new Date(fechaISO + 'T00:00:00');
+  inicio.setHours(hh||0, mm||0, 0, 0);
+  const ahora = new Date();
+  const horasFalta = (inicio - ahora) / 3600000;
+
+  if(horasFalta < 2){
+    alert('🕐 Llegaste tarde\n\nEl turno empieza en menos de 2 horas. Esta clase ya no se puede cancelar.\nSi no podés venir, avisanos por WhatsApp.');
+    return;
+  }
+
+  const etiquetaTipo = tipo === 'recuperatorio' ? 'recuperatorio' : 'clase suelta';
+  const msgConfirm = `¿Cancelar tu ${etiquetaTipo} del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?\n\nSe libera el lugar y la clase desaparece de tu agenda.`;
+  if(!confirm(msgConfirm)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Cancelando…';
+
+  try {
+    const { error } = await sb.from('turno_agregados').delete().eq('id', agregadoId);
+    if(error) throw error;
+
+    // Éxito: quitar el botón y mostrar mensaje
+    btn.style.display = 'none';
+    slot.innerHTML = `<div class="aviso-falta firme">
+      <div>✓ Cancelaste tu ${etiquetaTipo} del <b>${fmtFechaCorta(fechaISO)}</b>. El lugar quedó liberado.</div>
+    </div>`;
+  } catch(e){
+    btn.disabled = false;
+    btn.textContent = '🚫 Cancelar';
+    const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+    let msg = 'No se pudo cancelar.';
+    if(raw.includes('row-level') || raw.includes('policy') || raw.includes('permission')){
+      msg = 'No tenés permiso para cancelar esta clase. Hablá con el centro.';
+    } else if(e && e.message){
+      msg = 'No se pudo cancelar: ' + e.message;
+    }
+    alert(msg);
+  }
+};
 
 window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
   const btn = document.getElementById('btn-'+turnoId);
