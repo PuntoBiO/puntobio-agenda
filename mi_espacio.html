@@ -15,6 +15,7 @@
   })();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="bloqueos.js"></script>
 <style>
   :root{
     /* === Tema OSCURO (default) === */
@@ -602,6 +603,20 @@ function hoyISO(){
   if(!session){
     mostrarSinSesion();
     return;
+  }
+  // BLOQUEOS · cargar la cache antes de pintar la agenda (silencioso si falla)
+  if (window.Bloqueos) {
+    try {
+      Bloqueos.setCliente(sb);
+      await Bloqueos.cargar();
+      Bloqueos.escucharCambios(() => {
+        // si el alumno tiene la pantalla abierta y Lu carga un bloqueo,
+        // re-renderiza el día que esté viendo
+        const cont = document.getElementById('agenda-lista');
+        const fechaSel = cont?.dataset?.fechaActual;
+        if (fechaSel && typeof renderAgendaDia === 'function') renderAgendaDia(fechaSel);
+      });
+    } catch (e) { console.warn('[bloqueos] no se pudieron cargar', e); }
   }
   // 2) ¿qué persona soy? (RLS Nivel C: solo veo mi propia fila)
   const { data:per, error } = await sb
@@ -1228,6 +1243,8 @@ function renderAgendaDia(fechaISO){
   const cont = document.getElementById('agenda-lista');
   const data = window._agendaData;
   if(!cont || !data || !fechaISO) return;
+  // BLOQUEOS · recordar la fecha activa para el realtime refresh
+  cont.dataset.fechaActual = fechaISO;
   // Día de semana (1=Lun..5=Vie) para filtrar turnos
   const [y,m,d] = fechaISO.split('-').map(Number);
   const dow = new Date(y, m-1, d).getDay(); // 1..5
@@ -1254,6 +1271,26 @@ function renderAgendaDia(fechaISO){
   const horasOrdenadas = Object.keys(porHora).sort();
 
   let html = '';
+
+  // BLOQUEOS · banner si hay un bloqueo activo TF/transversal para esta fecha
+  if (window.Bloqueos) {
+    const bloqsHoy = Bloqueos.lista().filter(b =>
+      (b.area === 'TF' || b.area === 'TRANSVERSAL') &&
+      fechaISO >= b.fecha_desde && fechaISO <= b.fecha_hasta
+    );
+    if (bloqsHoy.length > 0) {
+      const fTxt = fechaISO.split('-').reverse().join('/');
+      const items = bloqsHoy.map(b => {
+        const h = (b.hora_desde && b.hora_hasta) ? ` ${b.hora_desde.slice(0,5)}–${b.hora_hasta.slice(0,5)}` : ' día completo';
+        return `<li>${esc(b.motivo||'')}${h}</li>`;
+      }).join('');
+      html += `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#991b1b">
+        <b>🚫 Aviso del centro para el ${fTxt}</b>
+        <ul style="margin:6px 0 0 0;padding-left:20px;line-height:1.5">${items}</ul>
+      </div>`;
+    }
+  }
+
   horasOrdenadas.forEach(hora => {
     const tsHora = porHora[hora];
     // Dentro de cada hora, ordenar Entrenamiento antes que Kinefilaxia
@@ -1269,10 +1306,22 @@ function renderAgendaDia(fechaISO){
       const niv = nivelDeOcupacion(efectivos, cap);
       const dot = dotServicio(t.servicio);
       const nom = nombreServicio(t.servicio);
-      filas += `<div class="ag-turno">
+      // BLOQUEOS · chequear si este turno puntual está bloqueado
+      let bloqMark = '';
+      let bloqCls = '';
+      if (window.Bloqueos) {
+        const horaIni = (t.hora || '').slice(0,5);
+        const horaFin = horaIni ? String(parseInt(horaIni.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
+        const b = Bloqueos.queAplica('TF', fechaISO, horaIni, horaFin, null, null);
+        if (b) {
+          bloqMark = `<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;margin-left:6px">🚫 NO DISPONIBLE</span>`;
+          bloqCls = 'style="opacity:0.55"';
+        }
+      }
+      filas += `<div class="ag-turno" ${bloqCls}>
         <div class="ag-turno-info">
           <span class="ag-dot ${dot}"></span>
-          <span class="ag-turno-nombre">${esc(nom)}</span>
+          <span class="ag-turno-nombre">${esc(nom)}${bloqMark}</span>
         </div>
         <div class="ag-turno-right">
           <div class="ag-cupo-num ${niv.cls}">${efectivos} / ${cap || '?'}</div>

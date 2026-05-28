@@ -902,6 +902,7 @@
   </div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="bloqueos.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 // =============================================
@@ -1070,6 +1071,25 @@ async function supabaseDelete(tabla, filtro) {
   });
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return res.ok;
+}
+
+// BLOQUEOS · Helper para chequear bloqueos al agregar a turno_agregados.
+// Recibe el objeto turno (t.hora) y la fecha del agregado. Devuelve true si
+// hay bloqueo activo (= NO se debe insertar), false si el slot está libre.
+// Si está bloqueado, muestra un toast con el motivo.
+async function chequearBloqueoTF_(t, fecha) {
+  if (!window.Bloqueos || !t || !fecha) return false;
+  try { await Bloqueos.refrescar(); } catch (e) {}
+  const horaIni = (t.hora || '').slice(0,5);
+  // Cada clase de TF dura ~1h (la grilla las maneja por hora redonda)
+  const horaFin = horaIni
+    ? String(parseInt(horaIni.slice(0,2),10)+1).padStart(2,'0')+':'+(horaIni.slice(3) || '00')
+    : null;
+  const b = Bloqueos.queAplica('TF', fecha, horaIni, horaFin, null, null);
+  if (!b) return false;
+  const fechaTxt = fecha.split('-').reverse().join('/');
+  toast(`🚫 BLOQUEADO · ${fechaTxt}${horaIni?' '+horaIni:''}: ${b.motivo}`, 'error');
+  return true;
 }
 
 // =============================================
@@ -2692,6 +2712,11 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     });
     // 2) Agregarlo al turno del día (igual que un agregado puntual)
     const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+    // BLOQUEOS · chequear antes del insert
+    if (await chequearBloqueoTF_(t, fechaRecupero)) {
+      cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">El día ${fechaRecupero.split('-').reverse().join('/')} está bloqueado por administración. No se puede agendar el recuperatorio en ese día.</div>`;
+      return;
+    }
     const filas = await supabaseInsertReturn('turno_agregados',
       { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
     const agId = (filas && filas[0]) ? filas[0].id : null;
@@ -2939,6 +2964,30 @@ function renderGrillaSemana() {
       ${dia}<br><span style="font-weight:500;font-size:11px;color:#94a3b8">${fLabel}${motivo?' 🟠':''}</span></th>`;
   });
   html += '</tr></thead><tbody>';
+
+  // BLOQUEOS · banner de bloqueos vigentes en esta semana
+  let bannerBloq = '';
+  if (window.Bloqueos) {
+    const fSemMin = fechas[0], fSemMax = fechas[4];
+    const enSemana = Bloqueos.lista().filter(b =>
+      (b.area === 'TF' || b.area === 'TRANSVERSAL') &&
+      b.fecha_desde <= fSemMax && b.fecha_hasta >= fSemMin
+    );
+    if (enSemana.length > 0) {
+      const items = enSemana.map(b => {
+        const f = (b.fecha_desde === b.fecha_hasta)
+          ? b.fecha_desde.slice(8,10)+'/'+b.fecha_desde.slice(5,7)
+          : `${b.fecha_desde.slice(8,10)}/${b.fecha_desde.slice(5,7)}→${b.fecha_hasta.slice(8,10)}/${b.fecha_hasta.slice(5,7)}`;
+        const h = (b.hora_desde && b.hora_hasta) ? ` ${b.hora_desde.slice(0,5)}–${b.hora_hasta.slice(0,5)}` : ' día completo';
+        return `<li><b>${f}</b>${h} · ${(b.motivo||'').replace(/</g,'&lt;')}</li>`;
+      }).join('');
+      bannerBloq = `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:12.5px;color:#991b1b">
+        <b>🚫 Bloqueos vigentes esta semana</b>
+        <ul style="margin:6px 0 0 0;padding-left:20px;line-height:1.6">${items}</ul>
+      </div>`;
+    }
+  }
+  html = bannerBloq + html;
 
   horas.forEach(hora => {
     // Armar las celdas de esta hora; si "solo disponibles", esconder los turnos sin lugar
@@ -3224,6 +3273,8 @@ window.confirmarAgregar = async (tipo) => {
     } else {
       // Recuperatorio o suelto: agregado puntual de la fecha
       const fecha = fechaDelDia(t.dia);
+      // BLOQUEOS · chequear antes del insert
+      if (await chequearBloqueoTF_(t, fecha)) return;
       const filas = await supabaseInsertReturn('turno_agregados',
         { turno_id: t.id, persona_id: pid, fecha, tipo, agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
       const agId = (filas && filas[0]) ? filas[0].id : null;
@@ -3892,6 +3943,8 @@ async function confirmarJustif() {
       await guardarAsistencia(t, justifId, 'ausente-justificada', motivoCambio);
       // 2) Anotar en el turno destino como 'cambio_area' (NO recuperatorio → no gasta cupo)
       const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+      // BLOQUEOS · chequear destino antes del insert
+      if (await chequearBloqueoTF_(destino, fecha)) return;
       const filas = await supabaseInsertReturn('turno_agregados',
         { turno_id: destino.id, persona_id: parseInt(justifId), fecha, tipo: 'cambio_area', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
       const agId = (filas && filas[0]) ? filas[0].id : null;
@@ -3992,6 +4045,12 @@ async function verificarSesion() {
       sesionActiva = true;
       document.getElementById('login-overlay').classList.add('oculto');
       cargarUsuarioActual();
+      // BLOQUEOS · cliente + cache + realtime
+      if (window.Bloqueos) {
+        if (sbCliente) Bloqueos.setCliente(sbCliente);
+        await Bloqueos.cargar();
+        Bloqueos.escucharCambios(() => { try { renderTurnos(); renderGrillaSemana(); } catch(e){} });
+      }
       cargarDatos();
       iniciarRealtime();
     } else {

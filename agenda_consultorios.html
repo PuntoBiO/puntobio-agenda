@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda Consultorios · PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="bloqueos.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -599,6 +600,12 @@ let pendienteSobre = null;
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // BLOQUEOS · cliente + cache + realtime
+    if (window.Bloqueos) {
+      Bloqueos.setCliente(supa);
+      await Bloqueos.cargar();
+      Bloqueos.escucharCambios(() => refresh());
+    }
     anchorDate = lunesDe(new Date());
     bindEvents();
     initNuevoForm();
@@ -910,6 +917,24 @@ function renderWeek(container) {
   container.querySelectorAll('.turno').forEach(el => {
     el.addEventListener('click', e => { e.stopPropagation(); onTurnoClick(el.dataset.turnoId); });
   });
+  // BLOQUEOS · marcar celdas con bloqueo AMPLIO (sin profe ni práctica)
+  // En Consultorios el slot es libre — varios profes/prácticas pueden caer ahí.
+  // Solo marcamos si el bloqueo cubre TODO (área completa, sin profe ni práctica).
+  // Bloqueos puntuales (solo Bruno / solo Fisio) se chequean al guardar.
+  if (window.Bloqueos) {
+    container.querySelectorAll('.grid-cell.is-libre').forEach(c => {
+      const fecha = c.dataset.fecha;
+      const h = parseInt(c.dataset.hora,10);
+      const horaIni = pad(h)+':00';
+      const horaFin = pad(h+1)+':00';
+      const bloqs = Bloqueos.todosLosQueAplican('CONSULTORIOS', fecha, horaIni, horaFin, null, null);
+      const bloqAmplio = bloqs.find(b => !b.profesional_email && !b.practica_codigo);
+      if (bloqAmplio) {
+        c.classList.add('slot-bloqueado');
+        c.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloqAmplio));
+      }
+    });
+  }
 }
 
 function calcularNumeroSesion(t) {
@@ -1646,6 +1671,21 @@ async function guardarLote(payloads) {
   const btn = document.getElementById('btnGuardarTurno');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
+    // BLOQUEOS · red de seguridad final (chequea profe + práctica concretos)
+    if (window.Bloqueos) {
+      await Bloqueos.refrescar();
+      for (const p of payloads) {
+        const hi = (p.hora_inicio || '').slice(0,5);
+        const hf = (p.hora_fin || '').slice(0,5) || hi;
+        const b = Bloqueos.queAplica('CONSULTORIOS', p.fecha, hi, hf, p.profesional || null, p.practica || p.practica_codigo || null);
+        if (b) {
+          const fechaTxt = p.fecha.split('-').reverse().join('/');
+          alert(`🚫 Bloqueado por administración\n\n${fechaTxt} ${hi} · ${p.profesional || ''} · ${p.practica || p.practica_codigo || ''}\nMotivo: ${b.motivo}\n\nNo se guardó ningún turno del lote.`);
+          btn.disabled = false; btn.textContent = 'Guardar turnos';
+          return;
+        }
+      }
+    }
     const { error } = await supa.from('turnos_consultorio').insert(payloads).select();
     if (error) throw error;
     // === Guardar info para el modal WhatsApp ANTES de cerrar el modal ===

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda Masoterapia · PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="bloqueos.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -567,6 +568,12 @@ let pendienteSobre = null;
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // BLOQUEOS · cliente + cache + realtime
+    if (window.Bloqueos) {
+      Bloqueos.setCliente(supa);
+      await Bloqueos.cargar();
+      Bloqueos.escucharCambios(() => refresh());
+    }
     anchorDate = lunesDe(new Date());
     bindEvents();
     initNuevoForm();
@@ -940,6 +947,22 @@ function renderWeek(container) {
   container.querySelectorAll('.turno').forEach(el => {
     el.addEventListener('click', e => { e.stopPropagation(); onTurnoClick(el.dataset.turnoId); });
   });
+  // BLOQUEOS · marcar celdas libres bloqueadas por la admin
+  // En masoterapia el profe siempre es VERO. Pasamos null para que matchee
+  // tanto bloqueos del área (sin profe) como bloqueos puntuales para Vero.
+  if (window.Bloqueos) {
+    container.querySelectorAll('.grid-cell.is-libre').forEach(c => {
+      const fecha = c.dataset.fecha;
+      const h = parseInt(c.dataset.hora,10);
+      const horaIni = pad(h)+':00';
+      const horaFin = pad(h+1)+':00';
+      const bloq = Bloqueos.queAplica('MASOTERAPIA', fecha, horaIni, horaFin, null, null);
+      if (bloq) {
+        c.classList.add('slot-bloqueado');
+        c.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+      }
+    });
+  }
 }
 
 function renderTurno(t) {
@@ -1608,6 +1631,21 @@ async function guardarLote(payloads) {
   const btn = document.getElementById('btnGuardarTurno');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
+    // BLOQUEOS · red de seguridad: refrescar cache y chequear cada payload
+    if (window.Bloqueos) {
+      await Bloqueos.refrescar();
+      for (const p of payloads) {
+        const hi = (p.hora_inicio || '').slice(0,5);
+        const hf = (p.hora_fin || '').slice(0,5) || hi;
+        const b = Bloqueos.queAplica('MASOTERAPIA', p.fecha, hi, hf, p.profesional || null, p.practica_codigo || null);
+        if (b) {
+          const fechaTxt = p.fecha.split('-').reverse().join('/');
+          alert(`🚫 Bloqueado por administración\n\n${fechaTxt} ${hi} · ${b.area}\nMotivo: ${b.motivo}\n\nNo se guardó ningún turno del lote. Sacá los slots bloqueados o liberá el bloqueo en Gestión de Cupo.`);
+          btn.disabled = false; btn.textContent = 'Guardar turnos';
+          return;
+        }
+      }
+    }
     const { error } = await supa.from('turnos_masoterapia').insert(payloads).select();
     if (error) throw error;
     closeModal('modalNuevo');

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda BiOLAB · PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="bloqueos.js"></script>
 <style>
   :root{
     --bg:#ffffff; --panel:#ffffff; --panel-2:#fafafa;
@@ -670,6 +671,16 @@ function render(){
         abrirNuevoDesdeSlot(fStr, hora, d, diaNum);
       };
       grid.appendChild(slot);
+      // BLOQUEOS · marcar visualmente si la admin bloqueó este slot
+      // (área BIOLAB, día completo o el rango que incluya esta hora)
+      if (window.Bloqueos) {
+        const horaFin = String(parseInt(hora.slice(0,2),10)+1).padStart(2,'0')+':00';
+        const bloq = Bloqueos.queAplica('BIOLAB', fStr, hora, horaFin, null, null);
+        if (bloq) {
+          slot.classList.add('slot-bloqueado');
+          slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+        }
+      }
     });
   });
 }
@@ -935,6 +946,11 @@ async function guardarTurnoNuevo(){
   const now = new Date();
   const idTurno = 'TD-' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') + '-' + String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
 
+  // BLOQUEOS · red de seguridad antes del INSERT (refresca cache y chequea)
+  if (window.Bloqueos && await Bloqueos.bloquearOk('BIOLAB', slotActual.fecha, horaInicio, horaFin, profesional, practica)) {
+    return; // ya mostró el alert con el motivo
+  }
+
   const { error } = await sb.from('turnos_biolab').insert({
     id_turno: idTurno, fecha: slotActual.fecha, hora_inicio: horaInicio, hora_fin: horaFin,
     profesional, persona_id: Number(personaId), paciente, tratamiento_id: idTto,
@@ -1040,6 +1056,11 @@ async function iniciarRealtime() {
 
 /* INIT */
 (async () => {
+  // BLOQUEOS · cargar al arranque + auto-refresh por realtime
+  if (window.Bloqueos) {
+    await Bloqueos.cargar();
+    Bloqueos.escucharCambios(() => render());
+  }
   await cargarTurnos();
   render();
   iniciarRealtime();
