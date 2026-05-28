@@ -299,6 +299,9 @@
   .clase-fija .cf-info{flex:1;min-width:160px}
   .clase-fija .cf-dia{font-weight:600;font-size:14.5px}
   .clase-fija .cf-sub{font-size:12.5px;color:var(--texto-tenue);margin-top:3px}
+  .cp-chip{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;vertical-align:middle}
+  .pill-suelto{background:rgba(30,159,224,.12);color:var(--celeste);border:1px solid rgba(30,159,224,.3)}
+  .pill-recu{background:rgba(255,179,0,.12);color:var(--ambar);border:1px solid rgba(255,179,0,.3)}
   .btn-faltar{
     background:transparent;border:1px solid var(--ambar);color:var(--ambar);
     padding:8px 14px;border-radius:10px;font-size:12.5px;font-weight:600;cursor:pointer;
@@ -706,7 +709,7 @@ async function cargarEspacio(per){
   const _desdeISO = _diasHabiles[0];
   const _hastaISO = _diasHabiles[_diasHabiles.length - 1];
 
-  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, allFijosRes, agregadosRes, ausentesRes] = await Promise.all([
+  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, allFijosRes, agregadosRes, ausentesRes, misAgregadosRes] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
@@ -721,10 +724,17 @@ async function cargarEspacio(per){
     sb.from('turnos').select('id, dia, hora, servicio, capacidad'),
     // Conteo de inscriptos fijos por turno (solo activos, sin nombres)
     sb.from('turno_alumnos').select('turno_id').eq('activo', true),
-    // Agregados puntuales (recuperatorios/sueltos) en el rango de 2 semanas
+    // Agregados puntuales (recuperatorios/sueltos) en el rango de 2 semanas (para conteo de cupo)
     sb.from('turno_agregados').select('turno_id, fecha').gte('fecha', _desdeISO).lte('fecha', _hastaISO),
     // Ausencias (no van) en el rango de 2 semanas — solo cuento para restar
     sb.from('asistencia').select('turno_id, fecha').gte('fecha', _desdeISO).lte('fecha', _hastaISO).in('estado', ['ausente','ausente-justificada']),
+    // MIS agregados puntuales (sueltos/recuperatorios cargados para mí) en el rango de 2 semanas
+    sb.from('turno_agregados')
+      .select('id, turno_id, fecha, tipo, turnos!inner(id, dia, hora, servicio)')
+      .eq('persona_id', pid)
+      .gte('fecha', _desdeISO)
+      .lte('fecha', _hastaISO)
+      .order('fecha', {ascending:true}),
   ]);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = (misTurnosRes.data || [])
@@ -768,9 +778,23 @@ async function cargarEspacio(per){
     hoyISO: _hoyISO,
   };
 
+  // Aplanar agregados puntuales propios (sueltos/recuperatorios)
+  const misAgregados = (misAgregadosRes.data || [])
+    .filter(r => r && r.turnos)
+    .map(r => ({
+      id: r.id,
+      turno_id: r.turno_id,
+      fecha: r.fecha,
+      tipo: r.tipo,
+      dia: r.turnos.dia,
+      hora: r.turnos.hora,
+      servicio: r.turnos.servicio,
+    }));
+
   const html = [
     bloquePlan(inscripcion),
     bloqueMisClases(misTurnos),
+    bloqueClasesPuntuales(misAgregados),
     bloqueAgenda(window._agendaData),
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
@@ -889,6 +913,35 @@ function bloqueMisClases(turnos){
     <h2><span class="dot"></span>Mis clases fijas</h2>
     ${rows}
     <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Si avisás a último momento, esa clase se pierde.</div>
+  </section>`;
+}
+
+// ============================================================
+//  MIS CLASES PUNTUALES (sueltos y recuperatorios cargados para mí)
+// ============================================================
+function bloqueClasesPuntuales(agregados){
+  if(!agregados || agregados.length === 0) return ''; // si no hay, no se muestra nada
+  // Ordenar por fecha ascendente (la próxima primero)
+  agregados.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || (a.hora||'').localeCompare(b.hora||''));
+  let rows = '';
+  agregados.forEach(a=>{
+    const fechaLeg = fmtFechaCorta(a.fecha);
+    const hora = esc(a.hora||'');
+    const serv = esc(a.servicio||'');
+    const tipo = (a.tipo||'').toLowerCase();
+    const chipTxt = tipo === 'recuperatorio' ? '♻️ Recuperatorio' : '✨ Clase suelta';
+    const chipCls = tipo === 'recuperatorio' ? 'pill-recu' : 'pill-suelto';
+    rows += `<div class="clase-fija">
+      <div class="cf-info">
+        <div class="cf-dia">${fechaLeg} · ${hora}</div>
+        <div class="cf-sub">${serv} <span class="cp-chip ${chipCls}">${chipTxt}</span></div>
+      </div>
+    </div>`;
+  });
+  return `<section class="card reveal d2b">
+    <h2><span class="dot"></span>Mis próximas clases puntuales</h2>
+    ${rows}
+    <div class="nota">Estas son clases <b>sueltas o de recuperación</b> que te cargó el centro para esta semana o la próxima. Si no podés venir, avisanos cuanto antes.</div>
   </section>`;
 }
 
