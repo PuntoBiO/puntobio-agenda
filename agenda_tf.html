@@ -1200,8 +1200,8 @@ async function cargarDatos() {
       capacidad: t.capacidad,
       profes: mapaProfe[t.id] || []
     }));
-    // Cargar alumnos por turno
-    const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,personas(id,nombre,foto_perfil)&activo=eq.true');
+    // Cargar alumnos por turno (incluyendo fecha_desde para filtrar por fecha de inicio)
+    const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,personas(id,nombre,foto_perfil)&activo=eq.true');
     
     ALUMNOS_POR_TURNO = {};
     alumnosTurno.forEach(at => {
@@ -1213,7 +1213,8 @@ async function cargarDatos() {
         id: String(at.personas.id),
         nombre: at.personas.nombre,
         foto: at.personas.foto_perfil || null,
-        estado: 'reservado'
+        estado: 'reservado',
+        fecha_desde: at.fecha_desde || null
       });
     });
     await cargarAgregadosSemana();
@@ -1404,11 +1405,19 @@ async function cargarAgregadosSemana() {
   }
 }
 
-// Devuelve los alumnos de un turno = fijos + agregados puntuales de la fecha indicada.
+// Devuelve los fijos VIGENTES en una fecha: descarta los que tienen fecha_desde futura.
+// Si fecha_desde es null/vacía, el alumno cuenta como vigente desde siempre (compat con datos viejos).
+function fijosVigentes(key, fechaIso) {
+  const todos = ALUMNOS_POR_TURNO[key] || [];
+  if (!fechaIso) return todos;
+  return todos.filter(a => !a.fecha_desde || a.fecha_desde <= fechaIso);
+}
+
+// Devuelve los alumnos de un turno = fijos vigentes + agregados puntuales de la fecha indicada.
 // Si no se pasa fecha, usa la del día activo (para grilla/modal).
 function getAlumnos(t, fecha) {
-  const fijos = ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || [];
   const f = fecha || fechaDelDia(t.dia);
+  const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, f);
   const puntuales = (AGREGADOS_POR_TURNO[`${t.id}-${f}`] || []).map(a => ({
     id: a.id, nombre: a.nombre, foto: a.foto || null, estado: 'reservado',
     tipoAgregado: a.tipo, agregadoId: a.agregadoId
@@ -1919,7 +1928,7 @@ async function cargarAsistenciaSemana() {
 }
 // ¿Cuántos alumnos FIJOS de un turno están ausentes en una fecha? (para el lugar del día)
 function ausentesDelDia(t, fecha) {
-  const fijos = ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || [];
+  const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, fecha);
   let n = 0;
   fijos.forEach(a => {
     const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
@@ -3257,18 +3266,20 @@ window.confirmarAgregar = async (tipo) => {
   try {
     if (tipo === 'permanente') {
       // Va a turno_alumnos (fijo). Si ya existía (aunque inactivo), reactivar; si no, insertar.
+      // En ambos casos seteamos fecha_desde = hoy (arranca a contar desde el día de la acción)
       const fz = SOBRECUPO_AUTORIZADO;   // ¿la admin autorizó sobrecupo recién?
+      const hoyIsoStr = hoyIso();
       const existe = await supabaseQuery('turno_alumnos',
         `?select=persona_id&turno_id=eq.${t.id}&persona_id=eq.${pid}`);
       if (existe && existe.length) {
-        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true, forzado: fz });
+        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true, forzado: fz, fecha_desde: hoyIsoStr });
       } else {
-        await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true, forzado: fz });
+        await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true, forzado: fz, fecha_desde: hoyIsoStr });
       }
       const key = `${t.dia}-${t.hora}-${t.servicio}`;
       if (!ALUMNOS_POR_TURNO[key]) ALUMNOS_POR_TURNO[key] = [];
       if (!ALUMNOS_POR_TURNO[key].some(a => String(a.id) === String(pid)))
-        ALUMNOS_POR_TURNO[key].push({ id: String(pid), nombre, estado: 'reservado' });
+        ALUMNOS_POR_TURNO[key].push({ id: String(pid), nombre, estado: 'reservado', fecha_desde: hoyIsoStr });
       toast(`${nombre} agregado de forma permanente`, 'ok');
     } else {
       // Recuperatorio o suelto: agregado puntual de la fecha
