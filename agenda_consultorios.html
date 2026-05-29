@@ -284,8 +284,21 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .hist-tag{font-size:11px;background:var(--bg-elev-2);border:1px solid var(--border);border-radius:12px;padding:2px 9px;color:var(--text-dim)}
 .hist-tag.dolor{background:#fde6e6;border-color:var(--s-ausente);color:#8a2020}
 .hist-tag.ok{background:var(--c-fisio-bg);border-color:var(--c-fisio);color:#2d5a14}
+.hist-tag.borg{background:#dde9f5;border-color:#1e9fe0;color:#0a4d6e}
 .hist-obs{font-size:12px;color:var(--text-dim);margin-top:5px;font-style:italic}
 .hist-autor{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-muted);margin-top:5px;text-align:right}
+.hist-acciones{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+.hist-acc-btn{background:var(--bg-elev-2);border:1px solid var(--border);border-radius:5px;padding:4px 9px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;letter-spacing:.04em;color:var(--text-dim);cursor:pointer;transition:all .1s}
+.hist-acc-btn:hover{border-color:var(--accent);color:var(--accent)}
+.hist-acc-btn.danger:hover{border-color:var(--s-ausente);color:var(--s-ausente);background:#fde6e6}
+/* Borg = azul (esfuerzo) — distinto de la EVA roja (dolor) */
+.evo-borg-btn{width:30px;height:32px;border:1px solid var(--border);background:var(--bg-elev);border-radius:6px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:12px;color:var(--text-dim);transition:all .1s}
+.evo-borg-btn:hover{border-color:#1e9fe0}
+.evo-borg-btn.sel{color:#fff;border-color:transparent}
+.evo-borg-info{font-size:11px;color:var(--text-dim);margin-top:6px;font-style:italic}
+/* Botón Borrar evolución del footer del modal */
+.btn-borrar-evo{background:#fff;border:1px solid var(--s-ausente);color:var(--s-ausente)!important;margin-right:auto}
+.btn-borrar-evo:hover{background:#fde6e6}
 </style>
 </head>
 <body>
@@ -541,10 +554,8 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
       <button class="modal-close" data-close="modalEvolucion">×</button>
     </div>
     <div class="modal-body" id="evoBody">—</div>
-    <div class="modal-footer">
-      <button class="btn" data-close="modalEvolucion">Cerrar</button>
-      <button class="btn primary" id="evoGuardarBtn">💾 Guardar evolución</button>
-    </div>
+    <!-- El footer se arma dinámicamente en evoActualizarFooter() -->
+    <div class="modal-footer"></div>
   </div>
 </div>
 
@@ -814,7 +825,8 @@ function bindEvents() {
   document.querySelectorAll('.modal-overlay').forEach(o => o.addEventListener('click', e => { if (e.target===o) closeModal(o.id); }));
   document.getElementById('btnGuardarTurno').addEventListener('click', onGuardarTurno);
   document.getElementById('btnConfirmarSobre').addEventListener('click', onConfirmarSobre);
-  document.getElementById('evoGuardarBtn').addEventListener('click', evoGuardar);
+  // El botón Guardar evolución se crea dinámicamente en evoActualizarFooter() porque
+  // su texto/posición cambia según haya o no fila existente que editar.
 }
 
 function toggleMulti() {
@@ -2060,8 +2072,11 @@ function closeModal(id) { document.getElementById(id).classList.remove('is-open'
 //  - Cada turno puede tener UNA evolución (índice único por turno_id). Editarla
 //    reemplaza la fila anterior.
 //  - El histórico se ve por paciente (todas las evoluciones de fisio de esa persona).
+//
+// Mediciones:
+//  - EVA dolor (0..10) → en rojo. 0=sin dolor, 10=máximo.
+//  - Borg esfuerzo (0..10, CR10) → en azul. 0=nada, 10=esfuerzo máximo.
 // =============================================
-const EVO_CARITAS = ['😀 Muy bien','🙂 Bien','😴 Cansado','😐 Molesto','😣 Mal'];
 // Sólo Lu / admin pueden editar la lista de módulos
 const EVO_EMAILS_EDITAN_MODULOS = ['liclucianavelaz@gmail.com'];
 function evoPuedeEditarModulos() {
@@ -2072,20 +2087,11 @@ function evoPuedeEditarModulos() {
 let EVO_MODULOS = [];        // [{id, nombre, orden, activo}] de modulos_fisio
 let EVO_NOTAS_PRED = [];     // notas predeterminadas del profe logueado
 let evoModulosSel = [];      // módulos elegidos (chips acumulables)
-let evoCaritaSel = '';       // carita elegida
-let evoDolorSel = null;      // escala 0..10 (null = sin marcar)
+let evoDolorSel = null;      // EVA 0..10 (null = sin marcar)
+let evoBorgSel  = null;      // Borg CR10 0..10 (null = sin marcar)
 let evoCtx = null;           // { turno, nombre, persona, tratInfo, nroSesion }
 let evoExistente = null;     // fila ya guardada de evoluciones_fisio para este turno (si existe)
 
-function evoScoreDesdeCarita(c) {
-  const t = String(c||'');
-  if (t.includes('😀')) return 5;
-  if (t.includes('🙂')) return 4;
-  if (t.includes('😴')) return 3;
-  if (t.includes('😐')) return 2;
-  if (t.includes('😣')) return 1;
-  return null;
-}
 function evoIniciales(nombre) {
   const p = (nombre||'').trim().split(/\s+/).filter(Boolean);
   if (!p.length) return '··';
@@ -2137,8 +2143,8 @@ async function abrirEvolucionDesdeCard(turnoId) {
 async function abrirEvolucion(turno, nombre, persona, tratInfo, nroSesion) {
   evoCtx = { turno, nombre, persona, tratInfo, nroSesion };
   evoModulosSel = [];
-  evoCaritaSel = '';
   evoDolorSel = null;
+  evoBorgSel  = null;
   evoExistente = null;
   closeModal('modalDetalle');
   document.getElementById('evoBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--accent)">⟳ Cargando…</div>';
@@ -2148,9 +2154,9 @@ async function abrirEvolucion(turno, nombre, persona, tratInfo, nroSesion) {
   // Precargar datos si ya había una evolución guardada para este turno
   if (evoExistente) {
     evoModulosSel = (evoExistente.modulo || '').split(',').map(s=>s.trim()).filter(Boolean);
-    evoCaritaSel = evoExistente.como_se_sintio || '';
     evoDolorSel = (evoExistente.dolor_escala != null) ? evoExistente.dolor_escala
                  : (evoExistente.dolor ? 5 : null);
+    evoBorgSel  = (evoExistente.esfuerzo_borg != null) ? evoExistente.esfuerzo_borg : null;
   }
   evoRenderModal();
 }
@@ -2215,8 +2221,10 @@ function evoRenderModal() {
   const opcionesMod = EVO_MODULOS.map(m => `<option value="${m.nombre.replace(/"/g,'&quot;')}">${escapeHtml(m.nombre)}</option>`).join('');
   const btnAdminMod = evoPuedeEditarModulos()
     ? `<button class="evo-mod-admin" onclick="evoAdminModulos()" title="Agregar o quitar módulos de la lista">⚙ Editar lista</button>` : '';
-  // Escala de dolor 0..10 (EVA). Color: verde(0-3) amarillo(4-6) rojo(7-10)
+  // Escala EVA de dolor 0..10. Color: verde(0-3) amarillo(4-6) rojo(7-10)
   const dolorBtns = Array.from({length:11}, (_,n) => `<button class="evo-dolor-btn" data-dolor="${n}" onclick="evoSetDolor(${n})">${n}</button>`).join('');
+  // Escala Borg de esfuerzo 0..10 (CR10). Color: azul claro → azul oscuro
+  const borgBtns  = Array.from({length:11}, (_,n) => `<button class="evo-borg-btn"  data-borg="${n}"  onclick="evoSetBorg(${n})">${n}</button>`).join('');
   // Si el turno ya está PRESENTE, mostrar mini-aviso. Si está PENDIENTE, avisar que pasa a presente al guardar.
   let avisoPresente = '';
   if (t.estado === 'PENDIENTE') {
@@ -2233,7 +2241,7 @@ function evoRenderModal() {
     ${cajaProfe}
     <div class="evo-sublabel">Mis plantillas</div>
     <div class="evo-recientes" style="margin-bottom:14px">${notasHtml}</div>
-    <div class="evo-sublabel">Módulos (zona / foco trabajado)</div>
+    <div class="evo-sublabel">Módulos (técnicas y ejercicios realizados)</div>
     <div class="evo-mod-row">
       <select id="evoModuloSel" class="form-select" onchange="evoAgregarModulo(this.value)">
         <option value="">+ Agregar módulo…</option>
@@ -2246,16 +2254,17 @@ function evoRenderModal() {
     <textarea id="evoContenido" class="form-textarea" rows="3" placeholder="Qué se trabajó (ej: movilización lumbar, ejercicios de core, electroanalgesia, punción en trapecio…)" autocomplete="off" spellcheck="false"></textarea>
     <div class="evo-fila">
       <div class="evo-grupo">
-        <div class="evo-sublabel">Cómo se sintió</div>
-        <div class="evo-caritas">
-          ${EVO_CARITAS.map(x => `<button class="evo-carita" data-carita="${x}" onclick="evoSetCarita('${x}')">${x}</button>`).join('')}
-        </div>
-      </div>
-      <div class="evo-grupo">
-        <div class="evo-sublabel">Dolor / molestia (0 = sin dolor · 10 = máximo)</div>
+        <div class="evo-sublabel">Dolor — EVA (0 = sin dolor · 10 = máximo)</div>
         <div class="evo-dolor-wrap">
           <div class="evo-dolor-escala">${dolorBtns}</div>
           <div class="evo-dolor-info" id="evoDolorInfo">Sin marcar</div>
+        </div>
+      </div>
+      <div class="evo-grupo">
+        <div class="evo-sublabel">Esfuerzo — Borg CR10 (0 = nada · 10 = máximo)</div>
+        <div class="evo-dolor-wrap">
+          <div class="evo-dolor-escala">${borgBtns}</div>
+          <div class="evo-borg-info" id="evoBorgInfo">Sin marcar</div>
         </div>
       </div>
     </div>
@@ -2270,9 +2279,35 @@ function evoRenderModal() {
     document.getElementById('evoContenido').value = evoExistente.contenido || '';
     document.getElementById('evoObs').value = evoExistente.observacion || '';
   }
+  // Pintar/repintar botón Borrar en el footer según sea edición o nuevo
+  evoActualizarFooter();
   evoPintarChips();
-  evoPintarCarita();
   evoPintarDolor();
+  evoPintarBorg();
+}
+
+// Muestra/oculta el botón "Borrar evolución" del footer según haya o no fila existente
+function evoActualizarFooter() {
+  const footer = document.querySelector('#modalEvolucion .modal-footer');
+  if (!footer) return;
+  // Limpiar cualquier botón borrar anterior y volver a armar el footer
+  footer.innerHTML = '';
+  if (evoExistente) {
+    const bDel = document.createElement('button');
+    bDel.className = 'btn btn-borrar-evo';
+    bDel.innerHTML = '🗑 Borrar evolución';
+    bDel.addEventListener('click', () => evoBorrar(evoExistente.id, true));
+    footer.appendChild(bDel);
+  }
+  const bCer = document.createElement('button');
+  bCer.className = 'btn'; bCer.textContent = 'Cerrar';
+  bCer.addEventListener('click', () => closeModal('modalEvolucion'));
+  footer.appendChild(bCer);
+  const bSav = document.createElement('button');
+  bSav.id = 'evoGuardarBtn'; bSav.className = 'btn primary';
+  bSav.textContent = evoExistente ? '💾 Guardar cambios' : '💾 Guardar evolución';
+  bSav.addEventListener('click', evoGuardar);
+  footer.appendChild(bSav);
 }
 
 // ===== Módulos (chips acumulables) =====
@@ -2292,17 +2327,7 @@ function evoPintarChips() {
     : '<span style="font-size:12px;color:var(--text-muted)">Sin módulos elegidos todavía</span>';
 }
 
-// ===== Carita =====
-window.evoSetCarita = (c) => {
-  evoCaritaSel = (evoCaritaSel === c) ? '' : c;
-  evoPintarCarita();
-};
-function evoPintarCarita() {
-  document.querySelectorAll('[data-carita]').forEach(el =>
-    el.classList.toggle('sel', el.getAttribute('data-carita') === evoCaritaSel));
-}
-
-// ===== Escala de dolor 0..10 (EVA) =====
+// ===== Escala EVA de dolor 0..10 (rojo) =====
 window.evoSetDolor = (n) => {
   evoDolorSel = (evoDolorSel === n) ? null : n;
   evoPintarDolor();
@@ -2329,15 +2354,46 @@ function evoPintarDolor() {
   }
 }
 
+// ===== Escala Borg CR10 de esfuerzo 0..10 (azul) =====
+window.evoSetBorg = (n) => {
+  evoBorgSel = (evoBorgSel === n) ? null : n;
+  evoPintarBorg();
+};
+function evoColorBorg(n) {
+  if (n <= 2) return '#7bb7e0';
+  if (n <= 4) return '#3d8fc4';
+  if (n <= 6) return '#1e6fa8';
+  if (n <= 8) return '#0f4d7a';
+  return '#0a3a5c';
+}
+function evoPintarBorg() {
+  document.querySelectorAll('[data-borg]').forEach(el => {
+    const n = parseInt(el.getAttribute('data-borg'),10);
+    const sel = (n === evoBorgSel);
+    el.classList.toggle('sel', sel);
+    el.style.background = sel ? evoColorBorg(n) : '';
+  });
+  const info = document.getElementById('evoBorgInfo');
+  if (info) {
+    if (evoBorgSel == null) { info.textContent = 'Sin marcar'; }
+    else {
+      // Etiquetas estándar de Borg CR10
+      const etqs = ['nada','muy débil','débil','moderado','algo fuerte','fuerte','','muy fuerte','','','máximo'];
+      const etq = etqs[evoBorgSel] || '';
+      info.textContent = `Esfuerzo ${evoBorgSel}/10${etq?' — '+etq:''}`;
+    }
+  }
+}
+
 // ===== Plantillas (notas predeterminadas del profe) =====
 window.evoUsarNotaPred = (i) => {
   const n = EVO_NOTAS_PRED[i];
   if (!n) return;
   evoModulosSel = (n.modulos || '').split(',').map(s=>s.trim()).filter(Boolean);
   document.getElementById('evoContenido').value = n.contenido || '';
-  evoCaritaSel = n.como_se_sintio || '';
   evoDolorSel = (n.dolor_escala != null) ? n.dolor_escala : null;
-  evoPintarChips(); evoPintarCarita(); evoPintarDolor();
+  evoBorgSel  = (n.esfuerzo_borg != null) ? n.esfuerzo_borg : null;
+  evoPintarChips(); evoPintarDolor(); evoPintarBorg();
 };
 window.evoGuardarNotaPred = async () => {
   const email = (USUARIO_FISIO?.email || '').trim();
@@ -2351,8 +2407,8 @@ window.evoGuardarNotaPred = async () => {
       autor_email: email,
       autor_nombre: USUARIO_FISIO?.nombre || null,
       titulo, modulos, contenido,
-      como_se_sintio: evoCaritaSel || null,
-      dolor_escala: evoDolorSel
+      dolor_escala: evoDolorSel,
+      esfuerzo_borg: evoBorgSel
     });
     if (error) throw error;
     await evoCargarNotasPred();
@@ -2414,8 +2470,8 @@ async function evoGuardar() {
   const contenido = (document.getElementById('evoContenido')?.value || '').trim();
   const observacion = (document.getElementById('evoObs')?.value || '').trim();
   const modulo = evoModulosSel.join(', ');
-  if (!modulo && !contenido && !observacion && evoCaritaSel==='' && evoDolorSel==null) {
-    evoMostrarAlerta('Cargá al menos un dato (módulo, contenido, cómo se sintió o dolor) antes de guardar.', 'warning');
+  if (!modulo && !contenido && !observacion && evoDolorSel==null && evoBorgSel==null) {
+    evoMostrarAlerta('Cargá al menos un dato (módulo, contenido, dolor o esfuerzo) antes de guardar.', 'warning');
     return;
   }
   const btn = document.getElementById('evoGuardarBtn');
@@ -2430,10 +2486,9 @@ async function evoGuardar() {
     profesional: t.profesional || null,
     modulo: modulo || null,
     contenido: contenido || null,
-    como_se_sintio: evoCaritaSel || null,
     dolor_escala: evoDolorSel,
     dolor: (evoDolorSel != null && evoDolorSel > 0),
-    score: evoScoreDesdeCarita(evoCaritaSel),
+    esfuerzo_borg: evoBorgSel,
     observacion: observacion || null
   };
   try {
@@ -2470,10 +2525,54 @@ async function evoGuardar() {
   }
 }
 
-// ===== Histórico del paciente (línea de tiempo) =====
+// ===== Borrar una evolución =====
+// `desdeModal=true` → la llamó el botón del footer del modal de evo: cierra el modal después.
+// `desdeModal=false` → la llamó el botón 🗑 del histórico: refresca el histórico.
+async function evoBorrar(evoId, desdeModal) {
+  if (!evoId) return;
+  if (!confirm('¿Borrar esta evolución? Esta acción no se puede deshacer.\n\n(El turno NO se modifica — si estaba PRESENTE sigue así, la sesión cobrada tampoco se toca.)')) return;
+  try {
+    const { error } = await supa.from('evoluciones_fisio').delete().eq('id', evoId);
+    if (error) throw error;
+    if (desdeModal) {
+      closeModal('modalEvolucion');
+      await refresh();
+    } else {
+      // Histórico: refrescar el cache de "turnos con evo" y volver a pintar la lista
+      const personaId = parseInt(document.getElementById('histBody')?.dataset.personaId || '0', 10);
+      const nombre = document.getElementById('histNombre')?.textContent || '';
+      await loadEvolucionesDeTurnos();
+      renderGrid();
+      if (personaId) await abrirHistoricoFisio(personaId, nombre);
+    }
+  } catch (e) {
+    alert('No se pudo borrar la evolución: ' + (e.message||e));
+    console.error(e);
+  }
+}
+
+// ===== Editar una evolución desde el histórico =====
+// La fila del histórico no tiene el objeto turno completo, así que lo traemos de Supabase.
+async function evoEditarDesdeHistorico(evoId, turnoId) {
+  if (!turnoId) { alert('Esta evolución no tiene turno asociado.'); return; }
+  try {
+    const { data: turno, error } = await supa.from('turnos_consultorio').select('*').eq('id', turnoId).single();
+    if (error || !turno) { alert('No se encontró el turno asociado a esta evolución.'); return; }
+    closeModal('modalHistorico');
+    // Reusar el atajo "desde card": calcula nombre + tratInfo + nroSesion solo
+    await abrirEvolucionDesdeCard(turno.id);
+  } catch (e) {
+    alert('No se pudo abrir la evolución para editar: ' + (e.message||e));
+    console.error(e);
+  }
+}
+
+// ===== Histórico del paciente (línea de tiempo, con editar y borrar por item) =====
 window.abrirHistoricoFisio = async (personaId, nombre) => {
   document.getElementById('histNombre').textContent = nombre || `#${personaId}`;
-  document.getElementById('histBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--accent)">⟳ Cargando histórico…</div>';
+  const body = document.getElementById('histBody');
+  body.dataset.personaId = personaId;   // guardamos el id para refrescar después de borrar
+  body.innerHTML = '<div style="padding:24px;text-align:center;color:var(--accent)">⟳ Cargando histórico…</div>';
   openModal('modalHistorico');
   try {
     const { data, error } = await supa.from('evoluciones_fisio')
@@ -2481,16 +2580,26 @@ window.abrirHistoricoFisio = async (personaId, nombre) => {
       .order('fecha',{ascending:false}).order('creado_en',{ascending:false}).limit(80);
     if (error) throw error;
     if (!data || !data.length) {
-      document.getElementById('histBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:14px">Todavía no hay evoluciones cargadas para este paciente.</div>';
+      body.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:14px">Todavía no hay evoluciones cargadas para este paciente.</div>';
       return;
     }
     const html = data.map(f => {
       const fechaTxt = new Date(f.fecha+'T00:00:00').toLocaleDateString('es-AR',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
       const conDolor = (f.dolor_escala != null && f.dolor_escala > 0) || f.dolor;
+      // Tag de dolor
       const dolorTag = (f.dolor_escala != null)
-        ? (f.dolor_escala > 0 ? `<span class="hist-tag dolor">⚠ Dolor ${f.dolor_escala}/10</span>` : '<span class="hist-tag ok">Sin dolor</span>')
-        : (f.dolor ? '<span class="hist-tag dolor">⚠ Dolor / molestia</span>' : '<span class="hist-tag ok">Sin dolor</span>');
+        ? (f.dolor_escala > 0 ? `<span class="hist-tag dolor">Dolor ${f.dolor_escala}/10</span>` : '<span class="hist-tag ok">Sin dolor</span>')
+        : (f.dolor ? '<span class="hist-tag dolor">Con dolor</span>' : '');
+      // Tag de esfuerzo (Borg)
+      const borgTag = (f.esfuerzo_borg != null)
+        ? `<span class="hist-tag borg">Esfuerzo ${f.esfuerzo_borg}/10</span>`
+        : '';
       const regla = REGLAS_PRACTICA[f.practica_codigo];
+      // Acciones por item: editar (si tiene turno_id) y borrar
+      const accEditar = f.turno_id
+        ? `<button class="hist-acc-btn" onclick="evoEditarDesdeHistorico(${f.id}, ${f.turno_id})">✏ Editar</button>`
+        : '';
+      const accBorrar = `<button class="hist-acc-btn danger" onclick="evoBorrar(${f.id}, false)">🗑 Borrar</button>`;
       return `
         <div class="hist-item ${conDolor?'con-dolor':''}">
           <div>
@@ -2501,17 +2610,18 @@ window.abrirHistoricoFisio = async (personaId, nombre) => {
             ${f.modulo ? `<div class="hist-modulos">${escapeHtml(f.modulo)}</div>` : ''}
             ${f.contenido ? `<div class="hist-contenido">${escapeHtml(f.contenido)}</div>` : ''}
             <div class="hist-tags">
-              ${f.como_se_sintio ? `<span class="hist-tag">${f.como_se_sintio}</span>` : ''}
               ${dolorTag}
+              ${borgTag}
             </div>
             ${f.observacion ? `<div class="hist-obs">📝 ${escapeHtml(f.observacion)}</div>` : ''}
-            ${f.autor_nombre ? `<div class="hist-autor">— ${escapeHtml(f.autor_nombre)}</div>` : ''}
+            ${f.autor_nombre ? `<div class="hist-autor">— ${escapeHtml(f.autor_nombre)}${f.editado_en?' · editado':''}</div>` : ''}
+            <div class="hist-acciones">${accEditar}${accBorrar}</div>
           </div>
         </div>`;
     }).join('');
-    document.getElementById('histBody').innerHTML = html;
+    body.innerHTML = html;
   } catch (e) {
-    document.getElementById('histBody').innerHTML = `<div style="padding:24px;text-align:center;color:var(--s-ausente);font-size:14px">No se pudo cargar el histórico: ${escapeHtml(e.message||String(e))}</div>`;
+    body.innerHTML = `<div style="padding:24px;text-align:center;color:var(--s-ausente);font-size:14px">No se pudo cargar el histórico: ${escapeHtml(e.message||String(e))}</div>`;
   }
 };
 
