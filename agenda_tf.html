@@ -134,9 +134,74 @@
     border: 1px solid var(--gris-borde); overflow: hidden;
     transition: box-shadow 0.15s, transform 0.15s, border-color 0.15s; cursor: pointer;
   }
+  /* Fondos distintos por tipo de clase (visible "de un vistazo") */
+  .turno-card.es-entrenamiento {
+    background: #fff5f5;
+    border-left: 4px solid #fb923c;
+  }
+  .turno-card.es-kinefilaxia {
+    background: #f5f3ff;
+    border-left: 4px solid #a855f7;
+  }
+  .turno-card.es-entrenamiento .turno-header,
+  .turno-card.es-kinefilaxia .turno-header {
+    background: rgba(255,255,255,0.55);
+  }
   .turno-card:hover {
     box-shadow: 0 4px 20px rgba(30,159,224,0.12);
     transform: translateY(-1px); border-color: var(--celeste-medio);
+  }
+  /* Resumen: card de "falta evolucionar" (cliqueable, amarillo suave) */
+  .resumen-card.falta-evo {
+    background: #fef9c3; border-color: #facc15; cursor: pointer;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .resumen-card.falta-evo:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(202,138,4,.18); }
+  .resumen-card.falta-evo .resumen-num { color: #a16207; }
+  .resumen-card.falta-evo.ok { background: #dcfce7; border-color: #86efac; cursor: default; }
+  .resumen-card.falta-evo.ok:hover { transform: none; box-shadow: none; }
+  .resumen-card.falta-evo.ok .resumen-num { color: #15803d; }
+  /* Popup de detalle "falta evolucionar" */
+  .pop-evo-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,42,0.5);
+    display: flex; align-items: center; justify-content: center; z-index: 9000;
+    padding: 20px;
+  }
+  .pop-evo-modal {
+    background: #fff; border-radius: 14px; max-width: 580px; width: 100%;
+    max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,.3);
+  }
+  .pop-evo-head {
+    padding: 16px 20px; border-bottom: 1px solid var(--gris-borde);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .pop-evo-head h3 { margin: 0; font-size: 16px; font-weight: 600; color: #a16207; }
+  .pop-evo-head button {
+    background: transparent; border: none; font-size: 22px; cursor: pointer;
+    color: var(--texto-suave); line-height: 1;
+  }
+  .pop-evo-body { padding: 14px 20px; overflow-y: auto; }
+  .pop-evo-turno {
+    border: 1px solid var(--gris-borde); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 9px;
+  }
+  .pop-evo-turno-head {
+    font-size: 13px; font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .pop-evo-chip {
+    font-size: 10px; padding: 2px 8px; border-radius: 99px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  .pop-evo-chip.ent { background: #ffedd5; color: #c2410c; }
+  .pop-evo-chip.kine { background: #ede9fe; color: #6d28d9; }
+  .pop-evo-alumnos {
+    display: flex; flex-wrap: wrap; gap: 5px;
+  }
+  .pop-evo-alumno {
+    background: #fef9c3; color: #713f12; border: 1px solid #fde047;
+    padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 500;
   }
   .turno-header {
     padding: 12px 14px; display: flex; align-items: center;
@@ -953,6 +1018,73 @@ async function fetchConTimeout(url, opciones = {}, ms = 12000) {
     clearTimeout(id);
   }
 }
+
+// === Renovación automática de sesión ===
+// Cuando el JWT vence (≈ 1h), Supabase responde 401 con "JWT expired".
+// Esta función pide un access_token nuevo usando el refresh_token guardado.
+// Si no hay refresh_token o también expiró, devuelve false y la app muestra
+// el overlay de login para que el profe vuelva a ingresar.
+let _refrescandoToken = null; // evita refrescos paralelos
+async function refrescarToken() {
+  if (_refrescandoToken) return _refrescandoToken;
+  _refrescandoToken = (async () => {
+    const rt = obtenerRefreshToken();
+    if (!rt) return false;
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: 'POST',
+        headers: { 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt })
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        guardarToken(data.access_token);
+        if (data.refresh_token) guardarRefreshToken(data.refresh_token);
+        return true;
+      }
+      // Refresh inválido: forzar nuevo login
+      limpiarTokens();
+      return false;
+    } catch (e) {
+      console.warn('No se pudo refrescar el token:', e);
+      return false;
+    } finally {
+      _refrescandoToken = null;
+    }
+  })();
+  return _refrescandoToken;
+}
+
+// Wrapper que detecta 401 JWT expired, renueva el token y reintenta UNA vez.
+// Si el refresh falla, abre el overlay de login y propaga el error original.
+async function fetchSupabase(url, opciones = {}, ms = 12000) {
+  const armarOpts = () => ({
+    ...opciones,
+    headers: {
+      ...(opciones.headers || {}),
+      'Authorization': `Bearer ${authBearer()}`
+    }
+  });
+  let res = await fetchConTimeout(url, armarOpts(), ms);
+  if (res.status === 401) {
+    // Leer el body sin consumir el original: clonamos
+    let bodyTxt = '';
+    try { bodyTxt = await res.clone().text(); } catch(e) {}
+    if (/jwt expired|jwt is expired|invalid jwt/i.test(bodyTxt)) {
+      const ok = await refrescarToken();
+      if (ok) {
+        // Reintentar con el token nuevo
+        res = await fetchConTimeout(url, armarOpts(), ms);
+      } else {
+        // Refresh falló → mostrar login y avisar
+        try { document.getElementById('login-overlay').classList.remove('oculto'); } catch(e) {}
+        throw new Error('Tu sesión expiró. Volvé a ingresar y reintentá guardar.');
+      }
+    }
+  }
+  return res;
+}
+
 // Devuelve el token a usar en Authorization: el del usuario logueado si existe
 // (necesario para tablas con RLS authenticated), o la key anon como respaldo.
 function authBearer() {
@@ -962,10 +1094,9 @@ function authBearer() {
   } catch (e) { return SUPABASE_KEY; }
 }
 async function supabaseQuery(tabla, params = '') {
-  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}${params}`, {
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json'
     }
   });
@@ -1016,11 +1147,10 @@ async function urlFotoPerfil(personaId, fotoPath) {
   } catch (e) { console.warn('[FOTO] fetch excepción', e.message); return null; }
 }
 async function supabaseInsert(tabla, data) {
-  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -1030,11 +1160,10 @@ async function supabaseInsert(tabla, data) {
   return true;
 }
 async function supabaseUpdate(tabla, filtro, data) {
-  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
     method: 'PATCH',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     },
@@ -1045,11 +1174,10 @@ async function supabaseUpdate(tabla, filtro, data) {
 }
 // Insert que devuelve la fila creada
 async function supabaseInsertReturn(tabla, data) {
-  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}`, {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}`, {
     method: 'POST',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     },
@@ -1060,11 +1188,10 @@ async function supabaseInsertReturn(tabla, data) {
 }
 // Borrar filas según filtro (ej: "id=eq.5")
 async function supabaseDelete(tabla, filtro) {
-  const res = await fetchConTimeout(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
     method: 'DELETE',
     headers: {
       'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${authBearer()}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=minimal'
     }
@@ -1441,13 +1568,100 @@ function renderResumen() {
   const totalCap = turnos.reduce((s,t)=>s+t.capacidad,0);
   const totalOcup = turnos.reduce((s,t)=>s+getAlumnos(t).length,0);
   const pct = totalCap > 0 ? Math.round(totalOcup/totalCap*100) : 0;
+  const fechaIso = fechaRealDiaActivo();
+  const motivoFeriado = feriadoDe(fechaIso);
+
+  // Conteo de alumnos pendientes de evolución (solo presentes, NO ausentes)
+  // y armado del detalle por turno para el popup.
+  let pendientesTotal = 0;
+  const turnosConPendientes = [];
+  if (!motivoFeriado) {
+    turnos.forEach(t => {
+      if (claseEstaCerrada(t.id, fechaIso)) return; // Clase cerrada no cuenta
+      const alumnos = getAlumnos(t, fechaIso);
+      const pendientes = [];
+      alumnos.forEach(a => {
+        const est = ASISTENCIA_SEMANA[`${t.id}-${fechaIso}-${a.id}`];
+        const esAusente = (est === 'ausente' || est === 'ausente-justificada');
+        if (esAusente) return;
+        if (!EVO_ALUMNO[`${t.id}-${fechaIso}-${a.id}`]) {
+          pendientes.push({ id: a.id, nombre: a.nombre });
+        }
+      });
+      if (pendientes.length > 0) {
+        turnosConPendientes.push({ turno: t, pendientes });
+        pendientesTotal += pendientes.length;
+      }
+    });
+  }
+  // Guardar el detalle en window para que el popup pueda leerlo on-demand
+  window._evoPendientesDetalle = turnosConPendientes;
+
+  // Card de falta evolución: amarilla si hay pendientes (cliqueable),
+  // verde si está todo evolucionado (estático).
+  let cardFaltaEvo;
+  if (motivoFeriado) {
+    cardFaltaEvo = `<div class="resumen-card"><div class="resumen-num">—</div><div class="resumen-label">Feriado</div></div>`;
+  } else if (pendientesTotal > 0) {
+    cardFaltaEvo = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo()" title="Click para ver el detalle">
+      <div class="resumen-num">${pendientesTotal}</div>
+      <div class="resumen-label">⚠️ Falta evolucionar</div>
+    </div>`;
+  } else {
+    cardFaltaEvo = `<div class="resumen-card falta-evo ok">
+      <div class="resumen-num">✓</div>
+      <div class="resumen-label">Todo evolucionado</div>
+    </div>`;
+  }
+
   document.getElementById('resumen-top').innerHTML = `
     <div class="resumen-card"><div class="resumen-num">${turnos.length}</div><div class="resumen-label">Turnos del día</div></div>
     <div class="resumen-card destacado"><div class="resumen-num">${totalOcup}</div><div class="resumen-label">Alumnos anotados</div></div>
     <div class="resumen-card"><div class="resumen-num">${totalCap-totalOcup}</div><div class="resumen-label">Lugares libres</div></div>
     <div class="resumen-card"><div class="resumen-num">${pct}%</div><div class="resumen-label">Ocupación</div></div>
+    ${cardFaltaEvo}
   `;
 }
+
+// Popup con el detalle de pendientes de evolución del día.
+// Agrupado por turno. Click en un turno → abre el modal de evolución de ese turno.
+window.mostrarPendientesEvo = function() {
+  const detalle = window._evoPendientesDetalle || [];
+  if (detalle.length === 0) { cerrarPendientesEvo(); return; }
+  const html = detalle.map(({ turno, pendientes }) => {
+    const chip = turno.servicio === 'Entrenamiento'
+      ? `<span class="pop-evo-chip ent">🏋️ Entrenamiento</span>`
+      : `<span class="pop-evo-chip kine">🤸 Kinefilaxia</span>`;
+    const abrir = `cerrarPendientesEvo();abrirModalDesde('${turno.dia}','${turno.hora}','${turno.servicio}')`;
+    const alumnos = pendientes.map(p => `<span class="pop-evo-alumno">${p.nombre}</span>`).join('');
+    return `
+      <div class="pop-evo-turno" style="cursor:pointer" onclick="${abrir}" title="Abrir este turno para evolucionar">
+        <div class="pop-evo-turno-head">
+          <strong>${turno.hora}</strong> ${chip}
+          <span style="color:var(--texto-suave); font-size:12px; margin-left:auto;">${pendientes.length} pendiente${pendientes.length!==1?'s':''}</span>
+        </div>
+        <div class="pop-evo-alumnos">${alumnos}</div>
+      </div>`;
+  }).join('');
+  const total = detalle.reduce((s, x) => s + x.pendientes.length, 0);
+  const overlay = document.createElement('div');
+  overlay.className = 'pop-evo-overlay';
+  overlay.id = 'pop-evo-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) cerrarPendientesEvo(); };
+  overlay.innerHTML = `
+    <div class="pop-evo-modal">
+      <div class="pop-evo-head">
+        <h3>⚠️ Faltan evolucionar: ${total} alumno${total!==1?'s':''}</h3>
+        <button onclick="cerrarPendientesEvo()" title="Cerrar">✕</button>
+      </div>
+      <div class="pop-evo-body">${html}</div>
+    </div>`;
+  document.body.appendChild(overlay);
+};
+window.cerrarPendientesEvo = function() {
+  const o = document.getElementById('pop-evo-overlay');
+  if (o) o.remove();
+};
 // Pinta la franja FIJA con el día y la fecha (siempre visible al scrollear, solo en Vista Día)
 function renderDiaSticky() {
   const cont = document.getElementById('dia-sticky');
@@ -1533,6 +1747,8 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
         ? `<span class="evo-badge eb-ok" title="Todos los presentes evolucionados">✅ EVOLUCIONADO</span>`
         : `<span class="evo-badge eb-falta" title="Falta evolución (${ev.evolucionados}/${ev.presentes} presentes)">⚠️ FALTA EVOLUCIÓN</span>`));
   const claseCard = motivoFeriado ? ' card-feriado' : (cerrada?' card-cerrada':'');
+  // Clase de fondo según servicio (naranja para Entrenamiento, violeta para Kinefilaxia)
+  const claseServicio = motivoFeriado ? '' : (t.servicio === 'Entrenamiento' ? ' es-entrenamiento' : ' es-kinefilaxia');
   // En la grilla de la semana, al abrir el modal hay que fijar primero el día de esa columna.
   const abrir = `abrirModalDesde('${t.dia}','${t.hora}','${t.servicio}')`;
   // Footer: en FERIADO no se habla de ausentes (es falta de servicio nuestra, no del alumno).
@@ -1543,7 +1759,7 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
       ? `<span class="footer-ausentes">${ev.ausentes} ausente${ev.ausentes !== 1 ? 's' : ''}</span>`
       : `<span style="color:var(--texto-suave)">Sin ausentes</span>`);
   return `
-    <div class="turno-card${claseCard}" onclick="${abrir}">
+    <div class="turno-card${claseCard}${claseServicio}" onclick="${abrir}">
       <div class="turno-header">
         <span class="turno-hora">${t.hora}</span>
         <span class="turno-head-right">
@@ -4046,12 +4262,24 @@ async function iniciarRealtime() {
 let sesionActiva = false;
 async function verificarSesion() {
   try {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    let res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: {
         'apikey': SUPABASE_KEY,
         'Authorization': `Bearer ${obtenerToken()}`
       }
     });
+    // Si el access_token venció, probar refresh transparente antes de pedir login
+    if (res.status === 401 && obtenerRefreshToken()) {
+      const ok = await refrescarToken();
+      if (ok) {
+        res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${obtenerToken()}`
+          }
+        });
+      }
+    }
     if (res.ok) {
       sesionActiva = true;
       document.getElementById('login-overlay').classList.add('oculto');
@@ -4074,8 +4302,18 @@ async function verificarSesion() {
 function obtenerToken() {
   return sessionStorage.getItem('pb_token') || '';
 }
+function obtenerRefreshToken() {
+  return sessionStorage.getItem('pb_refresh') || '';
+}
 function guardarToken(token) {
   sessionStorage.setItem('pb_token', token);
+}
+function guardarRefreshToken(rt) {
+  if (rt) sessionStorage.setItem('pb_refresh', rt);
+}
+function limpiarTokens() {
+  sessionStorage.removeItem('pb_token');
+  sessionStorage.removeItem('pb_refresh');
 }
 async function hacerLogin() {
   const email = document.getElementById('login-email').value.trim();
@@ -4098,6 +4336,7 @@ async function hacerLogin() {
     const data = await res.json();
     if (res.ok && data.access_token) {
       guardarToken(data.access_token);
+      guardarRefreshToken(data.refresh_token);
       sesionActiva = true;
       document.getElementById('login-overlay').classList.add('oculto');
       cargarUsuarioActual();
