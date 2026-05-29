@@ -134,17 +134,24 @@
     border: 1px solid var(--gris-borde); overflow: hidden;
     transition: box-shadow 0.15s, transform 0.15s, border-color 0.15s; cursor: pointer;
   }
-  /* Fondos distintos por tipo de clase (visible "de un vistazo") */
+  /* Fondos distintos por tipo de clase — colores fuertes para distinguir "de un vistazo" */
   .turno-card.es-entrenamiento {
-    background: #fff5f5;
-    border-left: 4px solid #fb923c;
+    background: #fecaca;
+    border-left: 6px solid #b91c1c;
   }
   .turno-card.es-kinefilaxia {
-    background: #f5f3ff;
-    border-left: 4px solid #a855f7;
+    background: #5eead4;
+    border-left: 6px solid #0d9488;
   }
+  /* Header semi-transparente blanco para que los chips internos (FALTA EVOLUCION, ENTRENAMIENTO)
+     se sigan leyendo bien arriba del fondo de color */
   .turno-card.es-entrenamiento .turno-header,
   .turno-card.es-kinefilaxia .turno-header {
+    background: rgba(255,255,255,0.78);
+  }
+  /* Footer también con leve overlay blanco para legibilidad */
+  .turno-card.es-entrenamiento .turno-footer,
+  .turno-card.es-kinefilaxia .turno-footer {
     background: rgba(255,255,255,0.55);
   }
   .turno-card:hover {
@@ -1568,16 +1575,26 @@ function renderResumen() {
   const totalCap = turnos.reduce((s,t)=>s+t.capacidad,0);
   const totalOcup = turnos.reduce((s,t)=>s+getAlumnos(t).length,0);
   const pct = totalCap > 0 ? Math.round(totalOcup/totalCap*100) : 0;
-  const fechaIso = fechaRealDiaActivo();
-  const motivoFeriado = feriadoDe(fechaIso);
 
-  // Conteo de alumnos pendientes de evolución (solo presentes, NO ausentes)
-  // y armado del detalle por turno para el popup.
+  // === CÁLCULO SEMANAL DE PENDIENTES DE EVOLUCIÓN ===
+  // Recorremos los 5 días (Lunes a Viernes) de la semana visible.
+  // Para cada día: filtrar feriado, clase cerrada, y armar pendientes.
+  const lunes = getLunes(offsetSemana);
   let pendientesTotal = 0;
-  const turnosConPendientes = [];
-  if (!motivoFeriado) {
-    turnos.forEach(t => {
-      if (claseEstaCerrada(t.id, fechaIso)) return; // Clase cerrada no cuenta
+  const diasConPendientes = []; // [{ dia, fechaIso, fechaLabel, esHoy, turnos:[{turno,pendientes}] }]
+  DIAS.forEach((diaNombre, idx) => {
+    const fObj = new Date(lunes); fObj.setDate(lunes.getDate() + idx);
+    const fechaIso = `${fObj.getFullYear()}-${String(fObj.getMonth()+1).padStart(2,'0')}-${String(fObj.getDate()).padStart(2,'0')}`;
+    if (feriadoDe(fechaIso)) return; // feriado: no aplica
+    // Filtrar turnos de ESTE día (respetando el filtro Todos/Entrenamiento/Kinefilaxia)
+    const turnosDia = HORARIOS.filter(t => {
+      if (t.dia !== diaNombre) return false;
+      if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
+      return true;
+    });
+    const turnosConPendientes = [];
+    turnosDia.forEach(t => {
+      if (claseEstaCerrada(t.id, fechaIso)) return;
       const alumnos = getAlumnos(t, fechaIso);
       const pendientes = [];
       alumnos.forEach(a => {
@@ -1593,24 +1610,26 @@ function renderResumen() {
         pendientesTotal += pendientes.length;
       }
     });
-  }
-  // Guardar el detalle en window para que el popup pueda leerlo on-demand
-  window._evoPendientesDetalle = turnosConPendientes;
+    if (turnosConPendientes.length > 0) {
+      const esHoyDia = esHoy(fObj);
+      const fechaLabel = `${fObj.getDate()}/${fObj.getMonth()+1}`;
+      diasConPendientes.push({ dia: diaNombre, fechaIso, fechaLabel, esHoy: esHoyDia, turnos: turnosConPendientes });
+    }
+  });
+  // Guardar el detalle para el popup
+  window._evoPendientesDetalle = diasConPendientes;
 
-  // Card de falta evolución: amarilla si hay pendientes (cliqueable),
-  // verde si está todo evolucionado (estático).
+  // Card de falta evolución (de la semana entera)
   let cardFaltaEvo;
-  if (motivoFeriado) {
-    cardFaltaEvo = `<div class="resumen-card"><div class="resumen-num">—</div><div class="resumen-label">Feriado</div></div>`;
-  } else if (pendientesTotal > 0) {
-    cardFaltaEvo = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo()" title="Click para ver el detalle">
+  if (pendientesTotal > 0) {
+    cardFaltaEvo = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo()" title="Click para ver el detalle de la semana">
       <div class="resumen-num">${pendientesTotal}</div>
-      <div class="resumen-label">⚠️ Falta evolucionar</div>
+      <div class="resumen-label">⚠️ Falta evolucionar · semana</div>
     </div>`;
   } else {
     cardFaltaEvo = `<div class="resumen-card falta-evo ok">
       <div class="resumen-num">✓</div>
-      <div class="resumen-label">Todo evolucionado</div>
+      <div class="resumen-label">Semana evolucionada</div>
     </div>`;
   }
 
@@ -1623,27 +1642,41 @@ function renderResumen() {
   `;
 }
 
-// Popup con el detalle de pendientes de evolución del día.
-// Agrupado por turno. Click en un turno → abre el modal de evolución de ese turno.
+// Popup con el detalle de pendientes de evolución de TODA LA SEMANA visible.
+// Agrupado por día → dentro por turno. Click en un turno → abre el modal para evolucionar.
 window.mostrarPendientesEvo = function() {
-  const detalle = window._evoPendientesDetalle || [];
-  if (detalle.length === 0) { cerrarPendientesEvo(); return; }
-  const html = detalle.map(({ turno, pendientes }) => {
-    const chip = turno.servicio === 'Entrenamiento'
-      ? `<span class="pop-evo-chip ent">🏋️ Entrenamiento</span>`
-      : `<span class="pop-evo-chip kine">🤸 Kinefilaxia</span>`;
-    const abrir = `cerrarPendientesEvo();abrirModalDesde('${turno.dia}','${turno.hora}','${turno.servicio}')`;
-    const alumnos = pendientes.map(p => `<span class="pop-evo-alumno">${p.nombre}</span>`).join('');
+  const dias = window._evoPendientesDetalle || [];
+  if (dias.length === 0) { cerrarPendientesEvo(); return; }
+  const totalGeneral = dias.reduce((s, d) => s + d.turnos.reduce((ss, x) => ss + x.pendientes.length, 0), 0);
+
+  const htmlDias = dias.map(d => {
+    const totalDia = d.turnos.reduce((s, x) => s + x.pendientes.length, 0);
+    const htmlTurnos = d.turnos.map(({ turno, pendientes }) => {
+      const chip = turno.servicio === 'Entrenamiento'
+        ? `<span class="pop-evo-chip ent">🏋️ Entrenamiento</span>`
+        : `<span class="pop-evo-chip kine">🤸 Kinefilaxia</span>`;
+      const abrir = `cerrarPendientesEvo();seleccionarDia('${turno.dia}');setTimeout(()=>abrirModalDesde('${turno.dia}','${turno.hora}','${turno.servicio}'),50)`;
+      const alumnos = pendientes.map(p => `<span class="pop-evo-alumno">${p.nombre}</span>`).join('');
+      return `
+        <div class="pop-evo-turno" style="cursor:pointer" onclick="${abrir}" title="Abrir este turno para evolucionar">
+          <div class="pop-evo-turno-head">
+            <strong>${turno.hora}</strong> ${chip}
+            <span style="color:var(--texto-suave); font-size:12px; margin-left:auto;">${pendientes.length} pendiente${pendientes.length!==1?'s':''}</span>
+          </div>
+          <div class="pop-evo-alumnos">${alumnos}</div>
+        </div>`;
+    }).join('');
+    const tagHoy = d.esHoy ? `<span style="background:#1e9fe0;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:99px;margin-left:6px">HOY</span>` : '';
     return `
-      <div class="pop-evo-turno" style="cursor:pointer" onclick="${abrir}" title="Abrir este turno para evolucionar">
-        <div class="pop-evo-turno-head">
-          <strong>${turno.hora}</strong> ${chip}
-          <span style="color:var(--texto-suave); font-size:12px; margin-left:auto;">${pendientes.length} pendiente${pendientes.length!==1?'s':''}</span>
+      <div style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#0f172a;margin:8px 2px 6px;padding-bottom:4px;border-bottom:1px solid #e5e7eb">
+          ${d.dia} ${d.fechaLabel} ${tagHoy}
+          <span style="color:#a16207;font-size:12px;font-weight:600;margin-left:auto">${totalDia} pendiente${totalDia!==1?'s':''}</span>
         </div>
-        <div class="pop-evo-alumnos">${alumnos}</div>
+        ${htmlTurnos}
       </div>`;
   }).join('');
-  const total = detalle.reduce((s, x) => s + x.pendientes.length, 0);
+
   const overlay = document.createElement('div');
   overlay.className = 'pop-evo-overlay';
   overlay.id = 'pop-evo-overlay';
@@ -1651,10 +1684,10 @@ window.mostrarPendientesEvo = function() {
   overlay.innerHTML = `
     <div class="pop-evo-modal">
       <div class="pop-evo-head">
-        <h3>⚠️ Faltan evolucionar: ${total} alumno${total!==1?'s':''}</h3>
+        <h3>⚠️ Faltan evolucionar: ${totalGeneral} alumno${totalGeneral!==1?'s':''} en la semana</h3>
         <button onclick="cerrarPendientesEvo()" title="Cerrar">✕</button>
       </div>
-      <div class="pop-evo-body">${html}</div>
+      <div class="pop-evo-body">${htmlDias}</div>
     </div>`;
   document.body.appendChild(overlay);
 };
