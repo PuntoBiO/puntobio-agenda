@@ -244,102 +244,126 @@
       const { lunes } = getRangoSemana();
       const fechasSemana = [0,1,2,3,4].map(i => toIso(addDias(lunes, i))); // lun a vie
 
-      // ==== Por cada inscripción, computar las clases asignadas en la semana y su asistencia ====
+      // Cantidad de clases por semana según el código del plan (COD1=1, COD2=2, COD3=3, COD2DES3=2, COD3ROT=3, etc.)
+      function clasesPorSemanaDelPlan(plan) {
+        if (!plan) return 0;
+        const m = String(plan).toUpperCase().match(/COD\s*0*([1-9])/);
+        return m ? Number(m[1]) : 0;
+      }
+
+      // ==== Por cada inscripción, computar asistencia REAL vs lo que pide su plan ====
+      // Lógica clave (lo que pidió Lu):
+      //   - Lo que importa NO es a cuántos turnos asignados fue, sino cuántas clases CUMPLIÓ
+      //     respecto a las que pide su plan semanal.
+      //   - Si un alumno COD2 (2 clases/sem) faltó al fijo del martes PERO hizo un recuperatorio
+      //     el miércoles → vino 1 clase. Si además vino al jueves → vino 2 = cumplió ✓
+      //   - Los recuperatorios + sueltos cuentan como "vino" si fue presente.
+      //   - Las faltas a fijos cuentan como "no vino".
+      //   - Comparamos contra "esperadas hasta hoy" (sus clases fijas que ya pasaron en la semana)
+      //     para ser justos antes de que termine la semana.
       const alumnos = [];
       inscripciones.forEach(insc => {
         const persona = personasMap[insc.persona_id];
         if (!persona) return;
+        const planN = clasesPorSemanaDelPlan(insc.plan);
+        if (planN === 0) return; // BON o plan sin patrón → no se evalúa
 
-        // Fecha de inicio efectiva del alumno
         const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;
         const fechaInicio = fechaInicioStr ? new Date(fechaInicioStr + 'T00:00:00') : null;
 
-        // Sus turnos fijos (turno_alumnos activos)
         const fijosDelAlumno = (taR.data || []).filter(ta => ta.persona_id === insc.persona_id);
-        // Sus agregados puntuales de la semana
         const agregadosDelAlumno = (agR.data || []).filter(ag => ag.persona_id === insc.persona_id);
 
-        // Construir lista de clases del alumno EN LA SEMANA (fecha, turno)
-        const clasesSemana = []; // { fechaIso, fechaObj, turno, tipo: 'fijo'|'agregado' }
+        // ---- Construir lista de clases EVALUABLES (ya pasaron o son de hoy con estado marcado) ----
+        const eventos = []; // { fechaIso, fechaObj, turno, tipo, estado, evaluable }
 
-        // 1) Fijos: cada turno_alumno tiene un turno_id que tiene un día.
-        //    Convertir ese día a fechaIso de la semana.
         fijosDelAlumno.forEach(ta => {
           const turno = turnosMap[ta.turno_id];
           if (!turno) return;
           const idx = DIA_AGENDA_A_INDEX[turno.dia];
-          if (!idx) return; // solo lun-vie
+          if (!idx) return;
           const fechaTurno = addDias(lunes, idx - 1);
           const fechaIso = toIso(fechaTurno);
-          // Filtrar: si el alumno NO arrancó todavía esa fecha
+          if (fechasBloqueadas.has(fechaIso)) return;
           const fechaDesdeFijo = ta.fecha_desde ? new Date(ta.fecha_desde + 'T00:00:00') : null;
           const fechaInicioAlumno = fechaDesdeFijo || fechaInicio;
           if (fechaInicioAlumno && fechaTurno < fechaInicioAlumno) return;
-          // Si la fecha está bloqueada (feriado/cierre), no cuenta
-          if (fechasBloqueadas.has(fechaIso)) return;
-          clasesSemana.push({ fechaIso, fechaObj: fechaTurno, turno, tipo: 'fijo' });
+          const key = `${insc.persona_id}-${turno.id}-${fechaIso}`;
+          const est = asiMap[key];
+          const esFutura = fechaIso > hoy;
+          const esHoy = fechaIso === hoy;
+          // Evaluable = ya pasó (estricto) o es hoy y ya está marcado
+          const evaluable = !esFutura && !(esHoy && !est);
+          eventos.push({ fechaIso, fechaObj: fechaTurno, turno, tipo: 'fijo', estado: est, evaluable });
         });
 
-        // 2) Agregados: tienen su fecha propia
         agregadosDelAlumno.forEach(ag => {
           const turno = turnosMap[ag.turno_id];
           if (!turno) return;
           const fechaObj = new Date(ag.fecha + 'T00:00:00');
           if (fechasBloqueadas.has(ag.fecha)) return;
-          clasesSemana.push({ fechaIso: ag.fecha, fechaObj, turno, tipo: 'agregado' });
+          const key = `${insc.persona_id}-${turno.id}-${ag.fecha}`;
+          const est = asiMap[key];
+          const esFutura = ag.fecha > hoy;
+          const esHoy = ag.fecha === hoy;
+          const evaluable = !esFutura && !(esHoy && !est);
+          const tipoEvento = (ag.tipo === 'recuperatorio' || ag.tipo === 'recupero') ? 'recupero' : (ag.tipo || 'suelto');
+          eventos.push({ fechaIso: ag.fecha, fechaObj, turno, tipo: tipoEvento, estado: est, evaluable });
         });
 
-        // Si no tiene ninguna clase asignada en la semana, no se evalúa
-        if (clasesSemana.length === 0) return;
+        // Solo eventos evaluables
+        const evals = eventos.filter(e => e.evaluable);
 
-        // ==== Computar asistencia POR CLASE ====
-        // Solo contamos clases que YA PASARON (fecha < hoy estrictamente) o
-        // clases del día de hoy que YA tienen estado marcado (presente/ausente).
-        // Las clases futuras o del día de hoy sin marcar se IGNORAN del cálculo.
-        let total = 0, vino = 0, justificadas = 0;
-        const detalle = []; // por clase: { fecha, dia, hora, servicio, estado }
-        clasesSemana.forEach(c => {
-          const key = `${insc.persona_id}-${c.turno.id}-${c.fechaIso}`;
-          const est = asiMap[key]; // 'presente' | 'ausente' | 'ausente-justificada' | undefined
-          const esFutura = c.fechaIso > hoy;
-          const esHoy = c.fechaIso === hoy;
-          // Reglas:
-          if (esFutura) return; // no cuenta
-          if (esHoy && !est) return; // todavía no se marcó, no cuenta
-          total++;
-          if (est === 'presente') vino++;
-          else if (est === 'ausente-justificada') justificadas++;
-          // 'ausente' o sin marcar (con fecha pasada) cuenta como NO vino
-          const labelEstado = est === 'presente' ? 'p' : (est === 'ausente-justificada' ? 'j' : 'f');
-          detalle.push({ fechaIso: c.fechaIso, fechaObj: c.fechaObj, dia: c.turno.dia, hora: c.turno.hora, servicio: c.turno.servicio, estado: labelEstado });
-        });
+        // Clases del plan que ya deberían haberse cumplido hasta hoy = #fijos evaluables
+        const fijosEvaluables = evals.filter(e => e.tipo === 'fijo').length;
+        // Esperadas = lo que pide el plan (N), acotado por los fijos que YA pasaron en la semana
+        // (si el alumno tiene solo 1 fijo en la semana porque arrancó tarde, esperadas = 1, no 2)
+        const esperadasHastaHoy = Math.min(planN, fijosEvaluables);
+        // Si todavía no le tocó ninguna clase esta semana, no lo evaluamos
+        if (esperadasHastaHoy === 0) return;
 
-        if (total === 0) return; // todavía no tenemos datos para este alumno esta semana
+        // Presentes = TOTAL de presentes en la semana (fijos + recuperos + sueltos)
+        // — un recupero al que fue cuenta para cumplir su cuota.
+        const presentes = evals.filter(e => e.estado === 'presente').length;
+        const justificadas = evals.filter(e => e.estado === 'ausente-justificada').length;
 
-        const ratio = vino / total;
+        // Si cumplió (vino igual o más que lo esperado hasta hoy), no aparece
+        if (presentes >= esperadasHastaHoy) return;
+
+        // Armar detalle para mostrar (todos los eventos evaluables, ordenados por fecha)
+        const detalle = evals.map(e => ({
+          fechaIso: e.fechaIso,
+          fechaObj: e.fechaObj,
+          dia: e.turno.dia,
+          hora: e.turno.hora,
+          servicio: e.turno.servicio,
+          tipo: e.tipo, // 'fijo' | 'recupero' | 'suelto'
+          estado: e.estado === 'presente' ? 'p' : (e.estado === 'ausente-justificada' ? 'j' : 'f')
+        })).sort((a, b) => a.fechaObj - b.fechaObj);
+
         alumnos.push({
           insc_id: insc.id,
           persona_id: insc.persona_id,
           nombre: persona.nombre || '',
           plan: insc.plan,
           tel: persona.telefono || persona.celular || persona.tel || persona.phone || '',
-          total, vino, justificadas,
-          ratio,
-          detalle: detalle.sort((a,b) => a.fechaObj - b.fechaObj)
+          planN,                  // lo que pide el plan (2 para COD2)
+          esperadas: esperadasHastaHoy,  // lo que debería haber cumplido hasta hoy
+          presentes,              // lo que efectivamente vino
+          justificadas,
+          detalle
         });
       });
 
-      // Categorizar
-      const noAparecio = alumnos.filter(a => a.vino === 0);
-      const vinoPoquito = alumnos.filter(a => a.vino > 0 && a.ratio < 0.5);
-      const masMenos = alumnos.filter(a => a.ratio >= 0.5 && a.ratio < 1);
+      // Categorización en 2 grupos: AUSENTE TOTAL (no vino a nada) y PARCIAL (vino algunas, faltan algunas)
+      const ausenteTotal = alumnos.filter(a => a.presentes === 0);
+      const ausenteParcial = alumnos.filter(a => a.presentes > 0);
 
-      // Ordenar dentro de cada grupo: primero los que más faltaron
-      noAparecio.sort((a,b) => b.total - a.total || a.nombre.localeCompare(b.nombre));
-      vinoPoquito.sort((a,b) => a.ratio - b.ratio || a.nombre.localeCompare(b.nombre));
-      masMenos.sort((a,b) => a.ratio - b.ratio || a.nombre.localeCompare(b.nombre));
+      // Ordenar: los que más faltaron arriba
+      ausenteTotal.sort((a,b) => b.esperadas - a.esperadas || a.nombre.localeCompare(b.nombre));
+      ausenteParcial.sort((a,b) => (a.presentes/a.esperadas) - (b.presentes/b.esperadas) || a.nombre.localeCompare(b.nombre));
 
-      datos = { noAparecio, vinoPoquito, masMenos, totalEvaluados: alumnos.length };
+      datos = { ausenteTotal, ausenteParcial, totalEvaluados: alumnos.length };
       renderTodo();
     } catch (err) {
       console.error(err);
@@ -349,39 +373,33 @@
 
   function renderTodo() {
     if (!datos) return;
-    const { noAparecio, vinoPoquito, masMenos, totalEvaluados } = datos;
+    const { ausenteTotal, ausenteParcial, totalEvaluados } = datos;
 
     // Cards superiores
     $('cards').innerHTML = `
       <div class="card">
         <div class="card-label">Alumnos evaluados</div>
         <div class="card-value">${totalEvaluados}</div>
-        <div class="card-sub">Activos con clases ya pasadas en la semana</div>
+        <div class="card-sub">Activos con clases ya pasadas en la semana, sin cumplir su plan</div>
       </div>
       <div class="card rojo">
-        <div class="card-label">No apareció</div>
-        <div class="card-value">${noAparecio.length}</div>
-        <div class="card-sub">Faltó a TODAS sus clases</div>
+        <div class="card-label">Ausente total</div>
+        <div class="card-value">${ausenteTotal.length}</div>
+        <div class="card-sub">No vino a NINGUNA clase ni recupero</div>
       </div>
       <div class="card naranja">
-        <div class="card-label">Vino poquito</div>
-        <div class="card-value">${vinoPoquito.length}</div>
-        <div class="card-sub">Vino menos del 50%</div>
-      </div>
-      <div class="card amarillo">
-        <div class="card-label">Vino más o menos</div>
-        <div class="card-value">${masMenos.length}</div>
-        <div class="card-sub">Vino entre 50% y 99%</div>
+        <div class="card-label">Ausencia parcial</div>
+        <div class="card-value">${ausenteParcial.length}</div>
+        <div class="card-sub">Vino a algunas, le faltó cumplir el plan</div>
       </div>
     `;
 
     // Secciones
     $('contenido').innerHTML = `
-      ${renderSeccion('rojo', '🔴 No apareció en toda la semana', 'Faltó a TODAS sus clases', noAparecio)}
-      ${renderSeccion('naranja', '🟠 Vino poquito', 'Asistió a menos de la mitad', vinoPoquito)}
-      ${renderSeccion('amarillo', '🟡 Vino más o menos', 'Asistió a la mitad o más, pero faltó alguna', masMenos)}
-      ${noAparecio.length === 0 && vinoPoquito.length === 0 && masMenos.length === 0
-        ? '<div class="empty ok">🎉 ¡Excelente! Toda la semana sin ausentes destacados.</div>'
+      ${renderSeccion('rojo', '🔴 Ausente total', 'No vino a ninguna clase de la semana (ni fija ni recupero)', ausenteTotal)}
+      ${renderSeccion('naranja', '🟠 Ausencia parcial', 'Vino a algunas pero no cumplió todavía las que pide su plan', ausenteParcial)}
+      ${ausenteTotal.length === 0 && ausenteParcial.length === 0
+        ? '<div class="empty ok">🎉 ¡Excelente! Todos los alumnos cumplieron su plan esta semana.</div>'
         : ''}
     `;
   }
@@ -406,8 +424,9 @@
     const tel = formatearTel(a.tel);
     const detalleHtml = a.detalle.map(d => {
       const cls = d.estado; // p|f|j
-      const labelEst = d.estado === 'p' ? 'Presente' : (d.estado === 'j' ? 'Justificada' : 'Faltó');
-      return `<li class="${cls}">${d.dia.slice(0,3)} ${fmtCorto(d.fechaObj)} ${d.hora} · ${d.servicio.slice(0,4)} — ${labelEst}</li>`;
+      const labelEst = d.estado === 'p' ? 'Vino' : (d.estado === 'j' ? 'Justificada' : 'Faltó');
+      const etiquetaTipo = d.tipo === 'recupero' ? ' (recupero)' : (d.tipo === 'suelto' ? ' (suelto)' : '');
+      return `<li class="${cls}">${d.dia.slice(0,3)} ${fmtCorto(d.fechaObj)} ${d.hora} · ${d.servicio.slice(0,4)}${etiquetaTipo} — ${labelEst}</li>`;
     }).join('');
 
     const btnWA = tel
@@ -418,6 +437,9 @@
       ? `<button class="btn-accion btn-tel" onclick="copiarTel(${a.persona_id})" title="${a.tel}">📋 Tel</button>`
       : '';
 
+    // Texto del ratio: vino / esperadas (con planN entre paréntesis si difiere)
+    const sufijoPlan = a.esperadas < a.planN ? ` <span style="opacity:.7">(plan ${a.planN})</span>` : '';
+
     return `
       <div class="alumno-card ${color}">
         <div>
@@ -426,7 +448,7 @@
         </div>
         <div class="alumno-meta">
           <span class="plan-chip">${a.plan}</span>
-          <span class="ratio-chip ${color}">${a.vino}/${a.total} clases${a.justificadas>0?` · ${a.justificadas} just.`:''}</span>
+          <span class="ratio-chip ${color}">${a.presentes}/${a.esperadas} clases${sufijoPlan}${a.justificadas>0?` · ${a.justificadas} just.`:''}</span>
         </div>
         <div class="alumno-clases">
           <strong style="font-size:11px;color:var(--text-dim)">Clases de la semana:</strong>
@@ -440,13 +462,10 @@
   // ===== Mensaje sugerido para WhatsApp =====
   function mensajePorDefecto(a) {
     const primer = nombreCorto(tt(a.nombre));
-    if (a.vino === 0) {
+    if (a.presentes === 0) {
       return `Hola ${primer}! 👋 Soy de PuntoBiO. Esta semana no te vimos por el centro, ¿está todo bien? Si necesitás reprogramar o tenés alguna duda contame, ¡te esperamos! 💪`;
     }
-    if (a.ratio < 0.5) {
-      return `Hola ${primer}! 👋 Soy de PuntoBiO. Esta semana faltaste a varias clases (${a.vino}/${a.total}). ¿Pasó algo? Contame si te puedo ayudar a reorganizar la semana 🙌`;
-    }
-    return `Hola ${primer}! 👋 Te extrañamos en alguna clase esta semana (${a.vino}/${a.total}). Si necesitás cambiar de horario o tenés alguna duda, escribime ✨`;
+    return `Hola ${primer}! 👋 Te extrañamos en alguna clase esta semana (${a.presentes}/${a.esperadas}). ¿Pasó algo? Si necesitás cambiar de horario o sumar un recupero, contame ✨`;
   }
 
   window.abrirWA = function(personaId) {
@@ -493,7 +512,7 @@
 
   function todosLosAlumnos() {
     if (!datos) return [];
-    return [...datos.noAparecio, ...datos.vinoPoquito, ...datos.masMenos];
+    return [...datos.ausenteTotal, ...datos.ausenteParcial];
   }
 
   function mostrarToast(texto) {
