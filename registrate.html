@@ -1671,8 +1671,37 @@ async function submitForm() {
       historiaData[key] = antecedentesState[key];
     });
 
-    const { error: histErr } = await sb.from('historias_clinicas').insert(historiaData);
-    if (histErr) throw histErr;
+    // ───────────────────────────────────────────────────────────────
+    // EVITAR HC DUPLICADAS (regla de 1 año):
+    // Si esta persona YA completó el formulario hace menos de 1 año,
+    // actualizamos esa misma historia en vez de crear otra nueva.
+    // Si pasó más de 1 año (dejó y retomó), creamos una nueva y la vieja
+    // queda como histórico (no se borra). Las evaluaciones cargadas por el
+    // equipo (origen 'profesional') NO se tocan: solo agrupamos las del paciente.
+    // ───────────────────────────────────────────────────────────────
+    let hcAActualizar = null;
+    try {
+      const { data: ult, error: ultErr } = await sb.rpc('ultima_hc_paciente', { p_persona_id: Number(personaId) });
+      if (!ultErr && ult && ult[0] && ult[0].completado_en) {
+        const diasDesde = (Date.now() - new Date(ult[0].completado_en).getTime()) / 86400000;
+        if (diasDesde < 365) hcAActualizar = ult[0].id;   // HC del paciente de menos de 1 año
+      }
+    } catch (e) {
+      // Si por algún motivo no se puede verificar, seguimos creando una nueva (comportamiento seguro).
+      console.warn('No se pudo verificar HC previa; se creará una nueva.', e);
+    }
+
+    if (hcAActualizar) {
+      // Re-completó el formulario: actualizamos su historia vigente (sin duplicar).
+      // Marcamos como "sin revisar" de nuevo para que el equipo la vuelva a mirar.
+      const historiaUpd = { ...historiaData, completado_en: new Date().toISOString(), revisada_en: null, revisada_por: null };
+      const { error: histErr } = await sb.from('historias_clinicas').update(historiaUpd).eq('id', hcAActualizar);
+      if (histErr) throw histErr;
+    } else {
+      // Paciente nuevo, o pasó más de 1 año: creamos una historia nueva.
+      const { error: histErr } = await sb.from('historias_clinicas').insert(historiaData);
+      if (histErr) throw histErr;
+    }
 
     // Éxito!
     document.getElementById('finalName').textContent = personalData.nombre.split(' ')[0] || 'paciente';
