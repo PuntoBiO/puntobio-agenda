@@ -834,6 +834,28 @@ const MES_ANTERIOR = (() => {
   const d = new Date(HOY.getFullYear(), HOY.getMonth()-1, 1);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 })();
+const MES_SIGUIENTE = (() => {
+  const d = new Date(HOY.getFullYear(), HOY.getMonth()+1, 1);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+})();
+
+// Genera un rango de 7 meses para el desplegable "Imputar pago a..." (3 atrás + actual + 3 adelante).
+// Devuelve [{ valor:'YYYY-MM', label:'YYYY-MM (etiqueta)', offset }] ordenado de más viejo a más nuevo.
+function generarMesesImputables() {
+  const meses = [];
+  for (let offset = -3; offset <= 3; offset++) {
+    const d = new Date(HOY.getFullYear(), HOY.getMonth() + offset, 1);
+    const yyyymm = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    let etiqueta = '';
+    if (offset === 0) etiqueta = ' (mes actual)';
+    else if (offset === -1) etiqueta = ' (mes anterior)';
+    else if (offset === 1) etiqueta = ' (mes siguiente)';
+    else if (offset < 0) etiqueta = ` (${Math.abs(offset)} meses atrás)`;
+    else etiqueta = ` (${offset} meses adelante)`;
+    meses.push({ valor: yyyymm, label: yyyymm + etiqueta, offset });
+  }
+  return meses;
+}
 
 // ===== HELPERS =====
 const $ = s => document.querySelector(s);
@@ -1644,11 +1666,37 @@ window.fichaAgregarHorario = () => fichaSelectorTurno(null);
 window.fichaCambiarHorario = (turnoViejoId) => fichaSelectorTurno(turnoViejoId);
 
 // Muestra un selector de turno; si viene turnoViejoId, primero saca el viejo (cambiar)
-function fichaSelectorTurno(turnoViejoId) {
+async function fichaSelectorTurno(turnoViejoId) {
   const cont = document.getElementById('fichaHorarios');
-  const opciones = fichaTurnosSistema
+
+  // Contar ocupados por turno (todos los alumnos fijos activos)
+  const { data: ocupacion } = await sb.from('turno_alumnos')
+    .select('turno_id')
+    .eq('activo', true);
+  const ocupadosPorTurno = {};
+  (ocupacion || []).forEach(r => {
+    ocupadosPorTurno[r.turno_id] = (ocupadosPorTurno[r.turno_id] || 0) + 1;
+  });
+
+  // Mostrar SOLO turnos con cupo libre (y excluir el turno viejo si es un cambio)
+  const disponibles = fichaTurnosSistema.filter(t => {
+    if (turnoViejoId && t.id === turnoViejoId) return false;        // no ofrecer el mismo de antes
+    const ocup = ocupadosPorTurno[t.id] || 0;
+    return !t.capacidad || ocup < t.capacidad;                       // hay lugar fijo
+  });
+
+  if (disponibles.length === 0) {
+    alert('No hay horarios con cupo libre en este momento.');
+    return;
+  }
+
+  const opciones = disponibles
     .sort((a,b) => ((ORDEN_DIAS[a.dia]||99)-(ORDEN_DIAS[b.dia]||99)) || a.hora.localeCompare(b.hora))
-    .map(t => `<option value="${t.id}">${t.dia} · ${t.hora} · ${t.servicio}</option>`).join('');
+    .map(t => {
+      const ocup = ocupadosPorTurno[t.id] || 0;
+      const libres = t.capacidad ? (t.capacidad - ocup) : '∞';
+      return `<option value="${t.id}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}</option>`;
+    }).join('');
   const titulo = turnoViejoId ? '🔄 Cambiar a este horario:' : '➕ Elegí el horario:';
   cont.insertAdjacentHTML('afterbegin', `
     <div id="fichaSelectorBox" style="background:#f8fafc;border:1.5px solid var(--azul);border-radius:10px;padding:12px;margin-bottom:10px">
@@ -1664,18 +1712,20 @@ function fichaSelectorTurno(turnoViejoId) {
 window.fichaConfirmarHorario = async (turnoViejoId) => {
   const nuevoId = parseInt(document.getElementById('fichaNuevoTurno').value);
   const pid = alumnoActivo.persona.id;
+  const hoyIso = new Date().toISOString().split('T')[0];
   try {
     // Si es cambio, sacar el viejo
     if (turnoViejoId) {
       await sb.from('turno_alumnos').update({ activo: false }).eq('persona_id', pid).eq('turno_id', turnoViejoId);
     }
-    // Ver si ya existe (reactivar) o insertar
+    // Ver si ya existe (reactivar) o insertar. En ambos casos seteamos fecha_desde = hoy,
+    // para que el alumno NO aparezca anotado en días previos a este momento.
     const { data: existe } = await sb.from('turno_alumnos').select('turno_id')
       .eq('persona_id', pid).eq('turno_id', nuevoId);
     if (existe && existe.length) {
-      await sb.from('turno_alumnos').update({ activo: true }).eq('persona_id', pid).eq('turno_id', nuevoId);
+      await sb.from('turno_alumnos').update({ activo: true, fecha_desde: hoyIso }).eq('persona_id', pid).eq('turno_id', nuevoId);
     } else {
-      const { error } = await sb.from('turno_alumnos').insert({ turno_id: nuevoId, persona_id: pid, activo: true });
+      const { error } = await sb.from('turno_alumnos').insert({ turno_id: nuevoId, persona_id: pid, activo: true, fecha_desde: hoyIso });
       if (error) throw error;
     }
     abrirFichaAlumno();
@@ -2362,10 +2412,36 @@ window.confirmarCambioPlan = async () => {
     }
 
     // 3) Agregar las clases extra elegidas a la agenda (permanentes)
+    // Arrancan el 1ro del mes en que se aplica el plan nuevo
     if (cpTurnosSel.size > 0) {
-      const filas = [...cpTurnosSel].map(turnoId => ({ turno_id: turnoId, persona_id: p.id, activo: true }));
-      const { error: errTurnos } = await sb.from('turno_alumnos').insert(filas);
-      if (errTurnos) throw errTurnos;
+      const fechaDesdeExtras = `${mesQueViene}-01`;
+      const turnoIdsExtra = [...cpTurnosSel];
+      // Chequear cuáles ya existen para esa persona (reactivar) y cuáles son nuevos (insertar)
+      const { data: existExtras } = await sb.from('turno_alumnos')
+        .select('id, turno_id')
+        .eq('persona_id', p.id)
+        .in('turno_id', turnoIdsExtra);
+      const yaExisteExtras = {};
+      (existExtras || []).forEach(r => { yaExisteExtras[r.turno_id] = r.id; });
+      const idsActualizarExtras = (existExtras || []).map(r => r.id);
+      if (idsActualizarExtras.length) {
+        const { error: errUpdEx } = await sb.from('turno_alumnos')
+          .update({ activo: true, fecha_desde: fechaDesdeExtras })
+          .in('id', idsActualizarExtras);
+        if (errUpdEx) throw errUpdEx;
+      }
+      const filasNuevasExtras = turnoIdsExtra
+        .filter(id => !yaExisteExtras[id])
+        .map(turnoId => ({
+          turno_id: turnoId,
+          persona_id: p.id,
+          activo: true,
+          fecha_desde: fechaDesdeExtras
+        }));
+      if (filasNuevasExtras.length) {
+        const { error: errTurnos } = await sb.from('turno_alumnos').insert(filasNuevasExtras);
+        if (errTurnos) throw errTurnos;
+      }
     }
 
     let msg = `✓ Cambio programado: ${i.plan}→${planNuevo} desde ${nombreMes(mesQueViene)}`;
@@ -2554,11 +2630,11 @@ function abrirModalCobrar() {
     Cuota base: <strong>${fmt$(f.cuota)}</strong>${tieneArrastre ? ' · ⚠️ Arrastre: sugerido cuota +10%' : ''}
   `;
   $('#cobrarImporte').value = importeSugerido;
-  // Mes imputado: ofrecer anterior y actual
-  $('#cobrarMesImputado').innerHTML = `
-    <option value="${MES_ANTERIOR}"${mesSugerido===MES_ANTERIOR?' selected':''}>${MES_ANTERIOR} (mes anterior)</option>
-    <option value="${MES_ACTUAL}"${mesSugerido===MES_ACTUAL?' selected':''}>${MES_ACTUAL} (mes actual)</option>
-  `;
+  // Mes imputado: ofrecer 7 meses (3 atrás + actual + 3 adelante). Sugerir el más viejo no pagado.
+  const mesesParaImputar = generarMesesImputables();
+  $('#cobrarMesImputado').innerHTML = mesesParaImputar
+    .map(m => `<option value="${m.valor}"${m.valor === mesSugerido ? ' selected' : ''}>${m.label}</option>`)
+    .join('');
   $('#cobrarMedio').value = 'TRANSFERENCIA';
   $('#cobrarObs').value = '';
   $('#modalCobrar').classList.add('activo');
@@ -2921,14 +2997,46 @@ window.toggleTurnoWiz = (turnoId) => {
 async function guardarTurnosWiz() {
   if (wizTurnosSel.size === 0) return; // opcional, no hace nada
   const personaId = alumnoActivo.persona.id;
-  const filas = [...wizTurnosSel].map(turnoId => ({
-    turno_id: turnoId,
-    persona_id: personaId,
-    activo: true
-  }));
-  const { error } = await sb.from('turno_alumnos').insert(filas);
-  if (error) throw error;
-  toast(`✓ ${filas.length} turno(s) fijo(s) asignado(s)`);
+  // fecha_desde = fecha_alta del plan (Paso 1). Si está vacía, usa hoy.
+  const fechaDesde = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
+    || HOY.toISOString().split('T')[0];
+
+  // Antes de insertar, traer los registros que ya existan para esa persona en esos turnos
+  // (activos o inactivos) — si existen los REACTIVAMOS en vez de duplicarlos.
+  const turnoIds = [...wizTurnosSel];
+  const { data: existentes, error: errSel } = await sb.from('turno_alumnos')
+    .select('id, turno_id')
+    .eq('persona_id', personaId)
+    .in('turno_id', turnoIds);
+  if (errSel) throw errSel;
+
+  const yaExistePorTurno = {};
+  (existentes || []).forEach(r => { yaExistePorTurno[r.turno_id] = r.id; });
+
+  // 1) Reactivar / actualizar los que ya existían
+  const idsParaActualizar = (existentes || []).map(r => r.id);
+  if (idsParaActualizar.length) {
+    const { error: errUpd } = await sb.from('turno_alumnos')
+      .update({ activo: true, fecha_desde: fechaDesde })
+      .in('id', idsParaActualizar);
+    if (errUpd) throw errUpd;
+  }
+
+  // 2) Insertar SOLO los que no existían
+  const filasNuevas = turnoIds
+    .filter(id => !yaExistePorTurno[id])
+    .map(turnoId => ({
+      turno_id: turnoId,
+      persona_id: personaId,
+      activo: true,
+      fecha_desde: fechaDesde
+    }));
+  if (filasNuevas.length) {
+    const { error: errIns } = await sb.from('turno_alumnos').insert(filasNuevas);
+    if (errIns) throw errIns;
+  }
+
+  toast(`✓ ${turnoIds.length} turno(s) fijo(s) desde ${fmtFechaArg(fechaDesde)}`);
 }
 
 // Devuelve los turnos seleccionados como objetos {dia, hora, servicio}, ordenados
@@ -2967,9 +3075,20 @@ function prepararPasoCobro() {
   $('#altaAvisoSinTurnos').innerHTML = resumenHtml + aviso;
 
   $('#altaCobrarImporte').value = neto;
-  $('#altaCobrarMes').innerHTML = `
-    <option value="${MES_ACTUAL}" selected>${MES_ACTUAL} (mes actual)</option>
-    <option value="${MES_ANTERIOR}">${MES_ANTERIOR} (mes anterior)</option>`;
+  // Sugerir el mes a imputar según la fecha de alta elegida en el Paso 1.
+  // El desplegable muestra 7 meses (3 atrás + actual + 3 adelante).
+  // Si la fecha_alta cae fuera de ese rango, agregamos su mes como opción extra.
+  const fechaAltaIso = $('#altaFecha').value || HOY.toISOString().split('T')[0];
+  const mesDeAlta = fechaAltaIso.slice(0, 7);   // 'YYYY-MM'
+  const mesesEstandar = generarMesesImputables();
+  const yaIncluido = mesesEstandar.some(m => m.valor === mesDeAlta);
+  const opcionExtra = yaIncluido
+    ? ''
+    : `<option value="${mesDeAlta}" selected>${mesDeAlta} (mes de alta)</option>`;
+  const opciones = mesesEstandar
+    .map(m => `<option value="${m.valor}"${m.valor === mesDeAlta ? ' selected' : ''}>${m.label}</option>`)
+    .join('');
+  $('#altaCobrarMes').innerHTML = opcionExtra + opciones;
   $('#altaCobrarMedio').value = 'TRANSFERENCIA';
   $('#altaCobrarObs').value = '';
 }
