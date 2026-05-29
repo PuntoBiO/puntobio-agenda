@@ -880,11 +880,12 @@ function renderNuevasTable() {
   return `<div class="table-wrapper">${renderNuevasInner()}</div>`;
 }
 function renderNuevasInner() {
-  // Sin revisar primero (más recientes), después revisadas
-  const sinRev = allHCs.filter(h => !h.revisada_en);
-  const conRev = allHCs.filter(h => h.revisada_en);
+  // Una fila por PERSONA (agrupado). Personas con alguna HC sin revisar primero.
+  const grupos = agruparHCporPersona(allHCs);
+  const sinRev = grupos.filter(g => g.algunaSinRevisar);
+  const conRev = grupos.filter(g => !g.algunaSinRevisar);
   const ordenadas = [...sinRev, ...conRev];
-  const filtradas = filterBySearch(ordenadas, h => h.dni, h => personaName(h.persona_id));
+  const filtradas = filterBySearch(ordenadas, g => g.rep.dni, g => personaName(g.rep.persona_id));
 
   if (!filtradas.length) {
     return `<div class="empty-state"><div class="icon">📭</div><p>No hay historias clínicas cargadas todavía.</p></div>`;
@@ -903,18 +904,18 @@ function renderNuevasInner() {
         </tr>
       </thead>
       <tbody>
-        ${filtradas.map(h => `
+        ${filtradas.map(g => { const h = g.rep; return `
           <tr>
-            <td>${h.revisada_en
-              ? '<span class="pill pill-ok">✓ Revisada</span>'
-              : '<span class="pill pill-new">🆕 Sin revisar</span>'}</td>
-            <td><strong>${personaName(h.persona_id) || '(sin nombre)'}</strong></td>
+            <td>${g.algunaSinRevisar
+              ? '<span class="pill pill-new">🆕 Sin revisar</span>'
+              : '<span class="pill pill-ok">✓ Revisada</span>'}</td>
+            <td><strong>${personaName(h.persona_id) || '(sin nombre)'}</strong>${chipsPersonaHC(h.persona_id, g.total)}</td>
             <td>${h.dni || '—'}</td>
             <td>${formatDate(h.completado_en)}</td>
             <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${toSentenceCase(h.motivo_consulta || '—').substring(0, 60)}${(h.motivo_consulta || '').length > 60 ? '…' : ''}</td>
             <td><div class="table-actions"><button class="btn btn-sm btn-primary" onclick="openHC(${h.id})">Ver</button></div></td>
           </tr>
-        `).join('')}
+        `; }).join('')}
       </tbody>
     </table>
   `;
@@ -963,7 +964,9 @@ function renderTodasTable() {
   return `<div class="table-wrapper">${renderTodasInner()}</div>`;
 }
 function renderTodasInner() {
-  const filtradas = filterBySearch(allHCs, h => h.dni, h => personaName(h.persona_id));
+  // Una fila por PERSONA (agrupado), ordenadas por la HC más reciente.
+  const grupos = agruparHCporPersona(allHCs);
+  const filtradas = filterBySearch(grupos, g => g.rep.dni, g => personaName(g.rep.persona_id));
   if (!filtradas.length) {
     return `<div class="empty-state"><div class="icon">📭</div><p>No hay HCs todavía.</p></div>`;
   }
@@ -980,18 +983,18 @@ function renderTodasInner() {
         </tr>
       </thead>
       <tbody>
-        ${filtradas.map(h => `
+        ${filtradas.map(g => { const h = g.rep; return `
           <tr>
-            <td>${h.revisada_en
-              ? '<span class="pill pill-ok">✓</span>'
-              : '<span class="pill pill-new">🆕</span>'}</td>
-            <td><strong>${personaName(h.persona_id) || '(sin nombre)'}</strong></td>
+            <td>${g.algunaSinRevisar
+              ? '<span class="pill pill-new">🆕</span>'
+              : '<span class="pill pill-ok">✓</span>'}</td>
+            <td><strong>${personaName(h.persona_id) || '(sin nombre)'}</strong>${chipsPersonaHC(h.persona_id, g.total)}</td>
             <td>${h.dni || '—'}</td>
             <td>${formatDate(h.completado_en)}</td>
             <td>${h.revisada_en ? formatDate(h.revisada_en) : '—'}</td>
             <td><div class="table-actions"><button class="btn btn-sm btn-primary" onclick="openHC(${h.id})">Ver</button></div></td>
           </tr>
-        `).join('')}
+        `; }).join('')}
       </tbody>
     </table>
   `;
@@ -1049,6 +1052,70 @@ function renderMoplexInner() {
 function personaName(id) {
   const p = allPersonas.find(x => x.id === id);
   return p ? upperName(p.nombre) : null;
+}
+
+/* =============================================================
+   AGRUPADO POR PERSONA (para que no se dupliquen filas con el
+   mismo paciente). NO borra ni modifica nada: solo agrupa al
+   mostrar. Cada persona aparece UNA vez; el resto de sus HC y
+   sus MOPLEX se ven dentro del perfil al abrirlo.
+============================================================= */
+// Agrupa una lista de HC (ya ordenada por completado_en DESC) por persona.
+// rep = la HC sin revisar más reciente si la hay; si no, la más reciente.
+function agruparHCporPersona(lista) {
+  const map = new Map();
+  lista.forEach(h => {
+    if (!map.has(h.persona_id)) map.set(h.persona_id, { persona_id: h.persona_id, todas: [h] });
+    else map.get(h.persona_id).todas.push(h);
+  });
+  const grupos = [];
+  map.forEach(g => {
+    const sinRev = g.todas.find(h => !h.revisada_en); // 1ra = más reciente sin revisar (lista DESC)
+    g.rep = sinRev || g.todas[0];
+    g.total = g.todas.length;
+    g.algunaSinRevisar = g.todas.some(h => !h.revisada_en);
+    grupos.push(g);
+  });
+  return grupos;
+}
+// Chips al lado del nombre: "📚 N HC" si tiene histórico y "🦶 MOPLEX" si tiene evaluación.
+function chipsPersonaHC(personaId, total) {
+  let s = '';
+  if (total > 1) s += ` <span class="pill" style="background:#ede9fe;color:#6d28d9;">📚 ${total} HC</span>`;
+  const nMoplex = allMoplex.filter(m => m.persona_id === personaId).length;
+  if (nMoplex > 0) s += ` <span class="pill" style="background:#fee2e2;color:#b91c1c;">🦶 MOPLEX</span>`;
+  return s;
+}
+// Bloque que se anexa al final del modal: otras HC + evaluaciones MOPLEX de la
+// misma persona, cada una clickeable. Así todo el recorrido del paciente queda
+// dentro de un solo perfil, sin duplicar el nombre en la lista.
+function renderRelacionados(personaId, currentHcId, currentMoplexId) {
+  const otrasHC = allHCs.filter(h => h.persona_id === personaId && h.id !== currentHcId);
+  const moplexP = allMoplex.filter(m => m.persona_id === personaId && m.id !== currentMoplexId);
+  if (!otrasHC.length && !moplexP.length) return '';
+  let html = '';
+  if (otrasHC.length) {
+    html += `<div class="hc-section"><div class="hc-section-header">📚 Otras historias clínicas de este paciente</div><div class="hc-section-body">`;
+    html += otrasHC.map(h => {
+      const origen = h.origen === 'profesional' ? '🩺 abierta por profesional' : '📝 completada por el paciente';
+      const sinRev = h.revisada_en ? '' : ' · <strong style="color:#b91c1c">sin revisar</strong>';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed #f0f0f0">
+        <span style="font-size:13px">📋 ${formatDate(h.completado_en)} · ${origen}${sinRev}</span>
+        <button class="btn btn-sm btn-primary" onclick="openHC(${h.id})">Ver</button></div>`;
+    }).join('');
+    html += `</div></div>`;
+  }
+  if (moplexP.length) {
+    html += `<div class="hc-section moplex"><div class="hc-section-header">🦶 Evaluaciones MOPLEX de este paciente</div><div class="hc-section-body">`;
+    html += moplexP.map(m => {
+      const sinRev = m.revisada_en ? '' : ' · <strong style="color:#b91c1c">sin revisar</strong>';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:1px dashed #f0f0f0">
+        <span style="font-size:13px">🦶 Evaluación de pisada · ${formatDate(m.completado_en)}${sinRev}</span>
+        <button class="btn btn-sm btn-rojo" onclick="openMoplex(${m.id})">Ver</button></div>`;
+    }).join('');
+    html += `</div></div>`;
+  }
+  return html;
 }
 
 function upperName(s) {
@@ -1180,6 +1247,10 @@ function openHC(hcId) {
 
   document.getElementById('modalBody').innerHTML = renderHCDetail(hc, persona);
 
+  // Anexar (sin reconstruir lo de arriba) las OTRAS HC y las MOPLEX de la misma
+  // persona, para ver todo el recorrido del paciente dentro del mismo perfil.
+  document.getElementById('modalBody').insertAdjacentHTML('beforeend', renderRelacionados(hc.persona_id, hc.id, null));
+
   // Cargar observaciones, notas y adjuntos (asíncrono, se rellenan cuando llegan)
   cargarExtras(hc.id, hc.persona_id);
 
@@ -1235,6 +1306,9 @@ function openMoplex(moplexId) {
     `MOPLEX · DNI ${ev.dni || '—'}${partFNacM} · Cargada el ${formatDate(ev.completado_en)}`;
 
   document.getElementById('modalBody').innerHTML = renderMoplexDetail(ev, persona);
+
+  // Anexar las HC y otras MOPLEX de la misma persona (todo dentro del perfil).
+  document.getElementById('modalBody').insertAdjacentHTML('beforeend', renderRelacionados(ev.persona_id, null, ev.id));
 
   // Estado revisada
   const btn = document.getElementById('btnMarcarRevisada');
