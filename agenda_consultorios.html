@@ -409,6 +409,9 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 
       <div class="form-row">
         <label class="form-label">Tratamiento (ID)</label>
+        <div id="avisoElegirTto" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:7px 11px;margin-bottom:6px;font-size:12px;color:#856404">
+          ⚠️ Este paciente tiene <strong>varios tratamientos abiertos</strong>. Elegí el que corresponde al diagnóstico que se va a tratar — el turno queda asociado al ID elegido.
+        </div>
         <select class="form-select" id="fNT_tratamiento" disabled><option value="">— Sin tratamiento (sesión suelta) —</option></select>
       </div>
 
@@ -1005,8 +1008,10 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
 }
 
 // Estados de tratamiento que se consideran ACTIVOS / EN CURSO.
-// Solo estos aparecen en el dropdown de turno y permiten cargar sesiones.
-// (SALDADO, null, vacío, NoAplica = cerrados o dudosos, NO aparecen)
+// Estos aparecen SIEMPRE en el dropdown.
+// (SALDADO, null, vacío, NoAplica también pueden aparecer pero SOLO SI tienen
+// sesiones por agendar — caso típico: paciente que pagó todas las sesiones por
+// adelantado, el tto queda SALDADO antes de terminarse físicamente.)
 const ESTADOS_ACTIVOS = ['ACTIVO', 'PARCIAL', 'PENDIENTE', 'EN CURSO', 'ENCURSO'];
 
 async function loadTratamientosPersona(personaId, practicaCodigo) {
@@ -1018,17 +1023,46 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
     ? [practicaCodigo, codigoAlt]
     : [practicaCodigo];
 
-  const { data, error } = await supa
+  // 1) Traemos TODOS los tratamientos del paciente con esa práctica (sin filtrar por estado)
+  const { data: ttos, error } = await supa
     .from('tratamientos')
-    .select('id, codigo_id, practica_codigo, estado, total_sesiones')
+    .select('id, codigo_id, practica_codigo, estado, total_sesiones, diagnostico')
     .eq('persona_id', personaId)
     .in('practica_codigo', codigosBusqueda)
     .order('fecha_alta', { ascending:false });
   if (error) { console.error(error); return []; }
-  // Solo mostrar tratamientos ACTIVOS / EN CURSO en el dropdown.
-  // SALDADO, null, vacío, NoAplica y cualquier otro estado quedan fuera
-  // para no confundir y para no poder cargar turnos a ttos cerrados.
-  return (data||[]).filter(t => ESTADOS_ACTIVOS.includes((t.estado||'').toUpperCase()));
+  if (!ttos || !ttos.length) return [];
+
+  // 2) Para esos tratamientos, contamos sesiones cumplidas y turnos pendientes
+  //    (las dos consultas en paralelo para no demorar)
+  const ttoIds = ttos.map(t => t.id);
+  const [resSes, resTur] = await Promise.all([
+    supa.from('sesiones').select('tratamiento_id').in('tratamiento_id', ttoIds),
+    supa.from('turnos_consultorio').select('tratamiento_id, estado').in('tratamiento_id', ttoIds).eq('estado', 'PENDIENTE')
+  ]);
+  const cumpPorTto = {};
+  (resSes.data || []).forEach(s => { cumpPorTto[s.tratamiento_id] = (cumpPorTto[s.tratamiento_id] || 0) + 1; });
+  const agePorTto = {};
+  (resTur.data || []).forEach(t => { agePorTto[t.tratamiento_id] = (agePorTto[t.tratamiento_id] || 0) + 1; });
+
+  // 3) Calculamos cuántas sesiones faltan agendar por cada tto y aplicamos la regla:
+  //    - Si estado es ACTIVO/PARCIAL/PENDIENTE/EN CURSO → aparece SIEMPRE (compat. con lo de antes)
+  //    - Si NO está activo (SALDADO/NULL/etc.) → aparece SOLO si tiene sesiones por agendar
+  //      (caso Bettucci: pagó todo de una, quedó SALDADO, pero le quedan sesiones físicas).
+  return ttos
+    .map(t => {
+      const total = t.total_sesiones || 0;
+      const cumplidas = cumpPorTto[t.id] || 0;
+      const agendadas = agePorTto[t.id] || 0;
+      const faltan = total > 0 ? Math.max(0, total - cumplidas - agendadas) : null;
+      return Object.assign({}, t, { _cumplidas: cumplidas, _agendadas: agendadas, _faltan: faltan });
+    })
+    .filter(t => {
+      const estaActivo = ESTADOS_ACTIVOS.includes((t.estado || '').toUpperCase());
+      if (estaActivo) return true;                          // activo → siempre aparece
+      if (t._faltan != null && t._faltan > 0) return true;  // cerrado pero con sesiones por dar → aparece
+      return false;
+    });
 }
 
 function renderGrid() {
@@ -1495,12 +1529,22 @@ async function refrescarTratamientos(personaId, practica) {
   sel.innerHTML = '<option value="">— Sin tratamiento (sesión suelta) —</option>';
   sel.disabled = true;
   document.getElementById('inlineCrearTratamiento').style.display = 'none';
+  // El aviso amarillo "elegí el tratamiento" se oculta por defecto y se muestra
+  // sólo cuando hay 2+ tratamientos activos (más abajo).
+  const avisoInit = document.getElementById('avisoElegirTto');
+  if (avisoInit) avisoInit.style.display = 'none';
   if (!personaId || !practica) return;
   tratamientosPersona = await loadTratamientosPersona(parseInt(personaId,10), practica);
   tratamientosPersona.forEach(t => {
     const o = document.createElement('option');
     o.value = t.id;
-    o.textContent = `${t.codigo_id || '#'+t.id}${t.estado?' · '+t.estado:''}${t.total_sesiones?' · '+t.total_sesiones+' ses.':''}`;
+    // Texto del option: código · estado · total · "X por agendar" · diagnóstico
+    // El diagnóstico va al final y en mayúsculas para que se vea fácil en el desplegable.
+    const txtFaltan = (t._faltan != null) ? ` · ${t._faltan} por agendar` : '';
+    const txtEstado = t.estado ? ` · ${t.estado}` : '';
+    const txtTotal = t.total_sesiones ? ` · ${t.total_sesiones} ses` : '';
+    const txtDiag = t.diagnostico ? ` · ${t.diagnostico.toUpperCase()}` : '';
+    o.textContent = `${t.codigo_id || '#'+t.id}${txtEstado}${txtTotal}${txtFaltan}${txtDiag}`;
     sel.appendChild(o);
   });
   const oNuevo = document.createElement('option');
@@ -1508,8 +1552,25 @@ async function refrescarTratamientos(personaId, practica) {
   oNuevo.textContent = '+ Crear tratamiento nuevo…';
   sel.appendChild(oNuevo);
   sel.disabled = false;
-  if (tratamientosPersona.length > 0) sel.value = tratamientosPersona[0].id;
+  // Auto-select inteligente:
+  //  - 1 tratamiento solo → se elige automáticamente (no hace falta hacer nada)
+  //  - 2+ tratamientos → NINGUNO se autoselecciona y se muestra cartel amarillo
+  //    obligando al usuario a elegir conscientemente (evita que se cargue el turno
+  //    al tto equivocado cuando el paciente tiene varios diagnósticos abiertos,
+  //    ej. rodilla + cervicales).
+  const aviso = document.getElementById('avisoElegirTto');
+  if (tratamientosPersona.length === 1) {
+    sel.value = tratamientosPersona[0].id;
+    if (aviso) aviso.style.display = 'none';
+  } else if (tratamientosPersona.length >= 2) {
+    sel.value = '';
+    if (aviso) aviso.style.display = '';
+  } else {
+    if (aviso) aviso.style.display = 'none';
+  }
   sel.onchange = async () => {
+    // Apenas elige algo (o vuelve a "Sin tratamiento") sacamos el cartel
+    if (aviso) aviso.style.display = 'none';
     if (sel.value === '__NUEVO__') {
       sel.value = '';
       const persona = personas.find(p => p.id === parseInt(personaId, 10));
