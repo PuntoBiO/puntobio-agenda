@@ -1058,9 +1058,14 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
       return Object.assign({}, t, { _cumplidas: cumplidas, _agendadas: agendadas, _faltan: faltan });
     })
     .filter(t => {
-      const estaActivo = ESTADOS_ACTIVOS.includes((t.estado || '').toUpperCase());
-      if (estaActivo) return true;                          // activo → siempre aparece
-      if (t._faltan != null && t._faltan > 0) return true;  // cerrado pero con sesiones por dar → aparece
+      const estado = (t.estado || '').toUpperCase().trim();
+      // Excluir explícitamente bajas/cancelados: si Lu dio de baja un tto, no debe aparecer
+      // para agendar (aunque tenga sesiones por dar — está cerrado por decisión).
+      if (['BAJA', 'CANCELADO'].includes(estado)) return false;
+      // En curso → siempre aparece
+      if (ESTADOS_ACTIVOS.includes(estado)) return true;
+      // Cerrado pero con sesiones físicas por agendar (caso SALDADO que pagó todo)  → aparece
+      if (t._faltan != null && t._faltan > 0) return true;
       return false;
     });
 }
@@ -1841,14 +1846,20 @@ async function onGuardarTurno() {
       mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones del tratamiento. Probá de nuevo.', 'error');
       return;
     }
-    // CANDADO ESTADO: no permitir cargar turnos a tratamientos cerrados/dudosos.
-    // Solo activos en curso (ACTIVO, PARCIAL, Pendiente, En curso).
-    if (ttoTope && !ESTADOS_ACTIVOS.includes((ttoTope.estado||'').toUpperCase())) {
+    // CANDADO DE ESTADO: NO bloqueamos por SALDADO ni por FINALIZADO.
+    //  - SALDADO = pagó toda la plata (≠ terminó las sesiones físicas).
+    //    Caso típico: paciente que paga las 5 sesiones por adelantado y le quedan 2 por dar.
+    //  - FINALIZADO = ya hizo todas las sesiones → el chequeo de cupo de abajo lo frena solo
+    //    (no hace falta un segundo candado).
+    // Sí bloqueamos BAJA / CANCELADO: son estados terminales por decisión, no por completitud.
+    const ESTADOS_BLOQUEAN_AGENDA = ['BAJA', 'CANCELADO'];
+    const estadoTto = (ttoTope?.estado || '').toUpperCase().trim();
+    if (ttoTope && ESTADOS_BLOQUEAN_AGENDA.includes(estadoTto)) {
       const codTxt = ttoTope.codigo_id ? ttoTope.codigo_id : '#' + datosForm.tratamiento_id;
       mostrarAlerta('nuevoAlert',
-        `🚫 El tratamiento ${codTxt} no está activo (estado: ${ttoTope.estado || 'sin estado'}).\n\n` +
-        `Solo se pueden cargar turnos a tratamientos en curso. ` +
-        `Si necesitás reabrirlo, cambiá su estado desde el módulo Tratamientos.`,
+        `🚫 El tratamiento ${codTxt} está dado de ${estadoTto.toLowerCase()}.\n\n` +
+        `No se pueden cargar turnos a tratamientos cancelados/de baja. ` +
+        `Si necesitás reactivarlo, cambiá el estado desde el módulo Tratamientos.`,
         'error');
       return;
     }
