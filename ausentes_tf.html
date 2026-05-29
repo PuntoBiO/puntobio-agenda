@@ -196,28 +196,28 @@
 
     try {
       // En paralelo: todo lo que necesitamos
-      const [insR, perR, turR, taR, agR, asR, blR, ccR] = await Promise.all([
+      const [insR, perR, turR, taR, agR, asR, feR, ccR] = await Promise.all([
         // 1) Inscripciones ACTIVAS (excluimos bonificados sin cuota — no se reclaman)
         supa.from('inscripciones_tf').select('id, persona_id, plan, estado, fecha_alta, fecha_reingreso').eq('estado','ACTIVO').neq('plan','COD0BON'),
         // 2) Personas (para nombre + tel) — select * para no fallar si alguna col no existe
         supa.from('personas').select('*'),
-        // 3) Turnos TF (catálogo: id, día, hora, servicio)
-        supa.from('turnos_tf').select('id, dia, hora, servicio, capacidad'),
+        // 3) Turnos (catálogo: id, día, hora, servicio)
+        supa.from('turnos').select('id, dia, hora, servicio, capacidad'),
         // 4) Turno_alumnos activos (fijos)
         supa.from('turno_alumnos').select('persona_id, turno_id, fecha_desde, activo').eq('activo', true),
         // 5) Agregados puntuales DENTRO de la semana
         supa.from('turno_agregados').select('persona_id, turno_id, fecha, tipo, activo').eq('activo', true).gte('fecha', lunesIso).lt('fecha', sabIso),
         // 6) Asistencias de la semana
         supa.from('asistencia').select('persona_id, turno_id, fecha, estado').gte('fecha', lunesIso).lt('fecha', sabIso),
-        // 7) Bloqueos de la semana (para descontar clases bloqueadas)
-        supa.from('bloqueos_agenda').select('fecha_desde, fecha_hasta, motivo').or(`fecha_desde.lte.${viernesIso},fecha_hasta.gte.${lunesIso}`),
-        // 8) Clases cerradas (las usamos para saber si el conteo está "cerrado")
+        // 7) Feriados de la semana
+        supa.from('feriados').select('fecha, motivo').gte('fecha', lunesIso).lt('fecha', sabIso),
+        // 8) Clases cerradas (informativo, no excluye del conteo)
         supa.from('clases_cerradas').select('turno_id, fecha').gte('fecha', lunesIso).lt('fecha', sabIso)
       ]);
 
       if (insR.error) throw new Error('inscripciones: ' + insR.error.message);
       if (perR.error) throw new Error('personas: ' + perR.error.message);
-      if (turR.error) throw new Error('turnos_tf: ' + turR.error.message);
+      if (turR.error) throw new Error('turnos: ' + turR.error.message);
       if (taR.error) throw new Error('turno_alumnos: ' + taR.error.message);
 
       const inscripciones = insR.data || [];
@@ -226,17 +226,9 @@
       const turnosMap = {};
       (turR.data || []).forEach(t => { turnosMap[t.id] = t; });
 
-      // Set de fechas bloqueadas (cualquier día dentro de un rango bloqueado)
+      // Set de fechas de feriados (esas clases no se le imputan a nadie)
       const fechasBloqueadas = new Set();
-      (blR.data || []).forEach(b => {
-        if (!b.fecha_desde || !b.fecha_hasta) return;
-        let d = new Date(b.fecha_desde + 'T00:00:00');
-        const hasta = new Date(b.fecha_hasta + 'T00:00:00');
-        while (d <= hasta) {
-          fechasBloqueadas.add(toIso(d));
-          d = addDias(d, 1);
-        }
-      });
+      (feR.data || []).forEach(f => { if (f.fecha) fechasBloqueadas.add(f.fecha); });
 
       // Índice de asistencia por (persona, turno, fecha)
       const asiMap = {};
