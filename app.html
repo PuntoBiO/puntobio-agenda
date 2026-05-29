@@ -1215,6 +1215,9 @@ async function init() {
   // Campanita de pagos OS (la ven Jime/Lu/Ale/Pau = equipo sin solo_lo_mio)
   actualizarCampanita()
 
+  // Badge dinámico del sidebar Morosos TF (se calcula en vivo, no hardcoded)
+  actualizarBadgeMorososTF()
+
   // Botón de cobro flotante: SOLO Jime/Lu/Ale/Pau (equipo sin solo_lo_mio).
   // Los profes/profesionales (Bruno, Male, Vero) y clientes NO lo ven.
   ajustarBotonCobro()
@@ -1267,6 +1270,100 @@ async function actualizarCampanita() {
     console.warn('No se pudo cargar campanita:', e.message)
   }
 }
+
+// ======================
+// BADGE MOROSOS TF: cuenta morosos reales y refresca el sidebar
+// Misma lógica que morosos_tf.html (debeEseMes con fecha_alta/fecha_reingreso).
+// Se llama al cargar la app y se expone como window.actualizarBadgeMorososTF
+// para que otros módulos (cobro, baja, etc.) puedan refrescarlo.
+// ======================
+async function actualizarBadgeMorososTF() {
+  if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
+  const badge = document.getElementById('badge-morosos-tf')
+  if (!badge) return
+  try {
+    const hoy = new Date()
+    const yyyy = hoy.getFullYear()
+    const mm = String(hoy.getMonth() + 1).padStart(2, '0')
+    const mesActual = `${yyyy}-${mm}`
+    const fAnt = new Date(yyyy, hoy.getMonth() - 1, 1)
+    const mesAnt = `${fAnt.getFullYear()}-${String(fAnt.getMonth() + 1).padStart(2, '0')}`
+
+    const [insR, pagR, tarR] = await Promise.all([
+      supabase.from('inscripciones_tf').select('id, plan, actividad, descuento_libre, dia_vencimiento, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
+      supabase.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
+      supabase.from('tarifario_tf').select('plan, actividad, valor_lista')
+    ])
+    if (insR.error || pagR.error || tarR.error) { console.warn('Error badge morosos:', insR.error || pagR.error || tarR.error); return }
+
+    const tarifario = {}
+    ;(tarR.data || []).forEach(t => { tarifario[`${t.plan}__${t.actividad}`] = Number(t.valor_lista) })
+    const pagos = pagR.data || []
+
+    const saldoParcial = (p) => {
+      const obs = (p.observaciones || '').trim()
+      if (!obs.toUpperCase().startsWith('PARCIAL')) return null
+      const m = obs.match(/saldo=(\d+)/i)
+      return m ? Number(m[1]) : 0
+    }
+    const debeEseMes = (fechaIni, mesStr) => {
+      if (!fechaIni) return true
+      const [y, m] = mesStr.split('-').map(Number)
+      const ultDia = new Date(y, m, 0)
+      return fechaIni <= ultDia
+    }
+
+    let count = 0
+    for (const i of (insR.data || [])) {
+      const precio = tarifario[`${i.plan}__${i.actividad}`] || 0
+      const monto = Math.max(0, precio - Number(i.descuento_libre || 0))
+      const fIniStr = i.fecha_reingreso || i.fecha_alta
+      const fIni = fIniStr ? new Date(fIniStr + 'T00:00:00') : null
+
+      // --- Mes actual: solo cuenta si la fecha de inicio ya pasó Y se venció el día de vencimiento ---
+      let debeActual = 0
+      if (debeEseMes(fIni, mesActual) && hoy.getDate() > Number(i.dia_vencimiento || 1)) {
+        const pm = pagos.filter(p => p.inscripcion_id === i.id && p.mes_imputado === mesActual)
+        if (pm.length === 0) debeActual = monto
+        else if (pm.some(p => p.tipo_cobro === 'CORTESIA')) debeActual = 0
+        else {
+          const sp = pm.map(saldoParcial).filter(s => s !== null)
+          if (sp.length > 0) debeActual = Math.max(0, sp.reduce((s, v) => s + v, 0))
+          else {
+            const pagado = pm.reduce((s, p) => s + Number(p.importe || 0), 0)
+            const desc = pm.reduce((s, p) => s + Number(p.descuento_temporal || 0), 0)
+            debeActual = Math.max(0, monto - pagado - desc)
+          }
+        }
+      }
+
+      // --- Mes anterior: pago NORMAL salda el mes (sin importar monto actual); parcial respeta saldo ---
+      let debeAnt = 0
+      if (debeEseMes(fIni, mesAnt)) {
+        const pm = pagos.filter(p => p.inscripcion_id === i.id && p.mes_imputado === mesAnt)
+        if (pm.length === 0) debeAnt = monto
+        else if (pm.some(p => p.tipo_cobro === 'CORTESIA')) debeAnt = 0
+        else {
+          const sp = pm.map(saldoParcial).filter(s => s !== null)
+          if (sp.length > 0) debeAnt = Math.max(0, sp.reduce((s, v) => s + v, 0))
+          else debeAnt = 0 // pago normal del mes pasado = saldado
+        }
+      }
+
+      if (debeActual + debeAnt > 0) count++
+    }
+
+    if (count > 0) {
+      badge.style.display = 'inline-block'
+      badge.textContent = count > 99 ? '99+' : String(count)
+    } else {
+      badge.style.display = 'none'
+    }
+  } catch (e) {
+    console.warn('No se pudo calcular badge morosos:', e.message)
+  }
+}
+window.actualizarBadgeMorososTF = actualizarBadgeMorososTF
 
 const fmtMonto = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR')
 function fmtFechaOS(iso) {
@@ -1415,7 +1512,7 @@ function buildNav() {
     areas.push({ icon: '📅', label: 'Agenda TF', id: 'agenda-tf', sub: !esProfe })
     if (!esProfe) {
       areas.push({ icon: '💵', label: 'Caja TF', id: 'caja-tf', sub: true })
-      areas.push({ icon: '🔔', label: 'Morosos TF', id: 'morosos-tf', sub: true, badge: '17', badgeColor: 'red' })
+      areas.push({ icon: '🔔', label: 'Morosos TF', id: 'morosos-tf', sub: true, badgeId: 'badge-morosos-tf' })
     }
   }
   if (permisos.ve_consultorios) {
@@ -1439,7 +1536,13 @@ function buildNav() {
       <div class="nav-section-title">Áreas</div>`)
     areas.forEach(a => {
       const padLeft = a.sub ? 'style="padding-left: 32px;"' : ''
-      const badge = a.badge ? `<span class="nav-badge" style="background: var(--red); color: #fff;">${a.badge}</span>` : ''
+      let badge = ''
+      if (a.badgeId) {
+        // Badge dinámico: arranca oculto, lo llena/oculta la función de cálculo
+        badge = `<span id="${a.badgeId}" class="nav-badge" style="background: var(--red); color: #fff; display:none;"></span>`
+      } else if (a.badge) {
+        badge = `<span class="nav-badge" style="background: var(--red); color: #fff;">${a.badge}</span>`
+      }
       items.push(`<div class="nav-item" ${padLeft} onclick="irA('${a.id}')">
         <span class="nav-icon">${a.icon}</span>
         <span class="nav-label">${a.label}</span>
@@ -1582,6 +1685,11 @@ window.irA = function(modulo) {
 // Listener para mensajes desde iframes (ej: Padrón → Agenda Fisio / Agenda TF)
 window.addEventListener('message', (ev) => {
   const data = ev.data || {};
+  // Refrescar badge de morosos cuando un iframe avisa que cambió algo (cobro, baja, etc.)
+  if (data.tipo === 'REFRESCAR_BADGE_MOROSOS') {
+    actualizarBadgeMorososTF();
+    return;
+  }
   if (data.tipo === 'NAVEGAR_MODULO' && typeof data.modulo === 'string') {
     // Llamar a irA sin depender de "event" (que no existe en este contexto)
     // Encontrar el nav-item del módulo de destino y simular click para mantener UI sincronizada
@@ -1776,6 +1884,8 @@ function renderMorososTF() {
   contentEl.innerHTML = `
     <iframe src="morosos_tf.html" class="module-iframe-tab" title="Morosos TF"></iframe>
   `
+  // Refrescar el contador del sidebar (por si cobraron o dieron de baja desde acá)
+  actualizarBadgeMorososTF()
 }
 
 // ======================
