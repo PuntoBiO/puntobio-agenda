@@ -1543,50 +1543,7 @@ async function submitForm() {
 
   try {
     const dni = document.getElementById('dni').value.trim();
-    // Recolectar datos personales
-    const personalData = {
-      dni,
-      nombre: document.getElementById('nombre').value.trim().toUpperCase(),
-      fecha_nacimiento: document.getElementById('fecha_nacimiento').value,
-      celular: document.getElementById('celular').value.trim(),
-      mail: document.getElementById('mail').value.trim().toLowerCase(),
-      direccion: document.getElementById('direccion').value.trim(),
-      obra_social: document.getElementById('obra_social').value,
-      nro_afiliado_os: document.getElementById('nro_afiliado_os').value.trim() || null,
-      contacto_urgencia_nombre: document.getElementById('contacto_urgencia_nombre').value.trim(),
-      contacto_urgencia_celular: document.getElementById('contacto_urgencia_celular').value.trim(),
-      quien_recomendo: document.getElementById('quien_recomendo').value.trim() || null,
-      medico_que_atendio: document.getElementById('medico_derivante').value.trim() || null,
-      actualizado_via_form_publico: new Date().toISOString(),
-      ip_ultimo_registro: userIP
-    };
 
-    let personaId;
-
-    if (existingPerson) {
-      // Paciente que vuelve: actualizamos SOLO los campos que el paciente
-      // efectivamente escribió (tienen valor). Los que dejó vacíos NO se tocan
-      // (se conservan los datos viejos). Si escribió un valor nuevo en un campo
-      // que ya tenía dato (ej: nuevo celular), se actualiza con lo nuevo.
-      const updates = { actualizado_via_form_publico: personalData.actualizado_via_form_publico, ip_ultimo_registro: userIP };
-      Object.keys(personalData).forEach(k => {
-        if (k === 'dni' || k === 'actualizado_via_form_publico' || k === 'ip_ultimo_registro') return;
-        if (personalData[k]) {   // solo si el paciente escribió algo en ese campo
-          updates[k] = personalData[k];
-        }
-      });
-      const { error } = await sb.from('personas').update(updates).eq('id', existingPerson.id);
-      if (error) throw error;
-      personaId = existingPerson.id;
-    } else {
-      // INSERT nuevo
-      const insertData = { ...personalData, fecha_alta: new Date().toISOString().slice(0, 10), estado: 'Activo' };
-      const { data, error } = await sb.from('personas').insert(insertData).select('id').single();
-      if (error) throw error;
-      personaId = data.id;
-    }
-
-    // Helpers para obtener valores opcionales
     const radioVal = (name) => {
       const el = document.querySelector(`input[name="${name}"]:checked`);
       return el ? (el.value === 'true' ? true : (el.value === 'false' ? false : el.value)) : null;
@@ -1597,32 +1554,41 @@ async function submitForm() {
     };
     const txtVal = (id) => document.getElementById(id).value.trim() || null;
 
-    // INSERT en historias_clinicas (siempre nueva)
-    const historiaData = {
-      persona_id: personaId,
-      dni,
+    // Datos de la persona. La funcion del servidor decide si inserta (paciente
+    // nuevo) o actualiza (paciente existente, por DNI) completando solo lo vacio.
+    const persona = {
+      nombre: document.getElementById('nombre').value.trim(),
+      fecha_nacimiento: document.getElementById('fecha_nacimiento').value || null,
+      celular: document.getElementById('celular').value.trim(),
+      mail: document.getElementById('mail').value.trim(),
+      direccion: document.getElementById('direccion').value.trim(),
+      obra_social: document.getElementById('obra_social').value,
+      nro_afiliado_os: document.getElementById('nro_afiliado_os').value.trim() || null,
+      contacto_urgencia_nombre: document.getElementById('contacto_urgencia_nombre').value.trim(),
+      contacto_urgencia_celular: document.getElementById('contacto_urgencia_celular').value.trim(),
+      ip: userIP
+    };
+
+    // Datos de la historia clinica
+    const historia = {
       ip_origen: userIP,
-      // Motivo + servicio
       motivo_consulta: document.getElementById('motivo_consulta').value.trim(),
-      derivacion_medica: document.querySelector('input[name="derivacion_medica"]:checked').value === 'true',
+      derivacion_medica: document.querySelector('input[name="derivacion_medica"]:checked')?.value === 'true',
       medico_derivante: txtVal('medico_derivante'),
-      como_llego: document.querySelector('input[name="como_llego"]:checked').value,
+      como_llego: document.querySelector('input[name="como_llego"]:checked')?.value || null,
       quien_recomendo: txtVal('quien_recomendo'),
       servicios_requeridos: Array.from(document.querySelectorAll('input[name="servicios"]:checked')).map(c => c.value),
-      // Antecedentes
-      lado_habil: document.querySelector('input[name="lado_habil"]:checked').value,
+      lado_habil: document.querySelector('input[name="lado_habil"]:checked')?.value || null,
       contracturas_donde: txtVal('contracturas_donde'),
       numero_partos: numVal('numero_partos'),
       cirugias_descripcion: txtVal('cirugias_descripcion'),
       otros_antecedentes: txtVal('otros_antecedentes'),
-      // Dolor
       dolor_motivo_consulta: radioVal('dolor_motivo'),
       dolor_zona: txtVal('dolor_zona'),
       dolor_desde_cuando: txtVal('dolor_desde_cuando'),
       dolor_consulto_medico: radioVal('dolor_consulto_medico'),
       dolor_realizo_tratamientos: radioVal('dolor_tratamientos'),
       dolor_tratamientos_descripcion: txtVal('dolor_tratamientos_descripcion'),
-      // Hábitos
       horas_descanso: document.getElementById('horas_descanso').value || null,
       descanso_reparador: radioVal('descanso_reparador'),
       fuma: radioVal('fuma'),
@@ -1640,7 +1606,6 @@ async function submitForm() {
       consume_farmacos: radioVal('consume_farmacos'),
       farmacos_descripcion: txtVal('farmacos_descripcion'),
       farmacos_indicados_medico: radioVal('farmacos_indicados_medico'),
-      // Nutricional
       apetito: radioVal('apetito'),
       comidas_por_dia: numVal('comidas_por_dia'),
       consume_todos_alimentos: radioVal('consume_todos_alimentos'),
@@ -1649,7 +1614,6 @@ async function submitForm() {
       suplementos_descripcion: txtVal('suplementos_descripcion'),
       litros_agua_por_dia: numVal('litros_agua_por_dia'),
       alimentacion_saludable: radioVal('alimentacion_saludable'),
-      // Aptitud física
       actividad_fisica_frecuencia: numVal('actividad_fisica_frecuencia'),
       actividad_fisica_que: txtVal('actividad_fisica_que'),
       realiza_deporte: radioVal('realiza_deporte'),
@@ -1658,58 +1622,29 @@ async function submitForm() {
       competencias_mensuales: numVal('competencias_mensuales'),
       fatiga_percibida: numVal('fatiga_percibida'),
       disponibilidad_entrenamiento: radioVal('disponibilidad_entrenamiento'),
-      // Objetivos
       objetivo_funcional: document.getElementById('objetivo_funcional').value.trim(),
-      // Consentimientos
       consentimiento_atencion: true,
       consentimiento_atencion_nombre: cAtenName.value.trim(),
       consentimiento_investigacion: document.querySelector('input[name="consent_investigacion"]:checked').value === 'true',
       consentimiento_investigacion_nombre: cInvName.value.trim()
     };
-    // Agregar todos los antecedentes booleanos
-    ANTECEDENTES.forEach(({ key }) => {
-      historiaData[key] = antecedentesState[key];
+    // Antecedentes SI/NO
+    ANTECEDENTES.forEach(({ key }) => { historia[key] = antecedentesState[key]; });
+
+    // Un solo llamado seguro: la funcion guarda persona + historia clinica.
+    const { data, error } = await sb.rpc('guardar_registro_publico', {
+      p_dni: dni,
+      p_persona: persona,
+      p_historia: historia
     });
+    if (error) throw error;
 
-    // ───────────────────────────────────────────────────────────────
-    // EVITAR HC DUPLICADAS (regla de 1 año):
-    // Si esta persona YA completó el formulario hace menos de 1 año,
-    // actualizamos esa misma historia en vez de crear otra nueva.
-    // Si pasó más de 1 año (dejó y retomó), creamos una nueva y la vieja
-    // queda como histórico (no se borra). Las evaluaciones cargadas por el
-    // equipo (origen 'profesional') NO se tocan: solo agrupamos las del paciente.
-    // ───────────────────────────────────────────────────────────────
-    let hcAActualizar = null;
-    try {
-      const { data: ult, error: ultErr } = await sb.rpc('ultima_hc_paciente', { p_persona_id: Number(personaId) });
-      if (!ultErr && ult && ult[0] && ult[0].completado_en) {
-        const diasDesde = (Date.now() - new Date(ult[0].completado_en).getTime()) / 86400000;
-        if (diasDesde < 365) hcAActualizar = ult[0].id;   // HC del paciente de menos de 1 año
-      }
-    } catch (e) {
-      // Si por algún motivo no se puede verificar, seguimos creando una nueva (comportamiento seguro).
-      console.warn('No se pudo verificar HC previa; se creará una nueva.', e);
-    }
-
-    if (hcAActualizar) {
-      // Re-completó el formulario: actualizamos su historia vigente (sin duplicar).
-      // Marcamos como "sin revisar" de nuevo para que el equipo la vuelva a mirar.
-      const historiaUpd = { ...historiaData, completado_en: new Date().toISOString(), revisada_en: null, revisada_por: null };
-      const { error: histErr } = await sb.from('historias_clinicas').update(historiaUpd).eq('id', hcAActualizar);
-      if (histErr) throw histErr;
-    } else {
-      // Paciente nuevo, o pasó más de 1 año: creamos una historia nueva.
-      const { error: histErr } = await sb.from('historias_clinicas').insert(historiaData);
-      if (histErr) throw histErr;
-    }
-
-    // Éxito!
-    document.getElementById('finalName').textContent = personalData.nombre.split(' ')[0] || 'paciente';
+    document.getElementById('finalName').textContent = persona.nombre.split(' ')[0] || 'paciente';
     goToStep(10);
 
   } catch (err) {
     console.error(err);
-    errorBox.textContent = 'Hubo un problema al guardar tus datos. Probá de nuevo o avisanos en recepción. Error: ' + (err.message || 'desconocido');
+    errorBox.textContent = 'Hubo un problema al guardar tus datos. Proba de nuevo o avisanos en recepcion. Error: ' + (err.message || 'desconocido');
     errorBox.style.display = 'block';
     btn.disabled = false;
     btn.textContent = 'Enviar';
