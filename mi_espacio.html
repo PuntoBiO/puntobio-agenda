@@ -1275,6 +1275,7 @@ async function cargarEspacio(per){
   window._personaNombreActual = per.nombre;
 
   const html = [
+    bloqueMensajesEquipo(),
     bloquePlan(inscripcion),
     bloqueMisClases(misTurnos, (asis.data||[])),
     bloqueClasesPuntuales(misAgregados),
@@ -1286,7 +1287,6 @@ async function cargarEspacio(per){
     bloqueCompetencias(competenciasAlumno),
     bloqueBitacora(bitacoraAlumno),
     bloqueAdjuntos(adjuntosAlumno),
-    bloqueMensajesEquipo(),
     bloqueEvoluciones(evos.data||[]),
     bloqueHC(hc.data&&hc.data[0], moplex.data&&moplex.data[0]),
     bloqueContacto()
@@ -2236,36 +2236,108 @@ const DIAS_SEMANA = [
 // BLOQUE: MENSAJES CON EL EQUIPO (alumno → profes)
 // El alumno escribe a un profe específico y ve la conversación
 // ============================================================
+function bloqueMensajesEquipo(){
+  return `
+    <section class="ag-card" id="pb-mensajes-card" style="border:2px solid #1e9fe0;background:linear-gradient(135deg,#fff,#f0f9ff)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <h2 class="ag-h2" style="margin:0">💬 Mensajes con el equipo ${badgeNuevoSi('mensajes-equipo')} <span id="pb-msj-badge"></span></h2>
+        <button class="ag-btn ag-btn-verde" onclick="pbAbrirMensajes()" style="font-size:13px">✉️ Abrir buzón</button>
+      </div>
+      <div id="pb-msj-preview" style="margin-top:6px"></div>
+    </section>
+  `;
+}
+
+// Llama esto después de cargar datos: pinta un preview de las últimas conversaciones
+function _renderPreviewMensajes(){
+  const cont = document.getElementById('pb-msj-preview');
+  if(!cont) return;
+  const yo = window._personaActual;
+  if(!yo || !yo.id){ cont.innerHTML = ''; return; }
+  // Agrupar por interlocutor (la "otra persona" en la conversación)
+  const porPersona = {}; // { otroId: { nombre, ultima_fecha, sin_leer, ultimo_texto } }
+  (_misMensajes || []).forEach(m => {
+    const esMio = m.autor_persona_id === yo.id;
+    const otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
+    if(otroId == null) return; // ignoramos anuncios generales en este preview
+    const k = String(otroId);
+    if(!porPersona[k]){
+      const eq = (_equipoMsj || []).find(p => p.id === otroId);
+      porPersona[k] = {
+        id: otroId,
+        nombre: eq ? _fmtNombrePB(eq.nombre) : (m.autor_nombre || 'Equipo'),
+        ultimo: m,
+        sin_leer: 0,
+      };
+    }
+    // Contar sin leer (de la otra persona hacia mí)
+    if(!esMio && !_misLecturas.has(m.id)) porPersona[k].sin_leer++;
+  });
+  const lista = Object.values(porPersona)
+    .sort((a,b) => new Date(b.ultimo.creado_en) - new Date(a.ultimo.creado_en))
+    .slice(0, 3); // top 3 más recientes
+
+  if(!lista.length){
+    cont.innerHTML = `<p class="empty" style="margin:6px 0 0">Escribile a tu profe o a alguien del equipo. Te respondemos por acá.</p>`;
+    return;
+  }
+
+  cont.innerHTML = lista.map(c => {
+    const m = c.ultimo;
+    const esMio = m.autor_persona_id === yo.id;
+    const autorAdmin = _adminsIds.has(m.autor_persona_id);
+    const preview = (m.contenido || '').substring(0, 75);
+    const moreThan = (m.contenido || '').length > 75 ? '…' : '';
+    let badge = '';
+    if(c.sin_leer > 0){
+      const bgColor = autorAdmin ? '#dc2626' : '#16a34a';
+      badge = `<span style="display:inline-block;background:${bgColor};color:#fff;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:10px;min-width:18px;text-align:center">${c.sin_leer}</span>`;
+    }
+    const lblImp = (c.sin_leer > 0 && autorAdmin)
+      ? ` <span style="background:#dc2626;color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px">⚡ IMPORTANTE</span>` : '';
+    return `<div onclick="pbAbrirMensajes()" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;border:1px solid #e2e8f0;${c.sin_leer>0?'border-left:4px solid '+(autorAdmin?'#dc2626':'#1e9fe0')+';':''}border-radius:8px;margin-bottom:5px;cursor:pointer">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#0f172a">
+          ${c.nombre}${lblImp}
+        </div>
+        <div style="font-size:11.5px;color:#64748b;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esMio?'<span style="color:#94a3b8">Vos: </span>':''}${_escHtmlPB(preview)}${moreThan}</div>
+      </div>
+      ${badge}
+    </div>`;
+  }).join('');
+}
+
 let _equipoMsj = null;       // lista de profes del equipo (cache)
 let _misMensajes = [];       // mensajes míos (autor o destinatario)
 let _misLecturas = new Set();
 let _msjNoLeidos = 0;
-
-function bloqueMensajesEquipo(){
-  return `
-    <section class="ag-card">
-      <h2 class="ag-h2">💬 Mensajes con el equipo ${badgeNuevoSi('mensajes-equipo')} <span id="pb-msj-badge"></span></h2>
-      <p class="empty" style="margin-top:6px">Escribile a tu profe o a alguien del equipo. Te respondemos por acá.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button class="ag-btn ag-btn-verde" onclick="pbAbrirMensajes()">✉️ Ver / escribir mensajes</button>
-      </div>
-    </section>
-  `;
-}
+let _adminsIds = new Set();  // ids de personas con admin_total — sus mensajes se ven en rojo
 
 // Carga miembros del equipo (solo profes/personas con es_equipo=true) y mensajes propios
 async function _cargarDatosMensajes(){
   const yo = window._personaActual;
   if(!yo || !yo.id) return;
   try {
-    const [eqRes, msjRes, lecRes] = await Promise.all([
+    const [eqRes, msjRes, lecRes, admRes] = await Promise.all([
       sb.from('personas').select('id, nombre').eq('es_equipo', true).order('nombre', { ascending: true }),
       sb.from('mensajes_equipo').select('*').order('creado_en', { ascending: false }),
-      sb.from('mensajes_lecturas').select('mensaje_id').eq('persona_id', yo.id)
+      sb.from('mensajes_lecturas').select('mensaje_id').eq('persona_id', yo.id),
+      sb.from('permisos_equipo').select('persona_id').eq('admin_total', true)
     ]);
-    _equipoMsj = (eqRes.data || []);
+    // Filtrar duplicados de personas por nombre normalizado (sin tildes ni case)
+    const vistos = new Set();
+    _equipoMsj = (eqRes.data || []).filter(p => {
+      const k = String(p.nombre || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quitar tildes
+        .trim().replace(/\s+/g, ' ');
+      if (vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
     _misMensajes = (msjRes.data || []);
     _misLecturas = new Set((lecRes.data || []).map(r => r.mensaje_id));
+    _adminsIds = new Set((admRes.data || []).map(r => r.persona_id));
     // Contar no leídos (donde yo soy destinatario y no leí)
     _msjNoLeidos = _misMensajes.filter(m =>
       m.destinatario_persona_id === yo.id
@@ -2278,12 +2350,22 @@ async function _cargarDatosMensajes(){
 
 function _renderBadgeMensajes(){
   const b = document.getElementById('pb-msj-badge');
-  if(!b) return;
-  if(_msjNoLeidos > 0){
-    b.innerHTML = ` <span style="display:inline-block;background:#dc2626;color:#fff;font-size:11px;font-weight:800;padding:2px 8px;border-radius:10px;margin-left:5px">${_msjNoLeidos} sin leer</span>`;
-  } else {
-    b.innerHTML = '';
+  if(b){
+    if(_msjNoLeidos > 0){
+      b.innerHTML = ` <span style="display:inline-block;background:#dc2626;color:#fff;font-size:12px;font-weight:800;padding:3px 10px;border-radius:12px;margin-left:6px;box-shadow:0 2px 6px rgba(220,38,38,.35);animation:pulse-rojo 1.8s infinite">🔴 ${_msjNoLeidos} sin leer</span>`;
+    } else {
+      b.innerHTML = '';
+    }
   }
+  // Asegurar que la animación esté definida
+  if(!document.getElementById('pb-msj-style')){
+    const st = document.createElement('style');
+    st.id = 'pb-msj-style';
+    st.textContent = '@keyframes pulse-rojo { 0%,100%{transform:scale(1)} 50%{transform:scale(1.06)} }';
+    document.head.appendChild(st);
+  }
+  // Render preview de las últimas conversaciones
+  _renderPreviewMensajes();
 }
 
 window.pbAbrirMensajes = async function(){
@@ -2301,14 +2383,31 @@ window.pbAbrirMensajes = async function(){
     const otroNombre = (_equipoMsj || []).find(p => p.id === otroId);
     const nombreOtro = otroNombre ? _fmtNombrePB(otroNombre.nombre) : (esMio ? '(profesional)' : (m.autor_nombre || 'Equipo'));
     const sinLeer = !esMio && !_misLecturas.has(m.id);
-    const bordeColor = esMio ? '#1e9fe0' : '#16a34a';
-    const fondoBase = sinLeer ? 'linear-gradient(90deg,#dcfce7 0%,#fff 12%)' : '#f8fafc';
-    return `<div style="background:${fondoBase};border:1px solid #e2e8f0;border-left:4px solid ${bordeColor};border-radius:10px;padding:11px 13px;margin-bottom:8px">
+    const autorEsAdmin = _adminsIds.has(m.autor_persona_id);
+    // Estilo según autor (admin = rojo importante)
+    let bordeColor, fondoBase, headerColor, chipImp = '', contStyle = '';
+    if (autorEsAdmin) {
+      bordeColor = '#dc2626';
+      fondoBase = sinLeer ? 'linear-gradient(90deg,#fee2e2 0%,#fff 15%)' : '#fff';
+      headerColor = '#b91c1c';
+      chipImp = ' <span style="background:#dc2626;color:#fff;font-size:9.5px;font-weight:800;padding:2px 7px;border-radius:5px;margin-left:4px;letter-spacing:.3px">⚡ IMPORTANTE</span>';
+      contStyle = 'color:#7f1d1d;font-weight:500';
+    } else if (esMio) {
+      bordeColor = '#1e9fe0';
+      fondoBase = '#f8fafc';
+      headerColor = '#1e9fe0';
+    } else {
+      bordeColor = '#16a34a';
+      fondoBase = sinLeer ? 'linear-gradient(90deg,#dcfce7 0%,#fff 12%)' : '#f8fafc';
+      headerColor = '#16a34a';
+    }
+    const styleCaja = `background:${fondoBase};border:1px solid #e2e8f0;border-left:${autorEsAdmin?'5px':'4px'} solid ${bordeColor};border-radius:10px;padding:11px 13px;margin-bottom:8px${autorEsAdmin?';box-shadow:0 2px 8px rgba(220,38,38,.12)':''}`;
+    return `<div style="${styleCaja}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:5px">
-        <div style="font-size:12px;font-weight:700;color:${bordeColor}">${esMio ? `Vos → ${nombreOtro}` : `${nombreOtro} → Vos`}${sinLeer ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVO</span>' : ''}</div>
+        <div style="font-size:12px;font-weight:700;color:${headerColor}">${esMio ? `Vos → ${nombreOtro}` : `${nombreOtro} → Vos`}${sinLeer && !autorEsAdmin ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVO</span>' : ''}${chipImp}</div>
         <div style="font-size:11px;color:#64748b">${_fmtFechaPB(m.creado_en)}</div>
       </div>
-      <div style="font-size:13.5px;color:#0f172a;line-height:1.5;white-space:pre-wrap;word-break:break-word">${_escHtmlPB(m.contenido)}</div>
+      <div style="font-size:13.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#0f172a;${contStyle}">${_escHtmlPB(m.contenido)}</div>
     </div>`;
   }).join('');
 

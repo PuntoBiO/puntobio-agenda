@@ -299,20 +299,32 @@ async function init() {
   }
   yo = persona;
 
-  // Verificar si es admin_total
+  // Verificar si puedo ver todos los mensajes (admin_total OR ve_todos_mensajes)
   try {
     const { data: perm } = await sb.from('permisos_equipo')
-      .select('admin_total').eq('persona_id', persona.id).maybeSingle();
-    esAdmin = !!(perm && perm.admin_total);
+      .select('admin_total, ve_todos_mensajes').eq('persona_id', persona.id).maybeSingle();
+    esAdmin = !!(perm && (perm.admin_total || perm.ve_todos_mensajes));
   } catch (e) { esAdmin = false; }
 
   // Cargar miembros del equipo (excluyendo a mí mismo) — para el dropdown destinatario
+  // Filtra duplicados por nombre normalizado (sin tildes ni case)
   try {
     const { data: eq } = await sb.from('personas')
       .select('id, nombre')
       .eq('es_equipo', true)
       .order('nombre', { ascending: true });
-    equipo = (eq || []).filter(p => p.id !== yo.id);
+    const vistos = new Set();
+    equipo = (eq || [])
+      .filter(p => p.id !== yo.id)
+      .filter(p => {
+        const k = String(p.nombre || '')
+          .toLowerCase()
+          .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          .trim().replace(/\s+/g, ' ');
+        if (vistos.has(k)) return false;
+        vistos.add(k);
+        return true;
+      });
   } catch (e) { equipo = []; }
 
   renderShell();
@@ -331,10 +343,10 @@ function renderShell() {
   const optsDest = `<option value="">📢 Todo el equipo (anuncio general)</option>` +
     equipo.map(p => `<option value="${p.id}">${escapeHtml(formatNombre(p.nombre))}</option>`).join('');
 
-  // Si soy admin, muestro un filtro extra para ver solo conversación con alguien
+  // Si tengo permiso de ver todos, muestro un filtro extra para ver solo conversación con alguien
   const filtroAdmin = esAdmin ? `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;background:#fef9c3;border:1.5px solid #fde047;border-radius:10px;padding:9px 13px;font-size:12.5px">
-      <span style="font-weight:700;color:#854d0e">👑 Vista admin:</span>
+      <span style="font-weight:700;color:#854d0e">👑 Vista supervisor:</span>
       <span style="color:#854d0e">ves todos los mensajes del equipo.</span>
       <select id="filtroAdminDest" onchange="aplicarFiltroAdmin()" style="margin-left:auto;font-family:inherit;padding:4px 8px;border-radius:6px;border:1px solid #d4d4d8;background:#fff;font-size:12px">
         <option value="">— Filtrar por persona —</option>
@@ -347,7 +359,7 @@ function renderShell() {
     <div class="header">
       <div>
         <h1>💬 Mensajes del equipo</h1>
-        <div class="sub">${esAdmin ? 'Vista admin · ves todo el equipo' : 'Solo ves los mensajes dirigidos a vos o anuncios generales'}</div>
+        <div class="sub">${esAdmin ? 'Vista supervisor · ves todo el equipo' : 'Solo ves los mensajes dirigidos a vos o anuncios generales'}</div>
       </div>
       <button class="btn btn-sm" onclick="cargarMensajes()" title="Refrescar">🔄</button>
     </div>
