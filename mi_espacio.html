@@ -414,6 +414,55 @@
   50%{opacity:.82;transform:scale(1.06)}
 }
 
+/* MIS ADJUNTOS · módulo para subir aptos, estudios y consideraciones médicas */
+.adj-lista{display:flex;flex-direction:column;gap:10px}
+.adj-item{
+  display:grid;grid-template-columns:auto 1fr auto;gap:10px 12px;align-items:start;
+  padding:12px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.06);
+  border-radius:10px;
+}
+[data-theme="light"] .adj-item{background:rgba(15,23,42,.025);border-color:rgba(15,23,42,.08)}
+.adj-cat{
+  font-size:11px;font-weight:800;padding:5px 10px;border-radius:6px;
+  white-space:nowrap;letter-spacing:.2px;align-self:flex-start;
+}
+.adj-cont{min-width:0}
+.adj-titulo{font-size:14px;font-weight:700;color:var(--texto);margin-bottom:4px;word-break:break-word}
+.adj-meta{font-size:11.5px;color:var(--texto-tenue);display:flex;flex-wrap:wrap;gap:8px 12px}
+.adj-meta span{display:inline-flex;align-items:center;gap:3px}
+.adj-origen{color:#a855f7;font-weight:600}
+.adj-notas{font-size:12.5px;color:var(--texto-tenue);margin-top:6px;padding:6px 8px;background:rgba(255,255,255,.03);border-left:2px solid rgba(255,255,255,.1);border-radius:0 4px 4px 0;font-style:italic}
+[data-theme="light"] .adj-notas{background:rgba(15,23,42,.025);border-left-color:rgba(15,23,42,.15)}
+.adj-acciones{display:flex;flex-direction:column;gap:5px;align-self:center}
+/* Formulario de subida (dentro del modal) */
+.adj-form{display:flex;flex-direction:column;gap:14px;text-align:left}
+.adj-form-row{display:flex;flex-direction:column;gap:5px}
+.adj-label{font-size:12.5px;font-weight:700;color:#475569;letter-spacing:.2px}
+.adj-input{
+  font-family:inherit;font-size:13.5px;padding:9px 11px;
+  border:1.5px solid #e2e8f0;border-radius:8px;background:#fff;color:#0f172a;
+  transition:border-color .15s;
+}
+.adj-input:focus{outline:none;border-color:#1e9fe0}
+.adj-help{font-size:11px;color:#94a3b8;margin-top:2px}
+.adj-cat-list{display:flex;flex-direction:column;gap:6px}
+.adj-cat-radio{display:flex;align-items:center;gap:8px;cursor:pointer}
+.adj-cat-radio input{width:18px;height:18px;cursor:pointer;flex-shrink:0}
+.adj-cat-chip{
+  display:inline-block;padding:6px 12px;border-radius:8px;font-size:13px;font-weight:700;
+  border:1.5px solid transparent;
+}
+.adj-error{color:#dc2626;font-size:12.5px;padding:8px 10px;background:#fef2f2;border-radius:6px;border-left:3px solid #dc2626}
+.adj-info{color:#0369a1;font-size:12.5px;padding:8px 10px;background:#eff6ff;border-radius:6px;border-left:3px solid #0369a1}
+.adj-ok{color:#16a34a;font-size:12.5px;padding:8px 10px;background:#f0fdf4;border-radius:6px;border-left:3px solid #16a34a}
+
+@media (max-width: 600px){
+  .adj-item{grid-template-columns:1fr;gap:8px}
+  .adj-acciones{flex-direction:row;justify-content:flex-end}
+}
+/* Cuando el modal contiene el form de adjuntos, permitir más altura */
+.pb-modal-opciones:has(.adj-form){max-height:60vh}
+
 /* SELF-SERVICE · modal compartido para confirmaciones */
 .pb-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 20px; }
 .pb-modal-overlay.open { display: flex; }
@@ -604,6 +653,7 @@ const DIAS_HABILES_VISTA  = 10; // cuántos días hábiles muestra el panel "Age
 const FEATURES_NUEVAS = {
   // Ejemplo: 'mis-adjuntos': '2026-05-31', // se va a usar cuando hagamos el módulo de adjuntos
   'agenda-cupos-claros': '2026-05-30', // chip "X lugares" en vez de "X / Y"
+  'mis-adjuntos': '2026-05-30', // módulo para subir aptos, estudios y consideraciones médicas
 };
 const DIAS_QUE_DURA_NUEVO = 10;
 
@@ -913,7 +963,7 @@ async function cargarEspacio(per){
   const _desdeISO = _diasHabiles[0];
   const _hastaISO = _diasHabiles[_diasHabiles.length - 1];
 
-  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, misAgregadosRes, cuposRes] = await Promise.all([
+  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, misAgregadosRes, cuposRes, adjuntosRes] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
@@ -938,6 +988,11 @@ async function cargarEspacio(per){
     // porque las queries directas las bloquea RLS (solo veríamos los del alumno mismo).
     // El RPC devuelve solo contadores, sin nombres ni datos personales.
     sb.rpc('alumno_agenda_cupos', { p_desde: _desdeISO, p_hasta: _hastaISO }),
+    // Adjuntos médicos del alumno (RLS filtra solo los suyos)
+    sb.from('hc_adjuntos')
+      .select('id, categoria, titulo, fecha_estudio, notas, nombre_original, storage_path, tipo_mime, tamano_bytes, subido_por_alumno, autor_nombre, creado_en')
+      .eq('persona_id', pid)
+      .order('creado_en', {ascending:false}),
   ]);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = (misTurnosRes.data || [])
@@ -1024,6 +1079,11 @@ async function cargarEspacio(per){
     })
     .filter(Boolean);
 
+  const adjuntosAlumno = adjuntosRes.data || [];
+  window._adjuntosAlumno = adjuntosAlumno;
+  window._personaIdActual = pid;
+  window._personaNombreActual = per.nombre;
+
   const html = [
     bloquePlan(inscripcion),
     bloqueMisClases(misTurnos, (asis.data||[])),
@@ -1032,6 +1092,7 @@ async function cargarEspacio(per){
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
     bloquePagos(misPagos),
+    bloqueAdjuntos(adjuntosAlumno),
     bloqueEvoluciones(evos.data||[]),
     bloqueHC(hc.data&&hc.data[0], moplex.data&&moplex.data[0]),
     bloqueContacto()
@@ -1771,6 +1832,195 @@ function bloquePagos(pagos){
     ${extra}
   </section>`;
 }
+
+// ============================================================
+//  BLOQUE: Mis adjuntos médicos (aptos, estudios, consideraciones)
+// ============================================================
+const CATS_ADJUNTO = {
+  apto_fisico:   { label: 'Apto físico',          icono: '🏃', color: '#16a34a' },
+  estudio:       { label: 'Informe de estudio',   icono: '🩻', color: '#1e9fe0' },
+  consideracion: { label: 'Consideración médica', icono: '📋', color: '#a855f7' },
+  otro:          { label: 'Otro',                 icono: '📎', color: '#64748b' },
+};
+
+function bloqueAdjuntos(adjuntos){
+  let lista = '';
+  if(!adjuntos || adjuntos.length === 0){
+    lista = `<p class="empty">Todavía no subiste nada. Acá podés cargar tu apto físico, estudios médicos (resonancia, ecografía, RX), consideraciones del doctor, etc. El equipo los va a ver en tu historia clínica.</p>`;
+  } else {
+    adjuntos.forEach(a => {
+      const cat = CATS_ADJUNTO[a.categoria] || CATS_ADJUNTO.otro;
+      const tit = a.titulo || a.nombre_original || 'Adjunto sin título';
+      const fecha = a.fecha_estudio ? fmtFecha(a.fecha_estudio) : null;
+      const subidoEn = fmtFecha(a.creado_en);
+      const puedeBorrar = a.subido_por_alumno === true;
+      const origen = puedeBorrar ? '' : `<span class="adj-origen">cargado por el equipo</span>`;
+      lista += `<div class="adj-item">
+        <div class="adj-cat" style="background:${cat.color}22;color:${cat.color}">${cat.icono} ${cat.label}</div>
+        <div class="adj-cont">
+          <div class="adj-titulo">${esc(tit)}</div>
+          <div class="adj-meta">
+            ${fecha ? `<span>📅 ${fecha}</span>` : ''}
+            <span>Subido el ${subidoEn}</span>
+            ${origen}
+          </div>
+          ${a.notas ? `<div class="adj-notas">${esc(a.notas)}</div>` : ''}
+        </div>
+        <div class="adj-acciones">
+          <button class="ag-btn ag-btn-azul" onclick="pbVerAdjunto(${a.id}, '${a.storage_path.replace(/'/g,"\\'")}')">👁 Ver</button>
+          ${puedeBorrar ? `<button class="ag-btn ag-btn-naranja" onclick="pbBorrarAdjunto(${a.id}, '${a.storage_path.replace(/'/g,"\\'")}', '${esc(tit).replace(/'/g,"\\'")}')">🗑 Borrar</button>` : ''}
+        </div>
+      </div>`;
+    });
+  }
+
+  return `<section class="card reveal d4">
+    <h2><span class="dot"></span>Mis estudios y aptos${badgeNuevoSi('mis-adjuntos')}</h2>
+    <div class="adj-lista">${lista}</div>
+    <button class="ag-btn ag-btn-verde" style="margin-top:12px" onclick="pbAbrirSubirAdjunto()">📤 Subir nuevo</button>
+    <div class="nota" style="margin-top:10px">Lo que subas acá lo va a ver el equipo en tu historia clínica. Aceptamos PDF e imágenes (JPG, PNG). Tamaño máximo: 10 MB.</div>
+  </section>`;
+}
+
+// === Subir adjunto ===
+window.pbAbrirSubirAdjunto = function(){
+  const cats = Object.entries(CATS_ADJUNTO).map(([k,c]) => 
+    `<label class="adj-cat-radio">
+      <input type="radio" name="adj-cat" value="${k}" required>
+      <span class="adj-cat-chip" style="background:${c.color}22;color:${c.color};border-color:${c.color}55">${c.icono} ${c.label}</span>
+    </label>`
+  ).join('');
+
+  pbAbrirModal({
+    titulo: '📤 Subir nuevo adjunto',
+    cuerpoHTML: `
+      <div class="adj-form">
+        <div class="adj-form-row">
+          <label class="adj-label">¿Qué es?</label>
+          <div class="adj-cat-list">${cats}</div>
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="adj-titulo">Título corto</label>
+          <input type="text" id="adj-titulo" class="adj-input" placeholder="Ej: Resonancia hombro derecho" maxlength="100" required>
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="adj-fecha">Fecha del estudio (opcional)</label>
+          <input type="date" id="adj-fecha" class="adj-input">
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="adj-archivo">Archivo (PDF o imagen)</label>
+          <input type="file" id="adj-archivo" class="adj-input" accept=".pdf,image/*" required>
+          <div class="adj-help">Máximo 10 MB</div>
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="adj-notas">Notas (opcional)</label>
+          <textarea id="adj-notas" class="adj-input" rows="3" placeholder="Ej: el doctor me dijo que cuide de no levantar peso con el brazo derecho" maxlength="500"></textarea>
+        </div>
+        <div id="adj-status" style="margin-top:8px"></div>
+      </div>`,
+    botones: [
+      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: 'Subir', cls: 'confirm', onclick: 'pbConfirmarSubirAdjunto()' },
+    ]
+  });
+};
+
+window.pbConfirmarSubirAdjunto = async function(){
+  const cat = document.querySelector('input[name="adj-cat"]:checked');
+  const titulo = document.getElementById('adj-titulo').value.trim();
+  const fecha = document.getElementById('adj-fecha').value || null;
+  const archivoInput = document.getElementById('adj-archivo');
+  const notas = document.getElementById('adj-notas').value.trim() || null;
+  const status = document.getElementById('adj-status');
+
+  if(!cat){ status.innerHTML = '<div class="adj-error">Elegí qué tipo de adjunto es</div>'; return; }
+  if(!titulo){ status.innerHTML = '<div class="adj-error">Poné un título</div>'; return; }
+  if(!archivoInput.files || archivoInput.files.length === 0){ status.innerHTML = '<div class="adj-error">Elegí un archivo</div>'; return; }
+
+  const archivo = archivoInput.files[0];
+  if(archivo.size > 10 * 1024 * 1024){
+    status.innerHTML = '<div class="adj-error">El archivo es muy grande (máximo 10 MB). Probá comprimirlo.</div>';
+    return;
+  }
+
+  status.innerHTML = '<div class="adj-info">Subiendo… esto puede tardar unos segundos</div>';
+
+  try {
+    const pid = window._personaIdActual;
+    const nombreOriginal = archivo.name;
+    const ext = nombreOriginal.includes('.') ? nombreOriginal.split('.').pop() : '';
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2,8)}${ext?'.'+ext:''}`;
+    const storagePath = `${pid}/${uniqueName}`;
+
+    // 1) Subir archivo al bucket
+    const { error: upErr } = await sb.storage.from('hc-adjuntos').upload(storagePath, archivo, {
+      contentType: archivo.type || 'application/octet-stream',
+      upsert: false,
+    });
+    if(upErr) throw upErr;
+
+    // 2) Insertar fila en hc_adjuntos (historia_id queda NULL si el alumno aún no tiene HC)
+    const { error: insErr } = await sb.from('hc_adjuntos').insert({
+      persona_id: pid,
+      historia_id: null,
+      storage_path: storagePath,
+      nombre_original: nombreOriginal,
+      tipo_mime: archivo.type || null,
+      tamano_bytes: archivo.size,
+      categoria: cat.value,
+      titulo: titulo,
+      fecha_estudio: fecha,
+      notas: notas,
+      autor_nombre: window._personaNombreActual || 'Alumno',
+      subido_por_alumno: true,
+    });
+    if(insErr){
+      // Si falla el insert, intentamos limpiar el archivo subido (best-effort)
+      try { await sb.storage.from('hc-adjuntos').remove([storagePath]); } catch(e){}
+      throw insErr;
+    }
+
+    status.innerHTML = '<div class="adj-ok">¡Listo! Adjunto subido. Recargando…</div>';
+    setTimeout(() => { pbCerrarModal(); location.reload(); }, 900);
+  } catch (err) {
+    status.innerHTML = `<div class="adj-error">No se pudo subir: ${esc(err.message || 'error desconocido')}</div>`;
+  }
+};
+
+window.pbVerAdjunto = async function(id, storagePath){
+  try {
+    const { data, error } = await sb.storage.from('hc-adjuntos').createSignedUrl(storagePath, 60);
+    if(error) throw error;
+    window.open(data.signedUrl, '_blank');
+  } catch (err) {
+    alert('No se pudo abrir el adjunto: ' + (err.message || 'error'));
+  }
+};
+
+window.pbBorrarAdjunto = function(id, storagePath, titulo){
+  pbAbrirModal({
+    titulo: '🗑 Borrar adjunto',
+    cuerpoHTML: `<p>¿Seguro querés borrar <b>${esc(titulo)}</b>? Esta acción no se puede deshacer.</p>`,
+    botones: [
+      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: 'Sí, borrar', cls: 'confirm', onclick: `pbConfirmarBorrarAdjunto(${id}, '${storagePath.replace(/'/g,"\\'")}')` },
+    ]
+  });
+};
+
+window.pbConfirmarBorrarAdjunto = async function(id, storagePath){
+  try {
+    // 1) Borrar fila (RLS solo deja borrar las del alumno con subido_por_alumno=true)
+    const { error: delErr } = await sb.from('hc_adjuntos').delete().eq('id', id);
+    if(delErr) throw delErr;
+    // 2) Borrar archivo del bucket (best-effort)
+    try { await sb.storage.from('hc-adjuntos').remove([storagePath]); } catch(e){}
+    pbCerrarModal();
+    location.reload();
+  } catch (err) {
+    alert('No se pudo borrar: ' + (err.message || 'error'));
+  }
+};
 
 function bloqueEvoluciones(evos){
   if(!evos || evos.length===0){
