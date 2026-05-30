@@ -840,7 +840,7 @@ async function cargarEspacio(per){
   const _desdeISO = _diasHabiles[0];
   const _hastaISO = _diasHabiles[_diasHabiles.length - 1];
 
-  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, allFijosRes, agregadosRes, ausentesRes, misAgregadosRes] = await Promise.all([
+  const [asis, recus, evos, hc, moplex, misTurnosRes, todosTurnosRes, misAgregadosRes, cuposRes] = await Promise.all([
     sb.from('asistencia').select('*').eq('persona_id',pid),
     sb.from('recuperatorios_tf').select('*').eq('persona_id',pid).order('fecha_ausencia',{ascending:false}),
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
@@ -853,12 +853,6 @@ async function cargarEspacio(per){
       .eq('activo', true),
     // Todos los turnos del centro (para el panel "Agenda de la semana")
     sb.from('turnos').select('id, dia, hora, servicio, capacidad'),
-    // Conteo de inscriptos fijos por turno (solo activos, sin nombres)
-    sb.from('turno_alumnos').select('turno_id').eq('activo', true),
-    // Agregados puntuales (recuperatorios/sueltos) en el rango de 2 semanas (para conteo de cupo)
-    sb.from('turno_agregados').select('turno_id, fecha').gte('fecha', _desdeISO).lte('fecha', _hastaISO),
-    // Ausencias (no van) en el rango de 2 semanas — solo cuento para restar
-    sb.from('asistencia').select('turno_id, fecha').gte('fecha', _desdeISO).lte('fecha', _hastaISO).in('estado', ['ausente','ausente-justificada']),
     // MIS agregados puntuales (sueltos/recuperatorios cargados para mí) en el rango de 2 semanas
     // Nota: select plano sin embed — el JOIN con turnos lo resolvemos en JS abajo
     sb.from('turno_agregados')
@@ -867,6 +861,10 @@ async function cargarEspacio(per){
       .gte('fecha', _desdeISO)
       .lte('fecha', _hastaISO)
       .order('fecha', {ascending:true}),
+    // Conteos GLOBALES de cupo (fijos, agregados, ausentes) — via RPC con SECURITY DEFINER
+    // porque las queries directas las bloquea RLS (solo veríamos los del alumno mismo).
+    // El RPC devuelve solo contadores, sin nombres ni datos personales.
+    sb.rpc('alumno_agenda_cupos', { p_desde: _desdeISO, p_hasta: _hastaISO }),
   ]);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = (misTurnosRes.data || [])
@@ -881,23 +879,14 @@ async function cargarEspacio(per){
   }
 
   // ===== Datos pre-procesados para el panel "Agenda de la semana" =====
-  // Conteo de fijos activos por turno_id
+  // Vienen del RPC alumno_agenda_cupos (bypassa RLS para devolver conteos globales)
+  const cupos = (cuposRes && cuposRes.data) || { fijos:{}, agregados:{}, ausentes:{} };
+  // Convertir claves de string a int para los fijos (el RPC los devuelve como string en JSON)
   const fijosPorTurno = {};
-  (allFijosRes.data || []).forEach(r => {
-    fijosPorTurno[r.turno_id] = (fijosPorTurno[r.turno_id]||0) + 1;
-  });
-  // Conteo de agregados por "turno_id|fecha"
-  const agregadosPorClave = {};
-  (agregadosRes.data || []).forEach(r => {
-    const k = r.turno_id+'|'+r.fecha;
-    agregadosPorClave[k] = (agregadosPorClave[k]||0) + 1;
-  });
-  // Conteo de ausentes por "turno_id|fecha"
-  const ausentesPorClave = {};
-  (ausentesRes.data || []).forEach(r => {
-    const k = r.turno_id+'|'+r.fecha;
-    ausentesPorClave[k] = (ausentesPorClave[k]||0) + 1;
-  });
+  Object.entries(cupos.fijos || {}).forEach(([k,v]) => { fijosPorTurno[parseInt(k,10)] = v; });
+  // Las claves "turno_id|fecha" ya vienen listas
+  const agregadosPorClave = cupos.agregados || {};
+  const ausentesPorClave  = cupos.ausentes  || {};
   // Datos consolidados para pasarle al bloque (sin nombres ni datos personales)
   window._agendaData = {
     turnos: todosTurnosRes.data || [],
