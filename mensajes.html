@@ -275,6 +275,7 @@ let mensajes = [];       // todos los mensajes
 let leidasPorMi = new Set(); // ids de mensajes ya leídos por mí
 let equipo = [];         // lista de personas del equipo (para el dropdown de destinatarios)
 let filtroDestId = '';   // filtro de bandeja (para admin: ver solo conversación con X)
+let ADMINS_IDS = new Set(); // ids de personas con admin_total — sus mensajes se ven en rojo
 
 // ============= INICIO =============
 async function init() {
@@ -391,13 +392,15 @@ function formatNombre(n) {
 // ============= CARGAR MENSAJES =============
 async function cargarMensajes() {
   try {
-    const [msjRes, lecRes] = await Promise.all([
+    const [msjRes, lecRes, admRes] = await Promise.all([
       sb.from('mensajes_equipo').select('*').order('creado_en', { ascending: false }),
-      sb.from('mensajes_lecturas').select('mensaje_id').eq('persona_id', yo.id)
+      sb.from('mensajes_lecturas').select('mensaje_id').eq('persona_id', yo.id),
+      sb.from('permisos_equipo').select('persona_id').eq('admin_total', true)
     ]);
     if (msjRes.error) throw msjRes.error;
     mensajes = msjRes.data || [];
     leidasPorMi = new Set((lecRes.data || []).map(r => r.mensaje_id));
+    ADMINS_IDS = new Set((admRes.data || []).map(r => r.persona_id));
     pintarMensajes();
     marcarTodosLeidosSilenciosamente();
   } catch (e) {
@@ -444,16 +447,32 @@ function renderMensaje(m) {
   const sinLeer = !leidasPorMi.has(m.id) && !esMio;
   const ini = inicialesDe(m.autor_nombre || 'Equipo');
   const esGeneral = m.destinatario_persona_id == null;
+  const autorEsAdmin = ADMINS_IDS.has(m.autor_persona_id);
   // Texto "para X"
   const paraTxt = esGeneral
     ? '<span style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:5px">📢 Todo el equipo</span>'
     : `<span style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:5px">→ ${escapeHtml(nombreDePersonaId(m.destinatario_persona_id))}</span>`;
-  return `<div class="msj ${sinLeer ? 'sin-leer' : ''}" id="msj-${m.id}">
+  // Estilos especiales si el autor es ADMIN (mensajes importantes en rojo)
+  const estilosAdmin = autorEsAdmin ? {
+    borderColor: '#dc2626',
+    bg: sinLeer ? 'linear-gradient(90deg,#fee2e2 0%,#fff 12%)' : '#fff',
+    avatarBg: '#dc2626',
+    nombreColor: '#b91c1c',
+    chipImportante: '<span style="background:#dc2626;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;margin-left:5px;letter-spacing:.3px">⚡ IMPORTANTE</span>',
+    extraStyle: 'border-width:2px;border-left-width:5px;box-shadow:0 2px 8px rgba(220,38,38,.12)'
+  } : null;
+  const sinLeerCls = (sinLeer && !autorEsAdmin) ? 'sin-leer' : '';
+  const inlineStyle = autorEsAdmin
+    ? `border-color:${estilosAdmin.borderColor};background:${estilosAdmin.bg};${estilosAdmin.extraStyle}`
+    : '';
+  const avatarStyle = autorEsAdmin ? `background:${estilosAdmin.avatarBg}` : '';
+  const nombreStyle = autorEsAdmin ? `color:${estilosAdmin.nombreColor}` : '';
+  return `<div class="msj ${sinLeerCls}" id="msj-${m.id}" style="${inlineStyle}">
     <div class="msj-head">
       <div class="msj-autor">
-        <div class="msj-avatar">${ini}</div>
+        <div class="msj-avatar" style="${avatarStyle}">${ini}</div>
         <div>
-          <div class="msj-nombre">${escapeHtml(m.autor_nombre || 'Equipo')}${esMio ? ' <span style="color:#94a3b8;font-weight:500;font-size:11.5px">(vos)</span>' : ''} ${paraTxt}</div>
+          <div class="msj-nombre" style="${nombreStyle}">${escapeHtml(m.autor_nombre || 'Equipo')}${esMio ? ' <span style="color:#94a3b8;font-weight:500;font-size:11.5px">(vos)</span>' : ''} ${paraTxt}${autorEsAdmin ? estilosAdmin.chipImportante : ''}</div>
           <div class="msj-fecha">${formatearFecha(m.creado_en)}${m.editado_en ? '<span class="editado">· editado</span>' : ''}</div>
         </div>
       </div>
@@ -462,7 +481,7 @@ function renderMensaje(m) {
         ${puedeBorrar ? `<button class="mini-btn peligro" onclick="borrar(${m.id})" title="Borrar">🗑️</button>` : ''}
       </div>
     </div>
-    <div class="msj-contenido" id="msj-cont-${m.id}">${linkify(escapeHtml(m.contenido))}</div>
+    <div class="msj-contenido" id="msj-cont-${m.id}" style="${autorEsAdmin?'color:#7f1d1d;font-weight:500':''}">${linkify(escapeHtml(m.contenido))}</div>
   </div>`;
 }
 
