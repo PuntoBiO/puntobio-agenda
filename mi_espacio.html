@@ -2254,26 +2254,21 @@ function _renderPreviewMensajes(){
   if(!cont) return;
   const yo = window._personaActual;
   if(!yo || !yo.id){ cont.innerHTML = ''; return; }
-  // Agrupar por interlocutor. Si soy del equipo, también muestro anuncios generales
-  // bajo una "conversación virtual" con id='anuncios'.
+  // Mi Espacio: solo conversaciones 1‑a‑1. Los mensajes ya vienen pre‑filtrados.
   const porPersona = {};
   (_misMensajes || []).forEach(m => {
     const esMio = m.autor_persona_id === yo.id;
-    let otroId, nombre;
-    if (m.destinatario_persona_id == null) {
-      // Anuncio general — solo si soy del equipo
-      if (!_yoSoyEquipo) return;
-      otroId = 'anuncios';
-      nombre = '📢 Anuncios del equipo';
-    } else {
-      otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
-      if (otroId == null) return;
-      const eq = (_equipoMsj || []).find(p => p.id === otroId);
-      nombre = eq ? _fmtNombrePB(eq.nombre, _equipoMsj) : (m.autor_nombre || 'Equipo');
-    }
+    const otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
+    if (otroId == null) return;
     const k = String(otroId);
     if(!porPersona[k]){
-      porPersona[k] = { id: otroId, nombre, ultimo: m, sin_leer: 0 };
+      const eq = (_equipoMsj || []).find(p => p.id === otroId);
+      porPersona[k] = {
+        id: otroId,
+        nombre: eq ? _fmtNombrePB(eq.nombre, _equipoMsj) : (m.autor_nombre || 'Equipo'),
+        ultimo: m,
+        sin_leer: 0,
+      };
     }
     if (new Date(m.creado_en) > new Date(porPersona[k].ultimo.creado_en)) {
       porPersona[k].ultimo = m;
@@ -2293,23 +2288,20 @@ function _renderPreviewMensajes(){
     const m = c.ultimo;
     const esMio = m.autor_persona_id === yo.id;
     const autorAdmin = _adminsIds.has(m.autor_persona_id);
-    const esAnuncio = c.id === 'anuncios';
     const preview = (m.contenido || '').substring(0, 75);
     const moreThan = (m.contenido || '').length > 75 ? '…' : '';
     let badge = '';
     if(c.sin_leer > 0){
-      const bgColor = autorAdmin ? '#dc2626' : (esAnuncio ? '#f59e0b' : '#16a34a');
+      const bgColor = autorAdmin ? '#dc2626' : '#16a34a';
       badge = `<span style="display:inline-block;background:${bgColor};color:#fff;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:10px;min-width:18px;text-align:center">${c.sin_leer}</span>`;
     }
-    const lblImp = (c.sin_leer > 0 && autorAdmin && !esAnuncio)
+    const lblImp = (c.sin_leer > 0 && autorAdmin)
       ? ` <span style="background:#dc2626;color:#fff;font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px">⚡ IMPORTANTE</span>` : '';
-    const lblStaff = esAnuncio
-      ? ` <span style="background:#fcd34d;color:#78350f;font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px">DEL EQUIPO</span>` : '';
-    const colorBorde = c.sin_leer > 0 ? (autorAdmin ? '#dc2626' : (esAnuncio ? '#f59e0b' : '#1e9fe0')) : '#e2e8f0';
+    const colorBorde = c.sin_leer > 0 ? (autorAdmin ? '#dc2626' : '#1e9fe0') : '#e2e8f0';
     return `<div onclick="pbAbrirMensajes()" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;border:1px solid #e2e8f0;${c.sin_leer>0?'border-left:4px solid '+colorBorde+';':''}border-radius:8px;margin-bottom:5px;cursor:pointer">
       <div style="flex:1;min-width:0">
         <div style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#0f172a;flex-wrap:wrap">
-          ${c.nombre}${lblImp}${lblStaff}
+          ${c.nombre}${lblImp}
         </div>
         <div style="font-size:11.5px;color:#64748b;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esMio?'<span style="color:#94a3b8">Vos: </span>':''}${_escHtmlPB(preview)}${moreThan}</div>
       </div>
@@ -2368,7 +2360,23 @@ async function _cargarDatosMensajes(){
       vistosFull.add(f); vistosP2.add(p2);
       return true;
     });
-    _misMensajes = (msjRes.data || []);
+    // FILTRADO PARA VISTA ALUMNO: Mi Espacio solo muestra conversaciones alumna↔profe
+    // - Mensajes donde YO soy destinatario directo (alguien me escribió como alumna): SIEMPRE
+    // - Mensajes donde YO soy autor: solo si enviado_desde='mi_espacio' (los que mandé como alumna)
+    // - NO mostrar anuncios generales (destinatario NULL) en esta vista
+    // - NO mostrar mensajes propios que mandé desde el panel staff (enviado_desde='equipo' o null + soy del staff)
+    _misMensajes = (msjRes.data || []).filter(m => {
+      // Anuncios generales: nunca en Mi Espacio
+      if (m.destinatario_persona_id == null) return false;
+      // Soy destinatario: siempre mostrar
+      if (m.destinatario_persona_id === yo.id) return true;
+      // Soy autor: solo si lo mandé desde Mi Espacio
+      if (m.autor_persona_id === yo.id) {
+        return m.enviado_desde === 'mi_espacio';
+      }
+      // Otros mensajes (que Lu/Jime puedan ver por RLS): no mostrar en Mi Espacio
+      return false;
+    });
     _misLecturas = new Set((lecRes.data || []).map(r => r.mensaje_id));
     _adminsIds = new Set((admRes.data || []).map(r => r.persona_id));
     // Cargar adjuntos de esos mensajes
@@ -2381,18 +2389,13 @@ async function _cargarDatosMensajes(){
         _adjPorMsj[a.mensaje_id].push(a);
       });
     }
-    // Contar no leídos: incluir anuncios generales si soy del equipo
-    _msjNoLeidos = _misMensajes.filter(m => {
-      if (m.autor_persona_id === yo.id) return false;
-      if (_misLecturas.has(m.id)) return false;
-      // Soy destinatario directo
-      if (m.destinatario_persona_id === yo.id) return true;
-      // Anuncio general y soy del equipo
-      if (m.destinatario_persona_id == null && _yoSoyEquipo) return true;
-      // Soy admin/supervisor y veo todo
-      if (_yoVeoTodo) return true;
-      return false;
-    }).length;
+    // Contar no leídos: SOLO los dirigidos a mí personalmente (no anuncios generales)
+    // Mi Espacio es vista de alumna, no de staff
+    _msjNoLeidos = _misMensajes.filter(m =>
+      m.destinatario_persona_id === yo.id
+      && m.autor_persona_id !== yo.id
+      && !_misLecturas.has(m.id)
+    ).length;
     _renderBadgeMensajes();
   } catch (e) { console.warn('Error mensajes', e); }
 }
@@ -2425,36 +2428,22 @@ window.pbAbrirMensajes = async function(){
     `<option value="${p.id}">${_fmtNombrePB(p.nombre, _equipoMsj)}</option>`
   ).join('');
 
-  // Render lista cronológica (último arriba)
+  // Render lista cronológica (último arriba) — Mi Espacio: solo conversaciones 1‑a‑1
   const lista = (_misMensajes || []).map(m => {
     const esMio = m.autor_persona_id === yo.id;
-    const esAnuncio = m.destinatario_persona_id == null;
-    // Si es anuncio y NO soy del equipo, lo salto (no debería verlo)
-    if (esAnuncio && !_yoSoyEquipo) return '';
-    let nombreOtro, headerCell;
-    if (esAnuncio) {
-      nombreOtro = '📢 Anuncios del equipo';
-      headerCell = esMio ? `Vos → 📢 Todo el equipo` : `${m.autor_nombre || 'Equipo'} → 📢 Todo el equipo`;
-    } else {
-      const otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
-      const otroNombre = (_equipoMsj || []).find(p => p.id === otroId);
-      nombreOtro = otroNombre ? _fmtNombrePB(otroNombre.nombre, _equipoMsj) : (esMio ? '(profesional)' : (m.autor_nombre || 'Equipo'));
-      headerCell = esMio ? `Vos → ${nombreOtro}` : `${nombreOtro} → Vos`;
-    }
+    const otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
+    const otroNombre = (_equipoMsj || []).find(p => p.id === otroId);
+    const nombreOtro = otroNombre ? _fmtNombrePB(otroNombre.nombre, _equipoMsj) : (esMio ? '(profesional)' : (m.autor_nombre || 'Equipo'));
     const sinLeer = !esMio && !_misLecturas.has(m.id);
     const autorEsAdmin = _adminsIds.has(m.autor_persona_id);
-    // Estilo según autor / tipo
-    let bordeColor, fondoBase, headerColor, chipImp = '', contStyle = '', chipAnuncio = '';
+    // Estilo según autor (admin = rojo importante)
+    let bordeColor, fondoBase, headerColor, chipImp = '', contStyle = '';
     if (autorEsAdmin) {
       bordeColor = '#dc2626';
       fondoBase = sinLeer ? 'linear-gradient(90deg,#fee2e2 0%,#fff 15%)' : '#fff';
       headerColor = '#b91c1c';
       chipImp = ' <span style="background:#dc2626;color:#fff;font-size:9.5px;font-weight:800;padding:2px 7px;border-radius:5px;margin-left:4px;letter-spacing:.3px">⚡ IMPORTANTE</span>';
       contStyle = 'color:#7f1d1d;font-weight:500';
-    } else if (esAnuncio) {
-      bordeColor = '#f59e0b';
-      fondoBase = sinLeer ? 'linear-gradient(90deg,#fef3c7 0%,#fff 15%)' : '#fffbeb';
-      headerColor = '#b45309';
     } else if (esMio) {
       bordeColor = '#1e9fe0';
       fondoBase = '#f8fafc';
@@ -2464,19 +2453,16 @@ window.pbAbrirMensajes = async function(){
       fondoBase = sinLeer ? 'linear-gradient(90deg,#dcfce7 0%,#fff 12%)' : '#f8fafc';
       headerColor = '#16a34a';
     }
-    if (esAnuncio) {
-      chipAnuncio = ' <span style="background:#fcd34d;color:#78350f;font-size:9.5px;font-weight:800;padding:2px 7px;border-radius:5px;margin-left:4px">DEL EQUIPO</span>';
-    }
-    const styleCaja = `background:${fondoBase};border:1px solid #e2e8f0;border-left:${(autorEsAdmin||esAnuncio)?'5px':'4px'} solid ${bordeColor};border-radius:10px;padding:11px 13px;margin-bottom:8px${autorEsAdmin?';box-shadow:0 2px 8px rgba(220,38,38,.12)':''}`;
+    const styleCaja = `background:${fondoBase};border:1px solid #e2e8f0;border-left:${autorEsAdmin?'5px':'4px'} solid ${bordeColor};border-radius:10px;padding:11px 13px;margin-bottom:8px${autorEsAdmin?';box-shadow:0 2px 8px rgba(220,38,38,.12)':''}`;
     return `<div style="${styleCaja}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:5px">
-        <div style="font-size:12px;font-weight:700;color:${headerColor}">${headerCell}${sinLeer && !autorEsAdmin && !esAnuncio ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVO</span>' : ''}${chipImp}${chipAnuncio}</div>
+        <div style="font-size:12px;font-weight:700;color:${headerColor}">${esMio ? `Vos → ${nombreOtro}` : `${nombreOtro} → Vos`}${sinLeer && !autorEsAdmin ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVO</span>' : ''}${chipImp}</div>
         <div style="font-size:11px;color:#64748b">${_fmtFechaPB(m.creado_en)}</div>
       </div>
       ${m.contenido && m.contenido !== '(adjunto)' ? `<div style="font-size:13.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#0f172a;${contStyle}">${_escHtmlPB(m.contenido)}</div>` : ''}
       ${_renderAdjuntosPB(m.id)}
     </div>`;
-  }).filter(Boolean).join('');
+  }).join('');
 
   const html = `
     <div id="pb-modal-msj" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:14px;animation:pb-fade-in .2s">
@@ -2573,6 +2559,7 @@ window.pbEnviarMensaje = async function(){
       autor_nombre: yo.nombre,
       destinatario_persona_id: destId,
       contenido: txt || '(adjunto)',
+      enviado_desde: 'mi_espacio',
     }).select('id').single();
     if(error) throw error;
     if (tieneAdj) {
@@ -2741,14 +2728,9 @@ async function _pbHidratarAdjuntos() {
 async function _marcarMisLecturas(){
   const yo = window._personaActual;
   if(!yo || !yo.id) return;
+  // Mi Espacio (vista alumna): solo mensajes dirigidos a mí
   const sinLeer = _misMensajes
-    .filter(m => {
-      if (m.autor_persona_id === yo.id) return false;
-      if (_misLecturas.has(m.id)) return false;
-      if (m.destinatario_persona_id === yo.id) return true; // soy destinatario directo
-      if (m.destinatario_persona_id == null && _yoSoyEquipo) return true; // anuncio y soy del equipo
-      return false;
-    })
+    .filter(m => m.destinatario_persona_id === yo.id && m.autor_persona_id !== yo.id && !_misLecturas.has(m.id))
     .map(m => ({ mensaje_id: m.id, persona_id: yo.id }));
   if(!sinLeer.length) return;
   try {
