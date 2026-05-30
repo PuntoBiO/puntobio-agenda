@@ -270,12 +270,21 @@ const SUPABASE_ANON = "sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
 let yo = null;           // persona del usuario logueado
-let esAdmin = false;     // admin_total
+let esAdmin = false;     // admin_total OR ve_todos_mensajes
 let mensajes = [];       // todos los mensajes
 let leidasPorMi = new Set(); // ids de mensajes ya leídos por mí
 let equipo = [];         // lista de personas del equipo (para el dropdown de destinatarios)
 let filtroDestId = '';   // filtro de bandeja (para admin: ver solo conversación con X)
 let ADMINS_IDS = new Set(); // ids de personas con admin_total — sus mensajes se ven en rojo
+let adjuntosPorMsj = {}; // { mensaje_id: [{...adjunto}] }
+let archivosNuevos = []; // archivos pendientes para adjuntar al próximo mensaje
+let urlsAdjuntoCache = {}; // cache de URLs firmadas por storage_path
+// Grabación de audio
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingStartTs = 0;
+let recordingTimerInt = null;
+let LIMITE_CHARS = 10000; // antes 2000 — Lu pidió subirlo
 
 // ============= INICIO =============
 async function init() {
@@ -356,6 +365,21 @@ function renderShell() {
     </div>` : '';
 
   document.getElementById('wrap').innerHTML = `
+    <style>
+      .archivo-chip { display:inline-flex; align-items:center; gap:6px; background:#eef2ff; color:#475569; border:1px solid #c7d2fe; border-radius:6px; padding:4px 8px; font-size:11.5px; font-weight:600; margin:3px 4px 3px 0 }
+      .archivo-chip .x { cursor:pointer; color:#64748b; font-weight:800 }
+      .archivo-chip .x:hover { color:#dc2626 }
+      .adj-chip { display:inline-flex; align-items:center; gap:6px; background:#fff; border:1px solid #cbd5e1; color:#1e9fe0; border-radius:7px; padding:6px 11px; font-size:12.5px; font-weight:700; margin:4px 5px 0 0; cursor:pointer; text-decoration:none }
+      .adj-chip:hover { background:#f0f9ff; border-color:#1e9fe0 }
+      .adj-img { max-width:280px; max-height:200px; border-radius:8px; border:1px solid #cbd5e1; display:block; margin:6px 4px 0 0; cursor:pointer }
+      .adj-audio { width:100%; max-width:360px; display:block; margin:6px 0 }
+      .adj-video { max-width:100%; max-height:280px; border-radius:8px; display:block; margin:6px 0 }
+      .icon-btn { display:inline-flex; align-items:center; gap:5px; background:#fff; color:#475569; border:1.5px solid var(--gris-borde); border-radius:8px; padding:7px 11px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit }
+      .icon-btn:hover { border-color: var(--celeste); color: var(--celeste); }
+      .icon-btn.rec { background:#dc2626; color:#fff; border-color:#dc2626; animation: pulse-rec 1.2s infinite }
+      .icon-btn.rec:hover { background:#b91c1c; color:#fff }
+      @keyframes pulse-rec { 0%,100%{opacity:1} 50%{opacity:.7} }
+    </style>
     <div class="header">
       <div>
         <h1>💬 Mensajes del equipo</h1>
@@ -373,10 +397,23 @@ function renderShell() {
           ${optsDest}
         </select>
       </div>
-      <textarea id="nuevoMsj" placeholder="Escribí tu mensaje…" maxlength="2000"></textarea>
-      <div class="acciones">
-        <div class="contador" id="contador">0 / 2000</div>
-        <button class="btn btn-primary" id="btnEnviar" onclick="enviar()">Enviar</button>
+      <textarea id="nuevoMsj" placeholder="Escribí tu mensaje…" maxlength="${LIMITE_CHARS}"></textarea>
+
+      <div id="archivosBox" style="margin-top:8px"></div>
+
+      <div class="acciones" style="flex-wrap:wrap;gap:8px">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <label class="icon-btn" style="cursor:pointer" title="Adjuntar archivo (PDF, video, imagen, etc.)">
+            📎 Adjuntar
+            <input type="file" id="inputArchivos" multiple style="display:none" onchange="agregarArchivos(this.files)">
+          </label>
+          <button class="icon-btn" id="btnGrabar" onclick="toggleGrabacion()" title="Grabar audio">🎙️ Grabar audio</button>
+          <span id="grabacionInfo" style="font-size:11.5px;color:#64748b"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-left:auto">
+          <div class="contador" id="contador">0 / ${LIMITE_CHARS.toLocaleString('es-AR')}</div>
+          <button class="btn btn-primary" id="btnEnviar" onclick="enviar()">Enviar</button>
+        </div>
       </div>
     </div>
 
@@ -384,8 +421,140 @@ function renderShell() {
   `;
   const ta = document.getElementById('nuevoMsj');
   const cont = document.getElementById('contador');
-  ta.addEventListener('input', () => { cont.textContent = `${ta.value.length} / 2000`; });
+  ta.addEventListener('input', () => { cont.textContent = `${ta.value.length.toLocaleString('es-AR')} / ${LIMITE_CHARS.toLocaleString('es-AR')}`; });
+  pintarArchivosNuevos();
 }
+
+// ====== ARCHIVOS Y GRABACIÓN ======
+window.agregarArchivos = function(files) {
+  for (const f of files) {
+    // Límite 50MB por archivo (los videos pueden ser pesados)
+    if (f.size > 50 * 1024 * 1024) { mostrarToast(`"${f.name}" supera 50 MB`); continue; }
+    archivosNuevos.push(f);
+  }
+  pintarArchivosNuevos();
+  const inp = document.getElementById('inputArchivos');
+  if (inp) inp.value = '';
+};
+
+window.quitarArchivoNuevo = function(idx) {
+  archivosNuevos.splice(idx, 1);
+  pintarArchivosNuevos();
+};
+
+function pintarArchivosNuevos() {
+  const box = document.getElementById('archivosBox');
+  if (!box) return;
+  if (!archivosNuevos.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px">' +
+    archivosNuevos.map((f, i) =>
+      `<span class="archivo-chip">${iconoArchivo(f.name, f.type)} ${escapeHtml(f.name)} <span style="color:#94a3b8">(${fmtSize(f.size)})</span> <span class="x" onclick="quitarArchivoNuevo(${i})" title="Quitar">×</span></span>`
+    ).join('') + '</div>';
+}
+
+window.toggleGrabacion = async function() {
+  const btn = document.getElementById('btnGrabar');
+  const info = document.getElementById('grabacionInfo');
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    // Parar
+    mediaRecorder.stop();
+    if (recordingTimerInt) { clearInterval(recordingTimerInt); recordingTimerInt = null; }
+    btn.classList.remove('rec');
+    btn.innerHTML = '🎙️ Grabar audio';
+    info.textContent = '';
+    return;
+  }
+  // Iniciar
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop()); // liberar micrófono
+      const tipo = mediaRecorder.mimeType || 'audio/webm';
+      const ext = tipo.includes('webm') ? 'webm' : (tipo.includes('mp4') ? 'mp4' : (tipo.includes('ogg') ? 'ogg' : 'webm'));
+      const blob = new Blob(audioChunks, { type: tipo });
+      const file = new File([blob], `audio_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`, { type: tipo });
+      archivosNuevos.push(file);
+      pintarArchivosNuevos();
+      mostrarToast('🎙️ Audio listo para enviar');
+    };
+    mediaRecorder.start();
+    recordingStartTs = Date.now();
+    btn.classList.add('rec');
+    btn.innerHTML = '⏹️ Detener';
+    info.textContent = '🔴 Grabando… 0:00';
+    recordingTimerInt = setInterval(() => {
+      const seg = Math.floor((Date.now() - recordingStartTs) / 1000);
+      const mm = Math.floor(seg / 60); const ss = seg % 60;
+      info.textContent = `🔴 Grabando… ${mm}:${String(ss).padStart(2,'0')}`;
+    }, 250);
+  } catch (e) {
+    mostrarToast('No pude acceder al micrófono: ' + (e.message || e));
+    btn.classList.remove('rec');
+    btn.innerHTML = '🎙️ Grabar audio';
+    info.textContent = '';
+  }
+};
+
+function iconoArchivo(nombre, mime) {
+  const n = String(nombre || '').toLowerCase();
+  const m = String(mime || '').toLowerCase();
+  if (m.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/.test(n)) return '🖼️';
+  if (m.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/.test(n)) return '🎵';
+  if (m.startsWith('video/') || /\.(mp4|mov|avi|webm|mkv)$/.test(n)) return '🎬';
+  if (/\.pdf$/.test(n) || m === 'application/pdf') return '📄';
+  if (/\.(doc|docx)$/.test(n)) return '📝';
+  if (/\.(xls|xlsx|csv)$/.test(n)) return '📊';
+  if (/\.(zip|rar|7z)$/.test(n)) return '🗜️';
+  return '📎';
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+// ====== SUBIR ADJUNTOS ======
+async function subirAdjuntosDeMensaje(mensajeId, files) {
+  if (!files || !files.length) return;
+  for (const f of files) {
+    const safeName = f.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${mensajeId}/${Date.now()}_${safeName}`;
+    const { error: upErr } = await sb.storage.from('mensajes-adjuntos').upload(path, f, {
+      contentType: f.type || 'application/octet-stream',
+      upsert: false,
+    });
+    if (upErr) throw upErr;
+    const { error: insErr } = await sb.from('mensajes_adjuntos').insert({
+      mensaje_id: mensajeId,
+      storage_path: path,
+      nombre_original: f.name,
+      tipo_mime: f.type || null,
+      tamano_bytes: f.size,
+    });
+    if (insErr) throw insErr;
+  }
+}
+
+// Obtiene URL firmada (cacheada por sesión)
+async function obtenerUrlAdjunto(path) {
+  if (urlsAdjuntoCache[path]) return urlsAdjuntoCache[path];
+  const { data, error } = await sb.storage.from('mensajes-adjuntos').createSignedUrl(path, 3600);
+  if (error || !data) return null;
+  urlsAdjuntoCache[path] = data.signedUrl;
+  return data.signedUrl;
+}
+
+window.abrirAdjunto = async function(path) {
+  const url = await obtenerUrlAdjunto(path);
+  if (url) window.open(url, '_blank');
+  else mostrarToast('No pude abrir el adjunto');
+};
 
 // Aplica filtro de admin: muestra solo conversación con persona X (o solo generales)
 window.aplicarFiltroAdmin = function() {
@@ -413,6 +582,16 @@ async function cargarMensajes() {
     mensajes = msjRes.data || [];
     leidasPorMi = new Set((lecRes.data || []).map(r => r.mensaje_id));
     ADMINS_IDS = new Set((admRes.data || []).map(r => r.persona_id));
+    // Adjuntos de los mensajes
+    adjuntosPorMsj = {};
+    if (mensajes.length) {
+      const ids = mensajes.map(m => m.id);
+      const { data: adj } = await sb.from('mensajes_adjuntos').select('*').in('mensaje_id', ids);
+      (adj || []).forEach(a => {
+        if (!adjuntosPorMsj[a.mensaje_id]) adjuntosPorMsj[a.mensaje_id] = [];
+        adjuntosPorMsj[a.mensaje_id].push(a);
+      });
+    }
     pintarMensajes();
     marcarTodosLeidosSilenciosamente();
   } catch (e) {
@@ -443,6 +622,8 @@ function pintarMensajes() {
     return;
   }
   cont.innerHTML = lista.map(m => renderMensaje(m)).join('');
+  // Después del HTML, traer las URLs firmadas para imágenes/audios/videos
+  _hidratarAdjuntos();
 }
 
 function nombreDePersonaId(pid) {
@@ -494,7 +675,50 @@ function renderMensaje(m) {
       </div>
     </div>
     <div class="msj-contenido" id="msj-cont-${m.id}" style="${autorEsAdmin?'color:#7f1d1d;font-weight:500':''}">${linkify(escapeHtml(m.contenido))}</div>
+    ${renderAdjuntosMsj(m.id)}
   </div>`;
+}
+
+// Renderiza la lista de adjuntos del mensaje, con preview en línea para audio/video/imagen
+function renderAdjuntosMsj(mensajeId) {
+  const adjs = adjuntosPorMsj[mensajeId] || [];
+  if (!adjs.length) return '';
+  const partes = adjs.map(a => {
+    const t = (a.tipo_mime || '').toLowerCase();
+    const n = (a.nombre_original || '').toLowerCase();
+    const esImg = t.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/.test(n);
+    const esAud = t.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/.test(n);
+    const esVid = t.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/.test(n);
+    if (esImg) {
+      return `<img class="adj-img" data-path="${escapeHtml(a.storage_path)}" alt="${escapeHtml(a.nombre_original)}" onclick="abrirAdjunto('${escapeHtml(a.storage_path).replace(/'/g,"\\'")}')" loading="lazy">`;
+    }
+    if (esAud) {
+      return `<audio class="adj-audio" data-path="${escapeHtml(a.storage_path)}" controls preload="none"></audio>`;
+    }
+    if (esVid) {
+      return `<video class="adj-video" data-path="${escapeHtml(a.storage_path)}" controls preload="none"></video>`;
+    }
+    return `<span class="adj-chip" onclick="abrirAdjunto('${escapeHtml(a.storage_path).replace(/'/g,"\\'")}')">${iconoArchivo(a.nombre_original, a.tipo_mime)} ${escapeHtml(a.nombre_original)} <span style="color:#94a3b8;font-weight:500">(${fmtSize(a.tamano_bytes || 0)})</span></span>`;
+  }).join('');
+  return `<div style="margin-top:10px" data-adj-msj="${mensajeId}">${partes}</div>`;
+}
+
+// Después de pintar los mensajes, popular los src de imágenes/audio/video con URLs firmadas
+async function _hidratarAdjuntos() {
+  // Imágenes
+  for (const img of document.querySelectorAll('.adj-img[data-path]')) {
+    const p = img.getAttribute('data-path');
+    if (!p || img.src) continue;
+    const url = await obtenerUrlAdjunto(p);
+    if (url) img.src = url;
+  }
+  // Audios y videos: sumar source con la URL firmada
+  for (const el of document.querySelectorAll('.adj-audio[data-path], .adj-video[data-path]')) {
+    const p = el.getAttribute('data-path');
+    if (!p || el.src) continue;
+    const url = await obtenerUrlAdjunto(p);
+    if (url) el.src = url;
+  }
 }
 
 // ============= ENVIAR =============
@@ -502,21 +726,29 @@ async function enviar() {
   const ta = document.getElementById('nuevoMsj');
   const sel = document.getElementById('nuevoDest');
   const txt = ta.value.trim();
-  if (!txt) { mostrarToast('Escribí algo primero'); return; }
+  const tieneAdjuntos = archivosNuevos.length > 0;
+  if (!txt && !tieneAdjuntos) { mostrarToast('Escribí algo o adjuntá un archivo'); return; }
   const destVal = sel ? sel.value : '';
   const destId = destVal ? parseInt(destVal, 10) : null;
   const btn = document.getElementById('btnEnviar');
-  btn.disabled = true; btn.textContent = 'Enviando…';
+  btn.disabled = true; btn.textContent = tieneAdjuntos ? 'Subiendo…' : 'Enviando…';
   try {
-    const { error } = await sb.from('mensajes_equipo').insert({
+    // 1) Insertar el mensaje y obtener su ID
+    const { data: nuevo, error } = await sb.from('mensajes_equipo').insert({
       autor_persona_id: yo.id,
       autor_nombre: yo.nombre,
       destinatario_persona_id: destId,
-      contenido: txt,
-    });
+      contenido: txt || '(adjunto)', // contenido vacío con solo adjunto: poner placeholder
+    }).select('id').single();
     if (error) throw error;
+    // 2) Subir adjuntos si hay
+    if (tieneAdjuntos) {
+      await subirAdjuntosDeMensaje(nuevo.id, archivosNuevos);
+      archivosNuevos = [];
+    }
     ta.value = '';
-    document.getElementById('contador').textContent = '0 / 2000';
+    document.getElementById('contador').textContent = `0 / ${LIMITE_CHARS.toLocaleString('es-AR')}`;
+    pintarArchivosNuevos();
     mostrarToast(destId ? `✓ Enviado a ${nombreDePersonaId(destId)}` : '✓ Anuncio publicado');
     await cargarMensajes();
   } catch (e) {

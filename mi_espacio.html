@@ -2312,6 +2312,14 @@ let _misMensajes = [];       // mensajes míos (autor o destinatario)
 let _misLecturas = new Set();
 let _msjNoLeidos = 0;
 let _adminsIds = new Set();  // ids de personas con admin_total — sus mensajes se ven en rojo
+let _adjPorMsj = {};         // { mensaje_id: [adjuntos] }
+let _archivosPB = [];        // archivos pendientes para adjuntar al próximo mensaje del alumno
+let _urlsAdjPB = {};         // cache URLs firmadas
+let _recPB = null;           // MediaRecorder del alumno
+let _chunksPB = [];
+let _recStartPB = 0;
+let _recIntPB = null;
+const PB_LIMITE_CHARS = 10000;
 
 // Carga miembros del equipo (solo profes/personas con es_equipo=true) y mensajes propios
 async function _cargarDatosMensajes(){
@@ -2338,6 +2346,16 @@ async function _cargarDatosMensajes(){
     _misMensajes = (msjRes.data || []);
     _misLecturas = new Set((lecRes.data || []).map(r => r.mensaje_id));
     _adminsIds = new Set((admRes.data || []).map(r => r.persona_id));
+    // Cargar adjuntos de esos mensajes
+    _adjPorMsj = {};
+    if (_misMensajes.length) {
+      const ids = _misMensajes.map(m => m.id);
+      const { data: adj } = await sb.from('mensajes_adjuntos').select('*').in('mensaje_id', ids);
+      (adj || []).forEach(a => {
+        if (!_adjPorMsj[a.mensaje_id]) _adjPorMsj[a.mensaje_id] = [];
+        _adjPorMsj[a.mensaje_id].push(a);
+      });
+    }
     // Contar no leídos (donde yo soy destinatario y no leí)
     _msjNoLeidos = _misMensajes.filter(m =>
       m.destinatario_persona_id === yo.id
@@ -2407,12 +2425,27 @@ window.pbAbrirMensajes = async function(){
         <div style="font-size:12px;font-weight:700;color:${headerColor}">${esMio ? `Vos → ${nombreOtro}` : `${nombreOtro} → Vos`}${sinLeer && !autorEsAdmin ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVO</span>' : ''}${chipImp}</div>
         <div style="font-size:11px;color:#64748b">${_fmtFechaPB(m.creado_en)}</div>
       </div>
-      <div style="font-size:13.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#0f172a;${contStyle}">${_escHtmlPB(m.contenido)}</div>
+      ${m.contenido && m.contenido !== '(adjunto)' ? `<div style="font-size:13.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#0f172a;${contStyle}">${_escHtmlPB(m.contenido)}</div>` : ''}
+      ${_renderAdjuntosPB(m.id)}
     </div>`;
   }).join('');
 
   const html = `
     <div id="pb-modal-msj" style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:14px;animation:pb-fade-in .2s">
+      <style>
+        .pb-icon-btn { display:inline-flex; align-items:center; gap:5px; background:#fff; color:#475569; border:1.5px solid #cbd5e1; border-radius:8px; padding:7px 11px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit }
+        .pb-icon-btn:hover { border-color: #1e9fe0; color: #1e9fe0; }
+        .pb-icon-btn.rec { background:#dc2626; color:#fff; border-color:#dc2626; animation: pb-pulse 1.2s infinite }
+        @keyframes pb-pulse { 0%,100%{opacity:1} 50%{opacity:.7} }
+        .pb-arch-chip { display:inline-flex; align-items:center; gap:6px; background:#eef2ff; color:#475569; border:1px solid #c7d2fe; border-radius:6px; padding:4px 8px; font-size:11.5px; font-weight:600; margin:3px 4px 3px 0 }
+        .pb-arch-chip .x { cursor:pointer; color:#64748b; font-weight:800 }
+        .pb-arch-chip .x:hover { color:#dc2626 }
+        .pb-adj-img { max-width:240px; max-height:180px; border-radius:8px; border:1px solid #cbd5e1; display:block; margin:6px 4px 0 0; cursor:pointer }
+        .pb-adj-audio { width:100%; max-width:320px; display:block; margin:6px 0 }
+        .pb-adj-video { max-width:100%; max-height:220px; border-radius:8px; display:block; margin:6px 0 }
+        .pb-adj-chip { display:inline-flex; align-items:center; gap:5px; background:#fff; border:1px solid #cbd5e1; color:#1e9fe0; border-radius:7px; padding:5px 10px; font-size:12px; font-weight:700; margin:4px 5px 0 0; cursor:pointer }
+        .pb-adj-chip:hover { background:#f0f9ff; border-color:#1e9fe0 }
+      </style>
       <div style="background:#fff;border-radius:16px;max-width:580px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.3)">
         <div style="padding:15px 18px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(135deg,#1e9fe0,#1788c2);color:#fff;border-radius:16px 16px 0 0">
           <div>
@@ -2430,10 +2463,23 @@ window.pbAbrirMensajes = async function(){
               ${profesOpts}
             </select>
           </div>
-          <textarea id="pb-msj-texto" placeholder="Escribí tu mensaje al equipo…" maxlength="2000" style="width:100%;font-family:inherit;font-size:13.5px;border:1px solid #cbd5e1;border-radius:8px;padding:9px 11px;resize:vertical;min-height:65px;background:#fff;color:#0f172a"></textarea>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px">
-            <div id="pb-msj-contador" style="font-size:11px;color:#64748b">0 / 2000</div>
-            <button id="pb-msj-enviar" onclick="pbEnviarMensaje()" class="ag-btn ag-btn-verde" style="font-size:12.5px">Enviar</button>
+          <textarea id="pb-msj-texto" placeholder="Escribí tu mensaje al equipo…" maxlength="${PB_LIMITE_CHARS}" style="width:100%;font-family:inherit;font-size:13.5px;border:1px solid #cbd5e1;border-radius:8px;padding:9px 11px;resize:vertical;min-height:65px;background:#fff;color:#0f172a"></textarea>
+
+          <div id="pb-archivos-box" style="margin-top:6px"></div>
+
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <label class="pb-icon-btn" style="cursor:pointer;margin:0" title="Adjuntar archivo (PDF, video, imagen)">
+                📎 Adjuntar
+                <input type="file" id="pb-input-arch" multiple style="display:none" onchange="pbAgregarArchivos(this.files)">
+              </label>
+              <button class="pb-icon-btn" id="pb-btn-grabar" onclick="pbToggleGrabacion()" title="Grabar audio">🎙️ Grabar</button>
+              <span id="pb-rec-info" style="font-size:11px;color:#64748b"></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div id="pb-msj-contador" style="font-size:11px;color:#64748b">0 / ${PB_LIMITE_CHARS.toLocaleString('es-AR')}</div>
+              <button id="pb-msj-enviar" onclick="pbEnviarMensaje()" class="ag-btn ag-btn-verde" style="font-size:12.5px">Enviar</button>
+            </div>
           </div>
         </div>
 
@@ -2446,7 +2492,11 @@ window.pbAbrirMensajes = async function(){
   // contador
   const ta = document.getElementById('pb-msj-texto');
   const cnt = document.getElementById('pb-msj-contador');
-  ta.addEventListener('input', () => { cnt.textContent = `${ta.value.length} / 2000`; });
+  ta.addEventListener('input', () => { cnt.textContent = `${ta.value.length.toLocaleString('es-AR')} / ${PB_LIMITE_CHARS.toLocaleString('es-AR')}`; });
+  pbPintarArchivosNuevos();
+
+  // Hidratar adjuntos en los mensajes ya pintados
+  _pbHidratarAdjuntos();
 
   // Marcar como leídos los que recibí
   _marcarMisLecturas();
@@ -2464,21 +2514,38 @@ window.pbEnviarMensaje = async function(){
   const ta = document.getElementById('pb-msj-texto');
   const destId = sel.value ? parseInt(sel.value, 10) : null;
   const txt = (ta.value || '').trim();
+  const tieneAdj = _archivosPB.length > 0;
   if(!destId){ alert('Elegí a quién le querés escribir'); return; }
-  if(!txt){ alert('Escribí algo primero'); return; }
+  if(!txt && !tieneAdj){ alert('Escribí algo o adjuntá un archivo'); return; }
   const btn = document.getElementById('pb-msj-enviar');
-  btn.disabled = true; btn.textContent = 'Enviando…';
+  btn.disabled = true; btn.textContent = tieneAdj ? 'Subiendo…' : 'Enviando…';
   try {
-    const { error } = await sb.from('mensajes_equipo').insert({
+    const { data: nuevo, error } = await sb.from('mensajes_equipo').insert({
       autor_persona_id: yo.id,
       autor_nombre: yo.nombre,
       destinatario_persona_id: destId,
-      contenido: txt,
-    });
+      contenido: txt || '(adjunto)',
+    }).select('id').single();
     if(error) throw error;
+    if (tieneAdj) {
+      for (const f of _archivosPB) {
+        const safe = f.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+        const path = `${nuevo.id}/${Date.now()}_${safe}`;
+        const { error: upErr } = await sb.storage.from('mensajes-adjuntos').upload(path, f, {
+          contentType: f.type || 'application/octet-stream', upsert: false,
+        });
+        if (upErr) throw upErr;
+        const { error: insErr } = await sb.from('mensajes_adjuntos').insert({
+          mensaje_id: nuevo.id, storage_path: path, nombre_original: f.name,
+          tipo_mime: f.type || null, tamano_bytes: f.size,
+        });
+        if (insErr) throw insErr;
+      }
+      _archivosPB = [];
+    }
     ta.value = '';
-    document.getElementById('pb-msj-contador').textContent = '0 / 2000';
-    // Recargar y re-abrir
+    document.getElementById('pb-msj-contador').textContent = `0 / ${PB_LIMITE_CHARS.toLocaleString('es-AR')}`;
+    pbPintarArchivosNuevos();
     await _cargarDatosMensajes();
     pbCerrarMensajes();
     pbAbrirMensajes();
@@ -2488,6 +2555,140 @@ window.pbEnviarMensaje = async function(){
     btn.disabled = false; btn.textContent = 'Enviar';
   }
 };
+
+// === ARCHIVOS Y AUDIO en Mi Espacio ===
+window.pbAgregarArchivos = function(files) {
+  for (const f of files) {
+    if (f.size > 50 * 1024 * 1024) { alert(`"${f.name}" supera 50 MB`); continue; }
+    _archivosPB.push(f);
+  }
+  pbPintarArchivosNuevos();
+  const inp = document.getElementById('pb-input-arch'); if (inp) inp.value = '';
+};
+
+window.pbQuitarArch = function(idx) {
+  _archivosPB.splice(idx, 1);
+  pbPintarArchivosNuevos();
+};
+
+function pbPintarArchivosNuevos() {
+  const box = document.getElementById('pb-archivos-box');
+  if (!box) return;
+  if (!_archivosPB.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:6px">' +
+    _archivosPB.map((f, i) =>
+      `<span class="pb-arch-chip">${_iconArchPB(f.name, f.type)} ${_escHtmlPB(f.name)} <span style="color:#94a3b8">(${_fmtTamPB(f.size)})</span> <span class="x" onclick="pbQuitarArch(${i})" title="Quitar">×</span></span>`
+    ).join('') + '</div>';
+}
+
+window.pbToggleGrabacion = async function() {
+  const btn = document.getElementById('pb-btn-grabar');
+  const info = document.getElementById('pb-rec-info');
+  if (_recPB && _recPB.state === 'recording') {
+    _recPB.stop();
+    if (_recIntPB) { clearInterval(_recIntPB); _recIntPB = null; }
+    btn.classList.remove('rec');
+    btn.innerHTML = '🎙️ Grabar';
+    info.textContent = '';
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mt = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    _recPB = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
+    _chunksPB = [];
+    _recPB.ondataavailable = (e) => { if (e.data.size > 0) _chunksPB.push(e.data); };
+    _recPB.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const tipo = _recPB.mimeType || 'audio/webm';
+      const ext = tipo.includes('webm') ? 'webm' : (tipo.includes('mp4') ? 'mp4' : (tipo.includes('ogg') ? 'ogg' : 'webm'));
+      const blob = new Blob(_chunksPB, { type: tipo });
+      const file = new File([blob], `audio_${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`, { type: tipo });
+      _archivosPB.push(file);
+      pbPintarArchivosNuevos();
+    };
+    _recPB.start();
+    _recStartPB = Date.now();
+    btn.classList.add('rec');
+    btn.innerHTML = '⏹️ Detener';
+    info.textContent = '🔴 0:00';
+    _recIntPB = setInterval(() => {
+      const seg = Math.floor((Date.now() - _recStartPB) / 1000);
+      const mm = Math.floor(seg / 60); const ss = seg % 60;
+      info.textContent = `🔴 ${mm}:${String(ss).padStart(2,'0')}`;
+    }, 250);
+  } catch (e) {
+    alert('No pude acceder al micrófono: ' + (e.message || e));
+    btn.classList.remove('rec');
+    btn.innerHTML = '🎙️ Grabar';
+    info.textContent = '';
+  }
+};
+
+function _iconArchPB(nombre, mime) {
+  const n = String(nombre || '').toLowerCase();
+  const m = String(mime || '').toLowerCase();
+  if (m.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/.test(n)) return '🖼️';
+  if (m.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/.test(n)) return '🎵';
+  if (m.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/.test(n)) return '🎬';
+  if (/\.pdf$/.test(n) || m === 'application/pdf') return '📄';
+  if (/\.(doc|docx)$/.test(n)) return '📝';
+  if (/\.(xls|xlsx|csv)$/.test(n)) return '📊';
+  return '📎';
+}
+
+function _fmtTamPB(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(0) + ' KB';
+  return (bytes/1024/1024).toFixed(1) + ' MB';
+}
+
+// Render de adjuntos de un mensaje en Mi Espacio
+function _renderAdjuntosPB(mensajeId) {
+  const adjs = _adjPorMsj[mensajeId] || [];
+  if (!adjs.length) return '';
+  const partes = adjs.map(a => {
+    const t = (a.tipo_mime || '').toLowerCase();
+    const n = (a.nombre_original || '').toLowerCase();
+    const esImg = t.startsWith('image/') || /\.(jpg|jpeg|png|gif|webp)$/.test(n);
+    const esAud = t.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/.test(n);
+    const esVid = t.startsWith('video/') || /\.(mp4|mov|webm|mkv)$/.test(n);
+    if (esImg) {
+      return `<img class="pb-adj-img" data-path="${_escHtmlPB(a.storage_path)}" onclick="pbAbrirAdj('${_escHtmlPB(a.storage_path).replace(/'/g,"\\'")}')" loading="lazy">`;
+    }
+    if (esAud) return `<audio class="pb-adj-audio" data-path="${_escHtmlPB(a.storage_path)}" controls preload="none"></audio>`;
+    if (esVid) return `<video class="pb-adj-video" data-path="${_escHtmlPB(a.storage_path)}" controls preload="none"></video>`;
+    return `<span class="pb-adj-chip" onclick="pbAbrirAdj('${_escHtmlPB(a.storage_path).replace(/'/g,"\\'")}')">${_iconArchPB(a.nombre_original, a.tipo_mime)} ${_escHtmlPB(a.nombre_original)} <span style="color:#94a3b8;font-weight:500">(${_fmtTamPB(a.tamano_bytes||0)})</span></span>`;
+  }).join('');
+  return `<div style="margin-top:8px">${partes}</div>`;
+}
+
+async function _pbObtenerUrl(path) {
+  if (_urlsAdjPB[path]) return _urlsAdjPB[path];
+  const { data, error } = await sb.storage.from('mensajes-adjuntos').createSignedUrl(path, 3600);
+  if (error || !data) return null;
+  _urlsAdjPB[path] = data.signedUrl;
+  return data.signedUrl;
+}
+
+window.pbAbrirAdj = async function(path) {
+  const url = await _pbObtenerUrl(path);
+  if (url) window.open(url, '_blank');
+};
+
+async function _pbHidratarAdjuntos() {
+  for (const img of document.querySelectorAll('.pb-adj-img[data-path]')) {
+    const p = img.getAttribute('data-path');
+    if (!p || img.src) continue;
+    const u = await _pbObtenerUrl(p); if (u) img.src = u;
+  }
+  for (const el of document.querySelectorAll('.pb-adj-audio[data-path], .pb-adj-video[data-path]')) {
+    const p = el.getAttribute('data-path');
+    if (!p || el.src) continue;
+    const u = await _pbObtenerUrl(p); if (u) el.src = u;
+  }
+}
 
 async function _marcarMisLecturas(){
   const yo = window._personaActual;
