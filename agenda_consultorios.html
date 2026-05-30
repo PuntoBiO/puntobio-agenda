@@ -153,6 +153,11 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .grid-cell.is-libre.is-no-disp{cursor:not-allowed;background:#e2e6eb;background-image:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.08) 5px,rgba(0,0,0,.08) 10px);opacity:.75}
 .grid-cell.is-libre.is-no-disp:hover{background:#e2e6eb;background-image:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.08) 5px,rgba(0,0,0,.08) 10px)}
 .grid-cell.is-libre.is-no-disp::before{display:none}
+/* SLOT LLENO · ya no entra ningún turno más (ej: osteo individual ocupando el único box).
+   Pinta gris el espacio del segundo turno aunque no haya filtro de práctica activo. */
+.grid-cell.is-libre.slot-lleno{cursor:not-allowed;background:#e2e6eb;background-image:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.08) 5px,rgba(0,0,0,.08) 10px)}
+.grid-cell.is-libre.slot-lleno:hover{background:#e2e6eb;background-image:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.08) 5px,rgba(0,0,0,.08) 10px)}
+.grid-cell.is-libre.slot-lleno::before{display:none}
 .practica-filter{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:12px}
 .practica-filter-label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;margin-right:4px;font-weight:600}
 .chip{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:6px 12px;border-radius:20px;border:1px solid var(--border);background:var(--bg-elev);color:var(--text-dim);cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:5px}
@@ -683,6 +688,19 @@ function normPractica(cod) {
 }
 function reglaDe(cod) { return REGLAS_PRACTICA[normPractica(cod)]; }
 
+// ¿Queda lugar para AL MENOS un turno más en este slot?
+// Recorre cada profesional disponible y cada práctica que ofrece, usando la
+// misma lógica de bloqueo ya corregida. Si nadie puede tomar nada → slot lleno.
+function slotTieneLugar(diaNumero, hora, fecha) {
+  const disp = disponiblesEn(diaNumero, hora);
+  for (const d of disp) {
+    for (const prac of d.practicas) {
+      if (profesionalesParaPracticaEn(diaNumero, hora, prac, fecha).includes(d.profesional)) return true;
+    }
+  }
+  return false;
+}
+
 const HORAS = [8,9,10,11,12,13,14,15,16,17,18,19,20];
 const DIAS = ['LUNES','MARTES','MIERCOLES','JUEVES','VIERNES'];
 
@@ -1133,7 +1151,13 @@ function renderWeek(container) {
         const profsCapaces = profesionalesParaPracticaEn(diaNumero, h, practicaFiltro, iso);
         if (profsCapaces.length === 0) noDispCls = 'is-no-disp';
       }
-      cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
+      // SLOT LLENO · sin filtro, si ya hay turnos y no entra ninguno más → gris
+      let llenoCls = '';
+      const ocupadoReal = turnos.filter(t => t.fecha===iso && t.estado!=='CANCELADO' && parseInt(t.hora_inicio.slice(0,2),10)===h).length;
+      if (!practicaFiltro && ocupadoReal > 0 && !slotTieneLugar(diaNumero, h, iso)) {
+        llenoCls = 'slot-lleno';
+      }
+      cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls} ${llenoCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
     });
   });
 
@@ -1335,6 +1359,10 @@ function onCeldaClick(fecha, hora) {
   if (practicaFiltro) {
     const profs = profesionalesParaPracticaEn(diaNumero, hora, practicaFiltro, fecha);
     if (profs.length === 0) return; // celda atenuada, no permite
+  } else {
+    // Sin filtro: si el slot está lleno (no entra nadie más), no abrir el modal
+    const ocupadoReal = turnos.filter(t => t.fecha===fecha && t.estado!=='CANCELADO' && parseInt(t.hora_inicio.slice(0,2),10)===hora).length;
+    if (ocupadoReal > 0 && !slotTieneLugar(diaNumero, hora, fecha)) return;
   }
   if (modoMulti) {
     const existe = slotsSel.findIndex(s => s.fecha === fecha && s.hora === hora);
