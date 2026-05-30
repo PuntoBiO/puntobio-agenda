@@ -1256,8 +1256,19 @@ async function cargarUsuarioActual() {
     USUARIO_ACTUAL = {
       id: p ? p.id : null,
       nombre: p ? p.nombre : email,
-      email: email
+      email: email,
+      veTodosMensajes: false, // se setea abajo
     };
+    // Chequear si tiene permisos para ver TODOS los mensajes (admin_total o ve_todos_mensajes)
+    if (USUARIO_ACTUAL.id) {
+      try {
+        const perm = await supabaseQuery('permisos_equipo',
+          `?select=admin_total,ve_todos_mensajes&persona_id=eq.${USUARIO_ACTUAL.id}`);
+        if (perm && perm[0]) {
+          USUARIO_ACTUAL.veTodosMensajes = !!(perm[0].admin_total || perm[0].ve_todos_mensajes);
+        }
+      } catch (e) { console.warn('No se pudo cargar permisos', e); }
+    }
     pintarUserBox();
     // Cargar módulos y las notas predeterminadas de este profe
     await Promise.all([ cargarModulosTF(), cargarNotasPred() ]);
@@ -2129,12 +2140,20 @@ window.verMensajeDeAlumno = async function(alumnoId) {
   const nombreAlumno = alum ? alum.nombre : 'Alumno';
 
   // Renderizar lista de mensajes (último arriba)
+  // Si soy supervisor (Lu/Jime) y el mensaje no es para mí, indico a quién iba originalmente
+  const profesAlumnos = (evoTurnoActual ? evoTurnoActual.profes : []) || [];
+  // Necesito un map persona_id -> nombre del profe para mostrar el destinatario
   const lista = msjs.map(m => {
     const fecha = new Date(m.creado_en);
     const hh = String(fecha.getHours()).padStart(2,'0') + ':' + String(fecha.getMinutes()).padStart(2,'0');
     const fmt = `${fecha.getDate()}/${fecha.getMonth()+1} · ${hh}`;
+    // Si yo no soy el destinatario original, mostrar a quién iba
+    let destChip = '';
+    if (m.destinatario_persona_id && m.destinatario_persona_id !== profeId) {
+      destChip = `<span style="background:#fef3c7;color:#854d0e;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:5px;margin-left:6px">→ era para otro profe</span>`;
+    }
     return `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #16a34a;border-radius:8px;padding:11px 13px;margin-bottom:8px">
-      <div style="font-size:11.5px;color:#64748b;margin-bottom:5px">${fmt}</div>
+      <div style="font-size:11.5px;color:#64748b;margin-bottom:5px">${fmt}${destChip}</div>
       <div style="font-size:13.5px;color:#0f172a;line-height:1.5;white-space:pre-wrap;word-break:break-word">${(m.contenido||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
     </div>`;
   }).join('');
@@ -2241,16 +2260,28 @@ async function sbInsertarMensaje(fila) {
 async function cargarMensajesPendientes(t) {
   MENSAJES_PENDIENTES_TURNO = {};
   const profeId = USUARIO_ACTUAL && USUARIO_ACTUAL.id;
-  if (!profeId) return; // sin perfil de profe no hay nada que mostrar
+  if (!profeId) return;
   const alumnos = getAlumnos(t);
   if (!alumnos.length) return;
   const ids = alumnos.map(a => a.id).join(',');
   try {
-    // Mensajes donde el destinatario soy yo (profe), el autor está entre los alumnos del turno
-    const msj = await supabaseQuery('mensajes_equipo',
-      `?select=id,autor_persona_id,contenido,creado_en&destinatario_persona_id=eq.${profeId}&autor_persona_id=in.(${ids})&order=creado_en.desc`);
+    // Si soy admin/supervisora (Lu, Jime): veo mensajes de alumnos del turno hacia CUALQUIER profe
+    // Si soy un profe normal: solo mensajes dirigidos a mí
+    const yoVeoTodo = USUARIO_ACTUAL.veTodosMensajes;
+    // Filtro común: autor en alumnos del turno, mensaje enviado desde Mi Espacio
+    // (asegura que cuenta solo los mensajes que el alumno mandó como alumno, no como staff)
+    const filtroBase = `autor_persona_id=in.(${ids})&enviado_desde=eq.mi_espacio&order=creado_en.desc`;
+    let queryUrl;
+    if (yoVeoTodo) {
+      // Veo todos los mensajes de alumnos del turno (a cualquier profe, no anuncios)
+      queryUrl = `?select=id,autor_persona_id,destinatario_persona_id,contenido,creado_en&${filtroBase}&destinatario_persona_id=not.is.null`;
+    } else {
+      // Solo los dirigidos a mí
+      queryUrl = `?select=id,autor_persona_id,destinatario_persona_id,contenido,creado_en&destinatario_persona_id=eq.${profeId}&${filtroBase}`;
+    }
+    const msj = await supabaseQuery('mensajes_equipo', queryUrl);
     if (!msj || !msj.length) return;
-    // Quitar los ya leídos por mí
+    // Quitar los ya leídos por MÍ (cada persona tiene sus propias lecturas)
     const idsMsj = msj.map(m => m.id).join(',');
     const leidasRes = await supabaseQuery('mensajes_lecturas',
       `?select=mensaje_id&persona_id=eq.${profeId}&mensaje_id=in.(${idsMsj})`);
