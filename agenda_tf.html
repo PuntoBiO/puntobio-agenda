@@ -2054,10 +2054,15 @@ let evoSeleccion = new Set(); // persona_id seleccionados para aplicar en lote
 let evoTurnoActual = null;    // el turno abierto
 let CLASES_CERRADAS = new Set();  // claves "turnoId-fecha" de clases ya cerradas
 let DOLOR_RECIENTE = new Set();   // persona_id que tuvieron dolor en las últimas 2 semanas
+let DOLOR_DETALLE = {};           // persona_id -> {origen: 'profe'|'alumno'|'ambos', max_eva, zona}
 
 // Carga qué alumnos del turno tuvieron dolor en las últimas 2 semanas (para la alerta ⚠️)
+// Fuentes: 
+//   1) evoluciones_tf con dolor=true (lo que cargan los profes)
+//   2) bitacora_fatiga con dolor_nivel > 0 (lo que carga el alumno en Mi Espacio)
 async function cargarDolorReciente(t) {
   DOLOR_RECIENTE = new Set();
+  DOLOR_DETALLE = {};
   const alumnos = getAlumnos(t);
   if (!alumnos.length) return;
   // Fecha de hace 14 días (en formato YYYY-MM-DD)
@@ -2065,11 +2070,37 @@ async function cargarDolorReciente(t) {
   hace14.setDate(hace14.getDate() - 14);
   const desde = `${hace14.getFullYear()}-${String(hace14.getMonth()+1).padStart(2,'0')}-${String(hace14.getDate()).padStart(2,'0')}`;
   const ids = alumnos.map(a => a.id).join(',');
+
+  // Fuente 1: dolor cargado por el profe en evoluciones_tf
   try {
     const filas = await supabaseQuery('evoluciones_tf',
       `?select=persona_id&dolor=eq.true&fecha=gte.${desde}&persona_id=in.(${ids})`);
-    (filas || []).forEach(f => DOLOR_RECIENTE.add(String(f.persona_id)));
-  } catch (e) { console.warn('No se pudo cargar dolor reciente', e); }
+    (filas || []).forEach(f => {
+      const pid = String(f.persona_id);
+      DOLOR_RECIENTE.add(pid);
+      const det = DOLOR_DETALLE[pid] || { origenes: new Set(), max_eva: null, zona: null };
+      det.origenes.add('profe');
+      DOLOR_DETALLE[pid] = det;
+    });
+  } catch (e) { console.warn('No se pudo cargar dolor reciente (profe)', e); }
+
+  // Fuente 2: dolor cargado por el alumno en bitacora_fatiga (EVA > 0)
+  try {
+    const filas2 = await supabaseQuery('bitacora_fatiga',
+      `?select=persona_id,dolor_nivel,dolor_zona,fecha&dolor_nivel=gt.0&fecha=gte.${desde}&persona_id=in.(${ids})`);
+    (filas2 || []).forEach(f => {
+      const pid = String(f.persona_id);
+      DOLOR_RECIENTE.add(pid);
+      const det = DOLOR_DETALLE[pid] || { origenes: new Set(), max_eva: null, zona: null };
+      det.origenes.add('alumno');
+      // Quedarnos con el EVA más alto y su zona
+      if (det.max_eva == null || (f.dolor_nivel != null && f.dolor_nivel > det.max_eva)) {
+        det.max_eva = f.dolor_nivel;
+        det.zona = f.dolor_zona || det.zona;
+      }
+      DOLOR_DETALLE[pid] = det;
+    });
+  } catch (e) { console.warn('No se pudo cargar dolor reciente (alumno)', e); }
 }
 
 // Carga todas las clases cerradas de la semana visible (para los ✓/✗ de la grilla)
@@ -3815,9 +3846,27 @@ function renderModalBody(dia, hora, servicio) {
           const ev = EVO_TURNO[String(a.id)];
           const tieneEvo = !!ev;
           const tuvoDolor = DOLOR_RECIENTE.has(String(a.id));
-          const alertaDolor = tuvoDolor
-            ? `<span class="alerta-dolor" title="Tuvo dolor/molestia en las últimas 2 semanas">⚠️</span>`
-            : '';
+          let alertaDolor = '';
+          if (tuvoDolor) {
+            const det = DOLOR_DETALLE[String(a.id)] || { origenes: new Set() };
+            const orgs = Array.from(det.origenes || []);
+            const tieneAlumno = orgs.includes('alumno');
+            const tieneProfe = orgs.includes('profe');
+            // Texto del tooltip
+            let titulo = 'Con dolor o molestia en las últimas 2 semanas';
+            if (tieneAlumno && tieneProfe) {
+              titulo += ' · cargado por el alumno Y por el equipo';
+            } else if (tieneAlumno) {
+              titulo += ' · cargado por el alumno en Mi Espacio';
+            } else if (tieneProfe) {
+              titulo += ' · registrado por el equipo';
+            }
+            if (det.max_eva != null) titulo += ` · EVA máx ${det.max_eva}/10`;
+            if (det.zona) titulo += ` · ${det.zona}`;
+            // Visual: si lo cargó el alumno (autoreporte), naranja más fuerte
+            const color = tieneAlumno ? '#dc2626' : '#ea580c';
+            alertaDolor = `<span class="alerta-dolor" style="color:${color};font-weight:700" title="${titulo.replace(/"/g,'&quot;')}">⚠️${tieneAlumno?'🩹':''}</span>`;
+          }
           const resumenEvo = tieneEvo
             ? `<div class="evo-mini">📝 ${[ev.sala, ev.modulo, ev.contenido].filter(Boolean).join(' · ') || 'evolución cargada'}${ev.como_se_sintio? ' · '+ev.como_se_sintio : ''}${ev.dolor? ' · ⚠️ dolor':''}</div>`
             : '';
