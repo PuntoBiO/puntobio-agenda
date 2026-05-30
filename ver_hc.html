@@ -257,6 +257,7 @@ let perfilDeportivo = null;
 let competenciasAlumno = [];
 let bitacoraAlumno = [];
 let adjuntosAlumno = [];
+let evolucionesAlumno = [];
 
 // Leer parámetro persona_id o dni de la URL
 const params = new URLSearchParams(window.location.search);
@@ -283,13 +284,14 @@ async function cargar() {
     // Buscar HCs y MOPLEX en paralelo
     const desde14 = new Date(); desde14.setDate(desde14.getDate() - 14);
     const desde14ISO = desde14.toISOString().slice(0,10);
-    const [hcRes, moplexRes, perfilDepRes, compsRes, bitRes, adjRes] = await Promise.all([
+    const [hcRes, moplexRes, perfilDepRes, compsRes, bitRes, adjRes, evosRes] = await Promise.all([
       sb.from('historias_clinicas').select('*').eq('persona_id', persona.id).order('completado_en', { ascending: false }),
       sb.from('evaluaciones_moplex').select('*').eq('persona_id', persona.id).order('completado_en', { ascending: false }),
       sb.from('perfil_deportivo').select('*').eq('persona_id', persona.id).maybeSingle(),
       sb.from('competencias_eventos').select('*').eq('persona_id', persona.id).order('fecha', { ascending: false }),
       sb.from('bitacora_fatiga').select('*').eq('persona_id', persona.id).gte('fecha', desde14ISO).order('fecha', { ascending: false }).order('creado_en', { ascending: false }),
-      sb.from('hc_adjuntos').select('*').eq('persona_id', persona.id).order('creado_en', { ascending: false })
+      sb.from('hc_adjuntos').select('*').eq('persona_id', persona.id).order('creado_en', { ascending: false }),
+      sb.from('evoluciones_tf').select('*').eq('persona_id', persona.id).order('fecha', { ascending: false }).order('creado_en', { ascending: false })
     ]);
 
     if (hcRes.error) throw hcRes.error;
@@ -308,6 +310,7 @@ async function cargar() {
     competenciasAlumno = compsRes && !compsRes.error ? (compsRes.data || []) : [];
     bitacoraAlumno = bitRes && !bitRes.error ? (bitRes.data || []) : [];
     adjuntosAlumno = adjRes && !adjRes.error ? (adjRes.data || []) : [];
+    evolucionesAlumno = evosRes && !evosRes.error ? (evosRes.data || []) : [];
 
     renderHeader();
     renderContenido();
@@ -677,6 +680,7 @@ function renderHC(hc) {
     ${renderPerfilDeportivoBlock()}
     ${renderCompetenciasBlock()}
     ${renderBitacoraBlock()}
+    ${renderEvolucionesBlock()}
     ${renderAdjuntosAlumnoBlock()}
   `;
 }
@@ -821,6 +825,49 @@ function renderBitacoraBlock() {
   return `<div class="hc-section">
     <div class="hc-section-header">💪 Cómo se viene sintiendo (últimos 14 días)</div>
     <div class="hc-section-body">${html}</div>
+  </div>`;
+}
+
+function renderEvolucionesBlock() {
+  const evos = evolucionesAlumno || [];
+  if (!evos.length) {
+    return `<div class="hc-section">
+      <div class="hc-section-header">💪 Evoluciones de los profes</div>
+      <div class="hc-section-body">
+        <div class="hc-field-value empty" style="text-align:center;padding:14px;font-style:italic;">Todavía no hay evoluciones cargadas.</div>
+      </div>
+    </div>`;
+  }
+  // Mapa de cómo se sintió → emoji
+  const EMOCION = { 'muy bien':'😄', 'bien':'🙂', 'normal':'😐', 'regular':'😟', 'mal':'😞', 'muy mal':'😩' };
+  function emojiSentir(t) {
+    if (!t) return '';
+    const k = String(t).toLowerCase().trim();
+    return EMOCION[k] || '😊';
+  }
+
+  const items = evos.map(e => {
+    const scoreChips = (e.score != null) ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#eef2ff;color:#475569;margin-right:5px">⭐ ${e.score}/5</span>` : '';
+    const emo = e.como_se_sintio ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#dcfce7;color:#15803d;margin-right:5px">${emojiSentir(e.como_se_sintio)} ${escapeHtml(e.como_se_sintio)}</span>` : '';
+    const dol = e.dolor === true ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#fee2e2;color:#b91c1c;margin-right:5px">🩹 Con dolor</span>` : e.dolor === false ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#f1f5f9;color:#64748b;margin-right:5px">Sin dolor</span>` : '';
+    const serv = e.servicio ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#dbeafe;color:#1e40af;margin-right:5px">${escapeHtml(e.servicio)}</span>` : '';
+    return `<div style="padding:11px 13px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <div>
+          <div style="font-size:11.5px;color:#1e9fe0;font-weight:700">${fmtFecha(e.fecha)}</div>
+          ${e.modulo ? `<div style="font-size:13.5px;font-weight:700;color:#0f172a;margin-top:2px">${escapeHtml(e.modulo)}</div>` : ''}
+        </div>
+        <div style="font-size:11px;color:#94a3b8">${e.autor_nombre ? '— '+escapeHtml(e.autor_nombre) : ''}${e.sala ? ' · '+escapeHtml(e.sala) : ''}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">${serv}${scoreChips}${emo}${dol}</div>
+      ${e.contenido ? `<div style="font-size:12.5px;color:#0f172a;line-height:1.5;white-space:pre-wrap">${escapeHtml(e.contenido)}</div>` : ''}
+      ${e.observacion ? `<div style="margin-top:6px;font-size:12px;color:#475569;background:#fff;padding:6px 8px;border-radius:6px;border-left:3px solid #94a3b8;font-style:italic;white-space:pre-wrap">${escapeHtml(e.observacion)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  return `<div class="hc-section">
+    <div class="hc-section-header">💪 Evoluciones de los profes <span style="font-size:11px;color:#94a3b8;font-weight:600;margin-left:6px">(${evos.length} cargada${evos.length===1?'':'s'})</span></div>
+    <div class="hc-section-body">${items}</div>
   </div>`;
 }
 

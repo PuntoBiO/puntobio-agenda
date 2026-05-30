@@ -1231,6 +1231,11 @@ function openHC(hcId) {
   currentHCId = hcId;
   currentMoplexId = null;
   modalType = 'hc';
+  // Invalidar cache de datos para PDF (se recargan al abrir el selector)
+  window._evosPDF = null;
+  window._compsPDF = null;
+  window._bitPDF = null;
+  window._perfilDepPDF = null;
   const persona = allPersonas.find(p => p.id === hc.persona_id);
 
   // Header celeste (default)
@@ -1647,6 +1652,14 @@ function renderHCDetail(hc, persona) {
       </div>
     </div>
 
+    <!-- EVOLUCIONES DE LOS PROFES (cargadas en Agenda TF) -->
+    <div class="hc-section">
+      <div class="hc-section-header">💪 Evoluciones de los profes</div>
+      <div class="hc-section-body">
+        <div id="evoList"><div class="obs-empty">Cargando…</div></div>
+      </div>
+    </div>
+
     <!-- ADJUNTOS (RX, estudios, PDFs) -->
     <div class="hc-section">
       <div class="hc-section-header">📎 Archivos adjuntos</div>
@@ -1740,12 +1753,60 @@ async function cargarExtras(historiaId, personaId) {
     console.warn('No se pudo cargar perfil deportivo:', e.message);
   }
 
+  // 6) Evoluciones de los profes (TODAS, última arriba)
+  let evolucionesActual = [];
+  try {
+    const { data, error } = await sb.from('evoluciones_tf')
+      .select('*').eq('persona_id', personaId)
+      .order('fecha', { ascending: false })
+      .order('creado_en', { ascending: false });
+    if (error) throw error;
+    evolucionesActual = data || [];
+  } catch (e) {
+    console.warn('No se pudieron cargar evoluciones:', e.message);
+  }
+
   pintarObservaciones(historiaId, personaId);
   pintarNotas(historiaId, personaId);
   pintarAdjuntos(historiaId, personaId);
   pintarPerfilDeportivo(perfilDepActual);
   pintarCompetencias(competenciasActual);
   pintarBitacora(bitacoraActual);
+  pintarEvoluciones(evolucionesActual);
+}
+
+// Pinta evoluciones cargadas por los profes (todas, última arriba)
+function pintarEvoluciones(evos) {
+  const cont = document.getElementById('evoList');
+  if (!cont) return;
+  if (!evos || !evos.length) {
+    cont.innerHTML = `<div class="obs-empty">Todavía no hay evoluciones cargadas.</div>`;
+    return;
+  }
+  const EMOCION = { 'muy bien':'😄', 'bien':'🙂', 'normal':'😐', 'regular':'😟', 'mal':'😞', 'muy mal':'😩' };
+  function emojiSentir(t) {
+    if (!t) return '';
+    const k = String(t).toLowerCase().trim();
+    return EMOCION[k] || '😊';
+  }
+  cont.innerHTML = evos.map(e => {
+    const scoreChip = (e.score != null) ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#eef2ff;color:#475569;margin-right:5px">⭐ ${e.score}/5</span>` : '';
+    const emo = e.como_se_sintio ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#dcfce7;color:#15803d;margin-right:5px">${emojiSentir(e.como_se_sintio)} ${escapeHtml(e.como_se_sintio)}</span>` : '';
+    const dol = e.dolor === true ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#fee2e2;color:#b91c1c;margin-right:5px">🩹 Con dolor</span>` : e.dolor === false ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#f1f5f9;color:#64748b;margin-right:5px">Sin dolor</span>` : '';
+    const serv = e.servicio ? `<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#dbeafe;color:#1e40af;margin-right:5px">${escapeHtml(e.servicio)}</span>` : '';
+    return `<div style="padding:11px 13px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+        <div>
+          <div style="font-size:11.5px;color:#1e9fe0;font-weight:700">${formatDate(e.fecha)}</div>
+          ${e.modulo ? `<div style="font-size:13.5px;font-weight:700;color:#0f172a;margin-top:2px">${escapeHtml(e.modulo)}</div>` : ''}
+        </div>
+        <div style="font-size:11px;color:#94a3b8">${e.autor_nombre ? '— '+escapeHtml(e.autor_nombre) : ''}${e.sala ? ' · '+escapeHtml(e.sala) : ''}</div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:7px">${serv}${scoreChip}${emo}${dol}</div>
+      ${e.contenido ? `<div style="font-size:12.5px;color:#0f172a;line-height:1.5;white-space:pre-wrap">${escapeHtml(e.contenido)}</div>` : ''}
+      ${e.observacion ? `<div style="margin-top:6px;font-size:12px;color:#475569;background:#fff;padding:6px 8px;border-radius:6px;border-left:3px solid #94a3b8;font-style:italic;white-space:pre-wrap">${escapeHtml(e.observacion)}</div>` : ''}
+    </div>`;
+  }).join('');
 }
 
 // Pinta perfil deportivo del alumno
@@ -2580,7 +2641,7 @@ async function guardarFormularioPaciente() {
 ============================================================= */
 
 // Paso 1: abrir un selector liviano para elegir qué observaciones incluir
-function abrirSelectorPDF() {
+async function abrirSelectorPDF() {
   if (esProfeSoloLectura()) return;
   if (!currentHCId) return;
   const hc = allHCs.find(h => h.id === currentHCId);
@@ -2589,6 +2650,37 @@ function abrirSelectorPDF() {
 
   // Solo observaciones clínicas (las notas internas NUNCA van al paciente)
   const observaciones = obsActual.filter(o => o.tipo === 'observacion');
+
+  // Cargar también: evoluciones, perfil deportivo, competencias, bitácora
+  // (los traemos acá si no están ya en memoria de cargarExtras)
+  const personaId = persona ? persona.id : hc.persona_id;
+  const evos = window._evosPDF || [];
+  const comps = window._compsPDF || [];
+  const bit = window._bitPDF || [];
+  const perfilDep = window._perfilDepPDF || null;
+
+  // Si no están en cache, los cargamos ahora (rápido, son tablas chicas)
+  if (!window._evosPDF) {
+    try {
+      const [evRes, cRes, bRes, pdRes] = await Promise.all([
+        sb.from('evoluciones_tf').select('*').eq('persona_id', personaId).order('fecha', { ascending: false }).order('creado_en', { ascending: false }),
+        sb.from('competencias_eventos').select('*').eq('persona_id', personaId).order('fecha', { ascending: false }),
+        sb.from('bitacora_fatiga').select('*').eq('persona_id', personaId).order('fecha', { ascending: false }).limit(30),
+        sb.from('perfil_deportivo').select('*').eq('persona_id', personaId).maybeSingle(),
+      ]);
+      window._evosPDF = evRes.data || [];
+      window._compsPDF = cRes.data || [];
+      window._bitPDF = bRes.data || [];
+      window._perfilDepPDF = pdRes.data || null;
+    } catch (e) {
+      console.warn('No se pudo cargar info extra para PDF:', e.message);
+      window._evosPDF = []; window._compsPDF = []; window._bitPDF = []; window._perfilDepPDF = null;
+    }
+  }
+  const _evos = window._evosPDF;
+  const _comps = window._compsPDF;
+  const _bit = window._bitPDF;
+  const _perfilDep = window._perfilDepPDF;
 
   const obsCheckboxes = observaciones.length
     ? observaciones.map((o, i) => `
@@ -2635,6 +2727,56 @@ function abrirSelectorPDF() {
           <div class="hc-section">
             <div class="hc-section-header">🩺 Observaciones del profesional <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(tildá las que querés enviar)</span></div>
             <div class="hc-section-body">${obsCheckboxes}</div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">💪 Evoluciones de los profes <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(${_evos.length} total)</span></div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirEvoluciones" ${_evos.length ? 'checked' : 'disabled'}>
+                <span style="font-size:13px;">${_evos.length ? `Incluir las ${_evos.length} evoluciones cargadas por los profes` : 'Sin evoluciones cargadas todavía'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">🏋️ Carga deportiva externa</div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirCargaDep" ${_perfilDep && _perfilDep.es_deportista !== false ? 'checked' : 'disabled'}>
+                <span style="font-size:13px;">${_perfilDep && _perfilDep.es_deportista !== false ? 'Incluir el perfil deportivo que cargó el alumno' : 'El alumno no cargó perfil deportivo'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">🏆 Competencias y eventos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(${_comps.length} total)</span></div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirComps" ${_comps.length ? 'checked' : 'disabled'}>
+                <span style="font-size:13px;">${_comps.length ? `Incluir las competencias/eventos cargados` : 'Sin competencias cargadas'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">💪 Bitácora (fatiga / dolor) <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(${_bit.length} registros)</span></div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirBit" ${_bit.length ? 'checked' : 'disabled'}>
+                <span style="font-size:13px;">${_bit.length ? `Incluir bitácora cargada por el alumno` : 'Sin bitácora cargada'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">🚫 Notas internas para el equipo</div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:not-allowed;">
+                <input type="checkbox" disabled>
+                <span style="font-size:13px; color:#94a3b8; font-style:italic;">Bloqueado · las notas internas NUNCA se envían al paciente</span>
+              </label>
+            </div>
           </div>
 
           <div class="hc-section">
@@ -2879,6 +3021,142 @@ async function generarPDF(conWhatsApp = false) {
         y += 13;
       });
       y += 12; // espacio entre observaciones
+    });
+  }
+
+  // ====== EVOLUCIONES DE LOS PROFES ======
+  const incEvos = document.getElementById('pdfIncluirEvoluciones')?.checked;
+  const evosPDF = window._evosPDF || [];
+  if (incEvos && evosPDF.length) {
+    tituloSeccion('Evoluciones de los profes');
+    evosPDF.forEach(e => {
+      const autor = e.autor_nombre ? upperName(e.autor_nombre).split(' ').slice(0,2).join(' ') : 'Profesional';
+      let cab = `${formatDate(e.fecha)}`;
+      if (e.modulo) cab += ` · ${e.modulo}`;
+      if (e.servicio) cab += ` · ${e.servicio}`;
+      cab += ` — ${autor}`;
+      checkPage(18);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(...AZUL);
+      doc.text(cab, MARGIN + 8, y);
+      y += 14;
+      // Chips de cómo se sintió + dolor
+      let chips = [];
+      if (e.score != null) chips.push(`Score: ${e.score}/5`);
+      if (e.como_se_sintio) chips.push(`Cómo se sintió: ${e.como_se_sintio}`);
+      if (e.dolor === true) chips.push('Con dolor');
+      else if (e.dolor === false) chips.push('Sin dolor');
+      if (chips.length) {
+        checkPage(13);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(...GRIS);
+        doc.text(chips.join(' · '), MARGIN + 8, y);
+        y += 13;
+      }
+      // Contenido de la evolución
+      if (e.contenido) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.setTextColor(40, 40, 40);
+        const lns = doc.splitTextToSize(e.contenido, CONTENT_W - 16);
+        lns.forEach(linea => { checkPage(13); doc.text(linea, MARGIN + 8, y); y += 13; });
+      }
+      if (e.observacion) {
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(80, 80, 80);
+        const lns2 = doc.splitTextToSize('Observación: ' + e.observacion, CONTENT_W - 16);
+        lns2.forEach(linea => { checkPage(13); doc.text(linea, MARGIN + 8, y); y += 13; });
+      }
+      y += 10;
+    });
+  }
+
+  // ====== CARGA DEPORTIVA EXTERNA ======
+  const incCargaDep = document.getElementById('pdfIncluirCargaDep')?.checked;
+  const perfilDepPDF = window._perfilDepPDF;
+  if (incCargaDep && perfilDepPDF && perfilDepPDF.es_deportista !== false) {
+    tituloSeccion('Carga deportiva externa');
+    function fila2(lbl, val) {
+      if (val == null || val === '') return;
+      checkPage(13);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...AZUL);
+      doc.text(lbl + ':', MARGIN + 8, y);
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(40, 40, 40);
+      doc.text(String(val), MARGIN + 8 + 110, y);
+      y += 14;
+    }
+    fila2('Disciplina', perfilDepPDF.disciplina);
+    fila2('Días por semana', perfilDepPDF.dias_semana);
+    fila2('Horas por sesión', perfilDepPDF.horas_sesion);
+    fila2('Tipo de carga', perfilDepPDF.tipo_carga);
+    fila2('Club / entrenador', perfilDepPDF.club_entrenador);
+    if (perfilDepPDF.dias_especificos && perfilDepPDF.dias_especificos.length) {
+      fila2('Días', perfilDepPDF.dias_especificos.join(', '));
+    }
+    if (perfilDepPDF.notas) {
+      checkPage(13);
+      doc.setFont('helvetica', 'italic'); doc.setFontSize(9); doc.setTextColor(...GRIS);
+      const lns = doc.splitTextToSize('Notas: ' + perfilDepPDF.notas, CONTENT_W - 16);
+      lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+    }
+    y += 6;
+  }
+
+  // ====== COMPETENCIAS Y EVENTOS ======
+  const incComps = document.getElementById('pdfIncluirComps')?.checked;
+  const compsPDF = window._compsPDF || [];
+  if (incComps && compsPDF.length) {
+    tituloSeccion('Competencias y eventos');
+    compsPDF.forEach(c => {
+      checkPage(16);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...AZUL);
+      doc.text(`${formatDate(c.fecha)} — ${c.nombre || '—'}`, MARGIN + 8, y);
+      y += 13;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(60, 60, 60);
+      const detalle = [c.tipo, c.nivel, c.distancia].filter(Boolean).join(' · ');
+      if (detalle) {
+        checkPage(13); doc.text(detalle, MARGIN + 8, y); y += 13;
+      }
+      if (c.notas) {
+        const lns = doc.splitTextToSize('Notas: ' + c.notas, CONTENT_W - 16);
+        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+      }
+      y += 6;
+    });
+  }
+
+  // ====== BITÁCORA (fatiga / dolor) ======
+  const incBit = document.getElementById('pdfIncluirBit')?.checked;
+  const bitPDF = window._bitPDF || [];
+  if (incBit && bitPDF.length) {
+    tituloSeccion('Bitácora del alumno (fatiga · dolor)');
+    bitPDF.forEach(b => {
+      checkPage(16);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...AZUL);
+      doc.text(formatDate(b.fecha), MARGIN + 8, y);
+      y += 13;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(60, 60, 60);
+      let chips = [];
+      if (b.sueno) chips.push(`Sueño ${b.sueno}/5`);
+      if (b.estado_general) chips.push(`Día ${b.estado_general}/5`);
+      if (b.entreno_en_pb) chips.push(`PB Borg ${b.fatiga_post_pb ?? '—'}/10`);
+      if (b.hizo_deporte) chips.push(`Deporte Borg ${b.fatiga_post_deporte ?? '—'}/10`);
+      if (b.dolor_nivel != null) chips.push(`Dolor EVA ${b.dolor_nivel}/10${b.dolor_zona ? ' — '+b.dolor_zona : ''}`);
+      if (chips.length) {
+        checkPage(13); doc.text(chips.join(' · '), MARGIN + 8, y); y += 13;
+      }
+      if (b.deporte_descripcion) {
+        const lns = doc.splitTextToSize('Deporte: ' + b.deporte_descripcion, CONTENT_W - 16);
+        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+      }
+      if (b.notas) {
+        const lns = doc.splitTextToSize('Notas: ' + b.notas, CONTENT_W - 16);
+        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+      }
+      y += 4;
     });
   }
 
