@@ -2560,6 +2560,42 @@ window.pbCerrarMensajes = function(){
   if(m) m.remove();
 };
 
+// Modal "anti‑cancelación por chat": cuando el alumno intenta avisar una falta por mensaje,
+// le pedimos confirmación y lo invitamos a usar el botón correcto.
+window.pbMostrarModalAntiCancel = function(){
+  if (document.getElementById('pb-anti-cancel-modal')) return;
+  const html = `
+    <div id="pb-anti-cancel-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:18px">
+      <div style="background:#fff;border-radius:16px;max-width:460px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.4);overflow:hidden">
+        <div style="padding:22px;background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#422006">
+          <div style="font-size:48px;line-height:1;margin-bottom:8px">⚠️</div>
+          <div style="font-size:18px;font-weight:800">¿Querés avisar que no podés venir?</div>
+        </div>
+        <div style="padding:18px 22px;color:#1e293b;font-size:14px;line-height:1.55">
+          <p style="margin:0 0 12px">Parece que estás escribiendo para <b>avisar una falta</b>. Si es así, este chat <b>NO sirve</b> para eso.</p>
+          <p style="margin:0 0 14px">Para que el aviso cuente y se libere tu lugar, tenés que usar el botón <b style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:5px;font-size:13px">🚫 Avisar falta</b> que está en tu clase fija (más arriba en Mi Espacio).</p>
+          <p style="margin:0;font-size:12.5px;color:#64748b;font-style:italic">Si tu mensaje era sobre otra cosa, podés mandarlo igual.</p>
+        </div>
+        <div style="display:flex;gap:8px;padding:14px 18px;border-top:1px solid #e2e8f0;background:#f8fafc;flex-wrap:wrap">
+          <button onclick="pbCerrarModalAntiCancel()" style="flex:1;min-width:130px;background:#16a34a;color:#fff;border:none;border-radius:8px;padding:11px;font-family:inherit;font-size:13px;font-weight:800;cursor:pointer">✓ Voy a usar Avisar falta</button>
+          <button onclick="pbForzarEnviarMensaje()" style="flex:1;min-width:130px;background:#fff;color:#64748b;border:1.5px solid #cbd5e1;border-radius:8px;padding:11px;font-family:inherit;font-size:12.5px;font-weight:700;cursor:pointer">Mandar mensaje igual</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+};
+
+window.pbCerrarModalAntiCancel = function(){
+  const m = document.getElementById('pb-anti-cancel-modal');
+  if (m) m.remove();
+};
+
+window.pbForzarEnviarMensaje = function(){
+  pbCerrarModalAntiCancel();
+  window._pbConfirmaNoCancelar = true;
+  window.pbEnviarMensaje();
+};
+
 window.pbEnviarMensaje = async function(){
   const yo = window._personaActual;
   if(!yo || !yo.id){ alert('Sesión vencida. Refrescá la página.'); return; }
@@ -2572,31 +2608,28 @@ window.pbEnviarMensaje = async function(){
   if(!txt && !tieneAdj){ alert('Escribí algo o adjuntá un archivo'); return; }
 
   // Detección de intento de cancelar clase por chat — recordamos usar el botón correcto
-  if (txt) {
-    const txtLower = txt.toLowerCase();
-    // Patrones comunes de cancelación
-    const patrones = [
-      /\bno\s+(voy|puedo)\b.*\b(ir|venir|asistir|entrenar|estar)\b/,
-      /\bno\s+vamos?\s+a\s+(poder|ir|venir|asistir)\b/,
-      /\bfalt[oa]\b/,
-      /\bcancel(o|ar|á|amos|en)\b/,
-      /\bavis(o|ar|amos|ame)\s+(la\s+)?falta\b/,
-      /\bno\s+(voy|puedo)\s+(a\s+)?(ir|venir|asistir|entrenar)\b/,
-      /\b(hoy|mañana|el\s+(lunes|martes|mi[eé]rcoles|jueves|viernes|s[áa]bado))\b.*\bno\s+(voy|puedo|vamos)\b/,
+  // (a menos que el alumno ya confirmó "mandar igual")
+  if (txt && !window._pbConfirmaNoCancelar) {
+    const txtLower = txt.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // quitar tildes para matcheo
+    const palabrasClave = [
+      'no puedo ir', 'no voy a ir', 'no voy a poder', 'no podre ir',
+      'no puedo', 'no voy', 'no vamos', 'no podemos', 'no podre', 'no podra',
+      'no asisto', 'no asistir', 'no llego',
+      'falto a', 'voy a faltar', 'tengo que faltar',
+      'cancel', // cancelar, cancelo, etc.
+      'avisar falta', 'avisar la falta', 'aviso la falta',
+      'avisar que no', 'avisarte que no',
+      'no podre asistir', 'no podre ir', 'no podre venir',
     ];
-    const pareceCancelar = patrones.some(re => re.test(txtLower));
+    const pareceCancelar = palabrasClave.some(p => txtLower.includes(p));
     if (pareceCancelar) {
-      const seguir = confirm(
-        '⚠️ ¿Estás intentando avisar que no podés venir a una clase?\n\n' +
-        'Si es así, este mensaje NO cancela tu lugar ni cuenta como falta avisada. ' +
-        'Tenés que usar el botón "🚫 Avisar falta" que aparece en tu clase fija (más arriba en Mi Espacio).\n\n' +
-        '¿Querés mandar este mensaje igual?'
-      );
-      if (!seguir) {
-        return; // El alumno cancela el envío para usar el botón correcto
-      }
+      pbMostrarModalAntiCancel();
+      return;
     }
   }
+  // Resetear flag por si vuelve a entrar
+  window._pbConfirmaNoCancelar = false;
 
   const btn = document.getElementById('pb-msj-enviar');
   btn.disabled = true; btn.textContent = tieneAdj ? 'Subiendo…' : 'Enviando…';
