@@ -660,6 +660,29 @@ function claseColorPractica(practicaCodigo) {
   return 'p-' + (MAP_PRACTICA_CLASE[cod] || cod.toLowerCase());
 }
 
+// Normaliza CUALQUIER código de práctica (corto o largo, viejo o nuevo) a la
+// clave canónica de REGLAS_PRACTICA. Esto es CLAVE para los bloqueos: los turnos
+// guardados pueden tener OSTEO/DRENAJE/PUNC_SECA/SUELO_PEL/TM (códigos cortos),
+// pero las reglas usan OSTEOPATIA/DLM/PUNCION_SECA/SUELO_PELVICO/TERAP_MANUAL.
+// Sin esto, REGLAS_PRACTICA[t.practica_codigo] daba undefined y un turno de
+// osteo/dlm/punción NO se reconocía como INDIVIDUAL → dejaba sobreturnar encima.
+const NORM_PRACTICA = {
+  FISIO:'FISIO', FISIO_PC:'FISIO', FISIO_SC:'FISIO', FISIO_DESC:'FISIO', RPG:'FISIO',
+  FISIO_PQ:'FISIO_PQ', FISIOPQ:'FISIO_PQ',
+  OSTEO:'OSTEOPATIA', OSTEOPATIA:'OSTEOPATIA',
+  DRENAJE:'DLM', DLM:'DLM',
+  PUNC_SECA:'PUNCION_SECA', PUNCION_SECA:'PUNCION_SECA', PUNC:'PUNCION_SECA',
+  SUELO_PEL:'SUELO_PELVICO', SUELO_PELVICO:'SUELO_PELVICO', SP:'SUELO_PELVICO',
+  TM:'TERAP_MANUAL', TERAP_MANUAL:'TERAP_MANUAL', TERAPIA_MANUAL:'TERAP_MANUAL',
+  MASAJES:'MASAJES', MASR:'MASAJES', MASAJES_C:'MASAJES', MASAJES_CC:'MASAJES',
+  MASAJES_EYC:'MASAJES', MASAJES_PAK:'MASAJES', MASAJES_R:'MASAJES', MASAJES_CERO:'MASAJES'
+};
+function normPractica(cod) {
+  const c = (cod || '').toUpperCase();
+  return NORM_PRACTICA[c] || c;
+}
+function reglaDe(cod) { return REGLAS_PRACTICA[normPractica(cod)]; }
+
 const HORAS = [8,9,10,11,12,13,14,15,16,17,18,19,20];
 const DIAS = ['LUNES','MARTES','MIERCOLES','JUEVES','VIERNES'];
 
@@ -695,12 +718,12 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
   // Si la práctica nueva es OSTEOPATIA o MASAJES y ya hay osteo/masaje en ese slot → no se puede (1 espacio único)
   if (fecha) {
     if (real==='OSTEOPATIA' || real==='MASAJES') {
-      const ocupadoEspec = slotTurnos.some(t => t.practica_codigo==='OSTEOPATIA' || t.practica_codigo==='MASAJES');
+      const ocupadoEspec = slotTurnos.some(t => { const n=normPractica(t.practica_codigo); return n==='OSTEOPATIA' || n==='MASAJES'; });
       if (ocupadoEspec) return [];
     }
     // Para prácticas COMPARTIDAS, chequear cupo
     if (regla.modalidad === 'COMPARTIDO') {
-      const sameCount = slotTurnos.filter(t => t.practica_codigo===real && t.estado!=='SOBRETURNO').length;
+      const sameCount = slotTurnos.filter(t => normPractica(t.practica_codigo)===real && t.estado!=='SOBRETURNO').length;
       if (sameCount >= regla.cap_normal && !regla.permite_sobreturno) return [];
       if (sameCount >= (regla.cap_max||regla.cap_normal)) return [];
     }
@@ -715,7 +738,7 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
       // Chequear si el profesional ya tiene un turno en esta franja
       const turnosDelProf = slotTurnos.filter(t => t.profesional === prof);
       if (turnosDelProf.length > 0) {
-        const algunoIndividual = turnosDelProf.some(t => REGLAS_PRACTICA[t.practica_codigo]?.modalidad === 'INDIVIDUAL');
+        const algunoIndividual = turnosDelProf.some(t => reglaDe(t.practica_codigo)?.modalidad === 'INDIVIDUAL');
         // Si el prof ya tiene un turno INDIVIDUAL, o la práctica nueva es INDIVIDUAL → no se puede
         if (algunoIndividual || regla.modalidad === 'INDIVIDUAL') continue;
       }
@@ -1756,15 +1779,15 @@ function validarUnSlot(slot, datosForm) {
   const slotTurnos = turnos.filter(t => t.fecha===slot.fecha && parseInt(t.hora_inicio.slice(0,2),10)===slot.hora);
   const delProf = slotTurnos.filter(t => t.profesional===profesional);
   if (delProf.length > 0) {
-    const algIndiv = delProf.some(t => REGLAS_PRACTICA[t.practica_codigo]?.modalidad==='INDIVIDUAL');
+    const algIndiv = delProf.some(t => reglaDe(t.practica_codigo)?.modalidad==='INDIVIDUAL');
     if (algIndiv || regla.modalidad==='INDIVIDUAL') return { ok:false, errores:[`${profesional} ya tiene un turno el ${slot.fecha} ${pad(slot.hora)}:00.`] };
   }
   if (practica==='OSTEOPATIA' || practica==='MASAJES') {
-    const c = slotTurnos.find(t => t.practica_codigo==='OSTEOPATIA' || t.practica_codigo==='MASAJES');
+    const c = slotTurnos.find(t => { const n=normPractica(t.practica_codigo); return n==='OSTEOPATIA' || n==='MASAJES'; });
     if (c) return { ok:false, errores:[`Ya hay ${c.practica_codigo} el ${slot.fecha} ${pad(slot.hora)}:00.`] };
   }
 
-  const sameCount = slotTurnos.filter(t => t.practica_codigo===practica && t.estado!=='SOBRETURNO').length;
+  const sameCount = slotTurnos.filter(t => normPractica(t.practica_codigo)===practica && t.estado!=='SOBRETURNO').length;
   let requiereSobre = false, box = null;
 
   if (regla.modalidad==='COMPARTIDO') {
