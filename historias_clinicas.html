@@ -1623,6 +1623,22 @@ function renderHCDetail(hc, persona) {
       </div>
     </div>
 
+    <!-- COMPETENCIAS Y EVENTOS DEL ALUMNO (cargados desde Mi Espacio) -->
+    <div class="hc-section">
+      <div class="hc-section-header">🏆 Competencias y eventos del alumno</div>
+      <div class="hc-section-body">
+        <div id="compList"><div class="obs-empty">Cargando…</div></div>
+      </div>
+    </div>
+
+    <!-- BITÁCORA DE FATIGA (Borg CR-10) Y DOLOR (EVA) (cargada desde Mi Espacio) -->
+    <div class="hc-section">
+      <div class="hc-section-header">💪 Cómo se viene sintiendo (últimos 14 días)</div>
+      <div class="hc-section-body">
+        <div id="bitList"><div class="obs-empty">Cargando…</div></div>
+      </div>
+    </div>
+
     <!-- ADJUNTOS (RX, estudios, PDFs) -->
     <div class="hc-section">
       <div class="hc-section-header">📎 Archivos adjuntos</div>
@@ -1665,10 +1681,11 @@ async function cargarExtras(historiaId, personaId) {
     console.warn('No se pudieron cargar observaciones:', e.message);
   }
 
-  // 2) Adjuntos
+  // 2) Adjuntos: los de esta HC (historia_id = X) + los que subió el alumno (historia_id NULL, mismo persona_id)
   try {
     const { data, error } = await sb.from('hc_adjuntos')
-      .select('*').eq('historia_id', historiaId)
+      .select('*')
+      .or(`historia_id.eq.${historiaId},and(historia_id.is.null,persona_id.eq.${personaId})`)
       .order('creado_en', { ascending: true });
     if (error) throw error;
     adjActual = data || [];
@@ -1676,9 +1693,136 @@ async function cargarExtras(historiaId, personaId) {
     console.warn('No se pudieron cargar adjuntos:', e.message);
   }
 
+  // 3) Competencias y eventos del alumno (todos)
+  let competenciasActual = [];
+  try {
+    const { data, error } = await sb.from('competencias_eventos')
+      .select('*').eq('persona_id', personaId)
+      .order('fecha', { ascending: false });
+    if (error) throw error;
+    competenciasActual = data || [];
+  } catch (e) {
+    console.warn('No se pudieron cargar competencias:', e.message);
+  }
+
+  // 4) Bitácora de fatiga y dolor (últimos 14 días)
+  let bitacoraActual = [];
+  try {
+    const desde = new Date(); desde.setDate(desde.getDate() - 14);
+    const desdeISO = desde.toISOString().slice(0,10);
+    const { data, error } = await sb.from('bitacora_fatiga')
+      .select('*').eq('persona_id', personaId)
+      .gte('fecha', desdeISO)
+      .order('fecha', { ascending: false })
+      .order('creado_en', { ascending: false });
+    if (error) throw error;
+    bitacoraActual = data || [];
+  } catch (e) {
+    console.warn('No se pudo cargar bitácora:', e.message);
+  }
+
   pintarObservaciones(historiaId, personaId);
   pintarNotas(historiaId, personaId);
   pintarAdjuntos(historiaId, personaId);
+  pintarCompetencias(competenciasActual);
+  pintarBitacora(bitacoraActual);
+}
+
+// Pinta competencias y eventos del alumno
+function pintarCompetencias(comps) {
+  const cont = document.getElementById('compList');
+  if (!cont) return;
+  if (!comps || comps.length === 0) {
+    cont.innerHTML = `<div class="obs-empty">El alumno no cargó competencias ni eventos.</div>`;
+    return;
+  }
+  const TIPOS = {
+    correr:    { label: 'Correr',    icono: '🏃' },
+    ciclismo:  { label: 'Ciclismo',  icono: '🚴' },
+    futbol:    { label: 'Fútbol',    icono: '⚽' },
+    hockey:    { label: 'Hockey',    icono: '🏑' },
+    natacion:  { label: 'Natación',  icono: '🏊' },
+    tenis:     { label: 'Tenis',     icono: '🎾' },
+    basquet:   { label: 'Básquet',   icono: '🏀' },
+    otro:      { label: 'Otro',      icono: '🏅' },
+  };
+  const hoy = (new Date()).toISOString().slice(0,10);
+  const proxi = comps.filter(c => c.fecha >= hoy);
+  const pasi = comps.filter(c => c.fecha < hoy);
+  let html = '';
+  if (proxi.length) {
+    html += `<div style="font-size:11px;font-weight:800;color:#1e9fe0;letter-spacing:1px;margin:6px 0">PRÓXIMOS</div>`;
+    proxi.forEach(c => { html += compRow(c, TIPOS, false); });
+  }
+  if (pasi.length) {
+    html += `<div style="font-size:11px;font-weight:800;color:#94a3b8;letter-spacing:1px;margin:10px 0 6px">PASADOS</div>`;
+    pasi.slice(0,5).forEach(c => { html += compRow(c, TIPOS, true); });
+  }
+  cont.innerHTML = html;
+}
+
+function compRow(c, TIPOS, esPasado) {
+  const t = TIPOS[c.tipo] || TIPOS.otro;
+  const nivel = c.nivel === 'competitivo' ? '🎯 Competitivo' : c.nivel === 'recreativo' ? '🎈 Recreativo' : '';
+  const diasFalta = Math.ceil((new Date(c.fecha) - new Date()) / 86400000);
+  let estado = '';
+  if (!esPasado) {
+    if (diasFalta > 0) estado = `<span style="color:#16a34a;font-weight:700">Faltan ${diasFalta} días</span>`;
+    else if (diasFalta === 0) estado = `<span style="color:#dc2626;font-weight:800">¡Es hoy!</span>`;
+  }
+  return `<div style="padding:9px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:6px;${esPasado?'opacity:.7':''}">
+    <div style="font-size:11.5px;color:#1e9fe0;font-weight:700">${formatDate(c.fecha)}</div>
+    <div style="font-size:14px;font-weight:700;color:#0f172a;margin-top:2px">${t.icono} ${escapeHtml(c.nombre)}</div>
+    <div style="font-size:11.5px;color:#64748b;margin-top:3px;display:flex;flex-wrap:wrap;gap:6px 12px">
+      ${c.distancia ? `<span>${escapeHtml(c.distancia)}</span>` : ''}
+      ${nivel ? `<span>${nivel}</span>` : ''}
+      ${estado}
+    </div>
+    ${c.notas ? `<div style="font-size:12px;color:#64748b;margin-top:5px;font-style:italic">${escapeHtml(c.notas)}</div>` : ''}
+  </div>`;
+}
+
+// Color de escala (verde 0-30%, ámbar 30-60%, rojo 60-100%)
+function colorEsc(v, max) {
+  if (v == null) return '#94a3b8';
+  const p = v / max;
+  if (p <= 0.3) return '#16a34a';
+  if (p <= 0.6) return '#f59e0b';
+  return '#dc2626';
+}
+
+// Pinta bitácora de fatiga y dolor
+function pintarBitacora(entries) {
+  const cont = document.getElementById('bitList');
+  if (!cont) return;
+  if (!entries || entries.length === 0) {
+    cont.innerHTML = `<div class="obs-empty">El alumno no cargó la bitácora en los últimos 14 días.</div>`;
+    return;
+  }
+  const html = entries.map(b => {
+    const chips = [];
+    if (b.sueno) chips.push(`<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#eef2ff;color:#475569">😴 Sueño ${b.sueno}/5</span>`);
+    if (b.estado_general) chips.push(`<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:#eef2ff;color:#475569">🌟 Día ${b.estado_general}/5</span>`);
+    if (b.entreno_en_pb) {
+      const c = colorEsc(b.fatiga_post_pb, 10);
+      chips.push(`<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:${c}22;color:${c}">💪 PB · Borg ${b.fatiga_post_pb ?? '—'}</span>`);
+    }
+    if (b.hizo_deporte) {
+      const c = colorEsc(b.fatiga_post_deporte, 10);
+      chips.push(`<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:${c}22;color:${c}">🏃 Deporte · Borg ${b.fatiga_post_deporte ?? '—'}</span>`);
+    }
+    if (b.dolor_nivel != null) {
+      const c = colorEsc(b.dolor_nivel, 10);
+      chips.push(`<span style="display:inline-block;font-size:11px;font-weight:700;padding:3px 8px;border-radius:5px;background:${c}22;color:${c}">🩹 Dolor EVA ${b.dolor_nivel}${b.dolor_zona ? ' · '+escapeHtml(b.dolor_zona) : ''}</span>`);
+    }
+    return `<div style="padding:9px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:6px">
+      <div style="font-size:11.5px;color:#1e9fe0;font-weight:700">${formatDate(b.fecha)}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:5px">${chips.join('')}</div>
+      ${b.deporte_descripcion ? `<div style="font-size:12.5px;color:#0f172a;margin-top:5px">🏃 ${escapeHtml(b.deporte_descripcion)}</div>` : ''}
+      ${b.notas ? `<div style="font-size:12px;color:#64748b;margin-top:4px;font-style:italic">${escapeHtml(b.notas)}</div>` : ''}
+    </div>`;
+  }).join('');
+  cont.innerHTML = html;
 }
 
 function avisoSinLogin() {
@@ -1867,19 +2011,36 @@ function formatTamano(bytes) {
 function pintarAdjuntos(historiaId, personaId) {
   const lista = document.getElementById('adjList');
   if (!lista) return;
+  // Etiquetas de categoría (las del alumno)
+  const CATS_LBL = {
+    apto_fisico: { icono: '🏃', label: 'Apto físico', color: '#16a34a' },
+    estudio: { icono: '🩻', label: 'Estudio', color: '#1e9fe0' },
+    consideracion: { icono: '📋', label: 'Consideración médica', color: '#a855f7' },
+    otro: { icono: '📎', label: 'Otro', color: '#64748b' },
+  };
   lista.innerHTML = adjActual.length
-    ? `<div class="adj-list">${adjActual.map(a => `
-        <div class="adj-item">
+    ? `<div class="adj-list">${adjActual.map(a => {
+        const subidoAlumno = a.subido_por_alumno === true;
+        const cat = a.categoria ? (CATS_LBL[a.categoria] || CATS_LBL.otro) : null;
+        const tituloMostrar = a.titulo || a.nombre_original;
+        const catChip = cat ? `<span class="adj-cat-chip" style="background:${cat.color}22;color:${cat.color};border:1px solid ${cat.color}55;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;margin-right:5px">${cat.icono} ${cat.label}</span>` : '';
+        const origenChip = subidoAlumno ? `<span class="adj-cat-chip" style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;margin-right:5px">📲 Subido por el alumno</span>` : '';
+        const fechaEstudio = a.fecha_estudio ? ` · Estudio del ${formatDate(a.fecha_estudio)}` : '';
+        const notasHtml = a.notas ? `<div class="adj-notas-equipo" style="margin-top:5px;font-size:12px;color:#475569;background:#f8fafc;padding:6px 8px;border-radius:6px;border-left:3px solid #94a3b8;font-style:italic">${escapeHtml(a.notas)}</div>` : '';
+        return `<div class="adj-item">
           <div class="adj-icon">${iconoArchivo(a.tipo_mime, a.nombre_original)}</div>
           <div class="adj-info">
-            <div class="adj-nombre">${escapeHtml(a.nombre_original)}</div>
-            <div class="adj-meta">${formatTamano(a.tamano_bytes)}${a.autor_nombre ? ' · ' + escapeHtml(upperName(a.autor_nombre).split(' ')[0]) : ''} · ${formatDate(a.creado_en)}</div>
+            <div style="margin-bottom:4px">${catChip}${origenChip}</div>
+            <div class="adj-nombre">${escapeHtml(tituloMostrar)}</div>
+            <div class="adj-meta">${a.nombre_original !== tituloMostrar ? escapeHtml(a.nombre_original) + ' · ' : ''}${formatTamano(a.tamano_bytes)}${a.autor_nombre ? ' · ' + escapeHtml(upperName(a.autor_nombre).split(' ')[0]) : ''} · ${formatDate(a.creado_en)}${fechaEstudio}</div>
+            ${notasHtml}
           </div>
           <div class="adj-actions">
             <button class="btn btn-sm btn-primary" onclick="verAdjunto(${a.id})">Ver</button>
             ${puedeEliminar() ? `<button class="btn btn-sm btn-rojo" onclick="eliminarAdjunto(${a.id})">🗑️</button>` : ''}
           </div>
-        </div>`).join('')}</div>`
+        </div>`;
+      }).join('')}</div>`
     : `<div class="obs-empty">Sin archivos adjuntos todavía.</div>`;
 
   const zona = document.getElementById('adjAddZone');
