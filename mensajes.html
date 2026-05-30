@@ -285,6 +285,9 @@ let audioChunks = [];
 let recordingStartTs = 0;
 let recordingTimerInt = null;
 let LIMITE_CHARS = 10000; // antes 2000 — Lu pidió subirlo
+// Modo de destinatario: 'uno' | 'varios' | 'todos'
+let modoDest = 'uno';
+let destinatariosMulti = new Set(); // ids elegidos en modo 'varios'
 
 // ============= INICIO =============
 async function init() {
@@ -316,22 +319,28 @@ async function init() {
   } catch (e) { esAdmin = false; }
 
   // Cargar miembros del equipo (excluyendo a mí mismo) — para el dropdown destinatario
-  // Filtra duplicados por nombre normalizado (sin tildes ni case)
+  // Filtra duplicados detectando colisión de NOMBRE COMPLETO normalizado Y también las primeras 2 palabras
+  // (cubre el caso "Paula Gabriela Fulanito" vs "Paula Gabriela Otro Apellido")
   try {
     const { data: eq } = await sb.from('personas')
       .select('id, nombre')
       .eq('es_equipo', true)
       .order('nombre', { ascending: true });
-    const vistos = new Set();
+    const norm = (s) => String(s || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .trim().replace(/\s+/g, ' ');
+    const primero2 = (s) => norm(s).split(' ').slice(0, 2).join(' '); // primeras 2 palabras
+    const vistosFull = new Set();
+    const vistosPrim2 = new Set();
     equipo = (eq || [])
       .filter(p => p.id !== yo.id)
       .filter(p => {
-        const k = String(p.nombre || '')
-          .toLowerCase()
-          .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-          .trim().replace(/\s+/g, ' ');
-        if (vistos.has(k)) return false;
-        vistos.add(k);
+        const full = norm(p.nombre);
+        const p2 = primero2(p.nombre);
+        if (vistosFull.has(full) || vistosPrim2.has(p2)) return false;
+        vistosFull.add(full);
+        vistosPrim2.add(p2);
         return true;
       });
   } catch (e) { equipo = []; }
@@ -348,10 +357,6 @@ function mostrarAccesoDenegado(texto) {
 }
 
 function renderShell() {
-  // Dropdown de destinatarios para el formulario
-  const optsDest = `<option value="">📢 Todo el equipo (anuncio general)</option>` +
-    equipo.map(p => `<option value="${p.id}">${escapeHtml(formatNombre(p.nombre))}</option>`).join('');
-
   // Si tengo permiso de ver todos, muestro un filtro extra para ver solo conversación con alguien
   const filtroAdmin = esAdmin ? `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;background:#fef9c3;border:1.5px solid #fde047;border-radius:10px;padding:9px 13px;font-size:12.5px">
@@ -360,12 +365,53 @@ function renderShell() {
       <select id="filtroAdminDest" onchange="aplicarFiltroAdmin()" style="margin-left:auto;font-family:inherit;padding:4px 8px;border-radius:6px;border:1px solid #d4d4d8;background:#fff;font-size:12px">
         <option value="">— Filtrar por persona —</option>
         <option value="generales">📢 Solo anuncios generales</option>
-        ${[yo].concat(equipo).map(p => `<option value="${p.id}">Conversaciones con ${escapeHtml(formatNombre(p.nombre))}</option>`).join('')}
+        ${[yo].concat(equipo).map(p => `<option value="${p.id}">Con ${escapeHtml(nombreCorto(p, [yo].concat(equipo)))}</option>`).join('')}
       </select>
     </div>` : '';
 
+  // Selector de modo destinatario
+  const tabs = `
+    <div style="display:flex;gap:5px;margin-bottom:10px;flex-wrap:wrap">
+      <button type="button" class="modo-btn ${modoDest==='uno'?'sel':''}" onclick="setModoDest('uno')">👤 Uno solo</button>
+      <button type="button" class="modo-btn ${modoDest==='varios'?'sel':''}" onclick="setModoDest('varios')">👥 Varios</button>
+      <button type="button" class="modo-btn ${modoDest==='todos'?'sel':''}" onclick="setModoDest('todos')">📢 Todos</button>
+    </div>`;
+
+  // Contenido del selector según el modo
+  let destinatariosBox;
+  if (modoDest === 'uno') {
+    const opts = equipo.map(p => `<option value="${p.id}">${escapeHtml(nombreCorto(p, equipo))}</option>`).join('');
+    destinatariosBox = `
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="font-size:12px;font-weight:700;color:var(--gris-texto)">Para:</label>
+        <select id="nuevoDest" style="font-family:inherit;font-size:13px;padding:6px 10px;border-radius:7px;border:1px solid var(--gris-borde);background:#fff;flex:1;min-width:200px">
+          <option value="">— Elegí —</option>${opts}
+        </select>
+      </div>`;
+  } else if (modoDest === 'varios') {
+    const chks = equipo.map(p => `
+      <label style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1.5px solid ${destinatariosMulti.has(p.id)?'#1e9fe0':'var(--gris-borde)'};border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer;background:${destinatariosMulti.has(p.id)?'#dbeafe':'#fff'};color:${destinatariosMulti.has(p.id)?'#1e40af':'#475569'}">
+        <input type="checkbox" ${destinatariosMulti.has(p.id)?'checked':''} onchange="toggleDestMulti(${p.id})" style="cursor:pointer">
+        ${escapeHtml(nombreCorto(p, equipo))}
+      </label>`).join('');
+    destinatariosBox = `
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--gris-texto);margin-bottom:6px">Elegí a quién mandarle (${destinatariosMulti.size} elegido${destinatariosMulti.size===1?'':'s'}):</div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">${chks}</div>
+        <div style="font-size:11px;color:var(--gris-texto)">Cada destinatario va a recibir el mensaje por separado.</div>
+      </div>`;
+  } else { // 'todos'
+    destinatariosBox = `
+      <div style="background:#fef3c7;border:1.5px solid #fcd34d;border-radius:8px;padding:9px 12px;font-size:13px;color:#854d0e;font-weight:600">
+        📢 Anuncio general · todo el equipo va a ver este mensaje.
+      </div>`;
+  }
+
   document.getElementById('wrap').innerHTML = `
     <style>
+      .modo-btn { background:#fff; color:var(--gris-texto); border:1.5px solid var(--gris-borde); border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:700; cursor:pointer; font-family:inherit }
+      .modo-btn:hover { border-color: var(--celeste); color: var(--celeste); }
+      .modo-btn.sel { background: var(--celeste); color:#fff; border-color: var(--celeste); }
       .archivo-chip { display:inline-flex; align-items:center; gap:6px; background:#eef2ff; color:#475569; border:1px solid #c7d2fe; border-radius:6px; padding:4px 8px; font-size:11.5px; font-weight:600; margin:3px 4px 3px 0 }
       .archivo-chip .x { cursor:pointer; color:#64748b; font-weight:800 }
       .archivo-chip .x:hover { color:#dc2626 }
@@ -391,12 +437,8 @@ function renderShell() {
     ${filtroAdmin}
 
     <div class="caja-nuevo">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
-        <label style="font-size:12px;font-weight:700;color:var(--gris-texto)">Para:</label>
-        <select id="nuevoDest" style="font-family:inherit;font-size:13px;padding:6px 10px;border-radius:7px;border:1px solid var(--gris-borde);background:#fff;flex:1;min-width:200px">
-          ${optsDest}
-        </select>
-      </div>
+      ${tabs}
+      <div id="boxDest" style="margin-bottom:10px">${destinatariosBox}</div>
       <textarea id="nuevoMsj" placeholder="Escribí tu mensaje…" maxlength="${LIMITE_CHARS}"></textarea>
 
       <div id="archivosBox" style="margin-top:8px"></div>
@@ -424,6 +466,40 @@ function renderShell() {
   ta.addEventListener('input', () => { cont.textContent = `${ta.value.length.toLocaleString('es-AR')} / ${LIMITE_CHARS.toLocaleString('es-AR')}`; });
   pintarArchivosNuevos();
 }
+
+window.setModoDest = function(modo) {
+  modoDest = modo;
+  if (modo !== 'varios') destinatariosMulti.clear();
+  // Preservar texto y archivos al re-renderizar
+  const txt = document.getElementById('nuevoMsj')?.value || '';
+  const archActuales = [...archivosNuevos];
+  renderShell();
+  const ta = document.getElementById('nuevoMsj');
+  if (ta) {
+    ta.value = txt;
+    document.getElementById('contador').textContent = `${txt.length.toLocaleString('es-AR')} / ${LIMITE_CHARS.toLocaleString('es-AR')}`;
+  }
+  archivosNuevos = archActuales;
+  pintarArchivosNuevos();
+  pintarMensajes(); // refresca la lista (que se borró al re-renderizar)
+};
+
+window.toggleDestMulti = function(pid) {
+  if (destinatariosMulti.has(pid)) destinatariosMulti.delete(pid);
+  else destinatariosMulti.add(pid);
+  // Refrescar solo la caja de destinos manteniendo texto y archivos
+  const txt = document.getElementById('nuevoMsj')?.value || '';
+  const archActuales = [...archivosNuevos];
+  renderShell();
+  const ta = document.getElementById('nuevoMsj');
+  if (ta) {
+    ta.value = txt;
+    document.getElementById('contador').textContent = `${txt.length.toLocaleString('es-AR')} / ${LIMITE_CHARS.toLocaleString('es-AR')}`;
+  }
+  archivosNuevos = archActuales;
+  pintarArchivosNuevos();
+  pintarMensajes();
+};
 
 // ====== ARCHIVOS Y GRABACIÓN ======
 window.agregarArchivos = function(files) {
@@ -563,11 +639,34 @@ window.aplicarFiltroAdmin = function() {
   pintarMensajes();
 };
 
-// Helper: nombre formateado (Mayúsculas y solo nombre + primer apellido)
+// Helper: nombre formateado completo (Capitalizado, máx 2 palabras) — para vistas amplias
 function formatNombre(n) {
   if (!n) return '—';
   const partes = String(n).trim().split(/\s+/);
   return partes.slice(0, 2).map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+}
+
+// Helper: PRIMER nombre nada más (con inicial de apellido SI hay duplicados con mismo primer nombre)
+// equipoLista: array completo de personas para detectar colisiones
+function nombreCorto(persona, equipoLista) {
+  if (!persona || !persona.nombre) return '—';
+  const partes = String(persona.nombre).trim().split(/\s+/);
+  const primero = (partes[0] || '').toLowerCase();
+  const cap = primero.charAt(0).toUpperCase() + primero.slice(1);
+  // Detectar colisión de primer nombre dentro de la lista
+  const lista = equipoLista || [];
+  const conMismoPrimero = lista.filter(p => {
+    if (!p || !p.nombre) return false;
+    const pn = String(p.nombre).trim().split(/\s+/)[0].toLowerCase();
+    return pn === primero;
+  });
+  if (conMismoPrimero.length > 1) {
+    // Agregar inicial del apellido (la segunda palabra disponible)
+    const segunda = partes[1] || '';
+    const ini = segunda ? segunda.charAt(0).toUpperCase() + '.' : '';
+    return cap + (ini ? ' ' + ini : '');
+  }
+  return cap;
 }
 
 // ============= CARGAR MENSAJES =============
@@ -628,9 +727,9 @@ function pintarMensajes() {
 
 function nombreDePersonaId(pid) {
   if (pid == null) return '📢 Todo el equipo';
-  if (pid === yo.id) return formatNombre(yo.nombre) + ' (vos)';
+  if (pid === yo.id) return nombreCorto(yo, [yo].concat(equipo)) + ' (vos)';
   const p = equipo.find(x => x.id === pid);
-  return p ? formatNombre(p.nombre) : '—';
+  return p ? nombreCorto(p, [yo].concat(equipo)) : '—';
 }
 
 function renderMensaje(m) {
@@ -724,32 +823,56 @@ async function _hidratarAdjuntos() {
 // ============= ENVIAR =============
 async function enviar() {
   const ta = document.getElementById('nuevoMsj');
-  const sel = document.getElementById('nuevoDest');
   const txt = ta.value.trim();
   const tieneAdjuntos = archivosNuevos.length > 0;
   if (!txt && !tieneAdjuntos) { mostrarToast('Escribí algo o adjuntá un archivo'); return; }
-  const destVal = sel ? sel.value : '';
-  const destId = destVal ? parseInt(destVal, 10) : null;
+
+  // Determinar lista de destinatarios según el modo
+  let destinatarios; // array de IDs, o [null] si es anuncio general
+  if (modoDest === 'todos') {
+    destinatarios = [null]; // un solo INSERT con destinatario_persona_id = NULL
+  } else if (modoDest === 'varios') {
+    if (!destinatariosMulti.size) { mostrarToast('Elegí al menos un destinatario'); return; }
+    destinatarios = Array.from(destinatariosMulti);
+  } else { // 'uno'
+    const sel = document.getElementById('nuevoDest');
+    const v = sel ? sel.value : '';
+    if (!v) { mostrarToast('Elegí un destinatario'); return; }
+    destinatarios = [parseInt(v, 10)];
+  }
+
   const btn = document.getElementById('btnEnviar');
-  btn.disabled = true; btn.textContent = tieneAdjuntos ? 'Subiendo…' : 'Enviando…';
+  btn.disabled = true;
+  btn.textContent = tieneAdjuntos ? 'Subiendo…' : 'Enviando…';
+
   try {
-    // 1) Insertar el mensaje y obtener su ID
-    const { data: nuevo, error } = await sb.from('mensajes_equipo').insert({
-      autor_persona_id: yo.id,
-      autor_nombre: yo.nombre,
-      destinatario_persona_id: destId,
-      contenido: txt || '(adjunto)', // contenido vacío con solo adjunto: poner placeholder
-    }).select('id').single();
-    if (error) throw error;
-    // 2) Subir adjuntos si hay
-    if (tieneAdjuntos) {
-      await subirAdjuntosDeMensaje(nuevo.id, archivosNuevos);
-      archivosNuevos = [];
+    let enviadosOK = 0;
+    for (const destId of destinatarios) {
+      // 1) Crear el mensaje
+      const { data: nuevo, error } = await sb.from('mensajes_equipo').insert({
+        autor_persona_id: yo.id,
+        autor_nombre: yo.nombre,
+        destinatario_persona_id: destId,
+        contenido: txt || '(adjunto)',
+      }).select('id').single();
+      if (error) throw error;
+      // 2) Subir adjuntos al mensaje (a cada uno por separado para que cada destinatario los vea)
+      if (tieneAdjuntos) {
+        await subirAdjuntosDeMensaje(nuevo.id, archivosNuevos);
+      }
+      enviadosOK++;
     }
+    // Limpiar UI
+    archivosNuevos = [];
     ta.value = '';
     document.getElementById('contador').textContent = `0 / ${LIMITE_CHARS.toLocaleString('es-AR')}`;
     pintarArchivosNuevos();
-    mostrarToast(destId ? `✓ Enviado a ${nombreDePersonaId(destId)}` : '✓ Anuncio publicado');
+    destinatariosMulti.clear();
+    let textoOK;
+    if (modoDest === 'todos') textoOK = '✓ Anuncio publicado';
+    else if (enviadosOK === 1) textoOK = `✓ Enviado a ${nombreDePersonaId(destinatarios[0])}`;
+    else textoOK = `✓ Enviado a ${enviadosOK} personas`;
+    mostrarToast(textoOK);
     await cargarMensajes();
   } catch (e) {
     mostrarToast('Error: ' + e.message);

@@ -2265,7 +2265,7 @@ function _renderPreviewMensajes(){
       const eq = (_equipoMsj || []).find(p => p.id === otroId);
       porPersona[k] = {
         id: otroId,
-        nombre: eq ? _fmtNombrePB(eq.nombre) : (m.autor_nombre || 'Equipo'),
+        nombre: eq ? _fmtNombrePB(eq.nombre, _equipoMsj) : (m.autor_nombre || 'Equipo'),
         ultimo: m,
         sin_leer: 0,
       };
@@ -2332,15 +2332,16 @@ async function _cargarDatosMensajes(){
       sb.from('mensajes_lecturas').select('mensaje_id').eq('persona_id', yo.id),
       sb.from('permisos_equipo').select('persona_id').eq('admin_total', true)
     ]);
-    // Filtrar duplicados de personas por nombre normalizado (sin tildes ni case)
-    const vistos = new Set();
+    // Filtrar duplicados por nombre completo Y también por primeras 2 palabras (cubre "Paula X" vs "Paula Y")
+    const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ');
+    const primero2 = (s) => norm(s).split(' ').slice(0,2).join(' ');
+    const vistosFull = new Set();
+    const vistosP2 = new Set();
     _equipoMsj = (eqRes.data || []).filter(p => {
-      const k = String(p.nombre || '')
-        .toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quitar tildes
-        .trim().replace(/\s+/g, ' ');
-      if (vistos.has(k)) return false;
-      vistos.add(k);
+      const f = norm(p.nombre);
+      const p2 = primero2(p.nombre);
+      if (vistosFull.has(f) || vistosP2.has(p2)) return false;
+      vistosFull.add(f); vistosP2.add(p2);
       return true;
     });
     _misMensajes = (msjRes.data || []);
@@ -2391,7 +2392,7 @@ window.pbAbrirMensajes = async function(){
   if(!yo || !yo.id){ alert('Hubo un problema. Refrescá la página.'); return; }
   if(_equipoMsj === null) await _cargarDatosMensajes();
   const profesOpts = (_equipoMsj || []).map(p =>
-    `<option value="${p.id}">${_fmtNombrePB(p.nombre)}</option>`
+    `<option value="${p.id}">${_fmtNombrePB(p.nombre, _equipoMsj)}</option>`
   ).join('');
 
   // Render lista cronológica (último arriba)
@@ -2399,7 +2400,7 @@ window.pbAbrirMensajes = async function(){
     const esMio = m.autor_persona_id === yo.id;
     const otroId = esMio ? m.destinatario_persona_id : m.autor_persona_id;
     const otroNombre = (_equipoMsj || []).find(p => p.id === otroId);
-    const nombreOtro = otroNombre ? _fmtNombrePB(otroNombre.nombre) : (esMio ? '(profesional)' : (m.autor_nombre || 'Equipo'));
+    const nombreOtro = otroNombre ? _fmtNombrePB(otroNombre.nombre, _equipoMsj) : (esMio ? '(profesional)' : (m.autor_nombre || 'Equipo'));
     const sinLeer = !esMio && !_misLecturas.has(m.id);
     const autorEsAdmin = _adminsIds.has(m.autor_persona_id);
     // Estilo según autor (admin = rojo importante)
@@ -2706,9 +2707,24 @@ async function _marcarMisLecturas(){
 }
 
 // Helpers locales para no chocar con otras funciones del archivo
-function _fmtNombrePB(n){
+// Devuelve SOLO el primer nombre, agregando inicial del apellido si hay duplicados de primer nombre en la lista
+function _fmtNombrePB(n, listaCompleta){
   if(!n) return '—';
-  return String(n).trim().split(/\s+/).slice(0,2).map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join(' ');
+  const partes = String(n).trim().split(/\s+/);
+  const primero = (partes[0] || '').toLowerCase();
+  const cap = primero.charAt(0).toUpperCase() + primero.slice(1);
+  // Si paso lista, chequeo colisiones; si no, devuelvo solo el primero
+  if (listaCompleta && Array.isArray(listaCompleta)) {
+    const conMismo = listaCompleta.filter(p => {
+      if (!p || !p.nombre) return false;
+      return p.nombre.trim().split(/\s+/)[0].toLowerCase() === primero;
+    });
+    if (conMismo.length > 1) {
+      const seg = partes[1] || '';
+      return cap + (seg ? ' ' + seg.charAt(0).toUpperCase() + '.' : '');
+    }
+  }
+  return cap;
 }
 function _escHtmlPB(s){
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
