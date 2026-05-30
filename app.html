@@ -1217,6 +1217,8 @@ async function init() {
 
   // Badge dinámico del sidebar Morosos TF (se calcula en vivo, no hardcoded)
   actualizarBadgeMorososTF()
+  // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
+  actualizarBadgeMensajes()
 
   // Botón de cobro flotante: SOLO Jime/Lu/Ale/Pau (equipo sin solo_lo_mio).
   // Los profes/profesionales (Bruno, Male, Vero) y clientes NO lo ven.
@@ -1277,6 +1279,24 @@ async function actualizarCampanita() {
 // Se llama al cargar la app y se expone como window.actualizarBadgeMorososTF
 // para que otros módulos (cobro, baja, etc.) puedan refrescarlo.
 // ======================
+// Badge de mensajes del equipo no leídos (lo ve todo el equipo)
+async function actualizarBadgeMensajes() {
+  if (!usuario || !usuario.es_equipo) return;
+  const badge = document.getElementById('badgeMensajes');
+  if (!badge) return;
+  try {
+    const { data, error } = await supabase.rpc('mensajes_equipo_no_leidos');
+    if (error) { console.warn('No se pudo leer badge mensajes:', error.message); return; }
+    const n = parseInt(data || 0, 10);
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.style.display = 'inline-block';
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { console.warn('Error badge mensajes:', e); }
+}
+
 async function actualizarBadgeMorososTF() {
   if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
   const badge = document.getElementById('badge-morosos-tf')
@@ -1496,6 +1516,15 @@ function buildNav() {
     </div>`)
   }
 
+  // Mensajes del equipo: lo ve TODO el equipo (es_equipo = true en personas).
+  // Es un muro común para que los profes y administración se comuniquen.
+  // El badge rojo con el count de no-leídos lo agrega actualizarBadgeMensajes() después.
+  items.push(`<div class="nav-item" onclick="irA('mensajes')" id="navItemMensajes">
+    <span class="nav-icon">💬</span>
+    <span class="nav-label">Mensajes equipo</span>
+    <span class="nav-badge" id="badgeMensajes" style="display:none"></span>
+  </div>`)
+
   items.push(`</div>`)
 
   // Profes TF a SUELDO FIJO (Santi, Lean, Lauti): están fuera del sistema de
@@ -1670,6 +1699,7 @@ window.irA = function(modulo) {
   else if (modulo === 'sesiones') renderSesiones()
   else if (modulo === 'padron') renderPadron()
   else if (modulo === 'historias-clinicas') renderHistoriasClinicas()
+  else if (modulo === 'mensajes') renderMensajes()
   else if (modulo === 'tratamientos') renderTratamientosHub()
   else if (modulo === 'agenda') renderAgenda()
   else if (modulo === 'auditoria') renderAuditoria()
@@ -1690,6 +1720,11 @@ window.addEventListener('message', (ev) => {
   // Refrescar badge de morosos cuando un iframe avisa que cambió algo (cobro, baja, etc.)
   if (data.tipo === 'REFRESCAR_BADGE_MOROSOS') {
     actualizarBadgeMorososTF();
+    return;
+  }
+  // Refrescar badge de mensajes (cuando el iframe de mensajes los marca como leídos)
+  if (data.tipo === 'MENSAJES_LEIDOS') {
+    actualizarBadgeMensajes();
     return;
   }
   if (data.tipo === 'NAVEGAR_MODULO' && typeof data.modulo === 'string') {
@@ -1932,6 +1967,21 @@ function renderHistoriasClinicas() {
   contentEl.innerHTML = `
     <iframe src="historias_clinicas.html" class="module-iframe-tab" title="Historias Clínicas"></iframe>
   `
+}
+
+// ======================
+// MODULO: MENSAJES DEL EQUIPO (muro común para el staff)
+// ======================
+function renderMensajes() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.add('module-embed')
+  contentEl.innerHTML = `
+    <iframe src="mensajes.html" class="module-iframe-tab" title="Mensajes del equipo"></iframe>
+  `
+  // Al entrar, ocultar el badge inmediatamente (la marca-leídos se hace en mensajes.html
+  // y al volver vamos a refrescar el contador)
+  const b = document.getElementById('badgeMensajes');
+  if (b) b.style.display = 'none';
 }
 
 // ======================
