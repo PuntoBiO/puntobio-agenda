@@ -1045,7 +1045,7 @@ function hoyISO(){
   // 2) ¿qué persona soy? (RLS Nivel C: solo veo mi propia fila)
   const { data:per, error } = await sb
     .from('personas')
-    .select('id, nombre, email, mail, dni, es_equipo, auth_user_id, foto_perfil')
+    .select('id, nombre, email, mail, dni, es_equipo, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular')
     .eq('auth_user_id', session.user.id)
     .maybeSingle();
 
@@ -1330,6 +1330,13 @@ async function cargarEspacio(per){
   const _tieneMoplex = !!(moplex.data && moplex.data.length);
   const _hcCompleta  = HC_EXIGIR_MOPLEX ? (_tieneHC && _tieneMoplex) : _tieneHC;
   if(!_hcCompleta) _iniciarRecordatorioHC();
+
+  // Tiene la HC completa pero le falta el contacto de urgencia → se lo pedimos (y lo guardamos solos).
+  // A los que les falta la HC no los molestamos acá: lo cargan en el formulario, que ya pide el contacto.
+  const _faltaContactoUrg = !(per.contacto_urgencia_celular && String(per.contacto_urgencia_celular).trim());
+  if(_hcCompleta && _faltaContactoUrg && typeof window._iniciarRecordatorioContacto === 'function'){
+    window._iniciarRecordatorioContacto(per);
+  }
 }
 
 // ============================================================
@@ -4719,6 +4726,174 @@ window.copiarInstructivo = function(btn){
   window._iniciarRecordatorioHC = function(){
     mostrarBanner();   // banner fijo arriba, siempre visible
     mostrarModal();    // y el cartel grande apenas entra
+  };
+})();
+</script>
+
+<!-- ============================================================
+     RECORDATORIO CONTACTO DE URGENCIA
+     Pide SOLO nombre + celular del contacto y lo guarda solo en
+     personas.contacto_urgencia_nombre / contacto_urgencia_celular.
+     Reusa las animaciones hcFadeIn / hcPop ya definidas arriba.
+     ============================================================ -->
+<style>
+  #cuOverlay{position:fixed;inset:0;z-index:12050;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.72);backdrop-filter:blur(4px);animation:hcFadeIn .25s ease;}
+  #cuOverlay.open{display:flex}
+  .cu-modal{position:relative;width:100%;max-width:440px;background:var(--bg-2);color:var(--texto);border:1px solid rgba(30,159,224,.45);border-radius:20px;padding:30px 24px 24px;box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 0 1px rgba(30,159,224,.12);text-align:center;animation:hcPop .3s cubic-bezier(.2,.9,.3,1.2);}
+  .cu-modal .cu-emoji{font-size:46px;line-height:1;margin-bottom:10px;display:block;}
+  .cu-modal h3{font-size:21px;font-weight:800;margin:0 0 8px;color:var(--texto)}
+  .cu-modal p{font-size:14.5px;line-height:1.55;color:var(--texto-tenue);margin:0 0 18px}
+  .cu-field{text-align:left;margin-bottom:13px}
+  .cu-field label{display:block;font-size:12.5px;font-weight:700;color:var(--texto-tenue);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px}
+  .cu-field input{width:100%;background:var(--bg);color:var(--texto);border:1.5px solid var(--gris-borde);border-radius:12px;padding:13px 14px;font-family:inherit;font-size:15px;transition:border-color .15s;box-sizing:border-box}
+  .cu-field input:focus{outline:none;border-color:var(--celeste)}
+  .cu-error{color:#ef4444;font-size:12.5px;margin:-7px 0 11px;text-align:left;display:none}
+  .cu-error.show{display:block}
+  .cu-btn-primario{width:100%;display:block;background:var(--celeste);color:#fff;border:none;border-radius:13px;padding:15px;font-family:inherit;font-size:15.5px;font-weight:800;cursor:pointer;box-shadow:0 10px 26px var(--celeste-glow);transition:transform .12s,filter .12s;}
+  .cu-btn-primario:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.06)}
+  .cu-btn-primario:disabled{opacity:.6;cursor:default}
+  .cu-btn-luego{width:100%;margin-top:12px;background:transparent;border:none;color:var(--texto-tenue);font-family:inherit;font-size:13.5px;font-weight:600;cursor:pointer;padding:8px;border-radius:10px;transition:opacity .2s,color .2s;}
+  .cu-btn-luego:disabled{opacity:.45;cursor:not-allowed}
+  .cu-btn-luego:not(:disabled):hover{color:var(--texto)}
+  .cu-ok{font-size:46px;line-height:1;margin-bottom:8px;display:block}
+  .cu-banner{display:flex;align-items:center;gap:13px;padding:14px 16px;margin-bottom:18px;cursor:pointer;background:linear-gradient(135deg,var(--celeste-soft),rgba(30,159,224,.04));border:1px solid rgba(30,159,224,.45);border-radius:14px;box-shadow:0 4px 18px rgba(30,159,224,.10);transition:transform .12s,filter .12s;}
+  .cu-banner:hover{transform:translateY(-1px);filter:brightness(1.03)}
+  .cu-banner .cub-ico{font-size:24px;line-height:1;flex-shrink:0}
+  .cu-banner .cub-txt{flex:1;font-size:13.5px;line-height:1.45;color:var(--texto)}
+  .cu-banner .cub-txt b{color:var(--celeste);display:block;font-size:14px;margin-bottom:1px}
+  .cu-banner .cub-cta{flex-shrink:0;background:var(--celeste);color:#fff;border-radius:999px;padding:8px 14px;font-size:13px;font-weight:800;white-space:nowrap;}
+</style>
+
+<script>
+// ============================================================
+//  RECORDATORIO CONTACTO DE URGENCIA
+// ============================================================
+(function(){
+  let _per = null;
+  let _guardando = false;
+
+  function construir(){
+    if(document.getElementById('cuOverlay')) return;
+    const ov = document.createElement('div');
+    ov.id = 'cuOverlay';
+    ov.innerHTML = `
+      <div class="cu-modal" role="dialog" aria-modal="true">
+        <span class="cu-emoji">📞</span>
+        <h3>Falta tu contacto de urgencia</h3>
+        <p>Para tu seguridad necesitamos un contacto al que podamos llamar ante cualquier emergencia. Es un segundo y queda guardado.</p>
+        <div class="cu-field">
+          <label for="cuNombre">Nombre del contacto</label>
+          <input id="cuNombre" type="text" autocomplete="name" placeholder="Ej: María (mamá)">
+        </div>
+        <div class="cu-field">
+          <label for="cuCelular">Celular del contacto</label>
+          <input id="cuCelular" type="tel" inputmode="tel" autocomplete="tel" placeholder="Ej: 3517123456">
+        </div>
+        <div class="cu-error" id="cuError"></div>
+        <button class="cu-btn-primario" id="cuBtnGuardar">Guardar</button>
+        <button class="cu-btn-luego" id="cuBtnLuego" disabled>Más tarde</button>
+      </div>`;
+    document.body.appendChild(ov);
+    ov.querySelector('#cuBtnGuardar').addEventListener('click', guardar);
+    ov.querySelector('#cuBtnLuego').addEventListener('click', cerrar);
+    ov.querySelector('#cuCelular').addEventListener('keydown', e=>{ if(e.key==='Enter') guardar(); });
+  }
+
+  function mostrarModal(){
+    construir();
+    const ov  = document.getElementById('cuOverlay');
+    const btn = document.getElementById('cuBtnLuego');
+    ov.classList.add('open');
+    let seg = 3;
+    btn.disabled = true;
+    btn.textContent = 'Más tarde (' + seg + ')';
+    const cuenta = setInterval(function(){
+      seg--;
+      if(seg <= 0){ clearInterval(cuenta); btn.disabled = false; btn.textContent = 'Más tarde'; }
+      else { btn.textContent = 'Más tarde (' + seg + ')'; }
+    }, 1000);
+    setTimeout(function(){ const n = document.getElementById('cuNombre'); if(n) n.focus(); }, 350);
+  }
+
+  function cerrar(){
+    const ov = document.getElementById('cuOverlay');
+    if(ov) ov.classList.remove('open');
+    mostrarBanner();
+  }
+
+  function errMostrar(msg){
+    const e = document.getElementById('cuError');
+    if(e){ e.textContent = msg; e.classList.add('show'); }
+  }
+  function errLimpiar(){
+    const e = document.getElementById('cuError');
+    if(e){ e.textContent = ''; e.classList.remove('show'); }
+  }
+
+  async function guardar(){
+    if(_guardando || !_per) return;
+    errLimpiar();
+    const nombre  = (document.getElementById('cuNombre').value || '').trim();
+    const celular = (document.getElementById('cuCelular').value || '').trim();
+    const digitos = celular.replace(/\D/g, '');
+    if(!nombre){ errMostrar('Decinos el nombre del contacto.'); document.getElementById('cuNombre').focus(); return; }
+    if(digitos.length < 8){ errMostrar('Escribí un celular válido (con característica).'); document.getElementById('cuCelular').focus(); return; }
+
+    _guardando = true;
+    const btn = document.getElementById('cuBtnGuardar');
+    btn.disabled = true; btn.textContent = 'Guardando…';
+    try {
+      const { error } = await sb.from('personas')
+        .update({ contacto_urgencia_nombre: nombre, contacto_urgencia_celular: celular })
+        .eq('id', _per.id);
+      if(error) throw error;
+      // Actualizamos la copia local para no volver a pedirlo en esta sesión.
+      _per.contacto_urgencia_nombre = nombre;
+      _per.contacto_urgencia_celular = celular;
+      if(window._personaActual){
+        window._personaActual.contacto_urgencia_nombre = nombre;
+        window._personaActual.contacto_urgencia_celular = celular;
+      }
+      exito();
+    } catch(e){
+      console.error('[contacto urgencia] no se pudo guardar', e);
+      btn.disabled = false; btn.textContent = 'Guardar';
+      _guardando = false;
+      errMostrar('No se pudo guardar. Probá de nuevo en un momento.');
+    }
+  }
+
+  function exito(){
+    const ov = document.getElementById('cuOverlay');
+    const modal = ov ? ov.querySelector('.cu-modal') : null;
+    if(modal){
+      modal.innerHTML = `
+        <span class="cu-ok">✅</span>
+        <h3>¡Listo, gracias!</h3>
+        <p>Ya guardamos tu contacto de urgencia.</p>`;
+    }
+    const b = document.getElementById('cuBanner'); if(b) b.remove();
+    setTimeout(function(){ if(ov) ov.classList.remove('open'); }, 1700);
+  }
+
+  function mostrarBanner(){
+    const cont = document.getElementById('contenido');
+    if(!cont || document.getElementById('cuBanner')) return;
+    const b = document.createElement('div');
+    b.id = 'cuBanner';
+    b.className = 'cu-banner';
+    b.innerHTML = `
+      <span class="cub-ico">📞</span>
+      <div class="cub-txt"><b>Falta tu contacto de urgencia</b>Cargalo así te podemos contactar ante una emergencia.</div>
+      <span class="cub-cta">Cargar</span>`;
+    b.addEventListener('click', mostrarModal);
+    cont.insertBefore(b, cont.firstChild);
+  }
+
+  // Función global que llama cargarEspacio() cuando falta el contacto de urgencia.
+  window._iniciarRecordatorioContacto = function(per){
+    _per = per;
+    mostrarModal();
   };
 })();
 </script>
