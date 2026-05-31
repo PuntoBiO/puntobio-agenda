@@ -2989,9 +2989,9 @@ async function generarPDF(conWhatsApp = false) {
   }
 
   // --- Limpia texto pegado desde un PDF/Word ---
-  // El VALD pega caracteres invisibles raros. El peor es U+2028 (separador de línea):
-  // jsPDF lo dibuja como "(" y por eso aparecían los "(" entre los datos. Además mete
-  // espacios finos entre cada letra ("S e x o"). Acá se normaliza TODO antes de dibujar.
+  // El VALD pega caracteres que la fuente de jsPDF NO sabe dibujar (U+2028 separador de
+  // línea, el ✓, flechas →, etc.). Apenas aparece uno, jsPDF rompe el renglón entero y lo
+  // separa letra por letra (y dibuja "(" donde iba el salto). Acá se normaliza TODO antes.
   function normalizarTextoPegado(t) {
     if (!t) return '';
     let s = String(t);
@@ -3005,13 +3005,36 @@ async function generarPDF(conWhatsApp = false) {
     // 4) TODO otro tipo de espacio raro (fino, duro, tab, etc.) -> espacio normal.
     //    [^\S\n] = cualquier espacio MENOS el salto de línea.
     s = s.replace(/[^\S\n]/g, ' ');
-    // 5) Red de seguridad: si quedaron "(" sueltos sin ningún ")", eran saltos de línea perdidos.
+    // 5) TRADUCIR / SACAR símbolos que la fuente de jsPDF NO sabe dibujar.
+    //    Apenas hay uno (un ✓, una flecha →, etc.) jsPDF rompe TODO el renglón
+    //    y lo separa letra por letra. Acá los pasamos a algo que sí dibuje.
+    const MAPA_SIMBOLOS = {
+      '✓':'•','✔':'•','☑':'•','✅':'•','🗸':'•','✗':'x','✘':'x','❌':'x','✕':'x',
+      '→':'->','⇒':'->','➜':'->','➔':'->','←':'<-','↔':'<->',
+      '▶':'•','►':'•','▸':'•','‣':'•','◦':'•','∙':'•','●':'•','○':'•','■':'•','□':'•','▪':'•','◆':'•','♦':'•','❖':'•',
+      '★':'*','☆':'*','✦':'*','✱':'*',
+      '–':'-','—':'-','‒':'-','―':'-','‑':'-','−':'-',
+      '“':'"','”':'"','„':'"','‟':'"','«':'"','»':'"',
+      '‘':"'",'’':"'",'‚':"'",'‛':"'",'′':"'",'″':'"',
+      '…':'...','‰':'%','№':'No.','™':'(TM)','®':'(R)','©':'(C)'
+    };
+    // Caracteres "extra" de Windows-1252 que jsPDF sí dibuja (comillas curvas, guiones, viñeta, etc.)
+    const SAFE_EXTRA = new Set([0x20AC,0x201A,0x0192,0x201E,0x2026,0x2020,0x2021,0x02C6,0x2030,0x0160,0x2039,0x0152,0x017D,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,0x02DC,0x2122,0x0161,0x203A,0x0153,0x017E,0x0178]);
+    let limpio = '';
+    for (const ch of s) {
+      if (MAPA_SIMBOLOS[ch] !== undefined) { limpio += MAPA_SIMBOLOS[ch]; continue; }
+      const c = ch.codePointAt(0);
+      const ok = ch === '\n' || (c >= 0x20 && c <= 0x7E) || (c >= 0xA0 && c <= 0xFF) || SAFE_EXTRA.has(c);
+      limpio += ok ? ch : ''; // símbolo no soportado: lo sacamos para no romper el renglón
+    }
+    s = limpio;
+    // 6) Red de seguridad: si quedaron "(" sueltos sin ningún ")", eran saltos de línea perdidos.
     const abre = (s.match(/\(/g) || []).length;
     const cierra = (s.match(/\)/g) || []).length;
     if (abre >= 2 && cierra === 0) {
       s = s.replace(/ *\( */g, '\n');
     }
-    // 6) Arreglar el "S e x o :  F e m e n i n o" letra por letra, línea por línea.
+    // 7) Red de seguridad: juntar "S e x o" si alguna línea igual quedó letra por letra.
     s = s.split('\n').map(function (linea) {
       const tokens = linea.split(' ').filter(Boolean);
       if (tokens.length >= 5) {
@@ -3033,7 +3056,7 @@ async function generarPDF(conWhatsApp = false) {
       }
       return linea;
     }).join('\n');
-    // 7) Limpiar espacios y líneas en blanco sobrantes
+    // 8) Limpiar espacios y líneas en blanco sobrantes
     return s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
   }
 
