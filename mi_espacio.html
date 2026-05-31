@@ -816,6 +816,16 @@ const DIAS_PARA_RECUPERAR = 60; // regla del centro
 const DIAS_HABILES_VISTA  = 10; // cuántos días hábiles muestra el panel "Agenda" hacia adelante
 
 // ============================================================
+//  RECORDATORIO HISTORIA CLÍNICA (molesto pero salteable)
+// ============================================================
+// Si el alumno NO tiene su historia clínica cargada, le aparece un cartel
+// grande apenas entra y se lo vuelve a recordar cada tanto durante la sesión.
+const HC_RECORDATORIO_LINK     = '/registrate.html'; // adónde lo mandamos a completar la HC
+const HC_REAPARECE_MINUTOS     = 2;   // cada cuántos minutos vuelve a saltar el cartel si no la completó
+const HC_SEGUNDOS_PARA_CERRAR  = 4;   // cuántos seg tiene que esperar antes de poder tocar "Más tarde"
+const HC_EXIGIR_MOPLEX         = false; // si lo ponés en true, también molesta a quien no tiene evaluación Moplex
+
+// ============================================================
 //  BADGE "NUEVO" · cada feature dura 10 días desde su fecha de lanzamiento
 // ============================================================
 // Para marcar una sección como nueva: agregá una entrada acá con la fecha (YYYY-MM-DD)
@@ -1314,6 +1324,12 @@ async function cargarEspacio(per){
   _renderAgendaInicial();
   _renderResumenChip();
   _cargarDatosMensajes(); // carga el badge "N sin leer" del módulo de mensajes
+
+  // Si no tiene la historia clínica cargada, lo molestamos hasta que la complete.
+  const _tieneHC     = !!(hc.data && hc.data.length);
+  const _tieneMoplex = !!(moplex.data && moplex.data.length);
+  const _hcCompleta  = HC_EXIGIR_MOPLEX ? (_tieneHC && _tieneMoplex) : _tieneHC;
+  if(!_hcCompleta) _iniciarRecordatorioHC();
 }
 
 // ============================================================
@@ -4554,6 +4570,156 @@ window.copiarInstructivo = function(btn){
 
   chequear();                 // registro inicial
   setInterval(chequear, 120000);  // revisa cada 2 minutos
+})();
+</script>
+
+<!-- ============================================================
+     RECORDATORIO HISTORIA CLÍNICA (cartel molesto + banner fijo)
+     ============================================================ -->
+<style>
+  /* Overlay que tapa toda la pantalla */
+  #hcOverlay{
+    position:fixed;inset:0;z-index:12000;
+    display:none;align-items:center;justify-content:center;padding:18px;
+    background:rgba(0,0,0,.72);backdrop-filter:blur(4px);
+    animation:hcFadeIn .25s ease;
+  }
+  #hcOverlay.open{display:flex}
+  @keyframes hcFadeIn{from{opacity:0}to{opacity:1}}
+  .hc-modal{
+    position:relative;width:100%;max-width:440px;
+    background:var(--bg-2);color:var(--texto);
+    border:1px solid rgba(245,166,35,.45);
+    border-radius:20px;padding:30px 24px 24px;
+    box-shadow:0 24px 70px rgba(0,0,0,.55), 0 0 0 1px rgba(245,166,35,.12);
+    text-align:center;animation:hcPop .3s cubic-bezier(.2,.9,.3,1.2);
+  }
+  @keyframes hcPop{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+  .hc-modal .hc-emoji{
+    font-size:46px;line-height:1;margin-bottom:10px;display:block;
+    animation:hcShake 1.4s ease-in-out infinite;
+  }
+  @keyframes hcShake{0%,88%,100%{transform:rotate(0)}90%{transform:rotate(-12deg)}94%{transform:rotate(12deg)}}
+  .hc-modal h3{font-size:21px;font-weight:800;margin:0 0 8px;color:var(--texto)}
+  .hc-modal p{font-size:14.5px;line-height:1.55;color:var(--texto-tenue);margin:0 0 20px}
+  .hc-modal p b{color:var(--ambar)}
+  .hc-btn-primario{
+    width:100%;display:block;background:var(--celeste);color:#fff;border:none;
+    border-radius:13px;padding:15px;font-family:inherit;font-size:15.5px;font-weight:800;
+    cursor:pointer;box-shadow:0 10px 26px var(--celeste-glow);transition:transform .12s,filter .12s;
+    text-decoration:none;
+  }
+  .hc-btn-primario:hover{transform:translateY(-1px);filter:brightness(1.06)}
+  .hc-btn-luego{
+    width:100%;margin-top:12px;background:transparent;border:none;
+    color:var(--texto-tenue);font-family:inherit;font-size:13.5px;font-weight:600;
+    cursor:pointer;padding:8px;border-radius:10px;transition:opacity .2s,color .2s;
+  }
+  .hc-btn-luego:disabled{opacity:.45;cursor:not-allowed}
+  .hc-btn-luego:not(:disabled):hover{color:var(--texto)}
+
+  /* Banner fijo que queda arriba del contenido si tocó "Más tarde" */
+  .hc-banner{
+    display:flex;align-items:center;gap:13px;
+    padding:14px 16px;margin-bottom:18px;cursor:pointer;
+    background:linear-gradient(135deg, rgba(245,166,35,.20), rgba(245,166,35,.08));
+    border:1px solid rgba(245,166,35,.50);border-radius:14px;
+    box-shadow:0 4px 18px rgba(245,166,35,.12);
+    transition:transform .12s,filter .12s;
+  }
+  .hc-banner:hover{transform:translateY(-1px);filter:brightness(1.03)}
+  [data-theme="light"] .hc-banner{
+    background:linear-gradient(135deg, rgba(217,119,6,.14), rgba(217,119,6,.05));
+    border-color:rgba(217,119,6,.45);
+  }
+  .hc-banner .hcb-ico{font-size:24px;line-height:1;flex-shrink:0}
+  .hc-banner .hcb-txt{flex:1;font-size:13.5px;line-height:1.45;color:var(--texto)}
+  .hc-banner .hcb-txt b{color:var(--ambar);display:block;font-size:14px;margin-bottom:1px}
+  .hc-banner .hcb-cta{
+    flex-shrink:0;background:var(--celeste);color:#fff;border-radius:999px;
+    padding:8px 14px;font-size:13px;font-weight:800;white-space:nowrap;
+  }
+</style>
+
+<script>
+// ============================================================
+//  RECORDATORIO HISTORIA CLÍNICA
+// ============================================================
+(function(){
+  let timerReaparece = null;
+
+  function irACompletar(){ window.location.href = HC_RECORDATORIO_LINK; }
+
+  function construirOverlay(){
+    if(document.getElementById('hcOverlay')) return;
+    const ov = document.createElement('div');
+    ov.id = 'hcOverlay';
+    ov.innerHTML = `
+      <div class="hc-modal" role="dialog" aria-modal="true">
+        <span class="hc-emoji">📋</span>
+        <h3>Te falta tu historia clínica</h3>
+        <p>Para que el equipo pueda atenderte bien necesitamos que <b>completes tu historia clínica</b>. Son unos minutos y se hace una sola vez.</p>
+        <a class="hc-btn-primario" id="hcBtnCompletar" href="${HC_RECORDATORIO_LINK}">Completar ahora</a>
+        <button class="hc-btn-luego" id="hcBtnLuego" disabled>Más tarde</button>
+      </div>`;
+    document.body.appendChild(ov);
+
+    ov.querySelector('#hcBtnCompletar').addEventListener('click', function(e){
+      e.preventDefault(); irACompletar();
+    });
+    ov.querySelector('#hcBtnLuego').addEventListener('click', cerrarModal);
+  }
+
+  function mostrarModal(){
+    construirOverlay();
+    const ov  = document.getElementById('hcOverlay');
+    const btn = document.getElementById('hcBtnLuego');
+    ov.classList.add('open');
+
+    // El botón "Más tarde" se habilita recién después de unos segundos (fricción).
+    let seg = HC_SEGUNDOS_PARA_CERRAR;
+    btn.disabled = true;
+    btn.textContent = 'Más tarde (' + seg + ')';
+    const cuenta = setInterval(function(){
+      seg--;
+      if(seg <= 0){
+        clearInterval(cuenta);
+        btn.disabled = false;
+        btn.textContent = 'Más tarde';
+      } else {
+        btn.textContent = 'Más tarde (' + seg + ')';
+      }
+    }, 1000);
+  }
+
+  function cerrarModal(){
+    const ov = document.getElementById('hcOverlay');
+    if(ov) ov.classList.remove('open');
+    mostrarBanner();
+    // Programamos que vuelva a aparecer "de a ratos".
+    if(timerReaparece) clearTimeout(timerReaparece);
+    timerReaparece = setTimeout(mostrarModal, HC_REAPARECE_MINUTOS * 60 * 1000);
+  }
+
+  function mostrarBanner(){
+    const cont = document.getElementById('contenido');
+    if(!cont || document.getElementById('hcBanner')) return;
+    const b = document.createElement('div');
+    b.id = 'hcBanner';
+    b.className = 'hc-banner';
+    b.innerHTML = `
+      <span class="hcb-ico">📋</span>
+      <div class="hcb-txt"><b>Te falta tu historia clínica</b>Completala así el equipo te puede atender mejor.</div>
+      <span class="hcb-cta">Completar</span>`;
+    b.addEventListener('click', irACompletar);
+    cont.insertBefore(b, cont.firstChild); // siempre arriba de todo
+  }
+
+  // Función global que llama cargarEspacio() cuando el alumno no tiene HC.
+  window._iniciarRecordatorioHC = function(){
+    mostrarBanner();   // banner fijo arriba, siempre visible
+    mostrarModal();    // y el cartel grande apenas entra
+  };
 })();
 </script>
 
