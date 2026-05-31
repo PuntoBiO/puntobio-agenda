@@ -2497,6 +2497,12 @@ function abrirFormularioPaciente() {
       ${campo('Disponibilidad para entrenamiento', radios('f_disponibilidad_entrenamiento', hc.disponibilidad_entrenamiento, [['1 vez por semana','1 vez/sem'],['2 veces por semana','2 veces/sem'],['3 veces por semana','3 veces/sem'],['Más','Más']]))}
     </div></div>
 
+    <div class="hc-section"><div class="hc-section-header">📏 Medidas (Anamnesis nutricional)</div><div class="hc-section-body">
+      ${campo('Peso (kg)', txtIn('f_peso', hc.peso, 'Ej: 72,5'))}
+      ${campo('Altura (cm)', txtIn('f_altura', hc.altura, 'Ej: 168'))}
+      ${campo('% de grasa corporal (lo mide el centro)', txtIn('f_grasa_corporal', hc.grasa_corporal, 'Ej: 28,5'))}
+    </div></div>
+
     <div class="hc-section"><div class="hc-section-header">🎯 Objetivo y consentimientos</div><div class="hc-section-body">
       ${campo('¿Qué objetivo funcional quiere lograr?', taIn('f_objetivo_funcional', hc.objetivo_funcional, 'Ej: volver a correr sin dolor…'))}
       ${campo('Consentimiento de atención', yn('f_consent_atencion', hc.consentimiento_atencion))}
@@ -2552,6 +2558,8 @@ async function guardarFormularioPaciente() {
   const txtVal = (id) => { const el = document.getElementById(id); const v = (el?.value || '').trim(); return v || null; };
   const numVal = (id) => { const el = document.getElementById(id); const v = el?.value; return (v === '' || v == null) ? null : parseInt(v); };
   const selVal = (id) => { const el = document.getElementById(id); const v = el?.value; return v || null; };
+  // Acepta coma o punto decimal (ej: "72,5") y devuelve número o null
+  const numFlex = (id) => { const el = document.getElementById(id); const v = (el?.value || '').trim(); if (!v) return null; const n = parseFloat(v.replace(',', '.')); return isNaN(n) ? null : n; };
 
   try {
     const datos = {
@@ -2606,6 +2614,9 @@ async function guardarFormularioPaciente() {
       fatiga_percibida: numVal('f_fatiga_percibida'),
       disponibilidad_entrenamiento: radioVal('f_disponibilidad_entrenamiento'),
       objetivo_funcional: txtVal('f_objetivo_funcional'),
+      peso: numFlex('f_peso'),
+      altura: numFlex('f_altura'),
+      grasa_corporal: numFlex('f_grasa_corporal'),
       consentimiento_atencion: radioVal('f_consent_atencion'),
       consentimiento_atencion_nombre: txtVal('f_consent_atencion_nombre'),
       consentimiento_investigacion: radioVal('f_consent_investigacion'),
@@ -3102,6 +3113,99 @@ async function generarPDF(conWhatsApp = false) {
     if (hc.objetivo_funcional) {
       tituloSeccion('Objetivo funcional');
       fila('Objetivo', hc.objetivo_funcional);
+    }
+
+    // ===== Anamnesis nutricional (Peso / Talla / IMC / % Grasa + clasificaciones) =====
+    if (hc.peso && hc.altura) {
+      const peso = Number(hc.peso);
+      const alturaM = Number(hc.altura) < 3 ? Number(hc.altura) : Number(hc.altura) / 100; // detecta metros o cm
+      const imc = alturaM > 0 ? peso / (alturaM * alturaM) : null;
+      const grasa = (hc.grasa_corporal !== null && hc.grasa_corporal !== undefined && hc.grasa_corporal !== '') ? Number(hc.grasa_corporal) : null;
+      let edad = null;
+      if (persona && persona.fecha_nacimiento) {
+        const fn = String(persona.fecha_nacimiento).slice(0, 10).split('-');
+        if (fn.length === 3) {
+          const hoy = new Date();
+          edad = hoy.getFullYear() - (+fn[0]);
+          const m = hoy.getMonth() + 1;
+          if (m < (+fn[1]) || (m === (+fn[1]) && hoy.getDate() < (+fn[2]))) edad--;
+        }
+      }
+      const num1 = (n) => (Math.round(n * 10) / 10).toString().replace('.', ',');
+
+      tituloSeccion('Anamnesis nutricional');
+
+      // Cajitas resumen: Peso / Talla / IMC / % Grasa
+      checkPage(44);
+      const cajas = [['Peso', num1(peso) + ' kg'], ['Talla', num1(alturaM) + ' m'], ['IMC', imc ? num1(imc) : '—']];
+      if (grasa !== null) cajas.push(['% Grasa', num1(grasa) + ' %']);
+      const cajaW = (CONTENT_W - 8 * (cajas.length - 1)) / cajas.length;
+      cajas.forEach((c, i) => {
+        const cx = MARGIN + i * (cajaW + 8);
+        doc.setFillColor(240, 248, 253);
+        doc.rect(cx, y - 6, cajaW, 34, 'F');
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+        doc.text(c[0], cx + 6, y + 3);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(...AZUL);
+        doc.text(c[1], cx + 6, y + 18);
+      });
+      y += 44;
+
+      // Tabla de IMC (OMS) con la fila de la persona resaltada
+      const filasIMC = [
+        ['< 18,5', 'Bajo peso', 'Delgado', [33, 150, 243], imc !== null && imc < 18.5],
+        ['18,5 - 24,9', 'Peso adecuado', 'Aceptable', [100, 181, 246], imc !== null && imc >= 18.5 && imc < 25],
+        ['25,0 - 29,9', 'Sobrepeso', 'Sobrepeso', [76, 175, 80], imc !== null && imc >= 25 && imc < 30],
+        ['30,0 - 34,9', 'Obesidad grado 1', 'Obesidad', [255, 193, 7], imc !== null && imc >= 30 && imc < 35],
+        ['35,0 - 39,9', 'Obesidad grado 2', 'Obesidad', [255, 152, 0], imc !== null && imc >= 35 && imc < 40],
+        ['>= 40', 'Obesidad grado 3', 'Obesidad', [244, 67, 54], imc !== null && imc >= 40],
+      ];
+      checkPage(18 + filasIMC.length * 15);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+      doc.text('Clasificación del IMC (OMS)', MARGIN, y); y += 10;
+      filasIMC.forEach(f => {
+        const rh = 15;
+        doc.setFillColor(f[3][0], f[3][1], f[3][2]);
+        doc.rect(MARGIN, y - 1, CONTENT_W, rh, 'F');
+        if (f[4]) { doc.setDrawColor(17, 17, 17); doc.setLineWidth(1.4); doc.rect(MARGIN, y - 1, CONTENT_W, rh); doc.setLineWidth(1); }
+        doc.setFont('helvetica', f[4] ? 'bold' : 'normal'); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
+        doc.text(f[0], MARGIN + 6, y + 9);
+        doc.text(f[1], MARGIN + 95, y + 9);
+        doc.text(f[2], MARGIN + 250, y + 9);
+        if (f[4]) { doc.setTextColor(17, 17, 17); doc.setFont('helvetica', 'bold'); doc.text('<- AQUI', MARGIN + CONTENT_W - 48, y + 9); }
+        y += rh;
+      });
+      y += 12;
+
+      // Tablas de % de grasa corporal (referencia) - se marca la columna de edad
+      const rangosEdad = ['20-39', '40-59', '60-79'];
+      const colEdadIdx = edad === null ? -1 : (edad < 40 ? 0 : (edad < 60 ? 1 : 2));
+      const tablaGrasa = (titulo, datos) => {
+        checkPage(22 + 4 * 13);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+        doc.text(titulo, MARGIN, y); y += 13;
+        const wLab = 110, wCol = (CONTENT_W - wLab) / 3;
+        doc.setFontSize(7.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS);
+        rangosEdad.forEach((r, i) => {
+          const cx = MARGIN + wLab + i * wCol;
+          if (i === colEdadIdx) { doc.setFillColor(255, 243, 205); doc.rect(cx, y - 9, wCol, 12, 'F'); }
+          doc.text(r + ' anos', cx + 4, y);
+        });
+        y += 3;
+        ['Bajo en grasa', 'Saludable', 'Sobrepeso', 'Obesidad'].forEach((et, ri) => {
+          doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(60, 60, 60);
+          doc.text(et, MARGIN, y + 9);
+          datos[ri].forEach((val, ci) => {
+            const cx = MARGIN + wLab + ci * wCol;
+            if (ci === colEdadIdx) { doc.setFillColor(255, 243, 205); doc.rect(cx, y, wCol, 12, 'F'); }
+            doc.setTextColor(60, 60, 60); doc.text(val, cx + 4, y + 9);
+          });
+          y += 12;
+        });
+        y += 10;
+      };
+      tablaGrasa('% de grasa corporal - Mujeres', [['< 21%', '< 23%', '< 24%'], ['21-33%', '23-35%', '24-36%'], ['33-39%', '35-40%', '36-42%'], ['> 39%', '> 40%', '> 42%']]);
+      tablaGrasa('% de grasa corporal - Hombres', [['< 8%', '< 11%', '< 13%'], ['8-20%', '11-22%', '13-25%'], ['20-25%', '22-28%', '25-30%'], ['> 25%', '> 28%', '> 30%']]);
     }
 
     // Convierte true/false a Sí/No y deja pasar textos y números tal cual
