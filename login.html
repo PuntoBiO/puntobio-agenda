@@ -531,9 +531,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 // Equipo -> app.html (panel completo). Alumno/paciente -> mi_espacio.html.
 // Averigua el rol de la persona logueada.
 // Devuelve: 'alumno' | 'equipo' | 'ambos'
-async function detectarRol() {
+async function detectarRol(uidArg) {
   try {
-    const uid = (await supabase.auth.getUser()).data.user.id
+    let uid = uidArg
+    if (!uid) {
+      const { data: { session } } = await supabase.auth.getSession()
+      uid = session && session.user ? session.user.id : null
+    }
+    if (!uid) return 'alumno'
     const { data: per } = await supabase
       .from('personas')
       .select('id, es_equipo')
@@ -571,8 +576,8 @@ async function detectarRol() {
 }
 
 // Decide a dónde ir. Si es 'ambos', NO redirige: muestra el selector.
-async function irSegunRol() {
-  const rol = await detectarRol()
+async function irSegunRol(uid) {
+  const rol = await detectarRol(uid)
   if (rol === 'equipo') { window.location.href = 'app.html'; return }
   if (rol === 'alumno') { window.location.href = 'mi_espacio.html'; return }
   // ambos -> mostrar selector de "¿cómo querés entrar?"
@@ -730,7 +735,7 @@ window.loginEmail = async function() {
   btn.disabled = true
   btn.innerHTML = '<span class="spinner"></span>Entrando...'
 
-  const { error } = await supabase.auth.signInWithPassword({ email, password })
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
 
   if (error) {
     btn.disabled = false
@@ -745,11 +750,20 @@ window.loginEmail = async function() {
     return
   }
 
-  // Intentamos vincular la cuenta a su ficha del padrón (solo aplica a alumnos; es idempotente)
-  try { await supabase.rpc('vincular_mi_cuenta') } catch (e) {}
+  // Ya tenemos al usuario del propio login: no hace falta volver a pedirlo.
+  const uid = data && data.user ? data.user.id : null
+
+  // Intentamos vincular la cuenta a su ficha del padrón (solo aplica a alumnos; es idempotente).
+  // No debe trabar el ingreso: si tarda más de 4s, seguimos igual.
+  try {
+    await Promise.race([
+      supabase.rpc('vincular_mi_cuenta'),
+      new Promise(resolve => setTimeout(resolve, 4000))
+    ])
+  } catch (e) {}
 
   // El sistema decide el destino: alumno -> mi espacio, equipo -> panel, ambos -> pregunta
-  await irSegunRol()
+  await irSegunRol(uid)
 }
 
 function mostrarError(tipo, mensaje) {
