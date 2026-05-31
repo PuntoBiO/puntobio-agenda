@@ -2989,26 +2989,29 @@ async function generarPDF(conWhatsApp = false) {
   }
 
   // --- Limpia texto pegado desde un PDF/Word ---
-  // Arregla el clásico "S e x o :  F e m e n i n o" (cada letra separada por un
-  // espacio raro que mete el copiar/pegar desde un PDF) y los saltos de línea perdidos.
+  // El VALD pega caracteres invisibles raros. El peor es U+2028 (separador de línea):
+  // jsPDF lo dibuja como "(" y por eso aparecían los "(" entre los datos. Además mete
+  // espacios finos entre cada letra ("S e x o"). Acá se normaliza TODO antes de dibujar.
   function normalizarTextoPegado(t) {
     if (!t) return '';
     let s = String(t);
-    // 1) Sacar caracteres invisibles (ancho cero) que mete el copiar/pegar
-    s = s.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
-    // 2) Unificar TODOS los tipos de espacio raros (finos, duros, etc.) a un espacio normal.
-    //    Acá está la clave: el PDF separa las letras con espacios que NO son el normal.
-    s = s.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\t]/g, ' ');
-    // 3) Normalizar saltos de línea
+    // 1) Sacar caracteres invisibles de ancho cero / guion suave
+    s = s.replace(/[\u00AD\u200B\u200C\u200D\u2060\uFEFF]/g, '');
+    // 2) Normalizar saltos de línea normales
     s = s.replace(/\r\n?/g, '\n');
-    // 4) Restaurar saltos de línea perdidos: si hay varios "(" y NINGÚN ")",
-    //    esos "(" son saltos de línea que se comieron al pegar (NO son paréntesis reales).
+    // 3) Separadores de línea/párrafo Unicode (U+2028 / U+2029 / U+0085) -> salto de línea REAL.
+    //    Estos son los que jsPDF dibujaba como "(" o ")".
+    s = s.replace(/[\u2028\u2029\u0085]/g, '\n');
+    // 4) TODO otro tipo de espacio raro (fino, duro, tab, etc.) -> espacio normal.
+    //    [^\S\n] = cualquier espacio MENOS el salto de línea.
+    s = s.replace(/[^\S\n]/g, ' ');
+    // 5) Red de seguridad: si quedaron "(" sueltos sin ningún ")", eran saltos de línea perdidos.
     const abre = (s.match(/\(/g) || []).length;
     const cierra = (s.match(/\)/g) || []).length;
     if (abre >= 2 && cierra === 0) {
       s = s.replace(/ *\( */g, '\n');
     }
-    // 5) Arreglar el "S e x o :  F e m e n i n o" letra por letra, línea por línea.
+    // 6) Arreglar el "S e x o :  F e m e n i n o" letra por letra, línea por línea.
     s = s.split('\n').map(function (linea) {
       const tokens = linea.split(' ').filter(Boolean);
       if (tokens.length >= 5) {
@@ -3018,7 +3021,6 @@ async function generarPDF(conWhatsApp = false) {
           let out;
           try {
             // Saca SOLO los espacios entre dos letras/números (no rompe palabras).
-            // Los espacios dobles (separadores reales) quedan y se colapsan después.
             out = linea.replace(/(?<=[\p{L}\p{N}]) (?=[\p{L}\p{N}])/gu, '');
           } catch (e) {
             // Por si el navegador no soporta lookbehind: deja el doble espacio como separador
@@ -3031,7 +3033,7 @@ async function generarPDF(conWhatsApp = false) {
       }
       return linea;
     }).join('\n');
-    // 6) Limpiar espacios y líneas en blanco sobrantes
+    // 7) Limpiar espacios y líneas en blanco sobrantes
     return s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
   }
 
