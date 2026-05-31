@@ -2990,29 +2990,49 @@ async function generarPDF(conWhatsApp = false) {
 
   // --- Limpia texto pegado desde un PDF/Word ---
   // Arregla el clásico "S e x o :  F e m e n i n o" (cada letra separada por un
-  // espacio) que aparece al copiar texto desde un PDF, y los saltos de línea raros.
+  // espacio raro que mete el copiar/pegar desde un PDF) y los saltos de línea perdidos.
   function normalizarTextoPegado(t) {
     if (!t) return '';
-    let s = String(t).replace(/\r\n?/g, '\n');
+    let s = String(t);
+    // 1) Sacar caracteres invisibles (ancho cero) que mete el copiar/pegar
+    s = s.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+    // 2) Unificar TODOS los tipos de espacio raros (finos, duros, etc.) a un espacio normal.
+    //    Acá está la clave: el PDF separa las letras con espacios que NO son el normal.
+    s = s.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\t]/g, ' ');
+    // 3) Normalizar saltos de línea
+    s = s.replace(/\r\n?/g, '\n');
+    // 4) Restaurar saltos de línea perdidos: si hay varios "(" y NINGÚN ")",
+    //    esos "(" son saltos de línea que se comieron al pegar (NO son paréntesis reales).
+    const abre = (s.match(/\(/g) || []).length;
+    const cierra = (s.match(/\)/g) || []).length;
+    if (abre >= 2 && cierra === 0) {
+      s = s.replace(/ *\( */g, '\n');
+    }
+    // 5) Arreglar el "S e x o :  F e m e n i n o" letra por letra, línea por línea.
     s = s.split('\n').map(function (linea) {
       const tokens = linea.split(' ').filter(Boolean);
-      if (tokens.length >= 6) {
+      if (tokens.length >= 5) {
         const sueltos = tokens.filter(w => w.length === 1).length;
         // Si la mayoría de los "tokens" son de 1 carácter, está espaciado letra a letra.
-        if (sueltos / tokens.length > 0.6) {
-          // Saca SOLO los espacios que están entre dos letras/números.
-          // Los espacios dobles (separadores reales de palabra) quedan intactos.
+        if (sueltos / tokens.length > 0.55) {
+          let out;
           try {
-            return linea.replace(/(?<=[\p{L}\p{N}]) (?=[\p{L}\p{N}])/gu, '');
+            // Saca SOLO los espacios entre dos letras/números (no rompe palabras).
+            // Los espacios dobles (separadores reales) quedan y se colapsan después.
+            out = linea.replace(/(?<=[\p{L}\p{N}]) (?=[\p{L}\p{N}])/gu, '');
           } catch (e) {
-            // Por si el navegador no soporta lookbehind: quita 1 de cada 2 espacios
-            return linea.replace(/ {2,}/g, '\u0001').replace(/ /g, '').replace(/\u0001/g, ' ');
+            // Por si el navegador no soporta lookbehind: deja el doble espacio como separador
+            out = linea.replace(/ {2,}/g, '\u0001').replace(/ /g, '').replace(/\u0001/g, ' ');
           }
+          out = out.replace(/ +([:;,.)\]!?¿¡])/g, '$1'); // saca espacio ANTES de un signo
+          out = out.replace(/([(\[¿¡]) +/g, '$1');         // saca espacio DESPUÉS de signo de apertura
+          return out.replace(/ {2,}/g, ' ');
         }
       }
       return linea;
     }).join('\n');
-    return s.replace(/[ \t]{2,}/g, ' ').trim();
+    // 6) Limpiar espacios y líneas en blanco sobrantes
+    return s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trim();
   }
 
   const ynTxt = (v) => v === true ? 'Sí' : v === false ? 'No' : null;
