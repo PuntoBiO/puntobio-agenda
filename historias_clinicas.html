@@ -2844,6 +2844,7 @@ async function generarPDF(conWhatsApp = false) {
   const AZUL = [30, 159, 224];   // #1e9fe0
   const NEGRO = [17, 17, 17];    // #111
   const GRIS = [110, 110, 110];
+  const GRIS_OSCURO = [70, 70, 70]; // gris oscuro PAREJO para el cuerpo del texto (lo que va al paciente)
   let y = MARGIN;
 
   // --- Salto de página automático ---
@@ -2960,6 +2961,60 @@ async function generarPDF(conWhatsApp = false) {
     y += alto;
   }
 
+  // --- Helper: bloque de texto multilínea, PAREJO en toda la página ---
+  // Reaplica el estilo en CADA línea. Así, aunque haya salto de página
+  // (y el pie cambie el color/tamaño), el texto nunca queda mitad negro / mitad gris.
+  // Además limpia el texto pegado desde PDF/Word (letras separadas, saltos raros).
+  function bloqueTexto(texto, opciones) {
+    const o = opciones || {};
+    const size   = o.size   || 10;
+    const color  = o.color  || GRIS_OSCURO;
+    const estilo = o.estilo || 'normal';            // 'normal' | 'italic' | 'bold'
+    const x      = (o.x != null) ? o.x : (MARGIN + 8);
+    const lineH  = o.lineH  || 13;
+    const ancho  = o.ancho  || (CONTENT_W - 16);
+    const aplicar = () => {
+      doc.setFont('helvetica', estilo);
+      doc.setFontSize(size);
+      doc.setTextColor(color[0], color[1], color[2]);
+    };
+    aplicar();
+    const lineas = doc.splitTextToSize(normalizarTextoPegado(texto), ancho);
+    lineas.forEach(linea => {
+      checkPage(lineH);
+      aplicar(); // por si checkPage saltó de página y el pie cambió el estilo
+      doc.text(linea, x, y);
+      y += lineH;
+    });
+  }
+
+  // --- Limpia texto pegado desde un PDF/Word ---
+  // Arregla el clásico "S e x o :  F e m e n i n o" (cada letra separada por un
+  // espacio) que aparece al copiar texto desde un PDF, y los saltos de línea raros.
+  function normalizarTextoPegado(t) {
+    if (!t) return '';
+    let s = String(t).replace(/\r\n?/g, '\n');
+    s = s.split('\n').map(function (linea) {
+      const tokens = linea.split(' ').filter(Boolean);
+      if (tokens.length >= 6) {
+        const sueltos = tokens.filter(w => w.length === 1).length;
+        // Si la mayoría de los "tokens" son de 1 carácter, está espaciado letra a letra.
+        if (sueltos / tokens.length > 0.6) {
+          // Saca SOLO los espacios que están entre dos letras/números.
+          // Los espacios dobles (separadores reales de palabra) quedan intactos.
+          try {
+            return linea.replace(/(?<=[\p{L}\p{N}]) (?=[\p{L}\p{N}])/gu, '');
+          } catch (e) {
+            // Por si el navegador no soporta lookbehind: quita 1 de cada 2 espacios
+            return linea.replace(/ {2,}/g, '\u0001').replace(/ /g, '').replace(/\u0001/g, ' ');
+          }
+        }
+      }
+      return linea;
+    }).join('\n');
+    return s.replace(/[ \t]{2,}/g, ' ').trim();
+  }
+
   const ynTxt = (v) => v === true ? 'Sí' : v === false ? 'No' : null;
 
   // ====== DATOS DEL FORMULARIO (si el paciente lo completó y lo eligieron) ======
@@ -3018,17 +3073,9 @@ async function generarPDF(conWhatsApp = false) {
       doc.setTextColor(...AZUL);
       doc.text(cab, MARGIN + 8, y);
       y += 14;
-      // Texto de la observación: escribimos línea por línea para que
-      // un texto largo salte de página correctamente y no se pise con el pie.
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      doc.setTextColor(40, 40, 40);
-      const lineasTexto = doc.splitTextToSize(o.texto || '', CONTENT_W - 16);
-      lineasTexto.forEach(linea => {
-        checkPage(13);
-        doc.text(linea, MARGIN + 8, y);
-        y += 13;
-      });
+      // Cuerpo de la observación: gris oscuro PAREJO en todas las páginas
+      // y con el texto pegado ya limpio (sin letras separadas).
+      bloqueTexto(o.texto || '', { size: 10, color: GRIS_OSCURO });
       y += 12; // espacio entre observaciones
     });
   }
@@ -3066,18 +3113,10 @@ async function generarPDF(conWhatsApp = false) {
       }
       // Contenido de la evolución
       if (e.contenido) {
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10);
-        doc.setTextColor(40, 40, 40);
-        const lns = doc.splitTextToSize(e.contenido, CONTENT_W - 16);
-        lns.forEach(linea => { checkPage(13); doc.text(linea, MARGIN + 8, y); y += 13; });
+        bloqueTexto(e.contenido, { size: 10, color: GRIS_OSCURO });
       }
       if (e.observacion) {
-        doc.setFont('helvetica', 'italic');
-        doc.setFontSize(9);
-        doc.setTextColor(80, 80, 80);
-        const lns2 = doc.splitTextToSize('Observación: ' + e.observacion, CONTENT_W - 16);
-        lns2.forEach(linea => { checkPage(13); doc.text(linea, MARGIN + 8, y); y += 13; });
+        bloqueTexto('Observación: ' + e.observacion, { size: 9, color: [90, 90, 90], estilo: 'italic' });
       }
       y += 10;
     });
@@ -3106,10 +3145,7 @@ async function generarPDF(conWhatsApp = false) {
       fila2('Días', perfilDepPDF.dias_especificos.join(', '));
     }
     if (perfilDepPDF.notas) {
-      checkPage(13);
-      doc.setFont('helvetica', 'italic'); doc.setFontSize(9); doc.setTextColor(...GRIS);
-      const lns = doc.splitTextToSize('Notas: ' + perfilDepPDF.notas, CONTENT_W - 16);
-      lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+      bloqueTexto('Notas: ' + perfilDepPDF.notas, { size: 9, color: GRIS_OSCURO, estilo: 'italic' });
     }
     y += 6;
   }
@@ -3130,8 +3166,7 @@ async function generarPDF(conWhatsApp = false) {
         checkPage(13); doc.text(detalle, MARGIN + 8, y); y += 13;
       }
       if (c.notas) {
-        const lns = doc.splitTextToSize('Notas: ' + c.notas, CONTENT_W - 16);
-        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+        bloqueTexto('Notas: ' + c.notas, { size: 9, color: GRIS_OSCURO });
       }
       y += 6;
     });
@@ -3158,12 +3193,10 @@ async function generarPDF(conWhatsApp = false) {
         checkPage(13); doc.text(chips.join(' · '), MARGIN + 8, y); y += 13;
       }
       if (b.deporte_descripcion) {
-        const lns = doc.splitTextToSize('Deporte: ' + b.deporte_descripcion, CONTENT_W - 16);
-        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+        bloqueTexto('Deporte: ' + b.deporte_descripcion, { size: 9, color: GRIS_OSCURO });
       }
       if (b.notas) {
-        const lns = doc.splitTextToSize('Notas: ' + b.notas, CONTENT_W - 16);
-        lns.forEach(l => { checkPage(13); doc.text(l, MARGIN + 8, y); y += 13; });
+        bloqueTexto('Notas: ' + b.notas, { size: 9, color: GRIS_OSCURO });
       }
       y += 4;
     });
