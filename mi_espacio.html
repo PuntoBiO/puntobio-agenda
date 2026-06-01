@@ -1045,41 +1045,51 @@ function hoyISO(){
   // 2) ¿qué persona soy? (RLS Nivel C: solo veo mi propia fila)
   const { data:per, error } = await sb
     .from('personas')
-    .select('id, nombre, email, mail, dni, es_equipo, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular')
+    .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular')
     .eq('auth_user_id', session.user.id)
     .maybeSingle();
 
   if(error){ console.error(error); mostrarError('No pudimos cargar tu información. Probá de nuevo en un momento.'); return; }
   if(!per){ mostrarSinFicha(); return; }
 
-  // Si es SOLO equipo (sin plan de alumno activo), este no es su lugar.
-  // Si es equipo PERO también tiene plan TF activo (doble rol), sí puede ver su espacio.
+  // 2.b) Acceso bloqueado manualmente desde el Padrón
+  if(per.bloqueado){ mostrarBloqueado(); return; }
+
+  // 2.c) ¿Tiene un plan TF activo? (RPC + fallback a inscripciones_tf)
+  const tienePlan = await chequearPlanActivo(per.id);
+
+  // Equipo: si no tiene plan, va al panel del equipo (no es su espacio).
+  //         Si tiene plan (doble rol), sigue y ve su espacio.
+  // Alumno/paciente: sin plan activo NO entra hasta tener uno.
   if(per.es_equipo){
-    let tienePlan = false;
-    try {
-      const { data:tp } = await sb.rpc('tiene_plan_tf_activo', { p_persona_id: per.id });
-      tienePlan = (tp === true);
-    } catch(e){ tienePlan = false; }
-
-    // Fallback directo: si el RPC no detecta plan, consultamos inscripciones_tf
-    // (soluciona el caso de staff que también son alumnos)
-    if(!tienePlan){
-      try {
-        const { data:insc } = await sb
-          .from('inscripciones_tf')
-          .select('id')
-          .eq('persona_id', per.id)
-          .eq('estado', 'ACTIVO')
-          .limit(1);
-        tienePlan = !!(insc && insc.length > 0);
-      } catch(e){ /* ignore */ }
-    }
-
     if(!tienePlan){ mostrarEquipo(); return; }
+  } else {
+    if(!tienePlan){ mostrarSinPlan(); return; }
   }
 
   await cargarEspacio(per);
 })();
+
+// ¿La persona tiene un plan TF activo? Usa el RPC y, si falla, mira inscripciones_tf.
+async function chequearPlanActivo(personaId){
+  let tienePlan = false;
+  try {
+    const { data:tp } = await sb.rpc('tiene_plan_tf_activo', { p_persona_id: personaId });
+    tienePlan = (tp === true);
+  } catch(e){ tienePlan = false; }
+  if(!tienePlan){
+    try {
+      const { data:insc } = await sb
+        .from('inscripciones_tf')
+        .select('id')
+        .eq('persona_id', personaId)
+        .eq('estado', 'ACTIVO')
+        .limit(1);
+      tienePlan = !!(insc && insc.length > 0);
+    } catch(e){ /* ignore */ }
+  }
+  return tienePlan;
+}
 
 // ============================================================
 //  PANTALLAS DE ESTADO
@@ -1102,6 +1112,18 @@ function mostrarEquipo(){
     <p>Tu cuenta es del equipo. Para administrar el sistema usá el panel completo.</p>
     <a class="boton" href="/app.html">Ir al sistema</a>
     <button class="boton" style="margin-top:12px;background:transparent;border:1.5px solid var(--celeste);color:var(--celeste);font-weight:700;padding:12px 22px;border-radius:12px;cursor:pointer;font-family:inherit" onclick="abrirInstructivo()">📲 Enviar instructivo a un alumno</button>`;
+}
+function mostrarBloqueado(){
+  $('boot').innerHTML = `
+    <h2>Acceso deshabilitado</h2>
+    <p>Tu acceso a Mi Espacio está deshabilitado por el momento. Si creés que es un error, escribinos y lo resolvemos.</p>
+    <a class="boton" href="https://wa.me/${WHATSAPP_CENTRO}" target="_blank">Escribir al centro</a>`;
+}
+function mostrarSinPlan(){
+  $('boot').innerHTML = `
+    <h2>No tenés un plan activo</h2>
+    <p>Mi Espacio está disponible mientras tengas un plan activo en el centro. Cuando retomes tu plan vas a poder entrar de nuevo. Cualquier duda, escribinos.</p>
+    <a class="boton" href="https://wa.me/${WHATSAPP_CENTRO}" target="_blank">Escribir al centro</a>`;
 }
 function mostrarError(msg){
   $('boot').innerHTML = `<h2>Ups…</h2><p>${esc(msg)}</p>
