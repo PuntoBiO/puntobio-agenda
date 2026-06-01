@@ -252,6 +252,7 @@
   <button class="filtro-btn" data-faltante="SIN_HC">⚠️ Sin HC</button>
   <button class="filtro-btn" data-faltante="SIN_EVAL">⚠️ Sin evaluación</button>
   <button class="filtro-btn" data-faltante="SIN_AMBAS">⚠️ Sin HC ni evaluación</button>
+  <button class="filtro-btn" data-faltante="SIN_MIESP">📵 Sin entrar a Mi Espacio</button>
 </div>
 
 <div class="resumen" id="resumen"></div>
@@ -274,6 +275,7 @@
         <button class="wsp-opcion" onclick="enviarWspPlantilla('pago')" style="text-align:left; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); cursor:pointer; font-size:13px;">💲 Recordatorio de pago / cuota</button>
         <button class="wsp-opcion" onclick="enviarWspPlantilla('turno')" style="text-align:left; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); cursor:pointer; font-size:13px;">📅 Confirmar turnos asignados</button>
         <button class="wsp-opcion" onclick="enviarWspPlantilla('hc')" style="text-align:left; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); cursor:pointer; font-size:13px;">📋 Completar historia clínica</button>
+        <button class="wsp-opcion" onclick="enviarWspPlantilla('miespacio')" style="text-align:left; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); cursor:pointer; font-size:13px;">💙 Invitar a Mi Espacio</button>
       </div>
     </div>
     <div class="modal-footer">
@@ -839,6 +841,9 @@ let hcsPersona = [];     // HCs de la persona activa en modalVer
 let hcActivaIdx = null;  // índice de la HC abierta en modalHC
 
 const FORM_URL = 'https://www.puntobio.com.ar/registrate.html';
+// Puerta de entrada a Mi Espacio (link SIN caducidad: el alumno crea su clave cuando quiera)
+const LINK_MI_ESPACIO = 'https://www.puntobio.com.ar/login.html';
+let accesoPorPersona = {}; // persona_id -> { tiene_cuenta, confirmado, ya_ingreso, ultimo_ingreso }
 
 const HOY = new Date();
 const MES_ACTUAL = `${HOY.getFullYear()}-${String(HOY.getMonth()+1).padStart(2,'0')}`;
@@ -1084,12 +1089,34 @@ async function cargarTodo() {
     renderCards();
     renderFiltrosOpciones();
     aplicarFiltros();
+    // Estado de acceso a Mi Espacio (quién ya entró / a quién falta invitar) — no traba si falla
+    cargarAccesos().then(() => { renderCards(); aplicarFiltros(); });
     // Avisar al app que refresque el badge del sidebar Morosos TF
     try { window.parent && window.parent.postMessage({ tipo: 'REFRESCAR_BADGE_MOROSOS' }, '*'); } catch(e) {}
   } catch (e) {
     console.error(e);
     $('#tabla-wrap').innerHTML = `<div class="empty" style="color:var(--rojo)">⚠️ Error al cargar: ${e.message}</div>`;
   }
+}
+
+// ===== ACCESO A MI ESPACIO =====
+async function cargarAccesos() {
+  accesoPorPersona = {};
+  try {
+    const { data, error } = await sb.rpc('estado_acceso_personas');
+    if (error) throw error;
+    (data || []).forEach(r => { accesoPorPersona[r.persona_id] = r; });
+  } catch (e) {
+    console.warn('No se pudo cargar el estado de acceso a Mi Espacio (¿falta el RPC?):', e.message);
+  }
+  personas.forEach(f => {
+    const a = accesoPorPersona[f.persona.id];
+    f.tieneCuenta   = !!(a && a.tiene_cuenta);
+    f.confirmado    = !!(a && a.confirmado);
+    f.ultimoIngreso = a && a.ultimo_ingreso ? a.ultimo_ingreso : null;
+    f.yaIngreso     = !!(a && (a.ya_ingreso || a.ultimo_ingreso));
+    f.tieneEmail    = !!(f.persona.email || f.persona.mail);
+  });
 }
 
 // ===== CARDS =====
@@ -1105,6 +1132,7 @@ function renderCards() {
     <div class="card verde"><div class="card-label">TF Activos</div><div class="card-value">${tfAct}</div><div class="card-sub">Cuota normal</div></div>
     <div class="card rojo"><div class="card-label">TF De baja</div><div class="card-value">${tfBaja}</div><div class="card-sub">Inscripción dada de baja</div></div>
     <div class="card violeta"><div class="card-label">Bonificados</div><div class="card-value">${tfBon}</div><div class="card-sub">Sin costo (COD0BON)</div></div>
+    <div class="card card-clickable" onclick="filtrarSinMiEsp()" style="cursor:pointer; border-color:var(--azul);" title="Tocá para ver a quiénes falta invitar a Mi Espacio"><div class="card-label">Sin entrar a Mi Espacio</div><div class="card-value" style="color:var(--azul)">${personas.filter(f => !f.yaIngreso).length}</div><div class="card-sub">👆 Tocá para ver a quiénes invitar</div></div>
   `;
 }
 
@@ -1128,6 +1156,7 @@ function aplicarFiltros() {
   if (filtroFaltante === 'SIN_HC') f = f.filter(x => !x.tieneHC);
   else if (filtroFaltante === 'SIN_EVAL') f = f.filter(x => !x.tieneEval);
   else if (filtroFaltante === 'SIN_AMBAS') f = f.filter(x => !x.tieneHC && !x.tieneEval);
+  else if (filtroFaltante === 'SIN_MIESP') f = f.filter(x => !x.yaIngreso);
   if (filtroPlan) f = f.filter(x => x.inscripcion && (x.inscripcion.plan || '') === filtroPlan);
   if (filtroDia) f = f.filter(x => x.inscripcion && String(x.inscripcion.dia_vencimiento || '') === String(filtroDia));
   if (textoBusqueda) {
@@ -1140,6 +1169,30 @@ function aplicarFiltros() {
   }
   f.sort((a,b) => (a.persona.nombre||'').localeCompare(b.persona.nombre||''));
   renderTabla(f);
+}
+
+// Filtro rápido desde la card: a quiénes falta invitar a Mi Espacio
+window.filtrarSinMiEsp = () => {
+  filtroFaltante = 'SIN_MIESP';
+  document.querySelectorAll('#filtrosFaltantes .filtro-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector('#filtrosFaltantes .filtro-btn[data-faltante="SIN_MIESP"]');
+  if (btn) btn.classList.add('active');
+  aplicarFiltros();
+};
+
+// Chip de estado de acceso a Mi Espacio + botón para invitar por WhatsApp
+function chipAcceso(f, idx) {
+  if (f.yaIngreso) {
+    const fecha = f.ultimoIngreso ? new Date(f.ultimoIngreso).toLocaleDateString('es-AR') : '';
+    return `<span class="area-chip tf-act" title="Último ingreso: ${fecha}">✅ Ya entró</span>`;
+  }
+  if (f.tieneCuenta) {
+    return `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="wspmiesp" title="Tiene cuenta pero todavía no entró — reenviar link" style="font-size:11px;padding:4px 8px;white-space:nowrap;">✉️ Invitado · sin entrar</button>`;
+  }
+  if (f.tieneEmail) {
+    return `<button class="btn-accion btn-baja" data-idx="${idx}" data-accion="wspmiesp" title="Enviar invitación a Mi Espacio por WhatsApp" style="font-size:11px;padding:4px 8px;white-space:nowrap;">✉️ Invitar a Mi Espacio</button>`;
+  }
+  return `<span class="area-chip" style="background:#fef3c7;color:#92400e;" title="Cargá un email en la ficha para poder invitarlo">⚠️ Sin email</span>`;
 }
 
 function chipsAreas(f) {
@@ -1167,6 +1220,7 @@ function renderTabla(lista) {
     <th class="right">Cuota TF</th>
     <th>Teléfono</th>
     <th>Antigüedad</th>
+    <th>Mi Espacio</th>
     <th class="center">Acciones</th>
   </tr></thead><tbody>`;
   lista.forEach((f, idx) => {
@@ -1188,6 +1242,7 @@ function renderTabla(lista) {
       <td class="right">${cuotaTxt}</td>
       <td>${tel}</td>
       <td>${antig}</td>
+      <td>${chipAcceso(f, idx)}</td>
       <td><div class="acciones-cell">${acciones}</div></td>
     </tr>`;
   });
@@ -1202,6 +1257,11 @@ function renderTabla(lista) {
       if (!fila) return;
       alumnoActivo = fila;
       if (accion === 'ver') abrirModalVer();
+      else if (accion === 'wspmiesp') {
+        const cel = (fila.persona.celular || fila.persona.telefono || '');
+        const email = (fila.persona.email || fila.persona.mail || '');
+        enviarWspMiEspacio(cel, fila.persona.nombre || '', email);
+      }
       else if (accion === 'wsp') abrirMenuWsp();
       else if (accion === 'editar') abrirModalEditar();
       else if (accion === 'ficha') abrirFichaAlumno();
@@ -3645,6 +3705,32 @@ window.enviarWspHC = (celular, nombre) => {
   window.open(`https://wa.me/${num}?text=${msg}`, '_blank');
 };
 
+// Invitación a Mi Espacio por WhatsApp (link sin caducidad: el alumno crea su clave cuando quiera)
+window.enviarWspMiEspacio = async (celular, nombre, email) => {
+  email = (email || '').trim();
+  if (!email) { toast('Cargá un email en la ficha antes de invitar.', true); return; }
+  let num = (celular || '').replace(/\D/g, '');
+  if (num.startsWith('0')) num = num.substring(1);
+  if (num && !num.startsWith('54')) num = '549' + num;
+  // Abrimos la ventana de WhatsApp YA (en respuesta al click) para que el navegador no la bloquee
+  const waWin = num ? window.open('about:blank', '_blank') : null;
+  toast('Enviando invitación…');
+  try {
+    const { data, error } = await sb.functions.invoke('invitar-mi-espacio', { body: { email, nombre } });
+    if (error) throw new Error(error.message || 'Error llamando a la función');
+    if (!data || !data.link) throw new Error((data && data.error) ? data.error : 'No se pudo generar el link');
+    const primer = (nombre || '').split(' ')[0] || '';
+    const verbo = data.tipo === 'recovery' ? 'Recuperá tu acceso a' : 'Activá tu cuenta en';
+    const msg = `Hola ${primer}! ${verbo} Mi Espacio de PuntoBiO 💙 Tocá este link para crear tu clave: ${data.link}`;
+    if (waWin && num) waWin.location.href = `https://wa.me/${num}?text=${encodeURIComponent(msg)}`;
+    toast(data.mailOk ? '✓ Invitación enviada por mail y WhatsApp' : '✓ Link listo (el mail no salió, revisá Resend)', !data.mailOk);
+    cargarAccesos().then(() => { renderCards(); aplicarFiltros(); });
+  } catch (e) {
+    if (waWin) { try { waWin.close(); } catch(_){} }
+    toast('No se pudo enviar: ' + (e.message || e), true);
+  }
+};
+
 // ===== MENÚ WHATSAPP DESDE LA FILA =====
 function normalizarCelTF(cel) {
   let num = (cel || '').replace(/\D/g, '');
@@ -3688,6 +3774,11 @@ window.enviarWspPlantilla = (tipo) => {
     texto = `Hola ${primer}! Te recordamos tus turnos asignados en PuntoBiO. Si no podés asistir a alguno, avisanos así liberamos el lugar. ¡Te esperamos!`;
   } else if (tipo === 'hc') {
     texto = `Hola ${primer}! Te dejamos el link para que completes tu historia clínica de PuntoBiO: ${FORM_URL}`;
+  } else if (tipo === 'miespacio') {
+    const _p = alumnoActivo ? alumnoActivo.persona : null;
+    cerrarModal('modalWsp');
+    if (_p) enviarWspMiEspacio(_p.celular || _p.telefono || '', _p.nombre || '', _p.email || _p.mail || '');
+    return;
   }
   abrirWhatsAppTF(texto);
   cerrarModal('modalWsp');
