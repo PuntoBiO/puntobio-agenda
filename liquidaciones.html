@@ -197,7 +197,14 @@ async function cargar(){
     .lte('fecha', hasta)
     .order('fecha');
 
-  if (filtroProf) q = q.eq('profesional', filtroProf);
+  // Para que los CRUCES salgan completos hay que mirar TODO el mes (un cruce involucra a dos personas).
+  // - Admin (sin restricción): traemos todo el mes y filtramos la VISTA en JS. Los números de cada profe no cambian,
+  //   pero los cruces se calculan sobre el panorama completo (correcto).
+  // - Profesional con "solo lo mío": NO le bajamos datos del resto. Traemos solo lo que lo involucra (atendió O cobró).
+  if (filtroProf && window._soloLoMioLiq) {
+    q = q.or(`profesional.eq.${filtroProf},quien_cobro.eq.${filtroProf}`);
+  }
+  // (si es admin con un profesional elegido, NO filtramos en la consulta: se filtra en render con `filtroProf`)
 
   const { data, error } = await q;
   if (error) {
@@ -245,10 +252,11 @@ async function cargar(){
   }
   window._pagosOS = pagosOS;
 
-  render(data, sesionesData);
+  render(data, sesionesData, filtroProf);
 }
 
-function render(pagos, sesiones){
+function render(pagos, sesiones, filtroProf){
+  filtroProf = filtroProf || '';
   sesiones = sesiones || [];
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien atendió)
@@ -257,7 +265,7 @@ function render(pagos, sesiones){
   const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
   const detalle = {};        // "profesional||practica" → {cobrado, prof, centro}
   const porTrat = {};        // tratamiento_id → {profParte:0, cobradoProfMismo:0} (para cruces por tratamiento)
-  let totalBruto = 0, totalProf = 0, totalCentro = 0;
+  let totalBruto = 0, totalProf = 0, totalCentro = 0, cantVista = 0;
 
   for (const p of pagos){
     const prof = normProf(p.profesional);     // quien ATENDIÓ
@@ -268,8 +276,11 @@ function render(pagos, sesiones){
     const totalPago = mProf + mCentro;
     if (!prof) continue;
 
-    totalBruto += importe; totalProf += mProf; totalCentro += mCentro;
+    // ¿Esta fila es PRODUCCIÓN del profesional que estoy mirando? (quien ATENDIÓ)
+    // Si no hay filtro, todo cuenta. Si hay filtro, solo lo que atendió ese profesional.
+    const esVista = !filtroProf || prof === filtroProf;
 
+    // ===== PARTES GLOBALES (siempre, aunque haya filtro) — necesarias para los CRUCES =====
     // Acumular por tratamiento: cuánto YA cobró el propio profesional (el pago COMPLETO que se llevó cuenta contra su parte).
     // (profParte se calcula aparte, desde las SESIONES, más abajo)
     const tid = p.tratamiento_id;
@@ -278,7 +289,15 @@ function render(pagos, sesiones){
       if (cobro === prof) porTrat[tid].cobradoProfMismo += totalPago; // el pago completo que se llevó el profesional
     }
 
-    // BLOQUE 1 — resumen por profesional
+    // BLOQUE 3 y 4 — guardar cruces crudos (el cálculo inteligente se hace después del loop)
+    if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
+      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe, tratId:p.tratamiento_id});
+    }
+
+    // ===== PARTES DE LA VISTA (solo del profesional filtrado) =====
+    if (!esVista) continue;
+
+    totalBruto += importe; totalProf += mProf; totalCentro += mCentro; cantVista++;
     if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, cobroProf:0, cobroPB:0, pagos:[]};
     const r = resumen[prof];
     r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.pagos.push(p);
@@ -292,11 +311,6 @@ function render(pagos, sesiones){
       if (medio.includes('DEBITO') || medio.includes('DÉBITO')) porMedio[prof].debito += totalPago;
       else if (medio.includes('TRANSFER')) porMedio[prof].transferencia += totalPago;
       else if (medio.includes('EFECTIVO')) porMedio[prof].efectivo += totalPago;
-    }
-
-    // BLOQUE 3 y 4 — guardar cruces crudos (el cálculo inteligente se hace después del loop)
-    if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
-      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe, tratId:p.tratamiento_id});
     }
 
     // BLOQUE 5 — detalle por profesional + práctica
@@ -357,7 +371,7 @@ function render(pagos, sesiones){
     <div class="cards">
       <div class="card cant">
         <div class="card-label">Cant. pagos</div>
-        <div class="card-value">${fmtNum(pagos.length)}</div>
+        <div class="card-value">${fmtNum(cantVista)}</div>
         <div class="card-sub">${profs.length} profesionales</div>
       </div>
       <div class="card bruto">
@@ -417,15 +431,19 @@ function render(pagos, sesiones){
   html += `</tbody></table>`;
 
   // ===== BLOQUE 3: CRUCES BRUTOS =====
+  // Si hay un profesional elegido, mostramos solo los cruces que lo involucran (cobró por otro, o cobraron por él).
+  const crucesVista = filtroProf
+    ? crucesBrutos.filter(c => c.cobro === filtroProf || c.prof === filtroProf)
+    : crucesBrutos;
   html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
-  if (crucesBrutos.length === 0){
+  if (crucesVista.length === 0){
     html += `<p class="vacio">Sin cruces este mes 👍</p>`;
   } else {
-    crucesBrutos.sort((a,b)=> (a.cobro+a.prof).localeCompare(b.cobro+b.prof));
+    crucesVista.sort((a,b)=> (a.cobro+a.prof).localeCompare(b.cobro+b.prof));
     html += `<table><thead><tr>
       <th>Fecha</th><th>Cobró</th><th>Correspondía a</th><th class="num">Cruce profesional</th><th class="num">Total cobrado</th>
     </tr></thead><tbody>`;
-    for (const c of crucesBrutos){
+    for (const c of crucesVista){
       html += `<tr><td>${c.fecha}</td><td>${badge(c.cobro)}</td><td>${badge(c.prof)}</td><td class="num">${fmt(c.mProf)}</td><td class="num">${fmt(c.importe)}</td></tr>`;
     }
     html += `</tbody></table>`;
@@ -456,19 +474,25 @@ function render(pagos, sesiones){
     procesadas.add(k); procesadas.add(inversa);
   }
 
-  if (netosFinales.length > 0 || Object.keys(deudasCentro).length > 0){
+  // Vistas filtradas por profesional elegido (si lo hay)
+  const deudasCentroVista = {};
+  Object.keys(deudasCentro).forEach(p => { if (!filtroProf || p === filtroProf) deudasCentroVista[p] = deudasCentro[p]; });
+  const netosFinalesVista = filtroProf ? netosFinales.filter(n => n[0] === filtroProf || n[1] === filtroProf) : netosFinales;
+  const hayCentroVista = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
+
+  if (netosFinalesVista.length > 0 || hayCentroVista){
     html += `<h2 class="bloque-tit">4 · Cruces netos (quién debe a quién)</h2>
       <table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto neto</th></tr></thead><tbody>`;
     // Deudas hacia el centro
     const ordenC = ['Bruno','Male','Vero','Jime','Lu'];
-    Object.keys(deudasCentro).sort((a,b)=>{const ia=ordenC.indexOf(a),ib=ordenC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
-      if (deudasCentro[prof] > 0.5){
-        html += `<tr><td>${badge(prof)}</td><td><b>PuntoBiO (centro)</b></td><td class="num"><b>${fmt(deudasCentro[prof])}</b></td></tr>`;
+    Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenC.indexOf(a),ib=ordenC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+      if (deudasCentroVista[prof] > 0.5){
+        html += `<tr><td>${badge(prof)}</td><td><b>PuntoBiO (centro)</b></td><td class="num"><b>${fmt(deudasCentroVista[prof])}</b></td></tr>`;
       }
     });
     // Deudas entre profesionales
-    netosFinales.sort((a,b)=> (a[0]+a[1]).localeCompare(b[0]+b[1]));
-    for (const n of netosFinales){
+    netosFinalesVista.sort((a,b)=> (a[0]+a[1]).localeCompare(b[0]+b[1]));
+    for (const n of netosFinalesVista){
       html += `<tr><td>${badge(n[0])}</td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
     }
     html += `</tbody></table>`;
@@ -540,16 +564,16 @@ function render(pagos, sesiones){
   html += `</div>`;
 
   // Resumen de cruces "quién le paga a quién" en texto claro
-  const hayDeudasCentro = Object.keys(deudasCentro).some(p => deudasCentro[p] > 0.5);
-  if (netosFinales.length > 0 || hayDeudasCentro){
+  const hayDeudasCentro = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
+  if (netosFinalesVista.length > 0 || hayDeudasCentro){
     html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Cobros a devolver</div>`;
     const ordenRC = ['Bruno','Male','Vero','Jime','Lu'];
-    Object.keys(deudasCentro).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
-      if (deudasCentro[prof] > 0.5){
-        html += `<div class="cruce-linea"><b>${prof}</b> cobró de más y debe <b>${fmt(deudasCentro[prof])}</b> al <b>centro (PuntoBiO)</b></div>`;
+    Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+      if (deudasCentroVista[prof] > 0.5){
+        html += `<div class="cruce-linea"><b>${prof}</b> cobró de más y debe <b>${fmt(deudasCentroVista[prof])}</b> al <b>centro (PuntoBiO)</b></div>`;
       }
     });
-    for (const n of netosFinales){
+    for (const n of netosFinalesVista){
       html += `<div class="cruce-linea"><b>${n[0]}</b> le debe <b>${fmt(n[2])}</b> a <b>${n[1]}</b></div>`;
     }
     html += `</div>`;
@@ -583,7 +607,7 @@ function render(pagos, sesiones){
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
-  window._liq = { resumen, porMedio, crucesBrutos, netosFinales, deudasCentro, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: pagos.length };
+  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista };
 }
 
 function toggleDetalle(prof){
@@ -765,6 +789,7 @@ async function restringirSiSoloLoMio(){
     if (perm && perm.solo_lo_mio === true) {
       const nombre = EMAIL_A_NOMBRE_LIQ[email] || null;
       if (nombre) {
+        window._soloLoMioLiq = true;   // marca: traer SOLO lo que lo involucra (no bajar datos del resto)
         const sel = document.getElementById('filtroProf');
         sel.value = nombre;        // fija a su nombre
         sel.disabled = true;        // no puede cambiarlo
