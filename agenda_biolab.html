@@ -357,8 +357,11 @@
           </select>
         </div>
         <div class="form-row">
-          <label>ID tratamiento (auto)</label>
-          <input type="text" id="inp-tto" placeholder="se genera solo" readonly style="background:#f9fafb; color:var(--muted); font-weight:600;">
+          <label>Tratamiento (existente)</label>
+          <select id="inp-tto" style="font-weight:600;">
+            <option value="">— Elegí paciente y práctica —</option>
+          </select>
+          <div id="tto-hint" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
         </div>
       </div>
 
@@ -783,11 +786,12 @@ function actualizarHorasExactas(){
   const practica = document.getElementById('sel-practica').value;
   const selH = document.getElementById('sel-hora-exacta');
   selH.innerHTML = '<option value="">—</option>';
-  // Preview ID tratamiento auto
+  // Cargar tratamientos YA creados del paciente para esta práctica (no se inventa nada)
   if(practica){
-    previewIdTratamiento(practica);
+    cargarTratamientosExistentes(practica);
   } else {
-    document.getElementById('inp-tto').value = '';
+    document.getElementById('inp-tto').innerHTML = '<option value="">— Elegí paciente y práctica —</option>';
+    const h = document.getElementById('tto-hint'); if(h) h.textContent = '';
   }
   if(!prof || !practica) return;
   const dur = duracionMin(practica, prof);
@@ -820,26 +824,64 @@ const PREFIJOS_TTO = {
   SARKMED: { prefix: 'SARK', pad: 3 }
 };
 
-async function previewIdTratamiento(practica){
+async function cargarTratamientosExistentes(practica){
+  // Lista los tratamientos YA creados del paciente para la práctica elegida.
+  // NO crea tratamientos nuevos: el turno se asocia a uno existente
+  // (los tratamientos se crean aparte, en la pantalla Tratamientos).
+  const sel = document.getElementById('inp-tto');
+  const hint = document.getElementById('tto-hint');
   const cfg = PREFIJOS_TTO[practica];
-  if(!cfg){ document.getElementById('inp-tto').value = ''; return; }
-  // Consulta AMBAS tablas: tratamientos.codigo_id (fuente de verdad) + turnos_biolab.tratamiento_id
-  const re = new RegExp('^' + cfg.prefix + '(\\d+)$');
-  const [t1, t2] = await Promise.all([
-    sb.from('tratamientos').select('codigo_id').like('codigo_id', cfg.prefix + '%'),
-    sb.from('turnos_biolab').select('tratamiento_id').like('tratamiento_id', cfg.prefix + '%')
-  ]);
-  let max = 0;
-  (t1.data || []).forEach(r => {
-    const m = (r.codigo_id || '').match(re);
-    if(m){ const n = parseInt(m[1], 10); if(n > max) max = n; }
-  });
-  (t2.data || []).forEach(r => {
-    const m = (r.tratamiento_id || '').match(re);
-    if(m){ const n = parseInt(m[1], 10); if(n > max) max = n; }
-  });
-  const siguiente = String(max + 1).padStart(cfg.pad, '0');
-  document.getElementById('inp-tto').value = cfg.prefix + siguiente;
+
+  // Prácticas que no llevan tratamiento asociado
+  if(!cfg){
+    sel.innerHTML = '<option value="">(esta práctica no lleva tratamiento)</option>';
+    if(hint) hint.textContent = '';
+    return;
+  }
+
+  const personaId = document.getElementById('busc-paciente').dataset.personaId;
+  if(!personaId){
+    sel.innerHTML = '<option value="">— Elegí primero el paciente —</option>';
+    if(hint) hint.textContent = '';
+    return;
+  }
+
+  sel.innerHTML = '<option value="">Cargando…</option>';
+
+  // Estados cerrados: no sirven para asociar un turno nuevo
+  const CERRADOS = ['BAJA','CANCELADO','FINALIZADO','CERRADO'];
+  const { data, error } = await sb.from('tratamientos')
+    .select('id, codigo_id, estado, saldo_pendiente')
+    .eq('persona_id', Number(personaId))
+    .eq('practica_codigo', cfg.prefix)
+    .order('id', { ascending: false });
+
+  if(error){
+    sel.innerHTML = '<option value="">Error al cargar tratamientos</option>';
+    if(hint){ hint.style.color = '#dc2626'; hint.textContent = error.message; }
+    return;
+  }
+
+  const activos = (data || []).filter(t => !CERRADOS.includes(String(t.estado || '').toUpperCase()));
+
+  if(activos.length === 0){
+    sel.innerHTML = '<option value="">— Sin tratamiento activo —</option>';
+    if(hint){
+      hint.style.color = '#dc2626';
+      hint.textContent = '⚠ Este paciente no tiene un tratamiento ' + cfg.prefix + ' activo. Creálo primero en Tratamientos y después reservá el turno.';
+    }
+    return;
+  }
+
+  sel.innerHTML = '<option value="">— Elegí el tratamiento —</option>' +
+    activos.map(t => {
+      const saldo = (t.saldo_pendiente != null) ? ' · saldo $' + Number(t.saldo_pendiente).toLocaleString('es-AR') : '';
+      return `<option value="${t.codigo_id}">${t.codigo_id}${t.estado ? ' · ' + t.estado : ''}${saldo}</option>`;
+    }).join('');
+
+  // Si hay uno solo, lo dejo ya elegido para agilizar
+  if(activos.length === 1){ sel.value = activos[0].codigo_id; }
+  if(hint){ hint.style.color = 'var(--muted)'; hint.textContent = activos.length + ' tratamiento(s) de este paciente.'; }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -884,6 +926,9 @@ function seleccionarPaciente(id, nombre){
   document.getElementById('busc-paciente').value = nombre;
   document.getElementById('busc-paciente').dataset.personaId = id;
   document.getElementById('paciente-results').classList.remove('activo');
+  // Si ya hay una práctica elegida, refresco la lista de tratamientos de este paciente
+  const pr = document.getElementById('sel-practica').value;
+  if(pr) cargarTratamientosExistentes(pr);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -904,6 +949,13 @@ async function guardarTurnoNuevo(){
 
   if(!paciente || !personaId){ alertaEl.innerHTML='<div class="err-box">Seleccioná un paciente del listado.</div>'; return; }
   if(!profesional || !practica || !horaInicio){ alertaEl.innerHTML='<div class="err-box">Completá profesional, práctica y hora exacta.</div>'; return; }
+
+  // Para prácticas con tratamiento (evaluaciones, MOPLEX, SARK): exigir un tratamiento EXISTENTE.
+  // No se crean tratamientos desde acá; deben estar cargados antes en Tratamientos.
+  if(PREFIJOS_TTO[practica] && !idTto){
+    alertaEl.innerHTML = '<div class="err-box">Falta elegir el tratamiento. Si el paciente no tiene un tratamiento '+PREFIJOS_TTO[practica].prefix+' activo, creálo primero en <b>Tratamientos</b> y después reservá el turno.</div>';
+    return;
+  }
 
   // Bloquear turnos en el pasado (admin_general puede continuar)
   const ahoraVal = new Date();
