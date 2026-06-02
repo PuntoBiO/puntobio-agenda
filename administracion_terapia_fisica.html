@@ -2798,10 +2798,17 @@ window.confirmarCambioPlan = async () => {
       if (sinCobro && (r.importe || 0) > 0) {
         obs += ` [DEUDA_CAMBIO importe=${r.importe} concepto=puente_fecha mes=${r.mes||MES_ACTUAL} venc=${i.dia_vencimiento||''}->${r.diaNuevo}]`;
       }
-      const { error: e2 } = await sb.from('inscripciones_tf').update({
+      const { data: updRows, error: e2 } = await sb.from('inscripciones_tf').update({
         dia_vencimiento: r.diaNuevo, observaciones: obs, actualizado_en: new Date().toISOString()
-      }).eq('id', i.id);
+      }).eq('id', i.id).select('id, dia_vencimiento');
       if (e2) throw e2;
+      if (!updRows || updRows.length === 0) {
+        toast(`⚠️ La base NO actualizó ninguna fila (inscripción id ${i.id}). Puede ser un tema de permisos/RLS.`, true);
+        btn.disabled = false; btn.textContent = 'Confirmar cambio'; return;
+      }
+      // Reflejar también en memoria por si el reabrir usa la fila cacheada
+      i.dia_vencimiento = updRows[0].dia_vencimiento;
+      const diaGuardado = updRows[0].dia_vencimiento;
       // Histórico: registrar el cambio de fecha (no rompe si la tabla no existe)
       try {
         await sb.from('cambios_inscripcion').insert({
@@ -2813,7 +2820,7 @@ window.confirmarCambioPlan = async () => {
           hecho_por: (typeof usuarioId !== 'undefined' ? usuarioId : null)
         });
       } catch (eh) { console.warn('No se pudo guardar el histórico de cambio de fecha', eh); }
-      toast(`✓ Fecha de pago: día ${i.dia_vencimiento||'—'} → ${r.diaNuevo}` + (sinCobro ? ` · deuda ${fmt$(r.importe||0)}` : (importe>0?` · cobrado ${fmt$(importe)}`:'')));
+      toast(`✓ GUARDADO en base · día de pago ahora: ${diaGuardado}` + (sinCobro ? ` · deuda ${fmt$(r.importe||0)}` : (importe>0?` · cobrado ${fmt$(importe)}`:'')));
       cerrarModal('modalCambioPlan'); cerrarModal('modalVer'); await cargarTodo();
     } catch (e) { console.error(e); toast('Error al cambiar la fecha: ' + e.message, true); }
     finally { btn.disabled = false; btn.textContent = 'Confirmar cambio'; }
