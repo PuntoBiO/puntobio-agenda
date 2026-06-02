@@ -431,7 +431,7 @@
       <div class="form-grid">
         <div class="form-group"><label>Plan</label><select id="edPlan"></select></div>
         <div class="form-group"><label>Actividad</label><select id="edActividad"><option value="TERAPIA_FISICA">TERAPIA_FISICA</option></select></div>
-        <div class="form-group"><label>Día de vencimiento (1-31) 🔒</label><input type="number" id="edDiaVenc" min="1" max="31" readonly title="Para cambiar la fecha de pago usá el botón 'Cambiar plan → Solo fecha', que calcula el puente." style="background:var(--bg,#f1f5f9); color:var(--text-dim); cursor:not-allowed;"><span style="display:block; font-size:11px; color:var(--text-dim); margin-top:3px;">No se edita acá. Cambialo con <b>Cambiar plan → Solo fecha</b> (calcula el puente).</span></div>
+        <div class="form-group"><label>Día de vencimiento (1-31) <span id="edDiaLock">🔒</span></label><input type="number" id="edDiaVenc" min="1" max="31" readonly style="background:var(--bg,#f1f5f9); color:var(--text-dim); cursor:not-allowed;"><label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); margin-top:6px; cursor:pointer; font-weight:normal;"><input type="checkbox" id="edCorregirSinCargo" onchange="edToggleCorregir()" style="width:auto; margin:0;"> 🔧 Corregir a mano (día y plan) SIN generar cargo</label><span id="edDiaNota" style="display:block; font-size:11px; color:var(--text-dim); margin-top:3px;">Por defecto el día se cambia con <b>Cambiar plan → Solo fecha</b> (calcula el puente).</span></div>
         <div class="form-group"><label>Descuento libre ($)</label><input type="number" id="edDescuento" min="0" step="500"></div>
         <div class="form-group form-grid-full"><label>Observaciones de la inscripción</label><textarea id="edObsInsc"></textarea></div>
       </div>
@@ -2144,6 +2144,28 @@ window.generarPDF = () => {
 };
 
 // ===== MODAL EDITAR =====
+// Valores originales al abrir Editar (para detectar correcciones sin cargo)
+let edOrigPlan = '';
+let edOrigDiaVenc = null;
+
+// Interruptor "Corregir sin cargo": destraba/bloquea el día de vencimiento en Editar.
+window.edToggleCorregir = () => {
+  const on = $('#edCorregirSinCargo') && $('#edCorregirSinCargo').checked;
+  const f = $('#edDiaVenc');
+  if (!f) return;
+  if (on) {
+    f.removeAttribute('readonly');
+    f.style.background = ''; f.style.color = ''; f.style.cursor = '';
+    if ($('#edDiaLock')) $('#edDiaLock').textContent = '🔓';
+    if ($('#edDiaNota')) $('#edDiaNota').innerHTML = '⚠️ <b>Modo corrección:</b> cambiás el día y el plan a mano, <b>SIN</b> generar puente ni proporcional. Usalo solo para arreglar datos cargados mal.';
+  } else {
+    f.setAttribute('readonly', '');
+    f.style.background = 'var(--bg,#f1f5f9)'; f.style.color = 'var(--text-dim)'; f.style.cursor = 'not-allowed';
+    if ($('#edDiaLock')) $('#edDiaLock').textContent = '🔒';
+    if ($('#edDiaNota')) $('#edDiaNota').innerHTML = 'Por defecto el día se cambia con <b>Cambiar plan → Solo fecha</b> (calcula el puente).';
+  }
+};
+
 function abrirModalEditar() {
   const f = alumnoActivo;
   const p = f.persona; const i = f.inscripcion;
@@ -2180,6 +2202,9 @@ function abrirModalEditar() {
     $('#edDiaVenc').value = i.dia_vencimiento || '';
     $('#edDescuento').value = i.descuento_libre || 0;
     $('#edObsInsc').value = i.observaciones || '';
+    // Reset del modo "corregir sin cargo" (siempre arranca bloqueado) + guardo valores originales
+    edOrigPlan = i.plan || ''; edOrigDiaVenc = i.dia_vencimiento || null;
+    if ($('#edCorregirSinCargo')) { $('#edCorregirSinCargo').checked = false; edToggleCorregir(); }
     // Botón "Deshacer cambio de plan": solo Lu y solo si hay un cambio programado
     const btnDeshacer = document.getElementById('btnDeshacerCambioPlan');
     if (btnDeshacer) {
@@ -2242,6 +2267,25 @@ window.confirmarEditar = async () => {
       };
       const { error: errIns } = await sb.from('inscripciones_tf').update(inscUpdate).eq('id', i.id);
       if (errIns) throw errIns;
+      // Si fue una CORRECCIÓN SIN CARGO y cambió el plan o el día, lo dejamos en el histórico
+      try {
+        const usoCorreccion = $('#edCorregirSinCargo') && $('#edCorregirSinCargo').checked;
+        const nuevoDia = parseInt($('#edDiaVenc').value) || null;
+        const cambioPlan = planSeleccionado !== edOrigPlan;
+        const cambioDia = nuevoDia !== edOrigDiaVenc;
+        if (usoCorreccion && (cambioPlan || cambioDia)) {
+          const partes = [];
+          if (cambioPlan) partes.push(`plan ${edOrigPlan} → ${planSeleccionado}`);
+          if (cambioDia) partes.push(`día de pago ${edOrigDiaVenc||'—'} → ${nuevoDia||'—'}`);
+          await sb.from('cambios_inscripcion').insert({
+            inscripcion_id: i.id, persona_id: p.id, tipo: cambioPlan ? 'plan' : 'fecha',
+            descripcion: `Corrección sin cargo: ${partes.join(' · ')}`,
+            importe_puente: null, mes_imputado: null,
+            vigente_desde: new Date().toISOString().split('T')[0],
+            hecho_por: (typeof usuarioId !== 'undefined' ? usuarioId : null)
+          });
+        }
+      } catch (eh) { console.warn('No se pudo guardar el histórico de la corrección sin cargo', eh); }
     } else if (planSeleccionado) {
       // Crear nueva inscripción (solo si eligió un plan)
       const inscInsert = {
