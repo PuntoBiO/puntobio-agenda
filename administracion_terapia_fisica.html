@@ -306,6 +306,31 @@
   </div>
 </div>
 
+<!-- MODAL COBRAR SALDO (PUENTE CAMBIO DE FECHA) con desplegable de medio -->
+<div class="modal-backdrop" id="modalCobrarSaldo">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <span class="modal-title">💵 Cobrar saldo del puente</span>
+      <button class="modal-close" onclick="cerrarModal('modalCobrarSaldo')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="csInfo" style="margin-top:0"></div>
+      <div class="form-group">
+        <label>Medio de pago</label>
+        <select id="csMedio">
+          <option value="EFECTIVO">Efectivo</option>
+          <option value="TRANSFERENCIA">Transferencia</option>
+          <option value="DEBITO">Débito</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCobrarSaldo')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-editar" id="csBtnConfirmar" onclick="confirmarCobrarSaldo()">Cobrar saldo</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL OPCIONES PDF -->
 <div class="modal-backdrop" id="modalPDF">
   <div class="modal">
@@ -857,6 +882,7 @@ let textoBusqueda = '';
 let alumnoActivo = null; // fila activa en modales
 let usuarioId = null;    // auth_user_id del usuario logueado (para cargado_por, tipo UUID)
 let hcsPersona = [];     // HCs de la persona activa en modalVer
+let cambiosInscActual = []; // histórico de cambios de inscripción de la persona activa
 let hcActivaIdx = null;  // índice de la HC abierta en modalHC
 
 const FORM_URL = 'https://www.puntobio.com.ar/registrate.html';
@@ -1353,6 +1379,16 @@ async function abrirModalVer() {
     if (!error) hcsPersona = data || [];
   } catch (e) { console.error('Error cargando HCs:', e); }
 
+  // Cargar histórico de cambios (tabla nueva; si no existe, queda vacío)
+  cambiosInscActual = [];
+  try {
+    if (i) {
+      const { data: ch } = await sb.from('cambios_inscripcion')
+        .select('*').eq('inscripcion_id', i.id).order('creado_en', { ascending: false });
+      cambiosInscActual = ch || [];
+    }
+  } catch (e) { cambiosInscActual = []; }
+
   const item = (label, val) => `<div class="info-item"><div class="info-item-label">${label}</div><div class="info-item-value${(val===null||val===''||val===undefined)?' empty':''}">${(val===null||val===''||val===undefined)?'—':val}</div></div>`;
 
   $('#verBody').innerHTML = `
@@ -1438,26 +1474,26 @@ function deudaCambioDe(inscripcion) {
   return { importe: parseInt(m[1], 10), mes: m[2] || MES_ACTUAL, venc: m[3] || '' };
 }
 
-// Cobra el saldo pendiente por cambio de fecha: registra el pago con el monto exacto,
-// imputado al mes guardado, y borra la etiqueta de deuda. Se llama desde el botón del Detalle.
+// Cobra el saldo pendiente por cambio de fecha: abre un mini-modal con desplegable de medio.
 window.cobrarSaldoCambioFecha = async () => {
   const i = alumnoActivo && alumnoActivo.inscripcion;
   const p = alumnoActivo && alumnoActivo.persona;
   if (!i) { toast('No hay inscripción activa.', true); return; }
   const d = deudaCambioDe(i);
   if (!d) { toast('Este alumno no tiene saldo pendiente por cambio de fecha.', true); return; }
+  $('#csInfo').innerHTML = `<strong>${p ? p.nombre : 'Alumno'}</strong> · saldo del puente: <strong>${fmt$(d.importe)}</strong><br>Se imputa a <strong>${d.mes}</strong>.`;
+  $('#csMedio').value = 'EFECTIVO';
+  $('#modalCobrarSaldo').classList.add('activo');
+};
 
-  const medio = prompt(
-    `Cobrar SALDO por cambio de fecha de ${p ? p.nombre : 'este alumno'}:\n\n` +
-    `• Importe: ${fmt$(d.importe)}\n` +
-    `• Se imputa a: ${d.mes}\n\n` +
-    `Medio de pago: EFECTIVO / TRANSFERENCIA / DEBITO`, 'EFECTIVO');
-  if (medio === null) return;
-  const medioOk = String(medio).trim().toUpperCase();
-  if (!['EFECTIVO', 'TRANSFERENCIA', 'DEBITO'].includes(medioOk)) {
-    toast('Medio inválido. Poné EFECTIVO, TRANSFERENCIA o DEBITO.', true); return;
-  }
-
+// Confirma el cobro del saldo desde el mini-modal (medio elegido en el desplegable).
+window.confirmarCobrarSaldo = async () => {
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  const d = deudaCambioDe(i);
+  if (!d) { toast('No hay saldo pendiente.', true); cerrarModal('modalCobrarSaldo'); return; }
+  const medioOk = $('#csMedio').value;
+  const btn = $('#csBtnConfirmar'); btn.disabled = true; btn.textContent = 'Cobrando...';
   try {
     const { error: e1 } = await sb.from('pagos_tf').insert({
       inscripcion_id: i.id, mes_imputado: d.mes, fecha: HOY.toISOString().split('T')[0],
@@ -1472,11 +1508,13 @@ window.cobrarSaldoCambioFecha = async () => {
       .eq('id', i.id);
     if (e2) throw e2;
     toast(`✓ Saldo cobrado: ${fmt$(d.importe)} (imputado ${d.mes})`);
-    cerrarModal('modalVer');
+    cerrarModal('modalCobrarSaldo'); cerrarModal('modalVer');
     await cargarTodo();
   } catch (e) {
     console.error(e);
     toast('Error al cobrar el saldo: ' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Cobrar saldo';
   }
 };
 
@@ -1572,29 +1610,31 @@ function renderPlanesYCobros(f) {
 
   let html = `<div class="section-title">🔄 Planes y cobros</div>`;
 
-  // ===== BLOQUE: CAMBIOS REGISTRADOS (fecha de pago + plan) =====
-  // Junta los cambios que quedaron anotados para que SE VEAN (no solo en observaciones).
+  // ===== BLOQUE: HISTÓRICO DE CAMBIOS (tabla cambios_inscripcion, ordenado) =====
+  const histo = (typeof cambiosInscActual !== 'undefined' ? cambiosInscActual : []) || [];
+  // Plan programado a futuro vigente (lo mostramos arriba del histórico como "activo")
   const cambios = [];
-  // Cambio de plan programado a futuro
   if (i.plan_futuro && i.mes_aplica_plan && String(i.mes_aplica_plan) > MES_ACTUAL) {
-    cambios.push(`📋 <b>Cambio de plan:</b> ${i.plan} → ${i.plan_futuro} · arranca <b>${nombreMes(i.mes_aplica_plan)}</b>`);
+    cambios.push(`📋 <b>Cambio de plan programado:</b> ${i.plan} → ${i.plan_futuro} · arranca <b>${nombreMes(i.mes_aplica_plan)}</b>`);
   }
-  // Cambios de fecha de pago anotados en observaciones:
-  //   [Cambio fecha: día X→Y el FECHA]  ó  [Cambio fecha de pago: día X→Y el FECHA]
-  const obsTxt = i.observaciones || '';
-  let mF; const reF = /\[Cambio fecha(?: de pago)?:\s*día\s*([^\u2192>\-\]]+?)\s*(?:→|->)\s*(\d+)\s*el\s*([\d-]+)\]/g;
-  while ((mF = reF.exec(obsTxt)) !== null) {
-    const diaViejo = mF[1].trim(), diaNuevo = mF[2], fechaHecho = mF[3];
-    cambios.push(`📅 <b>Cambio de fecha de pago:</b> día ${diaViejo} → <b>día ${diaNuevo}</b> · vigente desde el <b>${diaNuevo}/${(new Date(fechaHecho)).getMonth()+1}</b> <span style="color:var(--text-dim)">(hecho el ${fmtFechaArg(fechaHecho)})</span>`);
-  }
-  // Deuda de puente pendiente
-  const mD = obsTxt.match(/\[DEUDA_CAMBIO\s+importe=(\d+)[^\]]*\]/);
-  if (mD) cambios.push(`🟡 <b>Puente pendiente de cobro:</b> ${fmt$(parseInt(mD[1],10))}`);
+  // Deuda de puente pendiente (sigue saliendo de la etiqueta porque es estado vivo)
+  const mD = (i.observaciones || '').match(/\[DEUDA_CAMBIO\s+importe=(\d+)[^\]]*\]/);
+  if (mD) cambios.push(`🟡 <b>Saldo del puente pendiente de cobro:</b> ${fmt$(parseInt(mD[1],10))}`);
 
-  if (cambios.length) {
+  if (cambios.length || histo.length) {
+    let filasHist = '';
+    if (histo.length) {
+      filasHist = histo.map(c => {
+        const ic = c.tipo === 'plan' ? '📋' : '📅';
+        const extra = (c.importe_puente ? ` · puente ${fmt$(c.importe_puente)}` : '');
+        const vig = c.vigente_desde ? ` · vigente ${fmtFechaArg(c.vigente_desde)}` : '';
+        return `<div style="font-size:12.5px; margin:3px 0; color:#78350f;">${ic} ${c.descripcion || 'Cambio'}${extra}<span style="color:#9a7b3f;">${vig} · ${fmtFechaArg((c.creado_en||'').split('T')[0])}</span></div>`;
+      }).join('');
+    }
     html += `<div style="margin-bottom:12px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:10px 14px;">
-      <div style="font-size:11px; text-transform:uppercase; color:#92400e; font-weight:700; margin-bottom:6px;">Cambios registrados</div>
+      <div style="font-size:11px; text-transform:uppercase; color:#92400e; font-weight:700; margin-bottom:6px;">Cambios e histórico</div>
       ${cambios.map(c => `<div style="font-size:13px; margin:3px 0; color:#78350f;">${c}</div>`).join('')}
+      ${filasHist ? `<div style="border-top:1px dashed #fde68a; margin-top:6px; padding-top:6px;">${filasHist}</div>` : ''}
     </div>`;
   }
 
@@ -2762,6 +2802,17 @@ window.confirmarCambioPlan = async () => {
         dia_vencimiento: r.diaNuevo, observaciones: obs, actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (e2) throw e2;
+      // Histórico: registrar el cambio de fecha (no rompe si la tabla no existe)
+      try {
+        await sb.from('cambios_inscripcion').insert({
+          inscripcion_id: i.id, persona_id: p.id, tipo: 'fecha',
+          descripcion: `Día de pago: ${i.dia_vencimiento||'—'} → ${r.diaNuevo}`,
+          importe_puente: (r.importe || 0) || null,
+          mes_imputado: (r.importe||0) > 0 ? (r.mes || MES_ACTUAL) : null,
+          vigente_desde: HOY.toISOString().split('T')[0],
+          hecho_por: (typeof usuarioId !== 'undefined' ? usuarioId : null)
+        });
+      } catch (eh) { console.warn('No se pudo guardar el histórico de cambio de fecha', eh); }
       toast(`✓ Fecha de pago: día ${i.dia_vencimiento||'—'} → ${r.diaNuevo}` + (sinCobro ? ` · deuda ${fmt$(r.importe||0)}` : (importe>0?` · cobrado ${fmt$(importe)}`:'')));
       cerrarModal('modalCambioPlan'); cerrarModal('modalVer'); await cargarTodo();
     } catch (e) { console.error(e); toast('Error al cambiar la fecha: ' + e.message, true); }
@@ -2815,8 +2866,19 @@ window.confirmarCambioPlan = async () => {
       actualizado_en: new Date().toISOString()
     }).eq('id', i.id);
     if (errInsc) throw errInsc;
+    // Histórico: registrar el cambio de plan (no rompe si la tabla no existe)
+    try {
+      await sb.from('cambios_inscripcion').insert({
+        inscripcion_id: i.id, persona_id: p.id, tipo: 'plan',
+        descripcion: planNuevo === i.plan
+          ? `Cambio de fecha (mismo plan ${i.plan})`
+          : `Plan: ${i.plan} → ${planNuevo}`,
+        importe_puente: null, mes_imputado: mesQueViene,
+        vigente_desde: `${mesQueViene}-01`,
+        hecho_por: (typeof usuarioId !== 'undefined' ? usuarioId : null)
+      });
+    } catch (eh) { console.warn('No se pudo guardar el histórico de cambio de plan', eh); }
 
-    // 1.b) Borrar deuda anterior: si el plan se cargó mal o el cambio arranca a futuro,
     // dejamos al alumno "al día" del mes actual con un ajuste en $0 (CORTESIA).
     // El sistema considera moroso a quien NO tiene pago del mes actual; este registro
     // lo saca de morosos sin cobrar plata. Es idempotente: si ya existe uno igual, no duplica.
