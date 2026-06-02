@@ -2350,13 +2350,37 @@ window.abrirCambioPlan = () => {
   $('#cpTurnosList').innerHTML = '';
 
   cpCargarTurnos();
+  cpCargarDiasFijos(p.id);             // carga los días fijos de ESTE alumno (para el puente)
   cpSetModo('fecha');                 // arranca en "Solo fecha" (lo más usado)
   $('#modalCambioPlan').classList.add('activo');
 };
 
+// Carga los días fijos (nombres de día: Lunes, Miércoles...) del alumno, leyendo turno_alumnos.
+// No depende de que se haya abierto la Ficha. Al terminar, recalcula el puente si está en pantalla.
+async function cpCargarDiasFijos(personaId) {
+  cpDiasFijos = [];
+  try {
+    const { data: mis } = await sb.from('turno_alumnos').select('turno_id').eq('persona_id', personaId).eq('activo', true);
+    const ids = (mis || []).map(r => r.turno_id);
+    if (!ids.length) { return; }
+    if (!fichaTurnosSistema.length) {
+      const { data: ts } = await sb.from('turnos').select('id,dia,hora,servicio,capacidad');
+      if (ts) fichaTurnosSistema = ts;
+    }
+    cpDiasFijos = fichaTurnosSistema.filter(t => ids.includes(t.id)).map(t => t.dia);
+  } catch (e) {
+    console.warn('No se pudieron cargar los días fijos para el puente', e);
+    cpDiasFijos = [];
+  }
+  // Si ya hay un día nuevo escrito, recalcular el puente con los días recién cargados
+  try { if ($('#cpDiaNuevo') && $('#cpDiaNuevo').value) cpRecalcular(); } catch(e) {}
+}
+
 // Calcula el PUENTE por cambio de fecha (clases fijas que caen entre el venc viejo y el nuevo).
 // En modo 'fecha' pinta el cálculo; en 'ambos' guarda el HTML para combinar. Devuelve datos o null.
 let cpFechaHtmlAmbos = '';
+// Días fijos del alumno del modal Cambiar plan (se cargan al abrir, independiente de la Ficha).
+let cpDiasFijos = [];
 function cpCalcularFecha(i) {
   const calc = $('#cpCalculo');
   cpFechaHtmlAmbos = '';
@@ -2385,8 +2409,12 @@ function cpCalcularFecha(i) {
 
   const hasta = cpProxFechaConDia(HOY, diaNuevo);
   const desde = cpFechaConDiaNoMayor(hasta, diaActual);
-  const misTurnos = (fichaDatosActual && fichaDatosActual.misTurnos) ? fichaDatosActual.misTurnos : [];
-  const diasFijos = new Set(misTurnos.map(t => t.dia));
+  // Días fijos de ESTE alumno: prioridad a los cargados al abrir el modal (cpDiasFijos);
+  // si por algo están vacíos, caemos a los de la Ficha.
+  const nombresDias = (cpDiasFijos && cpDiasFijos.length)
+    ? cpDiasFijos
+    : ((fichaDatosActual && fichaDatosActual.misTurnos) ? fichaDatosActual.misTurnos.map(t => t.dia) : []);
+  const diasFijos = new Set(nombresDias);
   const sinTilde = new Set([...diasFijos].map(s => s.replace('é','e').replace('á','a')));
   const NOMBRE = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
   const clasesEnPuente = [];
