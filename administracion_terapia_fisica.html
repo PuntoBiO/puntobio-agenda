@@ -1405,6 +1405,11 @@ async function abrirModalVer() {
   const btn = (accion, label, bg, color) => `<button class="btn-modal" style="background:${bg};color:${color};" onclick="accionDesdeFicha('${accion}')">${label}</button>`;
   let acc = '';
   if (esActivo) acc += btn('cobrar', '💵 Cobrar', 'var(--verde)', '#fff');
+  // Botón especial: cobrar el SALDO PENDIENTE por cambio de fecha (monto exacto guardado)
+  const _deuda = deudaCambioDe(i);
+  if (esActivo && _deuda) {
+    acc += `<button class="btn-modal" style="background:#f59e0b;color:#fff;" onclick="cobrarSaldoCambioFecha()">💵 Cobrar saldo (${fmt$(_deuda.importe)})</button>`;
+  }
   acc += btn('editar', '✏️ Editar', 'var(--bg-hover)', 'var(--text)');
   acc += btn('ficha', '📅 Horarios', 'var(--bg-hover)', 'var(--text)');
   if (puedeAlta) acc += btn('altatf', '➕ Dar alta TF', 'var(--azul)', '#fff');
@@ -1422,6 +1427,57 @@ window.accionDesdeFicha = (accion) => {
   else if (accion === 'ficha') abrirFichaAlumno();
   else if (accion === 'altatf') abrirAltaTF();
   else if (accion === 'baja') abrirModalBaja();
+};
+
+// Lee el saldo pendiente por cambio de fecha guardado en la inscripción.
+// Tag: [DEUDA_CAMBIO importe=NNN concepto=puente_fecha mes=YYYY-MM venc=X->Y]
+function deudaCambioDe(inscripcion) {
+  if (!inscripcion || !inscripcion.observaciones) return null;
+  const m = inscripcion.observaciones.match(/\[DEUDA_CAMBIO\s+importe=(\d+)[^\]]*?(?:mes=([\d-]+))?[^\]]*?(?:venc=([^\]\s]+))?\s*\]/);
+  if (!m) return null;
+  return { importe: parseInt(m[1], 10), mes: m[2] || MES_ACTUAL, venc: m[3] || '' };
+}
+
+// Cobra el saldo pendiente por cambio de fecha: registra el pago con el monto exacto,
+// imputado al mes guardado, y borra la etiqueta de deuda. Se llama desde el botón del Detalle.
+window.cobrarSaldoCambioFecha = async () => {
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  const p = alumnoActivo && alumnoActivo.persona;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  const d = deudaCambioDe(i);
+  if (!d) { toast('Este alumno no tiene saldo pendiente por cambio de fecha.', true); return; }
+
+  const medio = prompt(
+    `Cobrar SALDO por cambio de fecha de ${p ? p.nombre : 'este alumno'}:\n\n` +
+    `• Importe: ${fmt$(d.importe)}\n` +
+    `• Se imputa a: ${d.mes}\n\n` +
+    `Medio de pago: EFECTIVO / TRANSFERENCIA / DEBITO`, 'EFECTIVO');
+  if (medio === null) return;
+  const medioOk = String(medio).trim().toUpperCase();
+  if (!['EFECTIVO', 'TRANSFERENCIA', 'DEBITO'].includes(medioOk)) {
+    toast('Medio inválido. Poné EFECTIVO, TRANSFERENCIA o DEBITO.', true); return;
+  }
+
+  try {
+    const { error: e1 } = await sb.from('pagos_tf').insert({
+      inscripcion_id: i.id, mes_imputado: d.mes, fecha: HOY.toISOString().split('T')[0],
+      importe: d.importe, medio: medioOk, tipo_cobro: 'NORMAL',
+      observaciones: `PUENTE cambio de fecha (saldo cobrado)${d.venc ? ' · venc ' + d.venc : ''}`,
+      cargado_por: usuarioId
+    });
+    if (e1) throw e1;
+    const obsLimpia = (i.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
+    const { error: e2 } = await sb.from('inscripciones_tf')
+      .update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() })
+      .eq('id', i.id);
+    if (e2) throw e2;
+    toast(`✓ Saldo cobrado: ${fmt$(d.importe)} (imputado ${d.mes})`);
+    cerrarModal('modalVer');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al cobrar el saldo: ' + e.message, true);
+  }
 };
 
 // ===== BLOQUE 1: RESUMEN DE UN VISTAZO (plan actual + deuda + contacto) =====
