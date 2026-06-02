@@ -503,6 +503,61 @@
   </div>
 </div>
 
+<!-- ===== MODAL CAMBIAR FECHA DE PAGO (PUENTE PROPORCIONAL POR CLASES) ===== -->
+<div class="modal-backdrop" id="modalCambioFecha">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="cfTitulo">📅 Cambiar fecha de pago</span>
+      <button class="modal-close" onclick="cerrarModal('modalCambioFecha')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="cfInfo" style="margin-top:0"></div>
+
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">
+        <div class="form-group" style="flex:1;min-width:140px">
+          <label>Día de pago actual</label>
+          <input type="text" id="cfDiaActual" disabled style="background:var(--bg)">
+        </div>
+        <div class="form-group" style="flex:1;min-width:140px">
+          <label>Nuevo día de pago</label>
+          <input type="number" id="cfDiaNuevo" min="1" max="28" placeholder="Ej: 10" oninput="cfRecalcular()">
+        </div>
+      </div>
+
+      <div id="cfCalculo" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;margin:8px 0">
+        <span style="color:var(--text-dim)">Escribí el nuevo día de pago para ver el puente a cobrar.</span>
+      </div>
+
+      <div class="section-title" style="margin-top:4px">Cobro del puente</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <div class="form-group" style="flex:1;min-width:140px">
+          <label>Importe a cobrar ahora</label>
+          <input type="number" id="cfImporte" min="0" placeholder="0">
+        </div>
+        <div class="form-group" style="flex:1;min-width:140px">
+          <label>Medio de pago</label>
+          <select id="cfMedio">
+            <option value="EFECTIVO">Efectivo</option>
+            <option value="TRANSFERENCIA">Transferencia</option>
+            <option value="DEBITO">Débito</option>
+          </select>
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:4px 0 2px;cursor:pointer">
+        <input type="checkbox" id="cfSinCobro" onchange="cfToggleSinCobro()"> No cobrar ahora (solo cambio la fecha)
+      </label>
+      <div class="form-group" style="margin-top:6px">
+        <label>Observación (opcional)</label>
+        <input type="text" id="cfObs" placeholder="Ej: reacomodo de fecha pedido por el alumno">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCambioFecha')">Cancelar</button>
+      <button class="btn-modal btn-confirmar-editar" id="cfBtnConfirmar" onclick="confirmarCambioFecha()">Confirmar cambio de fecha</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== MODAL EDITAR / CORREGIR CAMBIO DE PLAN PROGRAMADO ===== -->
 <div class="modal-backdrop" id="modalEditarCambio">
   <div class="modal modal-sm">
@@ -1690,7 +1745,7 @@ async function abrirFichaAlumno() {
     }
 
     // Guardar todo para el informe PDF
-    fichaDatosActual = { p, misTurnos, asistencias, evoluciones, presentes, conAviso, sinAviso };
+    fichaDatosActual = { p, misTurnos, asistencias, evoluciones, presentes, conAviso, sinAviso, diaVenc: (insc ? insc.dia_vencimiento : null), plan: codPlan };
 
     // Foto / iniciales (la foto se carga firmada después, asíncrono)
     const ini = inicialesDe(p.nombre);
@@ -1764,9 +1819,12 @@ async function abrirFichaAlumno() {
         </div>
       </div>
 
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
         <div style="font-size:15px;font-weight:700">📌 Horarios fijos</div>
-        <button onclick="fichaAgregarHorario()" style="background:var(--azul);color:white;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">➕ Agregar horario</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button onclick="abrirCambioFechaPago()" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">📅 Cambiar fecha de pago</button>
+          <button onclick="fichaAgregarHorario()" style="background:var(--azul);color:white;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer">➕ Agregar horario</button>
+        </div>
       </div>
       <div id="fichaHorarios" style="margin-bottom:22px">${horariosHtml}</div>
 
@@ -2614,8 +2672,192 @@ window.confirmarCambioPlan = async () => {
   }
 };
 
-// Arma y ofrece el aviso por WhatsApp del cambio de plan (formato completo, estilo inscripción)
-function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene, proporcional, diaVenc) {
+// ===== CAMBIAR FECHA DE PAGO (puente proporcional por clases fijas) =====
+// Estado del modal
+let cfPuenteCache = { clases: 0, importe: 0, desde: null, hasta: null, diaNuevo: null };
+
+// Próxima fecha (>= base) cuyo día del mes sea `dia`. Devuelve objeto Date.
+function cfProximaFechaConDia(base, dia) {
+  const b = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  const ult = new Date(b.getFullYear(), b.getMonth() + 1, 0).getDate();
+  let d = new Date(b.getFullYear(), b.getMonth(), Math.min(dia, ult));
+  if (d < b) {
+    const ult2 = new Date(b.getFullYear(), b.getMonth() + 2, 0).getDate();
+    d = new Date(b.getFullYear(), b.getMonth() + 1, Math.min(dia, ult2));
+  }
+  return d;
+}
+// Fecha con día `dia` en el mismo mes que `ref`, pero no después de `ref` (si cae después, mes anterior)
+function cfFechaConDiaNoMayor(ref, dia) {
+  let d = new Date(ref.getFullYear(), ref.getMonth(), Math.min(dia, new Date(ref.getFullYear(), ref.getMonth() + 1, 0).getDate()));
+  if (d > ref) {
+    const m = ref.getMonth() - 1;
+    d = new Date(ref.getFullYear(), m, Math.min(dia, new Date(ref.getFullYear(), m + 1, 0).getDate()));
+  }
+  return d;
+}
+function cfFmtDia(d) {
+  const dias = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+  return `${dias[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`;
+}
+
+window.abrirCambioFechaPago = () => {
+  const d = fichaDatosActual;
+  if (!d || !alumnoActivo || !alumnoActivo.inscripcion) { toast('Abrí la ficha del alumno primero.', true); return; }
+  const i = alumnoActivo.inscripcion;
+  if (!clasesSemanaDePlan(i.plan)) {
+    toast('Este plan no se prorratea por clases (es tarifa plana). Cambiá la fecha desde "Editar".', true);
+    return;
+  }
+  $('#cfTitulo').textContent = `📅 Cambiar fecha de pago — ${d.p.nombre}`;
+  $('#cfInfo').innerHTML = `<strong>${d.p.nombre}</strong> · plan <strong>${i.plan}</strong> (${fmt$((tarifario[i.plan]||{}).valor_lista || 0)}) · ${clasesSemanaDePlan(i.plan)} clases/sem`;
+  $('#cfDiaActual').value = d.diaVenc ? `Día ${d.diaVenc}` : 'Sin definir';
+  $('#cfDiaNuevo').value = '';
+  $('#cfImporte').value = '';
+  $('#cfObs').value = '';
+  $('#cfSinCobro').checked = false;
+  $('#cfImporte').disabled = false;
+  $('#cfCalculo').innerHTML = '<span style="color:var(--text-dim)">Escribí el nuevo día de pago para ver el puente a cobrar.</span>';
+  $('#modalCambioFecha').classList.add('activo');
+};
+
+window.cfToggleSinCobro = () => {
+  const sin = $('#cfSinCobro').checked;
+  $('#cfImporte').disabled = sin;
+  if (sin) $('#cfImporte').value = '';
+  else cfRecalcular();
+};
+
+window.cfRecalcular = () => {
+  const d = fichaDatosActual;
+  const i = alumnoActivo.inscripcion;
+  const calc = $('#cfCalculo');
+  const diaActual = parseInt(d.diaVenc, 10);
+  const diaNuevo = parseInt($('#cfDiaNuevo').value, 10);
+  if (!diaNuevo || diaNuevo < 1 || diaNuevo > 28) {
+    calc.innerHTML = '<span style="color:var(--text-dim)">Escribí un día válido (1 a 28).</span>';
+    cfPuenteCache = { clases: 0, importe: 0 };
+    return;
+  }
+  if (!diaActual) {
+    calc.innerHTML = '<div class="aviso-amarillo">Este alumno no tiene día de pago definido. Cargalo primero en "Editar".</div>';
+    cfPuenteCache = { clases: 0, importe: 0 };
+    return;
+  }
+
+  // Ventana puente: desde el arranque viejo (día actual, no posterior a hoy+nuevo) hasta el nuevo arranque (exclusivo).
+  const hasta = cfProximaFechaConDia(HOY, diaNuevo);            // próximo día nuevo (arranque mes entero)
+  const desde = cfFechaConDiaNoMayor(hasta, diaActual);         // boundary del día viejo, antes del nuevo arranque
+
+  // Clases fijas del alumno por nombre de día
+  const diasFijos = new Set((d.misTurnos || []).map(t => t.dia));
+  const diasFijosSinTilde = new Set([...diasFijos].map(s => s.replace('é','e').replace('á','a')));
+  const NOMBRE = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+
+  // Recorrer cada día del puente [desde, hasta) y contar las clases fijas que caen
+  const clasesEnPuente = [];
+  let cur = new Date(desde.getFullYear(), desde.getMonth(), desde.getDate());
+  let guard = 0;
+  while (cur < hasta && guard < 90) {
+    const nom = NOMBRE[cur.getDay()];
+    if (diasFijos.has(nom) || diasFijosSinTilde.has(nom.replace('é','e').replace('á','a'))) {
+      clasesEnPuente.push(new Date(cur));
+    }
+    cur.setDate(cur.getDate() + 1);
+    guard++;
+  }
+
+  const cuota = (tarifario[i.plan] || {}).valor_lista || 0;
+  const clasesSem = clasesSemanaDePlan(i.plan) || 0;
+  const clasesMes = clasesSem * 4;                              // convención del centro: 4 semanas
+  const valorClase = clasesMes ? Math.round(cuota / clasesMes) : 0;
+  const importe = valorClase * clasesEnPuente.length;
+
+  cfPuenteCache = { clases: clasesEnPuente.length, importe, desde, hasta, diaNuevo, valorClase };
+
+  const listaClases = clasesEnPuente.length
+    ? clasesEnPuente.map(c => `<div style="font-size:12px;color:#1e40af">• ${cfFmtDia(c)}</div>`).join('')
+    : '<div style="font-size:12px;color:var(--text-dim)">No hay clases fijas en el puente.</div>';
+
+  calc.innerHTML = `
+    <div style="font-weight:600;margin-bottom:8px">Puente: ${cfFmtDia(desde)} → arranca ${cfFmtDia(hasta)}</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr><td>Cuota ${i.plan}</td><td style="text-align:right">${fmt$(cuota)}</td></tr>
+      <tr><td>Clases del mes</td><td style="text-align:right">${clasesMes} (${clasesSem}/sem × 4)</td></tr>
+      <tr><td>Valor por clase</td><td style="text-align:right">${fmt$(valorClase)}</td></tr>
+      <tr><td>Clases fijas en el puente</td><td style="text-align:right;font-weight:600">${clasesEnPuente.length}</td></tr>
+    </table>
+    <div style="margin:6px 0 8px">${listaClases}</div>
+    <div style="border-top:2px solid var(--azul);padding-top:8px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-weight:700">Proporcional a cobrar ahora</span>
+      <span style="font-weight:700;font-size:16px;color:var(--azul)">${fmt$(importe)}</span>
+    </div>
+    <div style="font-size:11.5px;color:var(--text-dim);margin-top:6px">El mes entero arranca el ${cfFmtDia(hasta)} (día ${diaNuevo} → día ${diaNuevo} del mes siguiente).</div>
+  `;
+  if (!$('#cfSinCobro').checked) $('#cfImporte').value = importe;
+};
+
+window.confirmarCambioFecha = async () => {
+  const i = alumnoActivo.inscripcion;
+  const p = alumnoActivo.persona;
+  const diaNuevo = parseInt($('#cfDiaNuevo').value, 10);
+  if (!diaNuevo || diaNuevo < 1 || diaNuevo > 28) { toast('Escribí un día válido (1 a 28).', true); return; }
+  const sinCobro = $('#cfSinCobro').checked;
+  const importe = sinCobro ? 0 : (parseFloat($('#cfImporte').value) || 0);
+
+  const ok = confirm(
+    `Cambio de FECHA de pago de ${p.nombre}:\n\n` +
+    `• Día de pago: ${i.dia_vencimiento || '—'} → ${diaNuevo}\n` +
+    `• Plan sin cambios: ${i.plan}\n` +
+    (sinCobro
+      ? `• NO se cobra puente ahora.\n`
+      : `• Puente: ${cfPuenteCache.clases || 0} clase(s) · se cobra ${fmt$(importe)}.\n`) +
+    `\n¿Confirmás?`
+  );
+  if (!ok) return;
+
+  const btn = $('#cfBtnConfirmar');
+  btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    // 1) Cobrar el puente proporcional (si corresponde)
+    if (!sinCobro && importe > 0) {
+      const { error: errPago } = await sb.from('pagos_tf').insert({
+        inscripcion_id: i.id,
+        mes_imputado: MES_ACTUAL,
+        fecha: HOY.toISOString().split('T')[0],
+        importe: importe,
+        medio: $('#cfMedio').value,
+        tipo_cobro: 'NORMAL',
+        observaciones: `PROPORCIONAL cambio de fecha de pago (día ${i.dia_vencimiento||'—'}→${diaNuevo}) · ${cfPuenteCache.clases||0} clase(s)` + ($('#cfObs').value.trim() ? ` · ${$('#cfObs').value.trim()}` : ''),
+        cargado_por: usuarioId
+      });
+      if (errPago) throw errPago;
+    }
+
+    // 2) Actualizar el día de vencimiento (NO toca el plan)
+    const { error: errInsc } = await sb.from('inscripciones_tf').update({
+      dia_vencimiento: diaNuevo,
+      observaciones: ((i.observaciones || '') + ` [Cambio fecha de pago: día ${i.dia_vencimiento||'—'}→${diaNuevo} el ${HOY.toISOString().split('T')[0]}]`).trim(),
+      actualizado_en: new Date().toISOString()
+    }).eq('id', i.id);
+    if (errInsc) throw errInsc;
+
+    let msg = `✓ Fecha de pago: día ${i.dia_vencimiento||'—'} → ${diaNuevo}`;
+    if (!sinCobro && importe > 0) msg += ` · puente cobrado ${fmt$(importe)}`;
+    toast(msg);
+
+    cerrarModal('modalCambioFecha');
+    abrirFichaAlumno();      // refresca la ficha con el nuevo día
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al cambiar la fecha: ' + e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirmar cambio de fecha';
+  }
+};
+
+
   try {
     // Turnos NUEVOS elegidos en el cambio (los que ya tenía se conservan, no se listan)
     const elegidos = cpTurnosCache.filter(t => cpTurnosSel.has(t.id || t.turno_id));
