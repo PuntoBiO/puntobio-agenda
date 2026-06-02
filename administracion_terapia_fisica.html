@@ -1442,6 +1442,11 @@ async function abrirModalVer() {
   const btn = (accion, label, bg, color) => `<button class="btn-modal" style="background:${bg};color:${color};" onclick="accionDesdeFicha('${accion}')">${label}</button>`;
   let acc = '';
   if (esActivo) acc += btn('cobrar', '💵 Cobrar', 'var(--verde)', '#fff');
+  // Botón especial: cobrar el puente pendiente (monto exacto ya guardado)
+  const _pend = puentePendienteDe(i);
+  if (esActivo && _pend) {
+    acc += `<button class="btn-modal" style="background:#f59e0b;color:#fff;" onclick="cobrarPuentePendiente()">💵 Cobrar puente (${fmt$(_pend.importe)})</button>`;
+  }
   acc += btn('editar', '✏️ Editar', 'var(--bg-hover)', 'var(--text)');
   acc += btn('ficha', '📅 Horarios', 'var(--bg-hover)', 'var(--text)');
   if (puedeAlta) acc += btn('altatf', '➕ Dar alta TF', 'var(--azul)', '#fff');
@@ -2748,6 +2753,19 @@ function cfFmtDia(d) {
   const dias = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
   return `${dias[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`;
 }
+// Mes (YYYY-MM) al que se imputa el puente = mes donde arranca el puente (desde). Default: mes actual.
+function cfMesImputado() {
+  const d = cfPuenteCache && cfPuenteCache.desde ? cfPuenteCache.desde : HOY;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+// Lee la etiqueta de puente pendiente desde las observaciones de la inscripción.
+// Devuelve {importe, clases, mes, venc} o null si no hay.
+function puentePendienteDe(inscripcion) {
+  if (!inscripcion || !inscripcion.observaciones) return null;
+  const m = inscripcion.observaciones.match(/\[PUENTE_PENDIENTE\s+importe=(\d+)\s+clases=(\d+)\s+mes=([\d-]+)\s+venc=([^\]]*)\]/);
+  if (!m) return null;
+  return { importe: parseInt(m[1],10), clases: parseInt(m[2],10), mes: m[3], venc: m[4].trim() };
+}
 
 window.abrirCambioFechaPago = () => {
   const d = fichaDatosActual;
@@ -2867,7 +2885,7 @@ window.confirmarCambioFecha = async () => {
     if (!sinCobro && importe > 0) {
       const { error: errPago } = await sb.from('pagos_tf').insert({
         inscripcion_id: i.id,
-        mes_imputado: MES_ACTUAL,
+        mes_imputado: cfMesImputado(),
         fecha: HOY.toISOString().split('T')[0],
         importe: importe,
         medio: $('#cfMedio').value,
@@ -2878,9 +2896,17 @@ window.confirmarCambioFecha = async () => {
       if (errPago) throw errPago;
     }
 
+    // Si NO se cobra ahora pero hay puente > 0 → dejar el puente PENDIENTE registrado en la
+    // inscripción (etiqueta parseable), para mostrar el botón "Cobrar puente" en el Detalle.
+    let obsBase = (i.observaciones || '').replace(/\s*\[PUENTE_PENDIENTE[^\]]*\]/g, '').trim();  // limpia etiquetas viejas
+    let nuevaObs = `${obsBase} [Cambio fecha de pago: día ${i.dia_vencimiento||'—'}→${diaNuevo} el ${HOY.toISOString().split('T')[0]}]`.trim();
+    if (sinCobro && (cfPuenteCache.importe || 0) > 0) {
+      nuevaObs += ` [PUENTE_PENDIENTE importe=${cfPuenteCache.importe} clases=${cfPuenteCache.clases||0} mes=${cfMesImputado()} venc=${i.dia_vencimiento||''}->${diaNuevo}]`;
+    }
+
     const { error: errInsc } = await sb.from('inscripciones_tf').update({
       dia_vencimiento: diaNuevo,
-      observaciones: ((i.observaciones || '') + ` [Cambio fecha de pago: día ${i.dia_vencimiento||'—'}→${diaNuevo} el ${HOY.toISOString().split('T')[0]}]`).trim(),
+      observaciones: nuevaObs,
       actualizado_en: new Date().toISOString()
     }).eq('id', i.id);
     if (errInsc) throw errInsc;
@@ -2900,7 +2926,59 @@ window.confirmarCambioFecha = async () => {
   }
 };
 
-// Deshacer un cambio de plan programado (SOLO Lu): limpia el plan futuro y
+// COBRAR PUENTE PENDIENTE: cobra el monto exacto guardado, imputado al mes del puente,
+// y borra la etiqueta PUENTE_PENDIENTE de la inscripción. Se llama desde el botón del Detalle.
+window.cobrarPuentePendiente = async () => {
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  const p = alumnoActivo && alumnoActivo.persona;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  const pend = puentePendienteDe(i);
+  if (!pend) { toast('Este alumno no tiene un puente pendiente.', true); return; }
+
+  const medio = prompt(
+    `Cobrar PUENTE de ${p ? p.nombre : 'este alumno'}:\n\n` +
+    `• Importe: ${fmt$(pend.importe)} (${pend.clases} clase/s)\n` +
+    `• Se imputa a: ${pend.mes}\n\n` +
+    `Escribí el medio de pago: EFECTIVO / TRANSFERENCIA / DEBITO`,
+    'EFECTIVO'
+  );
+  if (medio === null) return; // canceló
+  const medioOk = String(medio).trim().toUpperCase();
+  if (!['EFECTIVO','TRANSFERENCIA','DEBITO'].includes(medioOk)) {
+    toast('Medio inválido. Poné EFECTIVO, TRANSFERENCIA o DEBITO.', true); return;
+  }
+
+  try {
+    // 1) Registrar el cobro del puente
+    const { error: errPago } = await sb.from('pagos_tf').insert({
+      inscripcion_id: i.id,
+      mes_imputado: pend.mes,
+      fecha: HOY.toISOString().split('T')[0],
+      importe: pend.importe,
+      medio: medioOk,
+      tipo_cobro: 'NORMAL',
+      observaciones: `PROPORCIONAL cambio de fecha de pago (venc ${pend.venc}) · ${pend.clases} clase(s) · PUENTE`,
+      cargado_por: usuarioId
+    });
+    if (errPago) throw errPago;
+
+    // 2) Borrar la etiqueta del puente pendiente
+    const obsLimpia = (i.observaciones || '').replace(/\s*\[PUENTE_PENDIENTE[^\]]*\]/g, '').trim();
+    const { error: errInsc } = await sb.from('inscripciones_tf')
+      .update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() })
+      .eq('id', i.id);
+    if (errInsc) throw errInsc;
+
+    toast(`✓ Puente cobrado: ${fmt$(pend.importe)} (imputado ${pend.mes})`);
+    cerrarModal('modalVer');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al cobrar el puente: ' + e.message, true);
+  }
+};
+
+
 // borra el pago del proporcional que se generó. Acción permanente, con confirmación.
 window.deshacerCambioPlan = async () => {
   if (!esLu) { toast('Solo Lu puede deshacer cambios de plan.', true); return; }
