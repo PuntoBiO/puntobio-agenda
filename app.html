@@ -1744,6 +1744,25 @@ window.addEventListener('message', (ev) => {
     actualizarBadgeMensajes();
     return;
   }
+  // "Abrir en Padrón": cualquier iframe puede pedir abrir la ficha de una persona.
+  // Uso: window.parent.postMessage({ tipo:'ABRIR_EN_PADRON', personaId: ID }, '*')
+  if (data.tipo === 'ABRIR_EN_PADRON' && data.personaId) {
+    window._padronAbrirPersonaId = data.personaId;
+    const navP = Array.from(document.querySelectorAll('.nav-item'))
+      .find(n => (n.getAttribute('onclick') || '').includes("irA('padron')"));
+    if (navP) { navP.click(); }
+    else {
+      try {
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        const fakeEvt = { target: { closest: () => null } };
+        const origEvent = window.event;
+        Object.defineProperty(window, 'event', { value: fakeEvt, configurable: true, writable: true });
+        window.irA('padron');
+        if (origEvent !== undefined) window.event = origEvent;
+      } catch (e) { console.warn('ABRIR_EN_PADRON', e); }
+    }
+    return;
+  }
   if (data.tipo === 'NAVEGAR_MODULO' && typeof data.modulo === 'string') {
     // Llamar a irA sin depender de "event" (que no existe en este contexto)
     // Encontrar el nav-item del módulo de destino y simular click para mantener UI sincronizada
@@ -1970,8 +1989,13 @@ function renderCajaDiariaTF() {
 function renderPadron() {
   const contentEl = document.getElementById('content')
   contentEl.classList.add('module-embed')
+  // Si quedó pendiente abrir una persona puntual (buscador / "Abrir en Padrón"),
+  // se la pasamos al iframe por ?persona=ID y se consume una sola vez.
+  const pid = window._padronAbrirPersonaId
+  window._padronAbrirPersonaId = null
+  const src = pid ? `padron.html?persona=${encodeURIComponent(pid)}` : 'padron.html'
   contentEl.innerHTML = `
-    <iframe src="padron.html" class="module-iframe-tab" title="Padrón"></iframe>
+    <iframe src="${src}" class="module-iframe-tab" title="Padrón"></iframe>
   `
 }
 
@@ -2568,6 +2592,8 @@ async function buscadorEjecutar(q) {
       el.addEventListener('mouseleave', () => el.style.background = '')
       el.addEventListener('click', () => {
         const nombre = decodeURIComponent(el.dataset.nombre)
+        // Abrir la ficha directo en el Padrón (no solo filtrar por nombre)
+        window._padronAbrirPersonaId = el.dataset.id
         // Guardar búsqueda y cerrar modal
         try { localStorage.setItem('padronSearch', nombre) } catch(e){}
         cerrarBuscador()
