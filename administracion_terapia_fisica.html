@@ -1071,7 +1071,7 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR, hcR, obsR, adjR, taR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, hcR, obsR, adjR, taR, bonifR] = await Promise.all([
       sb.from('personas').select('*'),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
@@ -1079,7 +1079,8 @@ async function cargarTodo() {
       sb.from('historias_clinicas').select('persona_id'),
       sb.from('hc_observaciones').select('persona_id'),
       sb.from('hc_adjuntos').select('persona_id'),
-      sb.from('turno_alumnos').select('persona_id').eq('activo', true)
+      sb.from('turno_alumnos').select('persona_id').eq('activo', true),
+      sb.from('recibos_bonif').select('inscripcion_id, mes_imputado')
     ]);
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
@@ -1089,6 +1090,11 @@ async function cargarTodo() {
     if (obsR.error) console.warn('obs:', obsR.error.message);
     if (adjR.error) console.warn('adj:', adjR.error.message);
     if (taR.error) console.warn('turno_alumnos:', taR.error.message);
+    if (bonifR && bonifR.error) console.warn('recibos_bonif:', bonifR.error.message);
+
+    // Set de recibos de bonificados ya enviados: "inscId|YYYY-MM"
+    const bonifSentSet = new Set();
+    ((bonifR && bonifR.data) || []).forEach(r => bonifSentSet.add(`${r.inscripcion_id}|${r.mes_imputado}`));
 
     // Conteo de clases fijas activas por persona (para el aviso "le falta clase fija")
     const turnosFijosPorPersona = {};
@@ -1172,13 +1178,21 @@ async function cargarTodo() {
       }
 
       // Estado del recibo del mes en curso (para filtro y botón de envío)
+      // - Alumno que paga: se basa en el último pago del mes (marca en pagos_tf).
+      // - Bonificado: no tiene pago; se marca en la tabla recibos_bonif (insc|mes).
       const _mesAct = new Date().toISOString().slice(0, 7);
-      let reciboPendiente = false, pagoMesId = null;
+      let reciboPendiente = false, pagoMesId = null, reciboModo = null, inscReciboId = null;
       if (inscRepr) {
-        const pagosMes = (pagosPorInsc[inscRepr.id] || [])
-          .filter(pg => pg.mes_imputado === _mesAct)
-          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || String(b.id).localeCompare(String(a.id)));
-        if (pagosMes.length) { pagoMesId = pagosMes[0].id; reciboPendiente = !pagosMes[0].recibo_enviado_at; }
+        inscReciboId = inscRepr.id;
+        if (estadoTF === 'TF_BONIF') {
+          reciboModo = 'bonif';
+          reciboPendiente = !bonifSentSet.has(`${inscRepr.id}|${_mesAct}`);
+        } else {
+          const pagosMes = (pagosPorInsc[inscRepr.id] || [])
+            .filter(pg => pg.mes_imputado === _mesAct)
+            .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || String(b.id).localeCompare(String(a.id)));
+          if (pagosMes.length) { pagoMesId = pagosMes[0].id; reciboModo = 'pago'; reciboPendiente = !pagosMes[0].recibo_enviado_at; }
+        }
       }
 
       personas.push({
@@ -1193,6 +1207,8 @@ async function cargarTodo() {
         tieneEval: personasConEval.has(persona.id),
         reciboPendiente,
         pagoMesId,
+        reciboModo,
+        inscReciboId,
         // Placeholders para futuras áreas
         tieneConsultorios: false,
         tieneBioLab: false,
@@ -1359,7 +1375,7 @@ function renderTabla(lista) {
     const esBajaTF = f.estadoTF === 'TF_BAJA';
     const sinTF = f.estadoTF === 'SIN_TF';
     const puedeAltaTF = sinTF || esBajaTF; // dar alta a quien no está activo
-    const reciboBtn = f.pagoMesId
+    const reciboBtn = f.reciboModo
       ? `<button class="btn-accion" data-idx="${idx}" data-accion="recibo" title="${f.reciboPendiente ? 'Enviar el recibo de este mes por mail' : 'Recibo ya enviado — tocá para reenviar'}" style="background:${f.reciboPendiente ? '#ede9fe' : '#dcfce7'};color:${f.reciboPendiente ? '#6d28d9' : '#15803d'};border:1px solid ${f.reciboPendiente ? '#a78bfa' : '#86efac'};font-size:11px;padding:4px 8px;white-space:nowrap;">${f.reciboPendiente ? '📧 Enviar recibo' : '📧 Recibo ✓'}</button>`
       : '';
     const acciones = `
@@ -1394,7 +1410,7 @@ function renderTabla(lista) {
         enviarWspMiEspacio(cel, fila.persona.nombre || '', email);
       }
       else if (accion === 'wsp') abrirMenuWsp();
-      else if (accion === 'recibo') enviarReciboUno(fila.pagoMesId, btn);
+      else if (accion === 'recibo') enviarReciboUno(fila, btn);
       else if (accion === 'editar') abrirModalEditar();
       else if (accion === 'ficha') abrirFichaAlumno();
       else if (accion === 'altatf') abrirAltaTF();
@@ -1452,20 +1468,25 @@ window.limpiarFiltros = () => {
   aplicarFiltros();
 };
 
-// ===== ENVÍO DE RECIBOS DEL MES (solo a los pendientes) =====
+// ===== ENVÍO DE RECIBOS DEL MES (solo a los pendientes: pagos + bonificados) =====
 window.enviarRecibosDelMes = async () => {
-  const pend = (personas || []).filter(x => x.reciboPendiente && x.pagoMesId);
+  const mesAct = new Date().toISOString().slice(0, 7);
+  const pend = (personas || []).filter(x => x.reciboPendiente && x.reciboModo);
   if (!pend.length) { alert('No hay recibos pendientes de envío este mes. 🎉\n\n(Usá el filtro "📧 Recibo pendiente" para verlos cuando los haya.)'); return; }
-  if (!confirm(`Hay ${pend.length} alumno(s) con recibo PENDIENTE este mes.\n\n¿Enviarles el recibo por mail ahora?\n(Los que no tengan email cargado se saltean solos.)`)) return;
+  if (!confirm(`Hay ${pend.length} alumno(s) con recibo PENDIENTE este mes (incluye bonificados).\n\n¿Enviarles el recibo por mail ahora?\n(Los que no tengan email cargado se saltean solos.)`)) return;
 
   const btn = document.getElementById('btnRecibosMes');
   if (btn) { btn.disabled = true; btn.textContent = '📧 Enviando...'; }
   let ok = 0, skip = 0, err = 0;
 
+  const bodyDe = (p) => p.reciboModo === 'bonif'
+    ? { inscripcion_id: p.inscReciboId, mes_imputado: mesAct }
+    : { pago_id: p.pagoMesId };
+
   for (let i = 0; i < pend.length; i += 5) {
     const tanda = pend.slice(i, i + 5);
     const res = await Promise.allSettled(
-      tanda.map(p => sb.functions.invoke('enviar_recibo', { body: { pago_id: p.pagoMesId } }))
+      tanda.map(p => sb.functions.invoke('enviar_recibo', { body: bodyDe(p) }))
     );
     res.forEach(r => {
       if (r.status === 'rejected') { err++; return; }
@@ -1483,12 +1504,17 @@ window.enviarRecibosDelMes = async () => {
 };
 
 // ===== ENVÍO DE UN RECIBO (elegís a quién, desde la fila) =====
-window.enviarReciboUno = async (pagoId, btnEl) => {
-  if (!pagoId) { alert('Este alumno no tiene un pago registrado este mes, no hay recibo para enviar.'); return; }
+window.enviarReciboUno = async (fila, btnEl) => {
+  const mesAct = new Date().toISOString().slice(0, 7);
+  let body = null;
+  if (fila && fila.reciboModo === 'bonif') body = { inscripcion_id: fila.inscReciboId, mes_imputado: mesAct };
+  else if (fila && fila.pagoMesId) body = { pago_id: fila.pagoMesId };
+  if (!body) { alert('Este alumno no tiene un recibo para enviar este mes.'); return; }
+
   const txtOrig = btnEl ? btnEl.textContent : '';
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '📧 ...'; }
   try {
-    const { data, error } = await sb.functions.invoke('enviar_recibo', { body: { pago_id: pagoId } });
+    const { data, error } = await sb.functions.invoke('enviar_recibo', { body });
     if (error) { alert('No se pudo enviar el recibo: ' + (error.message || error)); }
     else if (data && data.skipped) { alert('El alumno no tiene email cargado, así que no se le pudo enviar.'); }
     else { toast('✓ Recibo enviado por mail'); }
