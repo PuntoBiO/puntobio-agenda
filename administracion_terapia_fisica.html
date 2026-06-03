@@ -470,9 +470,10 @@
           <input type="number" id="cpDiaNuevo" min="1" max="28" placeholder="Ej: 10" oninput="cpRecalcular()">
         </div>
         <div class="form-group cp-campo-plan">
-          <label>Fecha del cambio</label>
-          <input type="date" id="cpFecha">
+          <label>Aplicar desde</label>
+          <select id="cpAplicaDesde" onchange="cpRecalcular()"></select>
         </div>
+        <input type="hidden" id="cpFecha">
       </div>
 
       <!-- Cálculo del proporcional -->
@@ -2496,7 +2497,17 @@ window.abrirCambioPlan = () => {
     planesUnicos
       .map(pl => `<option value="${pl}">${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}${pl === i.plan ? ' (actual)' : ''}</option>`).join('');
 
-  $('#cpFecha').value = HOY.toISOString().split('T')[0];
+  // Casilla "Aplicar desde": dos opciones armadas sobre el PRÓXIMO VENCIMIENTO del alumno.
+  // Opción 1 = próximo vencimiento (este mes si todavía no venció). Opción 2 = el mes siguiente.
+  const _dvenc = parseInt(i.dia_vencimiento, 10) || 1;
+  const _v1 = cpProxFechaConDia(HOY, _dvenc);
+  const _ult2 = new Date(_v1.getFullYear(), _v1.getMonth() + 2, 0).getDate();
+  const _v2 = new Date(_v1.getFullYear(), _v1.getMonth() + 1, Math.min(_dvenc, _ult2));
+  const _mesDe = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  $('#cpAplicaDesde').innerHTML =
+    `<option value="${_mesDe(_v1)}|${_v1.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v1)} — ${nombreMes(_mesDe(_v1))} (su próximo vencimiento)</option>` +
+    `<option value="${_mesDe(_v2)}|${_v2.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v2)} — ${nombreMes(_mesDe(_v2))}</option>`;
+  $('#cpFecha').value = _v1.toISOString().split('T')[0];
   $('#cpDiaNuevo').value = '';
   $('#cpImporte').value = 0;
   $('#cpMedio').value = 'TRANSFERENCIA';
@@ -2633,20 +2644,20 @@ function cpRecalcular() {
     $('#cpImporte').value = 0;
     return null;
   }
-  const fecha = $('#cpFecha').value ? new Date($('#cpFecha').value + 'T00:00:00') : HOY;
+  // El mes desde el que ARRANCA el plan nuevo lo manda la casilla "Aplicar desde",
+  // que se arma sobre el PRÓXIMO VENCIMIENTO del alumno (no sobre la fecha de hoy).
+  // value = "YYYY-MM|YYYY-MM-DD"  →  mes que aplica | fecha efectiva.
+  const aplicaVal = $('#cpAplicaDesde') ? $('#cpAplicaDesde').value : '';
+  const partsAplica = aplicaVal.split('|');
+  const mesQueViene = partsAplica[0] || mesSiguienteStr(HOY);
+  const fechaIso = partsAplica[1] || HOY.toISOString().split('T')[0];
+  const fecha = new Date(fechaIso + 'T00:00:00');
+  if ($('#cpFecha')) $('#cpFecha').value = fechaIso;   // sincroniza el hidden que usa confirmar
+  const esFuturo = mesQueViene > MES_ACTUAL;
   const cuotaVieja = tarifario[planViejo] ? (tarifario[planViejo].valor_lista || 0) : 0;
   const cuotaNueva = tarifario[planNuevo] ? (tarifario[planNuevo].valor_lista || 0) : 0;
   const diff = cuotaNueva - cuotaVieja;
   const { total, restantes } = diasMes(fecha);
-  // El mes desde el que ARRANCA el plan nuevo lo manda la fecha elegida:
-  // - Si la fecha cae en el mes actual → arranca este mes (mesDeLaFecha).
-  // - Si la fecha es de un mes futuro (ej: lunes que viene ya es mes próximo) → arranca ese mes.
-  // Esto permite "cambio a partir de una fecha X" sin generar deuda antes de esa fecha.
-  const mesDeLaFecha = `${fecha.getFullYear()}-${String(fecha.getMonth()+1).padStart(2,'0')}`;
-  const esFuturo = mesDeLaFecha > MES_ACTUAL;
-  // Por compatibilidad: si la fecha es de este mes, el plan nuevo se programa para el mes
-  // que viene (comportamiento clásico). Si es de un mes futuro, arranca en ese mes.
-  const mesQueViene = esFuturo ? mesDeLaFecha : mesSiguienteStr(fecha);
 
   // Caso tarifa plana: no se prorratea automático
   if (esPlanPlano(planNuevo) || esPlanPlano(planViejo)) {
@@ -2680,7 +2691,7 @@ function cpRecalcular() {
     </table>
     <div style="margin-top:8px; color:var(--text-dim); font-size:12px;">
       ${diff < 0 ? '⚠️ Bajó de plan: la diferencia es a favor del alumno, normalmente no se cobra proporcional (queda en $0).' : ''}
-      El plan nuevo <strong>${planNuevo}</strong> arranca completo en ${nombreMes(mesQueViene)}. Este mes mantiene <strong>${planViejo}</strong>.
+      El plan nuevo <strong>${planNuevo}</strong> arranca en ${nombreMes(mesQueViene)} (desde su vencimiento). Hasta ahí sigue con <strong>${planViejo}</strong>.
       ${esFuturo ? '<div style="margin-top:6px; color:var(--verde); font-weight:600;">✓ Cambio a futuro: el alumno NO figura con deuda de este plan hasta ' + nombreMes(mesQueViene) + '. No cobres proporcional si todavía no arrancó.</div>' : ''}
     </div>`;
 
@@ -2889,8 +2900,8 @@ window.confirmarCambioPlan = async () => {
         `• Mantenés el mismo plan ${i.plan} (no cambia el plan).\n` +
         `• Arranca a contar desde ${nombreMes(mesQueViene)}.\n`
       : `Confirmá el cambio de plan de ${p.nombre}:\n\n` +
-        `• Plan actual ${i.plan} → se mantiene este mes.\n` +
-        `• Plan nuevo ${planNuevo} → arranca en ${nombreMes(mesQueViene)}.\n`) +
+        `• Plan nuevo ${planNuevo} → arranca en ${nombreMes(mesQueViene)} (desde su vencimiento).\n` +
+        `• Hasta ahí sigue con ${i.plan}.\n`) +
     `• ${resumenCobro}\n` +
     `• ${resumenClases}` + resumenDeuda + `\n\n` +
     `¿Confirmás?`
@@ -2948,7 +2959,7 @@ window.confirmarCambioPlan = async () => {
       const { error: errPago } = await sb.from('pagos_tf').insert({
         inscripcion_id: i.id,
         mes_imputado: MES_ACTUAL,
-        fecha: fechaCambio,
+        fecha: HOY.toISOString().split('T')[0],
         importe: importe,
         medio: $('#cpMedio').value,
         tipo_cobro: 'NORMAL',
