@@ -575,6 +575,7 @@
     <div class="modal-body">
       <div class="modal-info" id="cobrarInfo"></div>
       <div class="form-group"><label>Importe a cobrar</label><input type="number" id="cobrarImporte" step="500" min="0"></div>
+      <div id="cobrarSaldoHint" style="margin:-4px 0 2px;"></div>
       <div class="form-group" style="margin-top:14px;"><label>Mes a imputar</label><select id="cobrarMesImputado"></select></div>
       <div class="form-group" style="margin-top:14px;"><label>Medio de pago</label><select id="cobrarMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
       <div class="form-group" style="margin-top:14px;"><label>Observaciones</label><textarea id="cobrarObs" placeholder="Opcional..."></textarea></div>
@@ -2115,6 +2116,34 @@ window.eliminarInscTF = async () => {
 };
 
 // ===== MODAL COBRAR (reuso) =====
+// Muestra en vivo cómo queda el mes con el importe que se está cargando.
+function actualizarSaldoCobro() {
+  const el = document.getElementById('cobrarSaldoHint');
+  if (!el || !alumnoActivo || !alumnoActivo.inscripcion) return;
+  const cuotaMes = alumnoActivo.cuota || 0;
+  const mesImp = $('#cobrarMesImputado').value;
+  const importe = parseFloat($('#cobrarImporte').value) || 0;
+  const pagosIns = pagosPorInsc[alumnoActivo.inscripcion.id] || [];
+  const yaPagadoMes = pagosIns
+    .filter(pg => pg.mes_imputado === mesImp)
+    .reduce((s, pg) => s + (Number(pg.importe) || 0), 0);
+  const total = yaPagadoMes + importe;
+  const mesLabel = (typeof nombreMes === 'function' ? nombreMes(mesImp) : mesImp);
+  if (cuotaMes <= 0) { el.innerHTML = ''; return; }
+  let color, txt;
+  if (total < cuotaMes) {
+    color = '#b45309';
+    txt = `⚠️ Parcial · cuota ${mesLabel}: ${fmt$(cuotaMes)}${yaPagadoMes ? ` · ya pagó ${fmt$(yaPagadoMes)}` : ''} · queda saldo <strong>${fmt$(cuotaMes - total)}</strong>`;
+  } else if (total === cuotaMes) {
+    color = '#166534';
+    txt = `✅ Con este pago, ${mesLabel} queda al día (${fmt$(total)} / ${fmt$(cuotaMes)})`;
+  } else {
+    color = '#1e3a8a';
+    txt = `ℹ️ ${mesLabel} quedaría con ${fmt$(total)} (cuota ${fmt$(cuotaMes)}) · a favor ${fmt$(total - cuotaMes)}`;
+  }
+  el.innerHTML = `<div style="font-size:12px;font-weight:600;color:${color};">${txt}</div>`;
+}
+
 function abrirModalCobrar() {
   const f = alumnoActivo;
   const p = f.persona; const i = f.inscripcion;
@@ -2140,6 +2169,10 @@ function abrirModalCobrar() {
     .join('');
   $('#cobrarMedio').value = 'TRANSFERENCIA';
   $('#cobrarObs').value = '';
+  // Saldo en vivo: recalcula al cambiar importe o mes (idempotente, no apila listeners).
+  $('#cobrarImporte').oninput = actualizarSaldoCobro;
+  $('#cobrarMesImputado').onchange = actualizarSaldoCobro;
+  actualizarSaldoCobro();
   $('#modalCobrar').classList.add('activo');
 }
 
@@ -2147,22 +2180,64 @@ window.confirmarCobro = async () => {
   if (!alumnoActivo) return;
   const importe = parseFloat($('#cobrarImporte').value);
   if (!importe || importe <= 0) { toast('Ingresá un importe válido', true); return; }
+
+  // ── Pago parcial inteligente + confirmación de mes (siempre) ──
+  const mesImp = $('#cobrarMesImputado').value;
+  const insc = alumnoActivo.inscripcion;
+  const cuotaMes = alumnoActivo.cuota || 0;
+  const pagosIns = pagosPorInsc[insc.id] || [];
+  const yaPagadoMes = pagosIns
+    .filter(pg => pg.mes_imputado === mesImp)
+    .reduce((s, pg) => s + (Number(pg.importe) || 0), 0);
+  const totalConEste = yaPagadoMes + importe;
+  const saldoDespues = Math.max(0, cuotaMes - totalConEste);
+  const esParcial = cuotaMes > 0 && totalConEste < cuotaMes;
+  const mesLabel = (typeof nombreMes === 'function' ? nombreMes(mesImp) : mesImp);
+
+  // 1) Si NO cubre la cuota → no deja guardar hasta confirmar que es PARCIAL.
+  if (esParcial) {
+    const okParcial = confirm(
+      `⚠️ PAGO PARCIAL\n\n` +
+      `Cobrás ${fmt$(importe)} y la cuota de ${mesLabel} es ${fmt$(cuotaMes)}` +
+      (yaPagadoMes > 0 ? ` (ese mes ya tenía ${fmt$(yaPagadoMes)})` : ``) + `.\n` +
+      `Va a quedar un SALDO de ${fmt$(saldoDespues)} en ${mesLabel}.\n\n` +
+      `¿Confirmás que es un pago PARCIAL?`
+    );
+    if (!okParcial) return;
+  }
+
+  // 2) Cartel SIEMPRE: confirmar el mes a imputar.
+  const resumen =
+    `Vas a registrar este cobro:\n\n` +
+    `• Alumno: ${alumnoActivo.persona.nombre}\n` +
+    `• Importe: ${fmt$(importe)}\n` +
+    `• Medio: ${$('#cobrarMedio').value}\n` +
+    `• Mes a imputar: ${mesLabel}\n` +
+    (yaPagadoMes > 0 ? `\n⚠️ Ojo: ${mesLabel} YA tenía ${fmt$(yaPagadoMes)} · quedaría ${fmt$(totalConEste)} en total.\n` : ``) +
+    `\n¿Seguro imputás a ${mesLabel}?`;
+  if (!confirm(resumen)) return;
+
   const btn = $('#btnConfirmarCobro');
   btn.disabled = true; btn.textContent = 'Guardando...';
   try {
     const hoyISO = HOY.toISOString().split('T')[0];
+    // Guardamos el plan vigente en la observación para que el pago quede asociado a su plan.
+    const planActual = insc.plan || '';
+    const obsManual = $('#cobrarObs').value.trim();
+    const tagParcial = esParcial ? ` · PARCIAL (saldo ${fmt$(saldoDespues)})` : '';
+    const obsFinal = `[Plan: ${planActual}]` + (obsManual ? ' ' + obsManual : '') + tagParcial;
     const { error } = await sb.from('pagos_tf').insert({
-      inscripcion_id: alumnoActivo.inscripcion.id,
-      mes_imputado: $('#cobrarMesImputado').value,
+      inscripcion_id: insc.id,
+      mes_imputado: mesImp,
       fecha: hoyISO,
       importe: importe,
       medio: $('#cobrarMedio').value,
       tipo_cobro: 'NORMAL',
-      observaciones: $('#cobrarObs').value.trim() || null,
+      observaciones: obsFinal,
       cargado_por: usuarioId
     });
     if (error) throw error;
-    toast(`✓ Cobro de ${fmt$(importe)} registrado para ${alumnoActivo.persona.nombre}`);
+    toast(`✓ Cobro de ${fmt$(importe)} registrado para ${alumnoActivo.persona.nombre}${esParcial ? ` · saldo ${fmt$(saldoDespues)}` : ''}`);
     cerrarModal('modalCobrar');
     await cargarTodo();
   } catch (e) {
