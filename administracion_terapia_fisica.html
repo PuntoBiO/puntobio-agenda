@@ -619,6 +619,30 @@
       <!-- PASO 1: PLAN -->
       <div class="wiz-pane activo" id="wizPane1">
         <div class="modal-info" id="altaInfo"></div>
+
+        <!-- 🌟 TIPO DE INGRESO (NUEVO / REINGRESO) -->
+        <div id="altaClasifBox" style="margin:2px 0 14px;">
+          <label style="display:block;font-weight:700;font-size:13px;margin-bottom:7px;">Tipo de ingreso <span style="font-weight:500;color:var(--text-dim);">· definí cómo entra esta persona</span></label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="clasif-card" data-clasif="NUEVO" onclick="setClasifIngreso('NUEVO')"
+              style="flex:1;min-width:150px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
+              <div style="font-weight:800;font-size:13px;">🌟 NUEVO</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Nunca estuvo en PuntoBiO. Hace evaluación.</div>
+            </button>
+            <button type="button" class="clasif-card" data-clasif="REINGRESO_CON_EVAL" onclick="setClasifIngreso('REINGRESO_CON_EVAL')"
+              style="flex:1;min-width:150px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
+              <div style="font-weight:800;font-size:13px;">🔁 REINGRESO · evaluar</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Ya fue, pero pasaron +12 meses sin plan. Hace evaluación.</div>
+            </button>
+            <button type="button" class="clasif-card" data-clasif="REINGRESO_SIN_EVAL" onclick="setClasifIngreso('REINGRESO_SIN_EVAL')"
+              style="flex:1;min-width:150px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
+              <div style="font-weight:800;font-size:13px;">🔁 REINGRESO</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Volvió antes de los 12 meses. No necesita evaluación.</div>
+            </button>
+          </div>
+          <div id="altaClasifHint" style="font-size:11.5px;color:var(--text-dim);margin-top:7px;"></div>
+        </div>
+
         <div class="form-grid">
           <div class="form-group"><label>Plan / Código</label><select id="altaPlan"></select></div>
           <div class="form-group"><label>Área</label><input type="text" id="altaArea" value="TERAPIA_FISICA" disabled style="background:var(--bg);"></div>
@@ -3451,11 +3475,55 @@ function wizSetPaso(n) {
   }
 }
 
+// ── Tipo de ingreso (clasificacion_ingreso) ──────────────────────────────
+// NUEVO              → nunca estuvo en PuntoBiO. Debe hacer evaluación.
+// REINGRESO_CON_EVAL → ya fue, pero pasaron +12 meses sin plan activo. Debe evaluación.
+// REINGRESO_SIN_EVAL → volvió antes de los 12 meses. No necesita evaluación.
+let wizClasificacion = 'NUEVO';
+
+// Meses transcurridos desde una fecha (YYYY-MM-DD o ISO). 0 si no hay fecha válida.
+function _mesesDesde(fechaStr) {
+  if (!fechaStr) return 0;
+  const s = String(fechaStr);
+  const d = new Date(s.length <= 10 ? s + 'T00:00:00' : s);
+  if (isNaN(d)) return 0;
+  let m = (HOY.getFullYear() - d.getFullYear()) * 12 + (HOY.getMonth() - d.getMonth());
+  if (HOY.getDate() < d.getDate()) m--;
+  return Math.max(0, m);
+}
+
+window.setClasifIngreso = (val) => {
+  wizClasificacion = val;
+  document.querySelectorAll('#altaClasifBox .clasif-card').forEach(card => {
+    const sel = card.dataset.clasif === val;
+    card.style.borderColor = sel ? 'var(--azul)' : 'var(--border)';
+    card.style.background  = sel ? 'var(--azul-soft)' : 'var(--bg-card)';
+    card.style.boxShadow   = sel ? '0 1px 4px rgba(30,159,224,.25)' : 'none';
+  });
+  const hint = document.getElementById('altaClasifHint');
+  if (hint) {
+    hint.textContent = (val === 'REINGRESO_SIN_EVAL')
+      ? '✓ Queda marcado como reingreso sin evaluación pendiente.'
+      : '⚠️ Va a quedar con evaluación pendiente (aparece el cartel en la Agenda TF hasta que se haga).';
+  }
+};
+
 window.abrirAltaTF = () => {
   const f = alumnoActivo;
   const p = f.persona;
   const i = f.inscripcion; // puede existir si viene de una baja
   const esReingreso = !!(i && i.id);
+
+  // Sugerencia automática del tipo de ingreso (la secre la puede cambiar a mano):
+  // - sin inscripción previa → NUEVO
+  // - con inscripción (estuvo de baja): según hace cuánto dejó el plan (fecha_baja)
+  //     +12 meses inactivo → REINGRESO_CON_EVAL · menos de 12 → REINGRESO_SIN_EVAL
+  let sugerida = 'NUEVO';
+  if (esReingreso) {
+    const refBaja = i.fecha_baja || i.fecha_alta || (i.creado_en ? String(i.creado_en).split('T')[0] : null);
+    sugerida = _mesesDesde(refBaja) >= 12 ? 'REINGRESO_CON_EVAL' : 'REINGRESO_SIN_EVAL';
+  }
+  setClasifIngreso(sugerida);
   wizPaso = 1;
   wizTurnosSel = new Set();
   wizNuevaInscId = null;
@@ -3520,6 +3588,8 @@ window.wizSiguiente = async () => {
         descuento_libre: parseFloat($('#altaDescuento').value) || 0,
         observaciones: obsFinal,
         estado: 'ACTIVO',
+        clasificacion_ingreso: wizClasificacion,
+        debe_evaluacion: (wizClasificacion !== 'REINGRESO_SIN_EVAL'),
         fecha_alta: $('#altaFecha').value || HOY.toISOString().split('T')[0]
       };
       // Si ya tiene una inscripción (p.ej. dada de baja), la reactivamos en vez de duplicar
