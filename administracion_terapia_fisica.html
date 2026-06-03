@@ -944,7 +944,9 @@ const $ = s => document.querySelector(s);
 const fmt$ = n => '$' + (Math.round(n||0)).toLocaleString('es-AR');
 const fmtFechaArg = (s) => {
   if (!s) return '—';
-  const d = new Date(s);
+  // Fechas "peladas" tipo YYYY-MM-DD: parsear como LOCAL (si no, la zona horaria de AR resta un día).
+  const sf = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
+  const d = sf ? new Date(+sf[1], +sf[2] - 1, +sf[3]) : new Date(s);
   if (isNaN(d)) return s;
   return d.toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit', year:'numeric' });
 };
@@ -1623,10 +1625,14 @@ function renderPlanesYCobros(f) {
     let filasHist = '';
     if (histo.length) {
       filasHist = histo.map(c => {
-        const ic = c.tipo === 'plan' ? '📋' : '📅';
+        const esPlan = c.tipo === 'plan';
+        const ic = esPlan ? '📋' : '📅';
         const extra = (c.importe_puente ? ` · puente ${fmt$(c.importe_puente)}` : '');
-        const vig = c.vigente_desde ? ` · vigente ${fmtFechaArg(c.vigente_desde)}` : '';
-        return `<div style="font-size:12.5px; margin:3px 0; color:#78350f;">${ic} ${c.descripcion || 'Cambio'}${extra}<span style="color:#9a7b3f;">${vig} · ${fmtFechaArg((c.creado_en||'').split('T')[0])}</span></div>`;
+        // Mes en que ARRANCA (solo cambios de plan): mes_imputado o el mes de vigente_desde.
+        const mesArr = c.mes_imputado || (c.vigente_desde ? String(c.vigente_desde).slice(0, 7) : '');
+        const desde = (esPlan && /^\d{4}-\d{2}$/.test(mesArr)) ? ` · arranca en ${nombreMes(mesArr)}` : '';
+        const reg = c.creado_en ? ` · registrado el ${fmtFechaArg(String(c.creado_en).split('T')[0])}` : '';
+        return `<div style="font-size:12.5px; margin:3px 0; color:#78350f;">${ic} ${c.descripcion || 'Cambio'}${extra}${desde}<span style="color:#9a7b3f;">${reg}</span></div>`;
       }).join('');
     }
     html += `<div style="margin-bottom:12px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:10px 14px;">
@@ -3057,11 +3063,10 @@ function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene, proporcional, diaVe
       `¡Hola ${nombre}! Te confirmamos tu cambio de plan en PuntoBiO:\n\n` +
       `Plan nuevo: ${planNuevo}\n` +
       bloqueTurnos +
-      `¡Ya podés disfrutar de tus clases nuevas desde este mes! 💪` +
+      `\nEl plan nuevo arranca a partir de ${nombreMes(mesQueViene)} (desde tu vencimiento).` +
       lineaProporcional +
-      `\nEl cambio de plan se verá reflejado el próximo mes.` +
       lineaVenc +
-      `\n\nPuntoBiO - ¡Te esperamos!`;
+      `\n\nPuntoBiO - ¡Te esperamos! 💪`;
 
     const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
     if (!tel) {
