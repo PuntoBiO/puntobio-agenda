@@ -1060,14 +1060,15 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR, hcR, obsR, adjR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, hcR, obsR, adjR, taR] = await Promise.all([
       sb.from('personas').select('*'),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
       sb.from('tarifario_tf').select('*'),
       sb.from('historias_clinicas').select('persona_id'),
       sb.from('hc_observaciones').select('persona_id'),
-      sb.from('hc_adjuntos').select('persona_id')
+      sb.from('hc_adjuntos').select('persona_id'),
+      sb.from('turno_alumnos').select('persona_id').eq('activo', true)
     ]);
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
@@ -1076,6 +1077,13 @@ async function cargarTodo() {
     if (hcR.error) console.warn('HC:', hcR.error.message);
     if (obsR.error) console.warn('obs:', obsR.error.message);
     if (adjR.error) console.warn('adj:', adjR.error.message);
+    if (taR.error) console.warn('turno_alumnos:', taR.error.message);
+
+    // Conteo de clases fijas activas por persona (para el aviso "le falta clase fija")
+    const turnosFijosPorPersona = {};
+    (taR.data || []).forEach(t => {
+      if (t.persona_id != null) turnosFijosPorPersona[t.persona_id] = (turnosFijosPorPersona[t.persona_id] || 0) + 1;
+    });
 
     // Sets de HC y evaluación (la HC la llena el paciente; la evaluación la hacemos nosotros)
     personasConHC = new Set();
@@ -1159,6 +1167,7 @@ async function cargarTodo() {
         todasInscripciones: inscripciones,
         cuota,
         estadoTF,
+        turnosFijos: (turnosFijosPorPersona[persona.id] || 0),
         tieneHC: personasConHC.has(persona.id),
         tieneEval: personasConEval.has(persona.id),
         // Placeholders para futuras áreas
@@ -1284,6 +1293,16 @@ function chipsAreas(f) {
   if (f.estadoTF === 'TF_ACTIVO') chips.push(`<span class="area-chip tf-act">🏋️ TF ${f.inscripcion.plan}</span>`);
   else if (f.estadoTF === 'TF_BONIF') chips.push(`<span class="area-chip tf-bon">💜 TF Bonif.</span>`);
   else if (f.estadoTF === 'TF_BAJA') chips.push(`<span class="area-chip tf-baja">❌ TF Baja</span>`);
+  // Aviso: alumno TF activo sin las clases fijas que le corresponden por su plan (CODx → x/sem).
+  if ((f.estadoTF === 'TF_ACTIVO' || f.estadoTF === 'TF_BONIF') && f.inscripcion) {
+    const reqSem = clasesSemanaDePlan(f.inscripcion.plan);
+    const tieneFijos = f.turnosFijos || 0;
+    if (reqSem > 0 && tieneFijos < reqSem) {
+      const faltan = reqSem - tieneFijos;
+      const txt = faltan === 1 ? '⚠️ Le falta clase fija' : `⚠️ Le faltan ${faltan} clases fijas`;
+      chips.push(`<span class="area-chip" style="background:#ffedd5;color:#9a3412;font-weight:700;" title="Tiene ${tieneFijos} de ${reqSem} clases fijas asignadas. Asignale los turnos en la Agenda TF.">${txt}</span>`);
+    }
+  }
   // Faltantes: HC la llena el paciente; evaluación la hacemos nosotros (obs o adjunto)
   if (!f.tieneHC) chips.push(`<span class="area-chip" style="background:#fee2e2;color:#dc2626;">⚠️ Sin HC</span>`);
   if (!f.tieneEval) chips.push(`<span class="area-chip" style="background:#fef3c7;color:#b45309;">⚠️ Sin evaluación</span>`);
