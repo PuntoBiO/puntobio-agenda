@@ -2185,10 +2185,10 @@ function pintarAdjuntos(historiaId, personaId) {
     apto_fisico: { icono: '🏃', label: 'Apto físico', color: '#16a34a' },
     estudio: { icono: '🩻', label: 'Estudio', color: '#1e9fe0' },
     consideracion: { icono: '📋', label: 'Consideración médica', color: '#a855f7' },
+    evaluacion_generada: { icono: '🧾', label: 'Evaluación (PDF del paciente)', color: '#1e9fe0' },
     otro: { icono: '📎', label: 'Otro', color: '#64748b' },
   };
-  lista.innerHTML = adjActual.length
-    ? `<div class="adj-list">${adjActual.map(a => {
+  const renderAdjItem = (a) => {
         const subidoAlumno = a.subido_por_alumno === true;
         const cat = a.categoria ? (CATS_LBL[a.categoria] || CATS_LBL.otro) : null;
         const tituloMostrar = a.titulo || a.nombre_original;
@@ -2218,8 +2218,24 @@ function pintarAdjuntos(historiaId, personaId) {
             ${puedeEliminar() ? `<button class="btn btn-sm btn-rojo" onclick="eliminarAdjunto(${a.id})">🗑️</button>` : ''}
           </div>
         </div>`;
-      }).join('')}</div>`
-    : `<div class="obs-empty">Sin archivos adjuntos todavía.</div>`;
+  };
+  const grupoTit = (txt) => `<div style="font-size:12px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#64748b;margin:14px 0 6px">${txt}</div>`;
+  if (adjActual.length) {
+    const delEquipo = adjActual.filter(a => a.subido_por_alumno !== true);
+    const delPaciente = adjActual.filter(a => a.subido_por_alumno === true);
+    let html = '';
+    if (delEquipo.length) {
+      html += grupoTit('👨‍⚕️ Cargados por el equipo');
+      html += `<div class="adj-list">${delEquipo.map(renderAdjItem).join('')}</div>`;
+    }
+    if (delPaciente.length) {
+      html += grupoTit('📲 Subidos por el paciente');
+      html += `<div class="adj-list">${delPaciente.map(renderAdjItem).join('')}</div>`;
+    }
+    lista.innerHTML = html;
+  } else {
+    lista.innerHTML = `<div class="obs-empty">Sin archivos adjuntos todavía.</div>`;
+  }
 
   const zona = document.getElementById('adjAddZone');
   if (!zona) return;
@@ -2875,6 +2891,44 @@ function cerrarSelectorPDF() {
 }
 
 // Paso 2: generar el PDF con jsPDF
+// Guarda el PDF generado en el espacio del paciente (sección "Evaluaciones Biolab").
+// Path fijo por HC + upsert: re-generar reemplaza el anterior, no duplica.
+async function guardarEvalEnEspacio(bytes, nombreArch, historiaId, personaId) {
+  if (!historiaId || !personaId) return;
+  try {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const blob = new Blob([u8], { type: 'application/pdf' });
+    const path = `hc/${historiaId}/evaluacion-biolab.pdf`;
+    const { error: upErr } = await sb.storage.from(ADJ_BUCKET)
+      .upload(path, blob, { upsert: true, contentType: 'application/pdf' });
+    if (upErr) throw upErr;
+    // ¿Ya existe la fila de esta HC? (para no duplicar al re-generar)
+    const { data: existe } = await sb.from('hc_adjuntos')
+      .select('id').eq('storage_path', path).limit(1);
+    if (!existe || !existe.length) {
+      const { error: insErr } = await sb.from('hc_adjuntos').insert({
+        historia_id: historiaId,
+        persona_id: personaId,
+        storage_path: path,
+        nombre_original: nombreArch,
+        titulo: 'Evaluación Biolab',
+        categoria: 'evaluacion_generada',
+        tipo_mime: 'application/pdf',
+        tamano_bytes: u8.byteLength || null,
+        autor_id: usuarioActual ? usuarioActual.id : null,
+        autor_nombre: usuarioActual ? usuarioActual.nombre : null,
+        autor_email: usuarioActual ? usuarioActual.email : null,
+        subido_por_alumno: false
+      });
+      if (insErr) throw insErr;
+    }
+    showToast('✓ También guardado en el espacio del paciente');
+  } catch (e) {
+    console.warn('No se pudo guardar la evaluación en Mi Espacio:', e.message);
+    showToast('⚠ El PDF se descargó, pero no se pudo guardar en Mi Espacio');
+  }
+}
+
 async function generarPDF(conWhatsApp = false) {
   if (esProfeSoloLectura()) return;
   if (!currentHCId) return;
@@ -3530,6 +3584,7 @@ async function generarPDF(conWhatsApp = false) {
       const finalBytes = await mergedPdf.save();
       descargarBytesPDF(finalBytes, nombreArch);
       ocultarCargandoPDF();
+      await guardarEvalEnEspacio(finalBytes, nombreArch, currentHCId, hc.persona_id);
     } catch (e) {
       ocultarCargandoPDF();
       console.error('Error al unir adjuntos:', e);
@@ -3540,6 +3595,7 @@ async function generarPDF(conWhatsApp = false) {
   } else {
     // Sin adjuntos: PDF normal
     doc.save(nombreArch);
+    await guardarEvalEnEspacio(doc.output('arraybuffer'), nombreArch, currentHCId, hc.persona_id);
   }
 
   cerrarSelectorPDF();

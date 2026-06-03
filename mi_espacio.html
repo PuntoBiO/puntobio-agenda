@@ -1482,6 +1482,7 @@ async function cargarEspacio(per){
     bloquePerfilDeportivo(perfilDeportivo, cargasDeportivas),
     bloqueCompetencias(competenciasAlumno),
     // 5) Estudios e historia clínica
+    bloqueEvaluacionesBiolab(adjuntosAlumno),
     bloqueAdjuntos(adjuntosAlumno),
     bloqueHC(hc.data&&hc.data[0], moplex.data&&moplex.data[0]),
     // 6) Comunicación y cierre
@@ -2502,7 +2503,13 @@ const CATS_ADJUNTO = {
   otro:          { label: 'Otro',                 icono: '📎', color: '#64748b' },
 };
 
+// Las Evaluaciones Biolab son el PDF que arma el equipo con el botón "Generar PDF".
+function esEvalBiolab(a){ return a && a.categoria === 'evaluacion_generada'; }
+
 function bloqueAdjuntos(adjuntos){
+  // Solo lo que subió el propio paciente. Lo que carga el equipo no se muestra acá
+  // (las evaluaciones van en "Evaluaciones Biolab"; los archivos técnicos quedan internos).
+  adjuntos = (adjuntos || []).filter(a => a.subido_por_alumno === true);
   let lista = '';
   if(!adjuntos || adjuntos.length === 0){
     lista = `<p class="empty">Todavía no subiste nada. Acá podés cargar tu apto físico, estudios médicos (resonancia, ecografía, RX), consideraciones del doctor, etc. El equipo los va a ver en tu historia clínica.</p>`;
@@ -2541,6 +2548,55 @@ function bloqueAdjuntos(adjuntos){
     <div class="nota" style="margin-top:10px">Lo que subas acá lo va a ver el equipo en tu historia clínica. Aceptamos PDF e imágenes (JPG, PNG). Tamaño máximo: 10 MB.</div>`,
     'd4', _accionAdj);
 }
+
+// === Evaluaciones Biolab (cargadas por el equipo: ingreso / deportistas) ===
+function bloqueEvaluacionesBiolab(adjuntos){
+  const evals = (adjuntos || []).filter(esEvalBiolab);
+  // ordenar por fecha (estudio o subida) desc
+  evals.sort((a,b)=> ((b.fecha_estudio||b.creado_en||'')).localeCompare(a.fecha_estudio||a.creado_en||''));
+  let lista;
+  if(evals.length === 0){
+    lista = `<p class="empty">Todavía no hay evaluaciones cargadas. Cuando te hagamos una evaluación en Biolab (de ingreso o para deportistas), la vas a encontrar acá para verla y descargarla.</p>`;
+  } else {
+    lista = evals.map(a => {
+      const tit = a.titulo || a.nombre_original || 'Evaluación Biolab';
+      const fecha = a.fecha_estudio ? fmtFecha(a.fecha_estudio) : fmtFecha(a.creado_en);
+      const nombreDescarga = (a.nombre_original || (tit + '.pdf')).replace(/'/g,"\\'");
+      const pathEsc = a.storage_path.replace(/'/g,"\\'");
+      return `<div class="adj-item">
+        <div class="adj-cat" style="background:#1e9fe022;color:#1e9fe0">🧾 Evaluación</div>
+        <div class="adj-cont">
+          <div class="adj-titulo">${esc(tit)}</div>
+          <div class="adj-meta">${fecha ? `<span>📅 ${fecha}</span>` : ''}</div>
+          ${a.notas ? `<div class="adj-notas">${esc(a.notas)}</div>` : ''}
+        </div>
+        <div class="adj-acciones">
+          <button class="ag-btn ag-btn-azul" onclick="pbVerAdjunto(${a.id}, '${pathEsc}')">👁 Ver</button>
+          <button class="ag-btn ag-btn-verde" onclick="pbDescargarAdjunto('${pathEsc}', '${nombreDescarga}')">⬇ Descargar</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  const n = evals.length;
+  const _res = n ? `${n} ${n===1?'evaluación':'evaluaciones'}` : 'Sin evaluaciones aún';
+  return colapsable('Evaluaciones Biolab', _res, `<div class="adj-lista">${lista}</div>`, 'd4');
+}
+
+// Descarga directa del archivo (link firmado con header de descarga)
+window.pbDescargarAdjunto = async function(storagePath, nombre){
+  try {
+    const { data, error } = await sb.storage.from('hc-adjuntos').createSignedUrl(storagePath, 60, { download: nombre || true });
+    if(error) throw error;
+    const link = document.createElement('a');
+    link.href = data.signedUrl;
+    link.download = nombre || '';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } catch (err) {
+    alert('No se pudo descargar: ' + (err.message || 'error'));
+  }
+};
 
 // === Subir adjunto ===
 window.pbAbrirSubirAdjunto = function(){
