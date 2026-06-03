@@ -1147,9 +1147,14 @@ async function cargarEspacio(per){
   const pid = per.id;
 
   // Primero: TODAS las inscripciones de esta persona (para poder filtrar sus pagos por inscripcion_id)
-  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, dia_vencimiento, descuento_libre').eq('persona_id', pid).order('id', {ascending:false});
+  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, fecha_reingreso, dia_vencimiento, descuento_libre').eq('persona_id', pid).order('id', {ascending:false});
   const misInscIds = (inscAll.data||[]).map(r => r.id);
   const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
+  // Inscripción bonificada (para mostrar sus recibos en Mi Espacio aunque no tenga pagos)
+  const inscBonif = (inscAll.data||[]).find(r =>
+    (r.estado === 'ACTIVO' || r.estado === 'BONIFICADO') &&
+    (/BON/i.test(r.plan||'') || r.estado === 'BONIFICADO')
+  ) || null;
 
   // === AGENDA: 10 días HÁBILES (lun-vie) hacia adelante desde HOY ===
   // El alumno solo ve días en los que puede actuar (no muestra días pasados).
@@ -1404,7 +1409,8 @@ async function cargarEspacio(per){
     bloqueAgenda(window._agendaData),
     bloqueAsistencia(asis.data||[]),
     bloqueRecuperatorios(recus.data||[]),
-    bloquePagos(misPagos),
+    (inscBonif && (!misPagos || !misPagos.length) ? '' : bloquePagos(misPagos)),
+    bloqueRecibosBonif(inscBonif),
     bloqueCambiosPlan(misCambios),
     bloquePerfilDeportivo(perfilDeportivo, cargasDeportivas),
     bloqueCompetencias(competenciasAlumno),
@@ -2153,6 +2159,26 @@ function bloqueRecuperatorios(recus){
 // ============================================================
 //  RECIBO DESCARGABLE (PDF) — replica el formato del recibo viejo
 // ============================================================
+// Devuelve el PRECIO NORMAL del plan (sin descuentos ni bonificación).
+// Para planes COD0BON (bonificados) lo deduce por la cantidad de clases fijas.
+function _valorNormalPlan(plan, tar, clasesFijas){
+  tar = tar || {};
+  const P = String(plan || '').toUpperCase();
+  const directo = Number(tar[P] || 0);
+  if (directo > 0 && !/BON/.test(P)) return directo;
+  // base sin sufijo DESxx ni BON  (ej: COD2DES10 -> COD2 ; COD0BON -> COD0)
+  const base = P.replace(/DES\d+/g, '').replace(/BON/g, '');
+  const vBase = Number(tar[base] || 0);
+  if (vBase > 0) return vBase;
+  // bonificado sin precio de lista: deducir por cantidad de clases fijas semanales -> COD{n}
+  const n = Number(clasesFijas || 0);
+  if (n > 0) {
+    const vN = Number(tar['COD' + n] || 0);
+    if (vN > 0) return vN;
+  }
+  return directo;
+}
+
 function _periodoServicio(mesImputado, diaVenc){
   const d = parseInt(diaVenc, 10) || 1;
   const partes = String(mesImputado || '').split('-');
@@ -2171,9 +2197,11 @@ window.descargarRecibo = (pagoId) => {
     const per  = window._personaActual || {};
     const insc = (window._reciboInscMap || {})[p.inscripcion_id] || {};
     const tar  = window._reciboTarifario || {};
-    const valor     = Number(tar[insc.plan] || 0);
-    const desc      = Number(insc.descuento_libre || 0);
-    const cuotaNeta = Math.max(0, valor - desc);
+    const valorLista  = Number(tar[insc.plan] || 0);
+    const desc        = Number(insc.descuento_libre || 0);
+    const cuotaNeta   = Math.max(0, valorLista - desc);
+    const valorNormal = _valorNormalPlan(insc.plan, tar, (window._reciboTurnos || []).length);
+    const descTotal   = Math.max(0, valorNormal - cuotaNeta);
     const totalMes  = (window._reciboPagosAll || [])
       .filter(x => x.inscripcion_id === p.inscripcion_id && x.mes_imputado === p.mes_imputado)
       .reduce((s, x) => s + (Number(x.importe) || 0), 0);
@@ -2214,8 +2242,8 @@ window.descargarRecibo = (pagoId) => {
     doc.text(`Dni = ${per.dni || '—'}`, M, y); y += 24;
     doc.text(`Importe recibido: ${$$(p.importe)}`, M, y); y += 8;
     sep();
-    doc.text(`Servicio Adquirido: ${insc.dia_vencimiento || 1} - ${insc.plan || '—'} - ${$$(valor)} De ${per_.desde} hasta ${per_.hasta}`, M, y, { maxWidth: 515 }); y += 26;
-    doc.text(`Total de descuentos: $ = ${$$(desc)}`, M, y); y += 24;
+    doc.text(`Servicio Adquirido: ${insc.dia_vencimiento || 1} - ${insc.plan || '—'} - ${$$(valorNormal)} De ${per_.desde} hasta ${per_.hasta}`, M, y, { maxWidth: 515 }); y += 26;
+    doc.text(`Total de descuentos: $ = ${$$(descTotal)}`, M, y); y += 24;
     doc.text(`Pago con: ${p.medio || ''}`, M, y); y += 24;
     doc.text(`Valor Restante: ${$$(saldo)}`, M, y); y += 16;
     doc.text(`Saldo deudor = ${$$(saldo)}`, M, y); y += 26;
@@ -2271,6 +2299,112 @@ function bloquePagos(pagos){
     <h2><span class="dot"></span>Mis pagos</h2>
     ${rows}
     ${extra}
+  </section>`;
+}
+
+// ============================================================
+//  RECIBO BONIFICADO (PDF) — alumno sin pago (beca / sin costo)
+// ============================================================
+window.descargarReciboBonif = (inscId, mes) => {
+  try {
+    const insc = (window._reciboInscMap || {})[inscId] || {};
+    const per  = window._personaActual || {};
+    const tar  = window._reciboTarifario || {};
+    const clasesFijas = (window._reciboTurnos || []).length;
+    const valorNormal = _valorNormalPlan(insc.plan, tar, clasesFijas);
+    const descTotal   = valorNormal; // bonificado 100%
+    const per_  = _periodoServicio(mes, insc.dia_vencimiento);
+    const $$ = (n) => '$ ' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 });
+
+    const ORDEN_DIA = { 'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':7 };
+    const turnosFijos = (window._reciboTurnos || [])
+      .slice()
+      .sort((a,b)=> (ORDEN_DIA[a.dia]||9)-(ORDEN_DIA[b.dia]||9) || String(a.hora||'').localeCompare(String(b.hora||'')))
+      .map(t => `${t.dia} ${String(t.hora||'').slice(0,5)} - ${t.servicio||''}`.trim());
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const M = 40; let y = 44;
+
+    const logoSrc = (document.querySelector('.logo-pb img') || {}).src || '';
+    if (logoSrc) { try { doc.addImage(logoSrc, 'PNG', M, y, 118, 88); } catch (e) {} }
+    y += 108;
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
+    ['PUNTO BIO', 'DIRECCION: LIBERTAD 1549', 'BARRIO: GRAL PAZ',
+     'CIUDAD-LOCALIDAD: CORDOBA', 'TELEFONO: (351) 153023476']
+      .forEach(t => { doc.text(t, M, y); y += 16; });
+
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+    const sep = () => { y += 6; doc.text('-'.repeat(74), M, y); y += 18; };
+    sep();
+    doc.text(`Nombre del cliente = ${String(per.nombre || '').toUpperCase()}`, M, y); y += 16;
+    doc.text(`Dni = ${per.dni || '—'}`, M, y); y += 24;
+    doc.text(`Importe recibido: ${$$(0)}`, M, y); y += 8;
+    sep();
+    doc.text(`Servicio Adquirido: ${insc.dia_vencimiento || 1} - ${insc.plan || '—'} - ${$$(valorNormal)} De ${per_.desde} hasta ${per_.hasta}`, M, y, { maxWidth: 515 }); y += 26;
+    doc.text(`Total de descuentos: $ = ${$$(descTotal)}`, M, y); y += 24;
+    doc.text(`Pago con: —`, M, y); y += 24;
+    doc.text(`Valor Restante: ${$$(0)}`, M, y); y += 16;
+    doc.text(`Saldo deudor = ${$$(0)}`, M, y); y += 26;
+
+    doc.setFont('helvetica', 'bold');
+    doc.text('Turnos fijos:', M, y); y += 16;
+    doc.setFont('helvetica', 'normal');
+    if (turnosFijos.length) {
+      turnosFijos.forEach(t => { doc.text('  ' + t, M, y); y += 15; });
+    } else {
+      doc.text('  A coordinar', M, y); y += 15;
+    }
+    y += 12;
+
+    doc.setFont('helvetica', 'bold');
+    doc.text('RECIBO PROCESADO AUTOMÁTICAMENTE POR EL SISTEMA', M, y, { maxWidth: 515 });
+
+    const nombreArch = `Recibo_PuntoBiO_${String(per.nombre || 'alumno').replace(/\s+/g, '_')}_${mes || ''}.pdf`;
+    doc.save(nombreArch);
+  } catch (e) {
+    console.error(e);
+    alert('No se pudo generar el recibo: ' + e.message);
+  }
+};
+
+// ============================================================
+//  BLOQUE: Mis recibos (para alumnos bonificados, sin pagos)
+// ============================================================
+function bloqueRecibosBonif(insc){
+  if(!insc) return '';
+  const hoy = new Date();
+  const startStr = insc.fecha_reingreso || insc.fecha_alta || hoy.toISOString().slice(0,10);
+  const sd = new Date(String(startStr).slice(0,10) + 'T00:00:00');
+  let yy = sd.getFullYear(), mm = sd.getMonth();          // mm: 0-11
+  const yN = hoy.getFullYear(), mN = hoy.getMonth();
+  if (isNaN(yy)) { yy = yN; mm = mN; }
+  const meses = [];
+  while (yy < yN || (yy === yN && mm <= mN)) {
+    meses.push(`${yy}-${String(mm+1).padStart(2,'0')}`);
+    mm++; if (mm > 11) { mm = 0; yy++; }
+  }
+  meses.reverse();                                         // más nuevo primero
+  const visibles = meses.slice(0,12);
+  if (!visibles.length) return '';
+  let rows = '';
+  visibles.forEach(m => {
+    rows += `<div class="pago-row">
+      <div class="pl">
+        <div class="mes">${fmtMesImputado(m)}</div>
+        <div class="sub">Bonificado · sin costo</div>
+      </div>
+      <div style="text-align:right">
+        <div class="imp">$ 0,00</div>
+        <div class="medio">Bonificado</div>
+        <button type="button" onclick="descargarReciboBonif('${insc.id}','${m}')" style="margin-top:5px;font-size:11px;font-weight:700;color:#1e9fe0;background:#dbeafe;border:1px solid #1e9fe0;border-radius:6px;padding:3px 9px;cursor:pointer;">📄 Recibo</button>
+      </div>
+    </div>`;
+  });
+  return `<section class="card reveal d4">
+    <h2><span class="dot"></span>Mis recibos</h2>
+    ${rows}
   </section>`;
 }
 
