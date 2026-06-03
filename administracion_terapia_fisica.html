@@ -245,7 +245,7 @@
     <select id="filtroDia"><option value="">Todos</option></select>
   </label>
   <button class="filtro-btn" onclick="limpiarFiltros()" style="border-color: var(--azul); color: var(--azul);">Limpiar filtros</button>
-  <button class="filtro-btn" id="btnRecibosMes" onclick="enviarRecibosDelMes()" style="border-color:#7c3aed; color:#7c3aed; font-weight:600;">📧 Enviar recibos de este mes</button>
+  <button class="filtro-btn" id="btnRecibosMes" onclick="enviarRecibosDelMes()" style="border-color:#7c3aed; color:#7c3aed; font-weight:600;">📧 Enviar recibos pendientes</button>
 </div>
 
 <div class="filtros" id="filtrosEstado">
@@ -262,6 +262,7 @@
   <button class="filtro-btn" data-faltante="SIN_AMBAS">⚠️ Sin HC ni evaluación</button>
   <button class="filtro-btn" data-faltante="SIN_MIESP">📵 Sin entrar a Mi Espacio</button>
   <button class="filtro-btn" data-faltante="CON_MIESP">✅ Ya entró a Mi Espacio</button>
+  <button class="filtro-btn" data-faltante="RECIBO_PEND">📧 Recibo pendiente</button>
 </div>
 
 <div class="resumen" id="resumen"></div>
@@ -1170,6 +1171,16 @@ async function cargarTodo() {
         else estadoTF = inscRepr.estado;
       }
 
+      // Estado del recibo del mes en curso (para filtro y botón de envío)
+      const _mesAct = new Date().toISOString().slice(0, 7);
+      let reciboPendiente = false, pagoMesId = null;
+      if (inscRepr) {
+        const pagosMes = (pagosPorInsc[inscRepr.id] || [])
+          .filter(pg => pg.mes_imputado === _mesAct)
+          .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || '') || String(b.id).localeCompare(String(a.id)));
+        if (pagosMes.length) { pagoMesId = pagosMes[0].id; reciboPendiente = !pagosMes[0].recibo_enviado_at; }
+      }
+
       personas.push({
         persona,
         inscripcion: inscRepr,
@@ -1180,6 +1191,8 @@ async function cargarTodo() {
         turnosFijos: (turnosFijosPorPersona[persona.id] || 0),
         tieneHC: personasConHC.has(persona.id),
         tieneEval: personasConEval.has(persona.id),
+        reciboPendiente,
+        pagoMesId,
         // Placeholders para futuras áreas
         tieneConsultorios: false,
         tieneBioLab: false,
@@ -1260,6 +1273,7 @@ function aplicarFiltros() {
   else if (filtroFaltante === 'SIN_AMBAS') f = f.filter(x => !x.tieneHC && !x.tieneEval);
   else if (filtroFaltante === 'SIN_MIESP') f = f.filter(x => !x.yaIngreso);
   else if (filtroFaltante === 'CON_MIESP') f = f.filter(x => x.yaIngreso);
+  else if (filtroFaltante === 'RECIBO_PEND') f = f.filter(x => x.reciboPendiente);
   if (filtroPlan) f = f.filter(x => x.inscripcion && (x.inscripcion.plan || '') === filtroPlan);
   if (filtroDia) f = f.filter(x => x.inscripcion && String(x.inscripcion.dia_vencimiento || '') === String(filtroDia));
   if (textoBusqueda) {
@@ -1345,7 +1359,11 @@ function renderTabla(lista) {
     const esBajaTF = f.estadoTF === 'TF_BAJA';
     const sinTF = f.estadoTF === 'SIN_TF';
     const puedeAltaTF = sinTF || esBajaTF; // dar alta a quien no está activo
+    const reciboBtn = f.pagoMesId
+      ? `<button class="btn-accion" data-idx="${idx}" data-accion="recibo" title="${f.reciboPendiente ? 'Enviar el recibo de este mes por mail' : 'Recibo ya enviado — tocá para reenviar'}" style="background:${f.reciboPendiente ? '#ede9fe' : '#dcfce7'};color:${f.reciboPendiente ? '#6d28d9' : '#15803d'};border:1px solid ${f.reciboPendiente ? '#a78bfa' : '#86efac'};font-size:11px;padding:4px 8px;white-space:nowrap;">${f.reciboPendiente ? '📧 Enviar recibo' : '📧 Recibo ✓'}</button>`
+      : '';
     const acciones = `
+      ${reciboBtn}
       <button class="btn-accion btn-wsp" data-idx="${idx}" data-accion="wsp" title="Enviar WhatsApp" style="background:#25D366;color:#fff;border:none;">📱 WhatsApp</button>
     `;
     html += `<tr class="row" data-idx="${idx}">
@@ -1376,6 +1394,7 @@ function renderTabla(lista) {
         enviarWspMiEspacio(cel, fila.persona.nombre || '', email);
       }
       else if (accion === 'wsp') abrirMenuWsp();
+      else if (accion === 'recibo') enviarReciboUno(fila.pagoMesId, btn);
       else if (accion === 'editar') abrirModalEditar();
       else if (accion === 'ficha') abrirFichaAlumno();
       else if (accion === 'altatf') abrirAltaTF();
@@ -1433,36 +1452,20 @@ window.limpiarFiltros = () => {
   aplicarFiltros();
 };
 
-// ===== ENVÍO MASIVO DE RECIBOS DEL MES =====
+// ===== ENVÍO DE RECIBOS DEL MES (solo a los pendientes) =====
 window.enviarRecibosDelMes = async () => {
-  const mesActual = new Date().toISOString().slice(0, 7); // YYYY-MM
-  const { data: pagos, error } = await sb.from('pagos_tf')
-    .select('id, inscripcion_id, fecha')
-    .eq('mes_imputado', mesActual);
-  if (error) { alert('No pude leer los pagos: ' + error.message); return; }
-  if (!pagos || !pagos.length) { alert(`No hay pagos registrados este mes (${mesActual}).`); return; }
-
-  // Un recibo por inscripción: el pago más reciente del mes (evita doble mail a quien pagó en cuotas)
-  const porInsc = {};
-  pagos.forEach(p => {
-    const prev = porInsc[p.inscripcion_id];
-    const masNuevo = !prev || (p.fecha || '') > (prev.fecha || '') ||
-      ((p.fecha || '') === (prev.fecha || '') && String(p.id) > String(prev.id));
-    if (masNuevo) porInsc[p.inscripcion_id] = p;
-  });
-  const lista = Object.values(porInsc);
-
-  if (!confirm(`Vas a enviar el recibo por mail a ${lista.length} alumno(s) que pagaron en ${mesActual}.\n\nLos que no tengan email cargado se saltean solos.\n\n¿Confirmás el envío?`)) return;
+  const pend = (personas || []).filter(x => x.reciboPendiente && x.pagoMesId);
+  if (!pend.length) { alert('No hay recibos pendientes de envío este mes. 🎉\n\n(Usá el filtro "📧 Recibo pendiente" para verlos cuando los haya.)'); return; }
+  if (!confirm(`Hay ${pend.length} alumno(s) con recibo PENDIENTE este mes.\n\n¿Enviarles el recibo por mail ahora?\n(Los que no tengan email cargado se saltean solos.)`)) return;
 
   const btn = document.getElementById('btnRecibosMes');
   if (btn) { btn.disabled = true; btn.textContent = '📧 Enviando...'; }
   let ok = 0, skip = 0, err = 0;
 
-  // En tandas de 5 para no saturar
-  for (let i = 0; i < lista.length; i += 5) {
-    const tanda = lista.slice(i, i + 5);
+  for (let i = 0; i < pend.length; i += 5) {
+    const tanda = pend.slice(i, i + 5);
     const res = await Promise.allSettled(
-      tanda.map(p => sb.functions.invoke('enviar_recibo', { body: { pago_id: p.id } }))
+      tanda.map(p => sb.functions.invoke('enviar_recibo', { body: { pago_id: p.pagoMesId } }))
     );
     res.forEach(r => {
       if (r.status === 'rejected') { err++; return; }
@@ -1471,11 +1474,29 @@ window.enviarRecibosDelMes = async () => {
       if (data && data.skipped) { skip++; return; }
       ok++;
     });
-    if (btn) btn.textContent = `📧 Enviando... ${Math.min(i + 5, lista.length)}/${lista.length}`;
+    if (btn) btn.textContent = `📧 Enviando... ${Math.min(i + 5, pend.length)}/${pend.length}`;
   }
 
-  if (btn) { btn.disabled = false; btn.textContent = '📧 Enviar recibos de este mes'; }
+  if (btn) { btn.disabled = false; btn.textContent = '📧 Enviar recibos pendientes'; }
   alert(`Listo ✅\n\nEnviados: ${ok}\nSin email (salteados): ${skip}\nErrores: ${err}`);
+  await cargarTodo();
+};
+
+// ===== ENVÍO DE UN RECIBO (elegís a quién, desde la fila) =====
+window.enviarReciboUno = async (pagoId, btnEl) => {
+  if (!pagoId) { alert('Este alumno no tiene un pago registrado este mes, no hay recibo para enviar.'); return; }
+  const txtOrig = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '📧 ...'; }
+  try {
+    const { data, error } = await sb.functions.invoke('enviar_recibo', { body: { pago_id: pagoId } });
+    if (error) { alert('No se pudo enviar el recibo: ' + (error.message || error)); }
+    else if (data && data.skipped) { alert('El alumno no tiene email cargado, así que no se le pudo enviar.'); }
+    else { toast('✓ Recibo enviado por mail'); }
+  } catch (e) {
+    alert('Error al enviar: ' + (e.message || e));
+  }
+  if (btnEl) { btnEl.disabled = false; btnEl.textContent = txtOrig; }
+  await cargarTodo();
 };
 
 // ===== MODAL VER DETALLE =====
