@@ -18,6 +18,7 @@
   })();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="bloqueos.js"></script>
 <style>
   :root{
@@ -1146,7 +1147,7 @@ async function cargarEspacio(per){
   const pid = per.id;
 
   // Primero: TODAS las inscripciones de esta persona (para poder filtrar sus pagos por inscripcion_id)
-  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, dia_vencimiento').eq('persona_id', pid).order('id', {ascending:false});
+  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, dia_vencimiento, descuento_libre').eq('persona_id', pid).order('id', {ascending:false});
   const misInscIds = (inscAll.data||[]).map(r => r.id);
   const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
 
@@ -1227,6 +1228,7 @@ async function cargarEspacio(per){
   const misTurnos = (misTurnosRes.data || [])
     .map(r => r.turnos)
     .filter(t => t && t.id);
+  window._reciboTurnos = misTurnos;
 
   // Pagos: SOLO los de MIS inscripciones. Si no tengo inscripciones, no hay pagos.
   let misPagos = [];
@@ -1234,6 +1236,20 @@ async function cargarEspacio(per){
     const pagosRes = await sb.from('pagos_tf').select('*').in('inscripcion_id', misInscIds).order('fecha',{ascending:false});
     misPagos = pagosRes.data || [];
   }
+
+  // ===== Datos para el RECIBO descargable (5A) =====
+  // Tarifario (valor del plan), mapa de inscripciones y pagos, para armar el PDF.
+  let _reciboTar = {};
+  try {
+    const tarRes = await sb.from('tarifario_tf').select('plan,valor_lista');
+    (tarRes.data || []).forEach(t => { _reciboTar[t.plan] = t.valor_lista; });
+  } catch (e) { _reciboTar = {}; }
+  window._reciboTarifario = _reciboTar;
+  window._reciboInscMap = {};
+  (inscAll.data || []).forEach(i => { window._reciboInscMap[i.id] = i; });
+  window._reciboPagos = {};
+  misPagos.forEach(p => { window._reciboPagos[p.id] = p; });
+  window._reciboPagosAll = misPagos;
 
   // Histórico de cambios de plan/fecha (tabla nueva; si no existe, queda vacío)
   let misCambios = [];
@@ -2134,6 +2150,98 @@ function bloqueRecuperatorios(recus){
   </section>`;
 }
 
+// ============================================================
+//  RECIBO DESCARGABLE (PDF) — replica el formato del recibo viejo
+// ============================================================
+function _periodoServicio(mesImputado, diaVenc){
+  const d = parseInt(diaVenc, 10) || 1;
+  const partes = String(mesImputado || '').split('-');
+  const y = parseInt(partes[0], 10), m = parseInt(partes[1], 10);
+  if (!y || !m) return { desde: '—', hasta: '—' };
+  const desde = new Date(y, m - 1, d);
+  const hasta = new Date(y, m, d); hasta.setDate(hasta.getDate() - 1);
+  const f = (dt) => `${dt.getDate()}/${dt.getMonth() + 1}/${dt.getFullYear()}`;
+  return { desde: f(desde), hasta: f(hasta) };
+}
+
+window.descargarRecibo = (pagoId) => {
+  try {
+    const p = (window._reciboPagos || {})[pagoId];
+    if (!p) { alert('No se encontró ese pago.'); return; }
+    const per  = window._personaActual || {};
+    const insc = (window._reciboInscMap || {})[p.inscripcion_id] || {};
+    const tar  = window._reciboTarifario || {};
+    const valor     = Number(tar[insc.plan] || 0);
+    const desc      = Number(insc.descuento_libre || 0);
+    const cuotaNeta = Math.max(0, valor - desc);
+    const totalMes  = (window._reciboPagosAll || [])
+      .filter(x => x.inscripcion_id === p.inscripcion_id && x.mes_imputado === p.mes_imputado)
+      .reduce((s, x) => s + (Number(x.importe) || 0), 0);
+    const saldo = Math.max(0, cuotaNeta - totalMes);
+    const per_  = _periodoServicio(p.mes_imputado, insc.dia_vencimiento);
+    const $$ = (n) => '$ ' + Number(n || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 });
+
+    // Administrativo que procesó el pago (se guarda como [Op:Nombre] al cobrar).
+    // Para pagos viejos sin ese dato, dejamos el pie histórico.
+    const mOp = String(p.observaciones || '').match(/\[Op:([^\]]+)\]/);
+    const operador = mOp ? mOp[1].trim() : 'LIC LUCIANA VELAZ / JIMENA LLORENTE';
+
+    // Turnos fijos del alumno (día + hora + servicio).
+    const ORDEN_DIA = { 'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':7 };
+    const turnosFijos = (window._reciboTurnos || [])
+      .slice()
+      .sort((a,b)=> (ORDEN_DIA[a.dia]||9)-(ORDEN_DIA[b.dia]||9) || String(a.hora||'').localeCompare(String(b.hora||'')))
+      .map(t => `${t.dia} ${String(t.hora||'').slice(0,5)} - ${t.servicio||''}`.trim());
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const M = 40; let y = 44;
+
+    // Logo (lo tomamos del que ya está embebido en la página, sin duplicar el base64)
+    const logoSrc = (document.querySelector('.logo-pb img') || {}).src || '';
+    if (logoSrc) { try { doc.addImage(logoSrc, 'PNG', M, y, 118, 88); } catch (e) {} }
+    y += 108;
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
+    ['PUNTO BIO', 'DIRECCION: LIBERTAD 1549', 'BARRIO: GRAL PAZ',
+     'CIUDAD-LOCALIDAD: CORDOBA', 'TELEFONO: (351) 153023476']
+      .forEach(t => { doc.text(t, M, y); y += 16; });
+
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+    const sep = () => { y += 6; doc.text('-'.repeat(74), M, y); y += 18; };
+    sep();
+    doc.text(`Nombre del cliente = ${String(per.nombre || '').toUpperCase()}`, M, y); y += 16;
+    doc.text(`Dni = ${per.dni || '—'}`, M, y); y += 24;
+    doc.text(`Importe recibido: ${$$(p.importe)}`, M, y); y += 8;
+    sep();
+    doc.text(`Servicio Adquirido: ${insc.dia_vencimiento || 1} - ${insc.plan || '—'} - ${$$(valor)} De ${per_.desde} hasta ${per_.hasta}`, M, y, { maxWidth: 515 }); y += 26;
+    doc.text(`Total de descuentos: $ = ${$$(desc)}`, M, y); y += 24;
+    doc.text(`Pago con: ${p.medio || ''}`, M, y); y += 24;
+    doc.text(`Valor Restante: ${$$(saldo)}`, M, y); y += 16;
+    doc.text(`Saldo deudor = ${$$(saldo)}`, M, y); y += 26;
+
+    // Turnos fijos
+    doc.setFont('helvetica', 'bold');
+    doc.text('Turnos fijos:', M, y); y += 16;
+    doc.setFont('helvetica', 'normal');
+    if (turnosFijos.length) {
+      turnosFijos.forEach(t => { doc.text('  ' + t, M, y); y += 15; });
+    } else {
+      doc.text('  A coordinar', M, y); y += 15;
+    }
+    y += 12;
+
+    doc.setFont('helvetica', 'bold');
+    doc.text(`ADMINISTRATIVO QUE PROCESÓ EL PAGO: ${operador}`, M, y, { maxWidth: 515 });
+
+    const nombreArch = `Recibo_PuntoBiO_${String(per.nombre || 'alumno').replace(/\s+/g, '_')}_${p.mes_imputado || ''}.pdf`;
+    doc.save(nombreArch);
+  } catch (e) {
+    console.error(e);
+    alert('No se pudo generar el recibo: ' + e.message);
+  }
+};
+
 function bloquePagos(pagos){
   if(!pagos || pagos.length===0){
     return `<section class="card reveal d4">
@@ -2154,6 +2262,7 @@ function bloquePagos(pagos){
       <div style="text-align:right">
         <div class="imp">${fmtMoneda(p.importe)}</div>
         <div class="medio">${esc(p.medio||'')}</div>
+        <button type="button" onclick="descargarRecibo('${p.id}')" style="margin-top:5px;font-size:11px;font-weight:700;color:#1e9fe0;background:#dbeafe;border:1px solid #1e9fe0;border-radius:6px;padding:3px 9px;cursor:pointer;">📄 Recibo</button>
       </div>
     </div>`;
   });
