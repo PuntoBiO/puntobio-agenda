@@ -2681,25 +2681,62 @@ function cpRecalcular() {
     return { planViejo, planNuevo, diff, total, restantes, proporcional: _brAmbosP, mesQueViene, plano: true, esFuturo, fecha: $('#cpFecha').value, modo: cpModo, diaNuevoFecha: (cpFechaCache&&cpFechaCache.diaNuevo)||null, puenteImporte: _brAmbosP, puenteMes: (cpFechaCache&&cpFechaCache.mes)||MES_ACTUAL, puenteClases: (cpFechaCache&&cpFechaCache.clases)||0 };
   }
 
-  // Proporcional = diferencia de cuota × (días restantes / días del mes)
-  const proporcional = Math.max(0, Math.round(diff * (restantes / total)));
-  const signo = diff >= 0 ? 'sube' : 'baja';
-  const colorDiff = diff >= 0 ? 'var(--azul)' : 'var(--verde)';
+  // ===== PROPORCIONAL POR CLASES (motor unificado, igual que el puente de fecha) =====
+  // SUBA: se cobran SOLO las clases extra elegidas que caen entre HOY y el próximo vencimiento,
+  //       al valor por clase del PLAN NUEVO = cuotaNueva / (clases_sem_nuevo × 4).
+  // BAJA (o mismo precio): proporcional $0 (la diferencia queda a favor del alumno).
+  const clasesSemNuevo = clasesSemanaPlan(planNuevo) || 0;
+  const valorClaseNueva = clasesSemNuevo ? Math.round(cuotaNueva / (clasesSemNuevo * 4)) : 0;
+  const _NOMBRE_D = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+  let clasesPuente = [];
+  if (diff > 0 && cpTurnosSel.size) {
+    const diasExtra = cpTurnosCache.filter(t => cpTurnosSel.has(t.id)).map(t => t.dia);
+    const setD = new Set(diasExtra);
+    const setSin = new Set([...setD].map(s => s.replace('é','e').replace('á','a')));
+    let cur = new Date(HOY.getFullYear(), HOY.getMonth(), HOY.getDate()), guard = 0;
+    while (cur < fecha && guard < 120) {
+      const nom = _NOMBRE_D[cur.getDay()];
+      if (setD.has(nom) || setSin.has(nom.replace('é','e').replace('á','a'))) clasesPuente.push(new Date(cur));
+      cur.setDate(cur.getDate() + 1); guard++;
+    }
+  }
+  const proporcional = (diff > 0) ? valorClaseNueva * clasesPuente.length : 0;
 
-  calc.innerHTML = `
-    <div style="font-weight:600; margin-bottom:6px;">Cálculo del proporcional</div>
-    <table style="width:100%; font-size:13px; border-collapse:collapse;">
-      <tr><td>Cuota ${planViejo}</td><td style="text-align:right">${fmt$(cuotaVieja)}</td></tr>
-      <tr><td>Cuota ${planNuevo}</td><td style="text-align:right">${fmt$(cuotaNueva)}</td></tr>
-      <tr style="border-top:1px solid #cbd5e1;"><td>Diferencia de cuota (${signo})</td><td style="text-align:right; color:${colorDiff}; font-weight:600;">${fmt$(diff)}</td></tr>
-      <tr><td>Días que quedan del mes</td><td style="text-align:right">${restantes} de ${total}</td></tr>
-      <tr style="border-top:2px solid var(--azul);"><td style="font-weight:700;">Proporcional a cobrar ahora</td><td style="text-align:right; font-weight:700; font-size:15px; color:var(--azul);">${fmt$(proporcional)}</td></tr>
-    </table>
-    <div style="margin-top:8px; color:var(--text-dim); font-size:12px;">
-      ${diff < 0 ? '⚠️ Bajó de plan: la diferencia es a favor del alumno, normalmente no se cobra proporcional (queda en $0).' : ''}
-      El plan nuevo <strong>${planNuevo}</strong> arranca en ${nombreMes(mesQueViene)} (desde su vencimiento). Hasta ahí sigue con <strong>${planViejo}</strong>.
-      ${esFuturo ? '<div style="margin-top:6px; color:var(--verde); font-weight:600;">✓ Cambio a futuro: el alumno NO figura con deuda de este plan hasta ' + nombreMes(mesQueViene) + '. No cobres proporcional si todavía no arrancó.</div>' : ''}
-    </div>`;
+  if (diff <= 0) {
+    // BAJA (o mismo precio): no se cobra puente
+    calc.innerHTML = `
+      <div style="font-weight:600; margin-bottom:6px;">${diff < 0 ? '📉 Baja de plan' : 'Cambio de plan'}: ${planViejo} → ${planNuevo}</div>
+      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <tr><td>Cuota ${planViejo}</td><td style="text-align:right">${fmt$(cuotaVieja)}</td></tr>
+        <tr><td>Cuota ${planNuevo}</td><td style="text-align:right">${fmt$(cuotaNueva)}</td></tr>
+        <tr style="border-top:2px solid var(--verde);"><td style="font-weight:700;">Proporcional a cobrar ahora</td><td style="text-align:right; font-weight:700; font-size:15px; color:var(--verde);">$0</td></tr>
+      </table>
+      <div style="margin-top:8px; color:var(--text-dim); font-size:12px;">
+        ${diff < 0 ? 'La diferencia es a favor del alumno: no se cobra proporcional.' : ''}
+        El plan nuevo <strong>${planNuevo}</strong> arranca en ${nombreMes(mesQueViene)} (desde su vencimiento). Hasta ahí sigue con <strong>${planViejo}</strong>.
+        ${diff < 0 ? '<div style="margin-top:6px; color:var(--naranja); font-weight:600;">👉 Si tiene más clases fijas de las que permite ' + planNuevo + ', sacale la que sobra en la Agenda TF (o desde acá cuando esté el quita-clases).</div>' : ''}
+      </div>`;
+  } else {
+    // SUBA: puente por las clases extra elegidas
+    const listaPuente = clasesPuente.length
+      ? clasesPuente.map(c => `<div style="font-size:12px;color:#1e40af">• ${cpFmtDiaCorto(c)}</div>`).join('')
+      : '<div style="font-size:12px;color:var(--naranja)">Todavía no elegiste la clase nueva: elegila abajo para calcular el puente.</div>';
+    calc.innerHTML = `
+      <div style="font-weight:600; margin-bottom:6px;">📈 Suba de plan: ${planViejo} → ${planNuevo}</div>
+      <table style="width:100%; font-size:13px; border-collapse:collapse;">
+        <tr><td>Cuota ${planNuevo}</td><td style="text-align:right">${fmt$(cuotaNueva)}</td></tr>
+        <tr><td>Valor por clase (${clasesSemNuevo}/sem × 4)</td><td style="text-align:right">${fmt$(valorClaseNueva)}</td></tr>
+        <tr><td>Clases extra en el puente</td><td style="text-align:right;font-weight:600">${clasesPuente.length}</td></tr>
+      </table>
+      <div style="margin:6px 0 8px">${listaPuente}</div>
+      <div style="border-top:2px solid var(--azul);padding-top:8px;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:700">Proporcional a cobrar ahora</span>
+        <span style="font-weight:700;font-size:15px;color:var(--azul)">${fmt$(proporcional)}</span>
+      </div>
+      <div style="margin-top:8px; color:var(--text-dim); font-size:12px;">
+        Se cobran las clases extra que toma de hoy hasta su vencimiento. El plan nuevo <strong>${planNuevo}</strong> arranca completo en ${nombreMes(mesQueViene)}.
+      </div>`;
+  }
 
   const _planProp = diff > 0 ? proporcional : 0;
   const _brAmbos = (cpModo === 'ambos' && cpFechaCache && cpFechaCache.importe) ? cpFechaCache.importe : 0;
@@ -2813,6 +2850,7 @@ window.cpToggleTurno = (turnoId) => {
   if (cpTurnosSel.has(turnoId)) cpTurnosSel.delete(turnoId);
   else cpTurnosSel.add(turnoId);
   cpRenderTurnos();
+  cpRecalcular();   // recalcula el puente de la suba (cuenta las clases extra elegidas)
 };
 
 window.confirmarCambioPlan = async () => {
@@ -3066,7 +3104,7 @@ function enviarWhatsAppCambioPlan(p, planNuevo, mesQueViene, proporcional, diaVe
       `\nEl plan nuevo arranca a partir de ${nombreMes(mesQueViene)} (desde tu vencimiento).` +
       lineaProporcional +
       lineaVenc +
-      `\n\nPuntoBiO - ¡Te esperamos! 💪`;
+      `\n\nPuntoBiO - ¡Te esperamos!`;
 
     const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
     if (!tel) {
