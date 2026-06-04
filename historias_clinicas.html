@@ -671,6 +671,10 @@ let personasConEvalEnEspacio = new Set(); // personas con el PDF de evaluación 
 // Coincide solo con archivos guardados como hc/<id>/evaluacion-XXX.pdf (no con adjuntos del paciente).
 function esEvalGenerada(p) { return /\/evaluacion-[^/]*\.pdf$/i.test(p || ''); }
 
+let hcsConEval = new Set();          // historia_id con archivos del equipo (material para generar)
+let hcsConEvalEnEspacio = new Set(); // historia_id que YA tienen evaluación generada/subida
+let batchCancel = false;             // bandera para frenar el lote
+
 document.addEventListener('DOMContentLoaded', async () => {
   await detectarUsuario();
   await loadAllData();
@@ -811,12 +815,19 @@ async function loadAllData() {
     // 5) Archivos cargados por el equipo -> quién tiene evaluación y quién ya la tiene en Mi Espacio
     personasConEval = new Set();
     personasConEvalEnEspacio = new Set();
+    hcsConEval = new Set();
+    hcsConEvalEnEspacio = new Set();
     try {
-      const { data: adjs } = await sb.from('hc_adjuntos').select('persona_id, storage_path, subido_por_alumno');
+      const { data: adjs } = await sb.from('hc_adjuntos').select('persona_id, historia_id, storage_path, subido_por_alumno');
       (adjs || []).forEach(a => {
         if (a.subido_por_alumno !== true) {
           personasConEval.add(a.persona_id);
-          if (esEvalGenerada(a.storage_path)) personasConEvalEnEspacio.add(a.persona_id);
+          const generada = esEvalGenerada(a.storage_path);
+          if (generada) personasConEvalEnEspacio.add(a.persona_id);
+          if (a.historia_id != null) {
+            if (generada) hcsConEvalEnEspacio.add(a.historia_id);
+            else hcsConEval.add(a.historia_id);
+          }
         }
       });
     } catch (e) { console.warn('No se pudieron cargar las evaluaciones:', e.message); }
@@ -1012,6 +1023,14 @@ function renderConEvalInner() {
   }
   return `
     <div style="font-size:12.5px; color:var(--gris-texto); margin:0 0 10px 2px;">⏳ <strong>Falta subir</strong> = el paciente todavía no la tiene en Mi Espacio. Entrá, tocá <strong>Generar PDF</strong> y dejá tildado "Subir a Mi Espacio".</div>
+    ${(() => { const pend = (typeof hcsPendientesDeEval === 'function' ? hcsPendientesDeEval().length : 0);
+      return pend ? `<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:0 0 14px 0; padding:12px 14px; background:#eef7fd; border:1px solid #bfe3f7; border-radius:10px;">
+        <span style="font-size:13px; color:#0b6ba8; font-weight:600;">⚡ ${pend} evaluaciones sin subir a Mi Espacio</span>
+        <button class="btn btn-primary btn-sm" onclick="generarPendientesBatch(0)">Generar todas (${pend})</button>
+        <button class="btn btn-sm" onclick="generarPendientesBatch(5)">🧪 Probar con 5</button>
+        <span style="font-size:11.5px; color:#777;">Las hace de a una, sin descargar nada. Podés frenar cuando quieras.</span>
+      </div>` : `<div style="margin:0 0 14px 0; padding:10px 14px; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:10px; font-size:13px; color:#047857;">🎉 No hay evaluaciones pendientes de subir.</div>`;
+    })()}
     <table class="data-table">
       <thead>
         <tr>
@@ -2976,7 +2995,8 @@ function cerrarSelectorPDF() {
 async function guardarEvalEnEspacio(bytes, nombreArch, historiaId, personaId) {
   if (!historiaId || !personaId) { console.warn('guardarEval: faltan ids', historiaId, personaId); return; }
   let paso = 'inicio';
-  if (typeof mostrarCargandoPDF === 'function') mostrarCargandoPDF('Guardando la evaluación en el espacio del paciente…');
+  const enLote = !!window.__batchMode;
+  if (!enLote && typeof mostrarCargandoPDF === 'function') mostrarCargandoPDF('Guardando la evaluación en el espacio del paciente…');
   try {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const blob = new Blob([u8], { type: 'application/pdf' });
@@ -3005,16 +3025,118 @@ async function guardarEvalEnEspacio(bytes, nombreArch, historiaId, personaId) {
     if (insErr) throw insErr;
     if (typeof personasConEval !== 'undefined') {
       personasConEval.add(personaId); personasConEvalEnEspacio.add(personaId);
-      try { if (typeof renderStats === 'function') renderStats(); if (currentTab === 'con-eval' && typeof renderTab === 'function') renderTab(); } catch (e) {}
+      if (typeof hcsConEval !== 'undefined') { hcsConEval.add(historiaId); hcsConEvalEnEspacio.add(historiaId); }
+      if (!enLote) { try { if (typeof renderStats === 'function') renderStats(); if (currentTab === 'con-eval' && typeof renderTab === 'function') renderTab(); } catch (e) {} }
     }
-    if (typeof ocultarCargandoPDF === 'function') ocultarCargandoPDF();
-    showToast('✓ Guardado en el espacio del paciente');
-    alert('✓ La evaluación quedó guardada en el espacio del paciente.');
+    if (!enLote && typeof ocultarCargandoPDF === 'function') ocultarCargandoPDF();
+    if (!enLote) {
+      showToast('✓ Guardado en el espacio del paciente');
+      alert('✓ La evaluación quedó guardada en el espacio del paciente.');
+    }
   } catch (e) {
-    if (typeof ocultarCargandoPDF === 'function') ocultarCargandoPDF();
+    if (!enLote && typeof ocultarCargandoPDF === 'function') ocultarCargandoPDF();
     console.error('guardarEvalEnEspacio falló en:', paso, e);
+    if (enLote) throw e; // en lote, que el error suba para registrarlo y seguir con el siguiente
     alert('⚠ El PDF se descargó, pero NO se pudo guardar en el espacio del paciente.\n\nPaso que falló: ' + paso + '\nError: ' + (e.message || e));
   }
+}
+
+// ===== LOTE: generar evaluaciones pendientes automáticamente =====
+function hcsPendientesDeEval() {
+  // HCs con archivos del equipo que todavía NO tienen evaluación generada/subida
+  return allHCs.filter(h => hcsConEval.has(h.id) && !hcsConEvalEnEspacio.has(h.id));
+}
+
+async function generarPendientesBatch(limite) {
+  if (typeof esProfeSoloLectura === 'function' && esProfeSoloLectura()) { alert('No tenés permiso para generar.'); return; }
+  let pendientes = hcsPendientesDeEval();
+  if (limite && limite > 0) pendientes = pendientes.slice(0, limite);
+  const total = pendientes.length;
+  if (!total) { alert('No hay evaluaciones pendientes para generar. 🎉'); return; }
+
+  const aviso = limite
+    ? `Vas a generar y subir ${total} evaluaciones (prueba con las primeras ${limite}).`
+    : `Vas a generar y subir ${total} evaluaciones pendientes.`;
+  if (!confirm(`${aviso}\n\nLas procesa de a una y puede tardar bastante (los archivos son pesados). No cierres esta pestaña. ¿Empezar?`)) return;
+
+  batchCancel = false;
+  mostrarProgresoBatch(total);
+
+  let ok = 0, fallos = 0;
+  const errores = [];
+  for (let i = 0; i < pendientes.length; i++) {
+    if (batchCancel) break;
+    const hc = pendientes[i];
+    const nombre = personaName(hc.persona_id) || 'paciente';
+    actualizarProgresoBatch(i + 1, total, nombre, ok, fallos);
+    try {
+      currentHCId = hc.id;
+      modalType = 'hc';
+      window._evosPDF = null; window._compsPDF = null; window._bitPDF = null; window._perfilDepPDF = null;
+      // Cargar observaciones + adjuntos de esta HC directamente (sin abrir el modal grande)
+      const { data: obsD } = await sb.from('hc_observaciones').select('*')
+        .eq('historia_id', hc.id).order('creado_en', { ascending: true });
+      obsActual = obsD || [];
+      const { data: adjD } = await sb.from('hc_adjuntos').select('*')
+        .or(`historia_id.eq.${hc.id},and(historia_id.is.null,persona_id.eq.${hc.persona_id})`)
+        .order('creado_en', { ascending: true });
+      adjActual = adjD || [];
+      // Construir el selector (carga datos extra + checkboxes, todo tildado por defecto)
+      try { cerrarSelectorPDF(); } catch (_) {}
+      await abrirSelectorPDF();
+      window.__batchMode = true;
+      await generarPDF(false);
+      window.__batchMode = false;
+      try { cerrarSelectorPDF(); } catch (_) {}
+      ok++;
+    } catch (e) {
+      window.__batchMode = false;
+      try { cerrarSelectorPDF(); } catch (_) {}
+      try { if (typeof ocultarCargandoPDF === 'function') ocultarCargandoPDF(); } catch (_) {}
+      fallos++;
+      errores.push(`${nombre}: ${e.message || e}`);
+      console.error('Lote: falló', nombre, e);
+    }
+    await new Promise(r => setTimeout(r, 250)); // respiro para no trabar el navegador
+  }
+
+  ocultarProgresoBatch();
+  try { if (typeof renderStats === 'function') renderStats(); if (typeof renderTab === 'function') renderTab(); } catch (_) {}
+
+  let resumen = (batchCancel ? 'Lote frenado.' : '¡Listo!') + `\n\nGeneradas: ${ok}\nCon error: ${fallos}`;
+  if (errores.length) resumen += '\n\nErrores:\n' + errores.slice(0, 8).join('\n') + (errores.length > 8 ? `\n…y ${errores.length - 8} más` : '');
+  alert(resumen);
+}
+
+function mostrarProgresoBatch(total) {
+  const prev = document.getElementById('batchProgreso'); if (prev) prev.remove();
+  const el = document.createElement('div');
+  el.id = 'batchProgreso';
+  el.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100001; display:flex; align-items:center; justify-content:center;';
+  el.innerHTML = `
+    <div style="background:#fff; padding:30px 34px; border-radius:16px; max-width:440px; width:90%; text-align:center;">
+      <div style="font-size:17px; font-weight:700; color:#111; margin-bottom:6px;">⚡ Generando evaluaciones…</div>
+      <div id="batchSub" style="font-size:13px; color:#555; margin-bottom:16px;">Preparando…</div>
+      <div style="background:#e5e7eb; border-radius:999px; height:12px; overflow:hidden; margin-bottom:10px;">
+        <div id="batchBar" style="background:#1e9fe0; height:100%; width:0%; transition:width .2s;"></div>
+      </div>
+      <div id="batchCount" style="font-size:12px; color:#777; margin-bottom:18px;">0 de ${total}</div>
+      <button onclick="batchCancel = true; this.disabled = true; this.textContent='Frenando…';"
+        style="background:#fff; border:1px solid #dc2626; color:#dc2626; padding:9px 18px; border-radius:9px; font-size:13px; font-weight:600; cursor:pointer;">✋ Frenar</button>
+      <div style="font-size:11px; color:#999; margin-top:12px;">No cierres ni cambies de pestaña.</div>
+    </div>`;
+  document.body.appendChild(el);
+}
+function actualizarProgresoBatch(n, total, nombre, ok, fallos) {
+  const bar = document.getElementById('batchBar');
+  const sub = document.getElementById('batchSub');
+  const cnt = document.getElementById('batchCount');
+  if (bar) bar.style.width = Math.round((n - 1) / total * 100) + '%';
+  if (sub) sub.textContent = 'Procesando: ' + nombre;
+  if (cnt) cnt.textContent = `${n} de ${total}  ·  ✓ ${ok}  ·  ⚠ ${fallos}`;
+}
+function ocultarProgresoBatch() {
+  const el = document.getElementById('batchProgreso'); if (el) el.remove();
 }
 
 async function generarPDF(conWhatsApp = false) {
@@ -3676,19 +3798,20 @@ async function generarPDF(conWhatsApp = false) {
 
       // 3) Guardar el PDF final único y descargarlo
       const finalBytes = await mergedPdf.save();
-      descargarBytesPDF(finalBytes, nombreArch);
+      if (!window.__batchMode) descargarBytesPDF(finalBytes, nombreArch);
       ocultarCargandoPDF();
       if (subirEspacio) await guardarEvalEnEspacio(finalBytes, nombreArch, currentHCId, hc.persona_id);
     } catch (e) {
       ocultarCargandoPDF();
       console.error('Error al unir adjuntos:', e);
       // Si algo falla al unir, igual entregamos la HC sola para no dejar a Lu sin nada
+      if (window.__batchMode) { throw e; }
       doc.save(nombreArch);
       alert('Se generó el PDF de la historia clínica, pero hubo un problema al unir algún adjunto (puede ser muy pesado o estar protegido). El PDF de la HC se descargó igual; los adjuntos podés enviarlos aparte.');
     }
   } else {
     // Sin adjuntos: PDF normal
-    doc.save(nombreArch);
+    if (!window.__batchMode) doc.save(nombreArch);
     if (subirEspacio) await guardarEvalEnEspacio(doc.output('arraybuffer'), nombreArch, currentHCId, hc.persona_id);
   }
 
@@ -3712,7 +3835,7 @@ async function generarPDF(conWhatsApp = false) {
     }, 700);
     showToast('✓ PDF descargado — adjuntalo en el WhatsApp que se abrió');
   } else {
-    showToast('✓ PDF generado');
+    if (!window.__batchMode) showToast('✓ PDF generado');
   }
 }
 
