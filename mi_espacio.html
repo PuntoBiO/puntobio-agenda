@@ -3983,6 +3983,10 @@ const EVA_LABELS = {
   7: 'Severo', 8: 'Severo', 9: 'Muy severo', 10: 'Dolor máximo'
 };
 
+// Marca interna para registrar un día de descanso / sin actividad
+// (se guarda al inicio de "notas" para no tocar la base de datos)
+const DIA_LIBRE_TAG = '🛌DL|';
+
 function colorEscala(v, max){
   // 0-3 verde, 4-6 ámbar, 7-10 rojo
   const p = v / max;
@@ -3998,8 +4002,18 @@ function bloqueBitacora(entries){
   } else {
     entries.forEach(b => {
       const chips = [];
+      // Detecta y limpia la marca interna de "día libre"
+      let esDiaLibre = false;
+      let notasMostrar = b.notas;
+      if(b.notas && b.notas.indexOf(DIA_LIBRE_TAG) === 0){
+        esDiaLibre = true;
+        notasMostrar = b.notas.slice(DIA_LIBRE_TAG.length) || null;
+      }
       if(b.sueno) chips.push(`<span class="bit-chip">😴 Sueño ${b.sueno}/5</span>`);
       if(b.estado_general) chips.push(`<span class="bit-chip">🌟 Día ${b.estado_general}/5</span>`);
+      if(esDiaLibre){
+        chips.push(`<span class="bit-chip" style="background:#6b728022;color:#6b7280">🛌 Día libre · sin actividad</span>`);
+      }
       if(b.entreno_en_pb){
         const c = colorEscala(b.fatiga_post_pb||0, 10);
         chips.push(`<span class="bit-chip" style="background:${c}22;color:${c}">💪 PB · Borg ${b.fatiga_post_pb??'—'}</span>`);
@@ -4019,7 +4033,7 @@ function bloqueBitacora(entries){
         <div class="bit-cont">
           <div class="bit-chips">${chips.join('')}</div>
           ${b.deporte_descripcion ? `<div class="bit-desc">🏃 ${esc(b.deporte_descripcion)}</div>` : ''}
-          ${b.notas ? `<div class="bit-notas">${esc(b.notas)}</div>` : ''}
+          ${notasMostrar ? `<div class="bit-notas">${esc(notasMostrar)}</div>` : ''}
         </div>
         ${puedeBorrar ? `<button class="ag-btn ag-btn-naranja" style="font-size:11px;padding:5px 9px" onclick="pbBorrarBitacora(${b.id})">🗑</button>` : ''}
       </div>`;
@@ -4125,6 +4139,10 @@ window.pbAbrirNuevaBitacora = function(){
         </div>
 
         <div class="adj-form-row">
+          <label class="adj-cat-radio"><input type="checkbox" id="bit-dialibre" onchange="pbToggleDiaLibre(this.checked)"> <b>Día sin actividad (descanso / día libre)</b></label>
+        </div>
+
+        <div class="adj-form-row">
           <label class="adj-label">¿Tenés dolor? (EVA 0-10)</label>
           ${renderEscala0a('bit-eva', 10, EVA_LABELS)}
           <input type="text" id="bit-zona" class="adj-input" placeholder="¿Dónde te duele? (ej: rodilla derecha)" maxlength="120" style="margin-top:8px">
@@ -4147,6 +4165,21 @@ window.pbAbrirNuevaBitacora = function(){
 window.pbToggleBit = function(quien, mostrar){
   const el = document.getElementById('bit-' + quien + '-detalle');
   if(el) el.style.display = mostrar ? 'block' : 'none';
+  // Si marca una actividad, ya no es un día libre
+  if(mostrar){
+    const dl = document.getElementById('bit-dialibre');
+    if(dl){ dl.checked = false; }
+  }
+};
+
+window.pbToggleDiaLibre = function(activo){
+  // Día libre = sin entreno PB ni deporte: limpio y deshabilito esos campos
+  ['entrenopb','deporte'].forEach(id => {
+    const cb = document.getElementById('bit-' + id);
+    if(cb){ if(activo) cb.checked = false; cb.disabled = activo; }
+  });
+  pbToggleBit('pb', false);
+  pbToggleBit('dep', false);
 };
 
 window.pbConfirmarNuevaBitacora = async function(){
@@ -4162,6 +4195,9 @@ window.pbConfirmarNuevaBitacora = async function(){
   const zona = document.getElementById('bit-zona').value.trim() || null;
   const notas = document.getElementById('bit-notas').value.trim() || null;
   const status = document.getElementById('bit-status');
+
+  const diaLibre = !!(document.getElementById('bit-dialibre') && document.getElementById('bit-dialibre').checked);
+  const notasFinal = diaLibre ? (DIA_LIBRE_TAG + (notas || '')) : notas;
 
   if(!fecha){ status.innerHTML = '<div class="adj-error">Elegí la fecha</div>'; return; }
 
@@ -4179,7 +4215,7 @@ window.pbConfirmarNuevaBitacora = async function(){
       fatiga_post_deporte: borgDep ? parseInt(borgDep,10) : null,
       dolor_nivel: eva ? parseInt(eva,10) : null,
       dolor_zona: zona,
-      notas,
+      notas: notasFinal,
       creado_por_alumno: true,
       autor_nombre: window._personaNombreActual || 'Alumno',
     });
