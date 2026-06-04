@@ -667,6 +667,10 @@ let personasConEvalProf = new Set(); // personas que ya tienen una HC abierta po
 let personasConEval = new Set();        // personas con evaluación cargada por el equipo (algún archivo)
 let personasConEvalEnEspacio = new Set(); // personas con el PDF de evaluación ya subido a Mi Espacio
 
+// Detecta cualquier PDF de evaluación generado por el equipo (nombre antiguo o con fecha).
+// Coincide solo con archivos guardados como hc/<id>/evaluacion-XXX.pdf (no con adjuntos del paciente).
+function esEvalGenerada(p) { return /\/evaluacion-[^/]*\.pdf$/i.test(p || ''); }
+
 document.addEventListener('DOMContentLoaded', async () => {
   await detectarUsuario();
   await loadAllData();
@@ -812,7 +816,7 @@ async function loadAllData() {
       (adjs || []).forEach(a => {
         if (a.subido_por_alumno !== true) {
           personasConEval.add(a.persona_id);
-          if ((a.storage_path || '').endsWith('evaluacion-biolab.pdf')) personasConEvalEnEspacio.add(a.persona_id);
+          if (esEvalGenerada(a.storage_path)) personasConEvalEnEspacio.add(a.persona_id);
         }
       });
     } catch (e) { console.warn('No se pudieron cargar las evaluaciones:', e.message); }
@@ -2254,7 +2258,7 @@ function pintarAdjuntos(historiaId, personaId) {
   };
   const renderAdjItem = (a) => {
         const subidoAlumno = a.subido_por_alumno === true;
-        const esEvalGen = (a.storage_path || '').endsWith('evaluacion-biolab.pdf');
+        const esEvalGen = esEvalGenerada(a.storage_path);
         const cat = esEvalGen
           ? { icono: '🧾', label: 'Evaluación generada', color: '#1e9fe0' }
           : (a.categoria ? (CATS_LBL[a.categoria] || CATS_LBL.otro) : null);
@@ -2976,32 +2980,29 @@ async function guardarEvalEnEspacio(bytes, nombreArch, historiaId, personaId) {
   try {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const blob = new Blob([u8], { type: 'application/pdf' });
-    const path = `hc/${historiaId}/evaluacion-biolab.pdf`;
+    // Nombre ÚNICO por generación: así cada evaluación que subas es una carga NUEVA
+    // en Mi Espacio y nunca pisa a la anterior (ej: una por mes).
+    const path = `hc/${historiaId}/evaluacion-${Date.now()}.pdf`;
+    const fechaCorta = new Date().toLocaleDateString('es-AR');
     paso = 'subir el archivo al storage';
     const { error: upErr } = await sb.storage.from(ADJ_BUCKET)
-      .upload(path, blob, { upsert: true, contentType: 'application/pdf' });
+      .upload(path, blob, { upsert: false, contentType: 'application/pdf' });
     if (upErr) throw upErr;
-    paso = 'buscar registro existente';
-    const { data: existe, error: selErr } = await sb.from('hc_adjuntos')
-      .select('id').eq('storage_path', path).limit(1);
-    if (selErr) throw selErr;
-    if (!existe || !existe.length) {
-      paso = 'guardar el registro en hc_adjuntos';
-      const { error: insErr } = await sb.from('hc_adjuntos').insert({
-        historia_id: historiaId,
-        persona_id: personaId,
-        storage_path: path,
-        nombre_original: nombreArch,
-        titulo: 'Evaluación Biolab',
-        tipo_mime: 'application/pdf',
-        tamano_bytes: u8.byteLength || null,
-        autor_id: usuarioActual ? usuarioActual.id : null,
-        autor_nombre: usuarioActual ? usuarioActual.nombre : null,
-        autor_email: usuarioActual ? usuarioActual.email : null,
-        subido_por_alumno: false
-      });
-      if (insErr) throw insErr;
-    }
+    paso = 'guardar el registro en hc_adjuntos';
+    const { error: insErr } = await sb.from('hc_adjuntos').insert({
+      historia_id: historiaId,
+      persona_id: personaId,
+      storage_path: path,
+      nombre_original: nombreArch,
+      titulo: 'Evaluación Biolab · ' + fechaCorta,
+      tipo_mime: 'application/pdf',
+      tamano_bytes: u8.byteLength || null,
+      autor_id: usuarioActual ? usuarioActual.id : null,
+      autor_nombre: usuarioActual ? usuarioActual.nombre : null,
+      autor_email: usuarioActual ? usuarioActual.email : null,
+      subido_por_alumno: false
+    });
+    if (insErr) throw insErr;
     if (typeof personasConEval !== 'undefined') {
       personasConEval.add(personaId); personasConEvalEnEspacio.add(personaId);
       try { if (typeof renderStats === 'function') renderStats(); if (currentTab === 'con-eval' && typeof renderTab === 'function') renderTab(); } catch (e) {}
