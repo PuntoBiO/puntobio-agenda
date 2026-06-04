@@ -594,6 +594,9 @@ textarea.form-input { resize: vertical; min-height: 44px; }
     <button class="tab" data-tab="duplicadas" onclick="switchTab('duplicadas')">
       🔁 Con 2+ HC <span class="badge" id="badgeDuplicadas">0</span>
     </button>
+    <button class="tab" data-tab="con-eval" onclick="switchTab('con-eval')">
+      🧾 Con evaluación <span class="badge" id="badgeConEval">0</span>
+    </button>
     <button class="tab tab-moplex" data-tab="moplex" onclick="switchTab('moplex')">
       🦶 MOPLEX <span class="badge" id="badgeMoplex">0</span>
     </button>
@@ -661,6 +664,8 @@ let modalType = 'hc'; // 'hc' o 'moplex'
 let obsActual = [];   // observaciones+notas de la HC abierta
 let adjActual = [];   // adjuntos de la HC abierta
 let personasConEvalProf = new Set(); // personas que ya tienen una HC abierta por profesional
+let personasConEval = new Set();        // personas con evaluación cargada por el equipo (algún archivo)
+let personasConEvalEnEspacio = new Set(); // personas con el PDF de evaluación ya subido a Mi Espacio
 
 document.addEventListener('DOMContentLoaded', async () => {
   await detectarUsuario();
@@ -798,6 +803,19 @@ async function loadAllData() {
     // Set de personas que YA tienen al menos una HC abierta por el profesional
     // (evita que el botón "Iniciar evaluación" cree duplicados sin querer)
     personasConEvalProf = new Set(allHCs.filter(h => h.origen === 'profesional').map(h => h.persona_id));
+
+    // 5) Archivos cargados por el equipo -> quién tiene evaluación y quién ya la tiene en Mi Espacio
+    personasConEval = new Set();
+    personasConEvalEnEspacio = new Set();
+    try {
+      const { data: adjs } = await sb.from('hc_adjuntos').select('persona_id, storage_path, subido_por_alumno');
+      (adjs || []).forEach(a => {
+        if (a.subido_por_alumno !== true) {
+          personasConEval.add(a.persona_id);
+          if ((a.storage_path || '').endsWith('evaluacion-biolab.pdf')) personasConEvalEnEspacio.add(a.persona_id);
+        }
+      });
+    } catch (e) { console.warn('No se pudieron cargar las evaluaciones:', e.message); }
   } catch (err) {
     console.error('Error cargando datos:', err);
     document.getElementById('tabContent').innerHTML =
@@ -827,6 +845,8 @@ function renderStats() {
   const dupCount = agruparHCporPersona(allHCs).filter(g => g.total > 1).length;
   const bd = document.getElementById('badgeDuplicadas');
   if (bd) bd.textContent = dupCount;
+  const bce = document.getElementById('badgeConEval');
+  if (bce) bce.textContent = personasConEval.size;
 }
 
 function switchTab(tab) {
@@ -854,6 +874,8 @@ function renderTab() {
     content.innerHTML = searchBar + renderMoplexTable();
   } else if (currentTab === 'duplicadas') {
     content.innerHTML = searchBar + renderDuplicadasTable();
+  } else if (currentTab === 'con-eval') {
+    content.innerHTML = searchBar + renderConEvalTable();
   } else {
     content.innerHTML = searchBar + renderTodasTable();
   }
@@ -870,6 +892,7 @@ function renderTab() {
                                     currentTab === 'sin-completar' ? renderSinCompletarInner() :
                                     currentTab === 'moplex' ? renderMoplexInner() :
                                     currentTab === 'duplicadas' ? renderDuplicadasInner() :
+                                    currentTab === 'con-eval' ? renderConEvalInner() :
                                     renderTodasInner();
       }
     });
@@ -964,6 +987,47 @@ function renderSinCompletarInner() {
             </div></td>
           </tr>
         `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderConEvalTable() {
+  return `<div class="table-wrapper">${renderConEvalInner()}</div>`;
+}
+function renderConEvalInner() {
+  // Pacientes con evaluación cargada por el equipo. Primero los que FALTA subir a Mi Espacio.
+  let grupos = agruparHCporPersona(allHCs).filter(g => personasConEval.has(g.rep.persona_id));
+  grupos.sort((a, b) => {
+    const ya = (g) => personasConEvalEnEspacio.has(g.rep.persona_id) ? 1 : 0;
+    return ya(a) - ya(b);
+  });
+  const filtradas = filterBySearch(grupos, g => g.rep.dni, g => personaName(g.rep.persona_id));
+  if (!filtradas.length) {
+    return `<div class="empty-state"><div class="icon">🧾</div><p>No hay pacientes con evaluación cargada por el equipo.</p></div>`;
+  }
+  return `
+    <div style="font-size:12.5px; color:var(--gris-texto); margin:0 0 10px 2px;">⏳ <strong>Falta subir</strong> = el paciente todavía no la tiene en Mi Espacio. Entrá, tocá <strong>Generar PDF</strong> y dejá tildado "Subir a Mi Espacio".</div>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Paciente</th>
+          <th>DNI</th>
+          <th>En Mi Espacio</th>
+          <th style="text-align:right;">Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${filtradas.map(g => { const h = g.rep; const ya = personasConEvalEnEspacio.has(h.persona_id); return `
+          <tr>
+            <td><strong>${personaName(h.persona_id) || '(sin nombre)'}</strong>${chipsPersonaHC(h.persona_id, g.total)}</td>
+            <td>${h.dni || '—'}</td>
+            <td>${ya
+              ? '<span class="pill pill-ok">✓ Subida</span>'
+              : '<span class="pill" style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d">⏳ Falta subir</span>'}</td>
+            <td><div class="table-actions"><button class="btn btn-sm btn-primary" onclick="openHC(${h.id})">Ver / Generar</button></div></td>
+          </tr>
+        `; }).join('')}
       </tbody>
     </table>
   `;
@@ -2937,6 +3001,7 @@ async function guardarEvalEnEspacio(bytes, nombreArch, historiaId, personaId) {
       });
       if (insErr) throw insErr;
     }
+    if (typeof personasConEval !== 'undefined') { personasConEval.add(personaId); personasConEvalEnEspacio.add(personaId); }
     showToast('✓ También guardado en el espacio del paciente');
     alert('✓ La evaluación se guardó en el espacio del paciente.');
   } catch (e) {
