@@ -244,6 +244,21 @@
   .slot.slot-bloqueado-gestion::after{content:attr(data-bloqueo-motivo); position:absolute; inset:0;
     display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700;
     color:#b91c1c; text-align:center; padding:2px 4px; line-height:1.1;}
+  /* Cierre PERMANENTE (todas las semanas) = gris, como el CERRADO de la grilla base */
+  .slot.slot-bloqueado-perm{position:relative; background:#eef0f3;
+    background-image:repeating-linear-gradient(45deg, transparent 0 4px, rgba(0,0,0,.045) 4px 8px);
+    pointer-events:none;}
+  .slot.slot-bloqueado-perm > *{display:none;}
+  .slot.slot-bloqueado-perm::after{content:attr(data-bloqueo-motivo); position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700;
+    color:#6b7280; text-align:center; padding:2px 4px; line-height:1.1;}
+  .slot.slot-bloqueado-perm-gestion{position:relative; cursor:pointer; background:#eef0f3;
+    background-image:repeating-linear-gradient(45deg, transparent 0 4px, rgba(0,0,0,.06) 4px 8px);
+    border:1px dashed rgba(107,114,128,.55);}
+  .slot.slot-bloqueado-perm-gestion > *{display:none;}
+  .slot.slot-bloqueado-perm-gestion::after{content:attr(data-bloqueo-motivo); position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700;
+    color:#4b5563; text-align:center; padding:2px 4px; line-height:1.1;}
 
   .estado-pill{display:inline-block; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600;}
   .estado-pill.RESERVADO{background:#e5e7eb; color:#475569;}
@@ -623,16 +638,25 @@ async function cargarAperturas(){
     aperturasSemana = error ? [] : (data||[]);
   }catch(e){ aperturasSemana = []; }
 }
+// ¿La apertura 'a' aplica a este slot (fecha + hora)? Soporta recurrente (todas las semanas).
+function aperturaAplica(a, fecha, hora){
+  if(a.area !== 'BIOLAB') return false;
+  if(a.recurrente){
+    if(a.fecha_desde && fecha < a.fecha_desde) return false;
+    if(a.dia_semana != null){
+      const dow = new Date(fecha + 'T00:00:00').getDay();
+      if(Number(a.dia_semana) !== dow) return false;
+    }
+  } else {
+    if(!(fecha >= a.fecha_desde && fecha <= a.fecha_hasta)) return false;
+  }
+  const m = hMin(hora), mFin = m + 60;
+  if(a.hora_desde == null) return true;
+  return hMin(a.hora_desde) < mFin && hMin(a.hora_hasta || a.hora_desde) > m;
+}
 // Devuelve la apertura activa de BIOLAB que cubre ese slot, o null
 function aperturaEnSlot(fecha, hora){
-  const m = hMin(hora), mFin = m + 60;
-  return aperturasSemana.find(a =>
-    a.area === 'BIOLAB' &&
-    fecha >= a.fecha_desde && fecha <= a.fecha_hasta &&
-    (a.hora_desde == null
-      ? true
-      : (hMin(a.hora_desde) < mFin && hMin(a.hora_hasta || a.hora_desde) > m))
-  ) || null;
+  return aperturasSemana.find(a => aperturaAplica(a, fecha, hora)) || null;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -776,14 +800,16 @@ function render(){
         const horaFin = String(parseInt(hora.slice(0,2),10)+1).padStart(2,'0')+':00';
         const bloq = Bloqueos.queAplica('BIOLAB', fStr, hora, horaFin, null, null);
         if (bloq) {
+          const perm = !!bloq.recurrente;   // permanente (todas las semanas) = gris; temporal = rojo
+          const motivoTxt = (perm ? '' : '🚫 ') + Bloqueos.rotuloCorto(bloq);
           if (modoGestion && esAdminGeneral()) {
-            // En modo gestión el slot bloqueado queda clickeable para poder reabrirlo
-            slot.classList.add('slot-bloqueado-gestion');
-            slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+            // En modo gestión queda clickeable para gestionarlo
+            slot.classList.add(perm ? 'slot-bloqueado-perm-gestion' : 'slot-bloqueado-gestion');
+            slot.setAttribute('data-bloqueo-motivo', motivoTxt);
             slot.onclick = () => abrirGestionSlot(fStr, hora, d, diaNum);
           } else {
-            slot.classList.add('slot-bloqueado');
-            slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+            slot.classList.add(perm ? 'slot-bloqueado-perm' : 'slot-bloqueado');
+            slot.setAttribute('data-bloqueo-motivo', motivoTxt);
           }
         }
       }
@@ -1282,11 +1308,7 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
   }
 
   // 2) Aperturas (verde) activas en este slot
-  const mIniG = hMin(horaCero);
-  const aps = aperturasSemana.filter(a =>
-    a.area === 'BIOLAB' && fecha >= a.fecha_desde && fecha <= a.fecha_hasta &&
-    (a.hora_desde == null ? true : (hMin(a.hora_desde) < mIniG+60 && hMin(a.hora_hasta||a.hora_desde) > mIniG))
-  );
+  const aps = aperturasSemana.filter(a => aperturaAplica(a, fecha, horaCero));
   if(aps.length){
     html += `<div class="info-box" style="background:#ecfdf5; border-left-color:#16a34a; color:#166534;">🔓 Apertura(s) activa(s):</div>`;
     aps.forEach(a => {
@@ -1311,6 +1333,13 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
           </select>
         </div>
         <div class="form-row">
+          <label>¿Cada cuánto?</label>
+          <select id="gestion-abrir-tipo">
+            <option value="dia">Solo este día</option>
+            <option value="semanal">Todas las semanas (permanente)</option>
+          </select>
+        </div>
+        <div class="form-row">
           <label>Nota (opcional)</label>
           <input type="text" id="gestion-abrir-motivo" placeholder="Ej: Male cubre a Bruno" autocomplete="off">
         </div>
@@ -1324,6 +1353,13 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
           <label>🔒 Cerrar este horario para</label>
           <select id="gestion-cerrar-prof">
             ${PROFES_CIERRE.map(p => `<option value="${p.email}">${p.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>¿Cada cuánto?</label>
+          <select id="gestion-cerrar-tipo">
+            <option value="dia">Solo este día (rojo)</option>
+            <option value="semanal">Todas las semanas / permanente (gris)</option>
           </select>
         </div>
         <div class="form-row">
@@ -1344,6 +1380,7 @@ async function abrirHorario(){
   const profEmail = document.getElementById('gestion-abrir-prof').value || null;
   const motivo = (document.getElementById('gestion-abrir-motivo')?.value || '').trim() || null;
   if(!profEmail){ alertaEl.innerHTML = '<div class="err-box">Elegí un profesional.</div>'; return; }
+  const semanal = (document.getElementById('gestion-abrir-tipo')?.value === 'semanal');
   try{
     const u = await usuarioActual();
     const payload = {
@@ -1351,9 +1388,11 @@ async function abrirHorario(){
       profesional_email: profEmail,
       practica_codigo: null,
       fecha_desde: gestionSlot.fecha,
-      fecha_hasta: gestionSlot.fecha,
+      fecha_hasta: semanal ? '2099-12-31' : gestionSlot.fecha,
       hora_desde: gestionSlot.horaCero,
       hora_hasta: gestionSlot.horaFin,
+      recurrente: semanal,
+      dia_semana: semanal ? new Date(gestionSlot.fecha + 'T00:00:00').getDay() : null,
       motivo,
       creado_por_email: u.email,
       creado_por_nombre: u.nombre,
@@ -1364,7 +1403,7 @@ async function abrirHorario(){
       alert('⚠️ No se pudo abrir el horario:\n\n' + error.message);
       return;
     }
-    toast('Horario abierto ✓','ok');
+    toast(semanal ? 'Horario abierto (todas las semanas) ✓' : 'Horario abierto ✓','ok');
     cerrarModal('modal-gestion');
     await cargarAperturas();
     render();
@@ -1393,6 +1432,7 @@ async function cerrarHorario(){
   const profEmail = document.getElementById('gestion-cerrar-prof').value || null;
   const motivo = document.getElementById('gestion-cerrar-motivo').value.trim();
   if(!motivo){ alertaEl.innerHTML = '<div class="err-box">Poné un motivo (ej: Bruno ausente).</div>'; return; }
+  const semanal = (document.getElementById('gestion-cerrar-tipo')?.value === 'semanal');
 
   try{
     const u = await usuarioActual();
@@ -1401,9 +1441,11 @@ async function cerrarHorario(){
       profesional_email: profEmail,
       practica_codigo: null,
       fecha_desde: gestionSlot.fecha,
-      fecha_hasta: gestionSlot.fecha,
+      fecha_hasta: semanal ? '2099-12-31' : gestionSlot.fecha,
       hora_desde: gestionSlot.horaCero,
       hora_hasta: gestionSlot.horaFin,
+      recurrente: semanal,
+      dia_semana: semanal ? new Date(gestionSlot.fecha + 'T00:00:00').getDay() : null,
       motivo,
       creado_por_email: u.email,
       creado_por_nombre: u.nombre,
@@ -1414,8 +1456,8 @@ async function cerrarHorario(){
       alert('⚠️ No se pudo cerrar el horario:\n\n' + error.message);
       return;
     }
-    const esPasado = new Date(`${gestionSlot.fecha}T${gestionSlot.horaCero}:00`) < new Date();
-    toast('Horario cerrado ✓','ok');
+    const esPasado = !semanal && new Date(`${gestionSlot.fecha}T${gestionSlot.horaCero}:00`) < new Date();
+    toast(semanal ? 'Cerrado todas las semanas ✓' : 'Horario cerrado ✓','ok');
     cerrarModal('modal-gestion');
     if(window.Bloqueos) await Bloqueos.refrescar();
     render();

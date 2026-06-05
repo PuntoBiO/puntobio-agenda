@@ -98,8 +98,17 @@
     if (!b.activo) return false;
     // area
     if (b.area !== 'TRANSVERSAL' && b.area !== area) return false;
-    // fechas
-    if (fecha < b.fecha_desde || fecha > b.fecha_hasta) return false;
+    // fechas / recurrencia
+    if (b.recurrente) {
+      // Permanente (todas las semanas): aplica en ese día de semana, desde fecha_desde en adelante.
+      if (b.fecha_desde && fecha < b.fecha_desde) return false;
+      if (b.dia_semana != null) {
+        var dow = new Date(fecha + 'T00:00:00').getDay(); // 0=Dom .. 6=Sáb
+        if (Number(b.dia_semana) !== dow) return false;
+      }
+    } else {
+      if (fecha < b.fecha_desde || fecha > b.fecha_hasta) return false;
+    }
     // profesional (NULL en el bloqueo = todos los profes del área)
     // Acepta tanto email como nombre corto ('BRUNO') gracias a aEmail()
     if (b.profesional_email && profeEmail) {
