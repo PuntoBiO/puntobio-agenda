@@ -226,6 +226,12 @@
     border-radius:6px; cursor:pointer; font-size:12px; font-weight:600; white-space:nowrap; line-height:1;}
   #btn-modo-gestion:hover{background:var(--hover); border-color:var(--primary);}
   #btn-modo-gestion.activo{background:#1f2937; color:#fff; border-color:#1f2937;}
+  /* Apertura: slot gris abierto a mano con profe designado */
+  .slot.slot-apertura{background:#f0fdf4; position:relative;}
+  .apertura-tag{position:absolute; top:3px; left:4px; right:4px; font-size:9px; font-weight:700;
+    color:#166534; background:#dcfce7; border:1px solid #86efac; border-radius:4px;
+    padding:1px 4px; text-align:center; letter-spacing:.02em; pointer-events:none;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   /* Cartel de modo gestión activo (no alarmante) */
   #gestion-banner{display:none; margin:0 32px 10px; padding:9px 14px; border-radius:8px;
     background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; font-size:12.5px; font-weight:600;}
@@ -527,6 +533,7 @@ let filtroProf = '';
 let filtroPract = '';
 let modoGestion = false;   // Fase 1: modo admin para cerrar/reabrir horarios
 let gestionSlot = null;    // slot que se está gestionando
+let aperturasSemana = [];  // Fase 2: aperturas activas (abrir gris + profe designado)
 
 /* ════════════════════════════════════════════════════════════════
    FECHAS
@@ -606,6 +613,29 @@ async function cargarTurnos(){
 }
 
 /* ════════════════════════════════════════════════════════════════
+   APERTURAS (Fase 2): abrir un horario gris y designar profe
+   ════════════════════════════════════════════════════════════════ */
+async function cargarAperturas(){
+  try{
+    const hoy = new Date().toISOString().substring(0,10);
+    const { data, error } = await sb.from('aperturas_agenda')
+      .select('*').eq('activo', true).gte('fecha_hasta', hoy);
+    aperturasSemana = error ? [] : (data||[]);
+  }catch(e){ aperturasSemana = []; }
+}
+// Devuelve la apertura activa de BIOLAB que cubre ese slot, o null
+function aperturaEnSlot(fecha, hora){
+  const m = hMin(hora), mFin = m + 60;
+  return aperturasSemana.find(a =>
+    a.area === 'BIOLAB' &&
+    fecha >= a.fecha_desde && fecha <= a.fecha_hasta &&
+    (a.hora_desde == null
+      ? true
+      : (hMin(a.hora_desde) < mFin && hMin(a.hora_hasta || a.hora_desde) > m))
+  ) || null;
+}
+
+/* ════════════════════════════════════════════════════════════════
    DISPONIBILIDAD POR HORA/DÍA
    ════════════════════════════════════════════════════════════════ */
 function disponiblesEnHora(diaNum, horaCero){
@@ -673,7 +703,7 @@ function render(){
       const fStr = fmtFecha(d);
       const diaNum = didx + 1;
       const esHoy = fStr === hoyStr;
-      const tipo = tipoSlot(fStr, diaNum, hora);
+      let tipo = tipoSlot(fStr, diaNum, hora);
       const slot = document.createElement('div');
       slot.className = 'slot';
 
@@ -682,9 +712,22 @@ function render(){
         slot.textContent = 'FERIADO';
         grid.appendChild(slot); return;
       }
+
+      // APERTURA: si el slot está cerrado por la grilla base pero hay una apertura activa,
+      // se comporta como libre y muestra el profe designado.
+      const ap = (tipo === 'cerrado') ? aperturaEnSlot(fStr, hora) : null;
+      const apProf = ap ? (EMAIL_TO_CODE[ap.profesional_email] || null) : null;
+      if(ap) tipo = 'libre';
+
       if(tipo === 'cerrado'){
         slot.classList.add('cerrado');
         slot.textContent = 'CERRADO';
+        // En modo gestión, el gris se puede tocar para ABRIRLO y poner profe
+        if(modoGestion && esAdminGeneral()){
+          slot.style.cursor = 'pointer';
+          slot.title = 'Gestionar horario (abrir)';
+          slot.onclick = () => abrirGestionSlot(fStr, hora, d, diaNum);
+        }
         grid.appendChild(slot); return;
       }
 
@@ -710,11 +753,21 @@ function render(){
         add.textContent = '+';
         slot.appendChild(add);
       }
+      // Etiqueta verde si es una apertura y el slot está vacío (si hay turno, el chip ya muestra el profe)
+      if(ap && turnosHora.length === 0){
+        slot.classList.add('slot-apertura');
+        const tag = document.createElement('div');
+        tag.className = 'apertura-tag';
+        tag.textContent = '🔓 ' + (EMAIL_PROFES[ap.profesional_email] || apProf || 'profe');
+        slot.appendChild(tag);
+      } else if(ap){
+        slot.classList.add('slot-apertura');
+      }
       slot.onclick = (ev) => {
         if(ev.target.closest('.turno')) return;
         if(modoGestion && esAdminGeneral()){ abrirGestionSlot(fStr, hora, d, diaNum); return; }
         if (!validarSlotPasado(fStr, hora)) return;
-        abrirNuevoDesdeSlot(fStr, hora, d, diaNum);
+        abrirNuevoDesdeSlot(fStr, hora, d, diaNum, apProf);
       };
       grid.appendChild(slot);
       // BLOQUEOS · marcar visualmente si la admin bloqueó este slot
@@ -765,11 +818,11 @@ function filtroPractica(btn){
    ════════════════════════════════════════════════════════════════ */
 async function cambiarSemana(delta){
   semanaActual.setDate(semanaActual.getDate() + delta*7);
-  await cargarTurnos(); render();
+  await Promise.all([cargarTurnos(), cargarAperturas()]); render();
 }
 async function irHoy(){
   semanaActual = lunesDeFecha(new Date());
-  await cargarTurnos(); render();
+  await Promise.all([cargarTurnos(), cargarAperturas()]); render();
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -785,28 +838,39 @@ function abrirModalNuevo(){
   document.getElementById('modal-nuevo').classList.add('activo');
 }
 
-function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum){
-  slotActual = { fecha, horaCero, diaNum };
+function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf){
+  slotActual = { fecha, horaCero, diaNum, apertura: !!aperturaProf, aperturaProf: aperturaProf || null };
   const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  const tituloAp = aperturaProf ? ` · <span style="color:#16a34a;font-weight:700;">🔓 abierto · ${EMAIL_PROFES[Object.keys(EMAIL_TO_CODE).find(e => EMAIL_TO_CODE[e]===aperturaProf)] || aperturaProf}</span>` : '';
   document.getElementById('info-slot').innerHTML =
-    `📅 <b>${dateObj.getDate()} ${meses[dateObj.getMonth()]}</b> · 🕐 <b>${horaCero}</b> – ${horaCero.slice(0,2)*1+1}:00`;
+    `📅 <b>${dateObj.getDate()} ${meses[dateObj.getMonth()]}</b> · 🕐 <b>${horaCero}</b> – ${horaCero.slice(0,2)*1+1}:00${tituloAp}`;
   document.getElementById('alerta-nuevo').innerHTML = '';
   ['busc-paciente','inp-tto','inp-obs'].forEach(id => {document.getElementById(id).value=''; document.getElementById(id).dataset.personaId='';});
   document.getElementById('sel-obra').value = 'PARTICULAR';
   document.getElementById('sel-hora-exacta').innerHTML = '<option value="">—</option>';
   document.getElementById('sel-practica').value = '';
 
-  // Profesionales disponibles en esa hora+día
-  const disp = disponiblesEnHora(diaNum, horaCero);
-  const profsDisp = [...new Set(disp.map(d => d.profesional))];
   const selP = document.getElementById('sel-profesional');
   selP.value = '';
-  Array.from(selP.options).forEach(opt => {
-    if(opt.value === '') return;
-    opt.disabled = !profsDisp.includes(opt.value);
-    opt.style.color = opt.disabled ? '#ccc' : '';
-  });
-  if(profsDisp.length === 1) selP.value = profsDisp[0];
+  if(aperturaProf){
+    // Apertura: solo habilito el profe designado y lo dejo elegido
+    Array.from(selP.options).forEach(opt => {
+      if(opt.value === '') return;
+      opt.disabled = (opt.value !== aperturaProf);
+      opt.style.color = opt.disabled ? '#ccc' : '';
+    });
+    selP.value = aperturaProf;
+  } else {
+    // Profesionales disponibles en esa hora+día (grilla base)
+    const disp = disponiblesEnHora(diaNum, horaCero);
+    const profsDisp = [...new Set(disp.map(d => d.profesional))];
+    Array.from(selP.options).forEach(opt => {
+      if(opt.value === '') return;
+      opt.disabled = !profsDisp.includes(opt.value);
+      opt.style.color = opt.disabled ? '#ccc' : '';
+    });
+    if(profsDisp.length === 1) selP.value = profsDisp[0];
+  }
 
   actualizarPracticasYHoras();
   document.getElementById('modal-nuevo').classList.add('activo');
@@ -814,11 +878,17 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum){
 
 function actualizarPracticasYHoras(){
   if(!slotActual) return;
+  const selP = document.getElementById('sel-practica');
+  if(slotActual.apertura){
+    // Apertura: el profe designado puede hacer cualquier práctica de BioLab
+    Array.from(selP.options).forEach(opt => { if(opt.value==='') return; opt.disabled=false; opt.style.color=''; });
+    actualizarHorasExactas();
+    return;
+  }
   const prof = document.getElementById('sel-profesional').value;
   const disp = disponiblesEnHora(slotActual.diaNum, slotActual.horaCero);
   const dispP = prof ? disp.filter(d => d.profesional === prof) : disp;
   const pracs = [...new Set(dispP.map(d => d.practica))];
-  const selP = document.getElementById('sel-practica');
   Array.from(selP.options).forEach(opt => {
     if(opt.value === '') return;
     opt.disabled = !pracs.includes(opt.value);
@@ -845,16 +915,22 @@ function actualizarHorasExactas(){
   const dur = duracionMin(practica, prof);
   if(!dur) return;
   const mIni = hMin(slotActual.horaCero), mFin = mIni + 60;
-  const disp = DISP.filter(d =>
-    d.dia === slotActual.diaNum && d.profesional === prof && d.practica === practica &&
-    hMin(d.ini) < mFin && hMin(d.fin) > mIni
-  );
   const slots = new Set();
-  disp.forEach(d => {
-    let m = Math.max(hMin(d.ini), mIni);
-    const limite = Math.min(hMin(d.fin), mFin);
-    while(m + dur <= limite){ slots.add(m); m += dur; }
-  });
+  if(slotActual.apertura){
+    // Apertura: toda la franja [hora, hora+60] está abierta para ese profe
+    let m = mIni;
+    while(m + dur <= mFin){ slots.add(m); m += dur; }
+  } else {
+    const disp = DISP.filter(d =>
+      d.dia === slotActual.diaNum && d.profesional === prof && d.practica === practica &&
+      hMin(d.ini) < mFin && hMin(d.fin) > mIni
+    );
+    disp.forEach(d => {
+      let m = Math.max(hMin(d.ini), mIni);
+      const limite = Math.min(hMin(d.fin), mFin);
+      while(m + dur <= limite){ slots.add(m); m += dur; }
+    });
+  }
   [...slots].sort((a,b)=>a-b).forEach(m => {
     const v = minH(m);
     selH.innerHTML += `<option value="${v}">${v}</option>`;
@@ -1134,6 +1210,20 @@ const PROFES_CIERRE = [
   { email: 'liclucianavelaz@gmail.com',  label: 'Lu' },
   { email: 'jimenahllorente@gmail.com',  label: 'Jime' },
 ];
+// Email → código corto que usa la grilla/turnos de BioLab (BRUNO/MALE/LU/JIME)
+const EMAIL_TO_CODE = {
+  'brunitovelez99@gmail.com': 'BRUNO',
+  'loz.magdalena@gmail.com':  'MALE',
+  'liclucianavelaz@gmail.com':'LU',
+  'jimenahllorente@gmail.com':'JIME',
+};
+// Profes que pueden atender en una apertura de BioLab (tienen duración/capacidad definidas)
+const PROFES_APERTURA = [
+  { email: 'brunitovelez99@gmail.com',  label: 'Bruno' },
+  { email: 'loz.magdalena@gmail.com',   label: 'Male' },
+  { email: 'liclucianavelaz@gmail.com', label: 'Lu' },
+  { email: 'jimenahllorente@gmail.com', label: 'Jime' },
+];
 
 function toggleModoGestion(){
   if(!esAdminGeneral()) return;
@@ -1168,16 +1258,19 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
   if(!window.Bloqueos){ toast('Bloqueos no disponible','err'); return; }
   const horaFin = String(parseInt(horaCero.slice(0,2),10)+1).padStart(2,'0')+':00';
   const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
-  gestionSlot = { fecha, horaCero, horaFin, diaNum };
+  const baseTipo = tipoSlot(fecha, diaNum, horaCero); // 'libre' | 'cerrado' | 'feriado'
+  gestionSlot = { fecha, horaCero, horaFin, diaNum, baseTipo };
 
   document.getElementById('gestion-info').innerHTML =
     `📅 <b>${dateObj.getDate()} ${meses[dateObj.getMonth()]}</b> · 🕐 <b>${horaCero}–${horaFin}</b> · BioLab`;
   document.getElementById('gestion-alerta').innerHTML = '';
 
   let html = '';
+
+  // 1) Cierres (rojo) activos en este slot
   const bloqs = Bloqueos.todosLosQueAplican('BIOLAB', fecha, horaCero, horaFin, null, null);
   if(bloqs.length){
-    html += `<div class="info-box" style="background:#fef2f2; border-left-color:var(--rojo-x); color:#b91c1c;">🚫 Este horario tiene cierre(s) activo(s):</div>`;
+    html += `<div class="info-box" style="background:#fef2f2; border-left-color:var(--rojo-x); color:#b91c1c;">🚫 Cierre(s) activo(s):</div>`;
     bloqs.forEach(b => {
       const quien = b.profesional_email ? (EMAIL_PROFES[b.profesional_email] || b.profesional_email) : 'Todos los profes';
       html += `
@@ -1188,23 +1281,110 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
     });
   }
 
-  html += `
-    <div style="margin-top:16px;">
-      <div class="form-row">
-        <label>🔒 Cerrar este horario para</label>
-        <select id="gestion-cerrar-prof">
-          ${PROFES_CIERRE.map(p => `<option value="${p.email}">${p.label}</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-row">
-        <label>Motivo</label>
-        <input type="text" id="gestion-cerrar-motivo" placeholder="Ej: Bruno ausente, sala en mantenimiento…" autocomplete="off">
-      </div>
-      <button class="btn btn-rojo" style="width:100%; margin-top:6px;" onclick="cerrarHorario()">🔒 Cerrar horario</button>
-    </div>`;
+  // 2) Aperturas (verde) activas en este slot
+  const mIniG = hMin(horaCero);
+  const aps = aperturasSemana.filter(a =>
+    a.area === 'BIOLAB' && fecha >= a.fecha_desde && fecha <= a.fecha_hasta &&
+    (a.hora_desde == null ? true : (hMin(a.hora_desde) < mIniG+60 && hMin(a.hora_hasta||a.hora_desde) > mIniG))
+  );
+  if(aps.length){
+    html += `<div class="info-box" style="background:#ecfdf5; border-left-color:#16a34a; color:#166534;">🔓 Apertura(s) activa(s):</div>`;
+    aps.forEach(a => {
+      const quien = EMAIL_PROFES[a.profesional_email] || a.profesional_email || 'profe';
+      html += `
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">
+          <div style="font-size:13px;"><b>${quien}</b>${a.motivo ? `<br><span style="color:var(--muted);">${a.motivo}</span>` : ''}</div>
+          <button class="btn btn-rojo" onclick="quitarApertura(${a.id})">Quitar</button>
+        </div>`;
+    });
+  }
+
+  // 3) Acción según el estado base del slot
+  if(baseTipo === 'cerrado' && aps.length === 0){
+    // Slot gris (cerrado por grilla base) → ABRIR y asignar profe
+    html += `
+      <div style="margin-top:16px;">
+        <div class="form-row">
+          <label>🔓 Abrir este horario y asignar profe</label>
+          <select id="gestion-abrir-prof">
+            ${PROFES_APERTURA.map(p => `<option value="${p.email}">${p.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Nota (opcional)</label>
+          <input type="text" id="gestion-abrir-motivo" placeholder="Ej: Male cubre a Bruno" autocomplete="off">
+        </div>
+        <button class="btn" style="width:100%; margin-top:6px; background:#16a34a; color:#fff; border-color:#16a34a;" onclick="abrirHorario()">🔓 Abrir y poner profe</button>
+      </div>`;
+  } else if(baseTipo === 'libre'){
+    // Slot abierto por la grilla base → CERRAR (temporal, rojo)
+    html += `
+      <div style="margin-top:16px;">
+        <div class="form-row">
+          <label>🔒 Cerrar este horario para</label>
+          <select id="gestion-cerrar-prof">
+            ${PROFES_CIERRE.map(p => `<option value="${p.email}">${p.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Motivo</label>
+          <input type="text" id="gestion-cerrar-motivo" placeholder="Ej: Bruno ausente, sala en mantenimiento…" autocomplete="off">
+        </div>
+        <button class="btn btn-rojo" style="width:100%; margin-top:6px;" onclick="cerrarHorario()">🔒 Cerrar horario</button>
+      </div>`;
+  }
 
   document.getElementById('gestion-acciones').innerHTML = html;
   document.getElementById('modal-gestion').classList.add('activo');
+}
+
+async function abrirHorario(){
+  if(!gestionSlot){ alert('No hay horario seleccionado. Cerrá y volvé a tocar el horario.'); return; }
+  const alertaEl = document.getElementById('gestion-alerta');
+  const profEmail = document.getElementById('gestion-abrir-prof').value || null;
+  const motivo = (document.getElementById('gestion-abrir-motivo')?.value || '').trim() || null;
+  if(!profEmail){ alertaEl.innerHTML = '<div class="err-box">Elegí un profesional.</div>'; return; }
+  try{
+    const u = await usuarioActual();
+    const payload = {
+      area: 'BIOLAB',
+      profesional_email: profEmail,
+      practica_codigo: null,
+      fecha_desde: gestionSlot.fecha,
+      fecha_hasta: gestionSlot.fecha,
+      hora_desde: gestionSlot.horaCero,
+      hora_hasta: gestionSlot.horaFin,
+      motivo,
+      creado_por_email: u.email,
+      creado_por_nombre: u.nombre,
+    };
+    const { error } = await sb.from('aperturas_agenda').insert(payload);
+    if(error){
+      alertaEl.innerHTML = `<div class="err-box">No se pudo abrir: ${error.message}</div>`;
+      alert('⚠️ No se pudo abrir el horario:\n\n' + error.message);
+      return;
+    }
+    toast('Horario abierto ✓','ok');
+    cerrarModal('modal-gestion');
+    await cargarAperturas();
+    render();
+  }catch(e){
+    alert('⚠️ Error al abrir el horario:\n\n' + (e?.message || e));
+  }
+}
+
+async function quitarApertura(id){
+  if(!confirm('¿Quitar esta apertura? El horario vuelve a quedar cerrado (gris).')) return;
+  try{
+    const { error } = await sb.from('aperturas_agenda').update({ activo: false }).eq('id', id);
+    if(error){ alert('⚠️ No se pudo quitar la apertura:\n\n' + error.message); return; }
+    toast('Apertura quitada ✓','ok');
+    cerrarModal('modal-gestion');
+    await cargarAperturas();
+    render();
+  }catch(e){
+    alert('⚠️ Error al quitar la apertura:\n\n' + (e?.message || e));
+  }
 }
 
 async function cerrarHorario(){
@@ -1284,7 +1464,7 @@ function recargarPorRealtime() {
     // No recargar si hay un modal abierto (clase .modal-bg.activo), para no interrumpir.
     const modalAbierto = document.querySelector('.modal-bg.activo');
     if (modalAbierto) return;
-    await cargarTurnos(); render();
+    await Promise.all([cargarTurnos(), cargarAperturas()]); render();
   }, 1200);
 }
 async function iniciarRealtime() {
@@ -1315,7 +1495,7 @@ async function iniciarRealtime() {
     await Bloqueos.cargar();
     Bloqueos.escucharCambios(() => render());
   }
-  await cargarTurnos();
+  await Promise.all([cargarTurnos(), cargarAperturas()]);
   render();
   iniciarRealtime();
 })();
