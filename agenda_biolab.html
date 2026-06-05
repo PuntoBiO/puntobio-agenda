@@ -221,8 +221,15 @@
   .err-box{background:#fee2e2; border-left:3px solid var(--rojo-x); padding:8px 12px; border-radius:4px; font-size:12px; margin-bottom:12px;}
 
   /* ===== MODO GESTIÓN (admin) — Fase 1: cerrar/reabrir horarios ===== */
+  #btn-modo-gestion{display:none; align-items:center; gap:6px; margin-left:18px;
+    padding:6px 14px; border:1px solid var(--border); background:#fff; color:var(--text);
+    border-radius:6px; cursor:pointer; font-size:12px; font-weight:600; white-space:nowrap; line-height:1;}
+  #btn-modo-gestion:hover{background:var(--hover); border-color:var(--primary);}
   #btn-modo-gestion.activo{background:#1f2937; color:#fff; border-color:#1f2937;}
-  .agenda-grid.gestion-on{outline:2px dashed var(--primary); outline-offset:3px; border-radius:6px;}
+  /* Cartel de modo gestión activo (no alarmante) */
+  #gestion-banner{display:none; margin:0 32px 10px; padding:9px 14px; border-radius:8px;
+    background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; font-size:12.5px; font-weight:600;}
+  .agenda-grid.gestion-on .slot:not(.cerrado):not(.feriado):hover{outline:2px solid #1e9fe0; outline-offset:-2px; cursor:pointer;}
   /* Slot bloqueado pero clickeable (solo en modo gestión, para poder reabrir) */
   .slot.slot-bloqueado-gestion{position:relative; cursor:pointer;
     background:repeating-linear-gradient(45deg, rgba(239,68,68,.18) 0 8px, rgba(239,68,68,.08) 8px 16px);
@@ -295,7 +302,7 @@
     <option value="JIME">Jime</option>
   </select>
 
-  <button id="btn-modo-gestion" class="nav-btn" style="display:none; margin-left:18px;" onclick="toggleModoGestion()">🛠️ Modo gestión: OFF</button>
+  <button id="btn-modo-gestion" onclick="toggleModoGestion()">🛠️ Modo gestión: OFF</button>
 </div>
 
 <div class="chips-row">
@@ -306,6 +313,8 @@
   <button class="chip" data-pract="EVALUACION_DEPORTISTA" onclick="filtroPractica(this)"><span class="ch-dot" style="background:var(--eval);"></span>EVAL. DEPORTISTA</button>
   <button class="chip" data-pract="SARKMED" onclick="filtroPractica(this)"><span class="ch-dot" style="background:var(--sarkmed);"></span>SARKMED</button>
 </div>
+
+<div id="gestion-banner">🛠️ Modo gestión activo · tocá un horario para <b>cerrarlo</b> o <b>reabrirlo</b>. Apagalo (botón de arriba) para volver a reservar turnos normalmente.</div>
 
 <div class="agenda-wrap">
   <div id="agenda" class="agenda-grid">
@@ -1136,6 +1145,8 @@ function toggleModoGestion(){
   }
   const grid = document.getElementById('agenda');
   if(grid) grid.classList.toggle('gestion-on', modoGestion);
+  const banner = document.getElementById('gestion-banner');
+  if(banner) banner.style.display = modoGestion ? 'block' : 'none';
   render();
 }
 
@@ -1197,41 +1208,53 @@ function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
 }
 
 async function cerrarHorario(){
-  if(!gestionSlot){ return; }
+  if(!gestionSlot){ alert('No hay horario seleccionado. Cerrá y volvé a tocar el horario.'); return; }
   const alertaEl = document.getElementById('gestion-alerta');
   const profEmail = document.getElementById('gestion-cerrar-prof').value || null;
   const motivo = document.getElementById('gestion-cerrar-motivo').value.trim();
   if(!motivo){ alertaEl.innerHTML = '<div class="err-box">Poné un motivo (ej: Bruno ausente).</div>'; return; }
 
-  const u = await usuarioActual();
-  const payload = {
-    area: 'BIOLAB',
-    profesional_email: profEmail,
-    practica_codigo: null,
-    fecha_desde: gestionSlot.fecha,
-    fecha_hasta: gestionSlot.fecha,
-    hora_desde: gestionSlot.horaCero,
-    hora_hasta: gestionSlot.horaFin,
-    motivo,
-    creado_por_email: u.email,
-    creado_por_nombre: u.nombre,
-  };
-  const { error } = await sb.from('bloqueos_agenda').insert(payload);
-  if(error){ alertaEl.innerHTML = `<div class="err-box">Error: ${error.message}</div>`; return; }
-  toast('Horario cerrado ✓','ok');
-  cerrarModal('modal-gestion');
-  if(window.Bloqueos) await Bloqueos.refrescar();
-  render();
+  try{
+    const u = await usuarioActual();
+    const payload = {
+      area: 'BIOLAB',
+      profesional_email: profEmail,
+      practica_codigo: null,
+      fecha_desde: gestionSlot.fecha,
+      fecha_hasta: gestionSlot.fecha,
+      hora_desde: gestionSlot.horaCero,
+      hora_hasta: gestionSlot.horaFin,
+      motivo,
+      creado_por_email: u.email,
+      creado_por_nombre: u.nombre,
+    };
+    const { error } = await sb.from('bloqueos_agenda').insert(payload);
+    if(error){
+      alertaEl.innerHTML = `<div class="err-box">No se pudo cerrar: ${error.message}</div>`;
+      alert('⚠️ No se pudo cerrar el horario:\n\n' + error.message);
+      return;
+    }
+    toast('Horario cerrado ✓','ok');
+    cerrarModal('modal-gestion');
+    if(window.Bloqueos) await Bloqueos.refrescar();
+    render();
+  }catch(e){
+    alert('⚠️ Error al cerrar el horario:\n\n' + (e?.message || e));
+  }
 }
 
 async function reabrirHorario(id){
   if(!confirm('¿Reabrir este horario? Se quita el cierre (el turno vuelve a quedar disponible).')) return;
-  const { error } = await sb.from('bloqueos_agenda').update({ activo: false }).eq('id', id);
-  if(error){ toast('Error: '+error.message,'err'); return; }
-  toast('Horario reabierto ✓','ok');
-  cerrarModal('modal-gestion');
-  if(window.Bloqueos) await Bloqueos.refrescar();
-  render();
+  try{
+    const { error } = await sb.from('bloqueos_agenda').update({ activo: false }).eq('id', id);
+    if(error){ alert('⚠️ No se pudo reabrir el horario:\n\n' + error.message); return; }
+    toast('Horario reabierto ✓','ok');
+    cerrarModal('modal-gestion');
+    if(window.Bloqueos) await Bloqueos.refrescar();
+    render();
+  }catch(e){
+    alert('⚠️ Error al reabrir el horario:\n\n' + (e?.message || e));
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1280,7 +1303,7 @@ async function iniciarRealtime() {
   // Cargar rol primero, para saber si mostrar el botón de gestión (admin)
   await cargarRolUsuario();
   const btnG = document.getElementById('btn-modo-gestion');
-  if (btnG && esAdminGeneral()) btnG.style.display = '';
+  if (btnG && esAdminGeneral()) btnG.style.display = 'inline-flex';
 
   // BLOQUEOS · cargar al arranque + auto-refresh por realtime
   if (window.Bloqueos) {
