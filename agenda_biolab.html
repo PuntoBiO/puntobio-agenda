@@ -220,6 +220,18 @@
   .info-box{background:var(--primary-soft); border-left:3px solid var(--primary); padding:8px 12px; border-radius:4px; font-size:12px; margin-bottom:12px;}
   .err-box{background:#fee2e2; border-left:3px solid var(--rojo-x); padding:8px 12px; border-radius:4px; font-size:12px; margin-bottom:12px;}
 
+  /* ===== MODO GESTIÓN (admin) — Fase 1: cerrar/reabrir horarios ===== */
+  #btn-modo-gestion.activo{background:#1f2937; color:#fff; border-color:#1f2937;}
+  .agenda-grid.gestion-on{outline:2px dashed var(--primary); outline-offset:3px; border-radius:6px;}
+  /* Slot bloqueado pero clickeable (solo en modo gestión, para poder reabrir) */
+  .slot.slot-bloqueado-gestion{position:relative; cursor:pointer;
+    background:repeating-linear-gradient(45deg, rgba(239,68,68,.18) 0 8px, rgba(239,68,68,.08) 8px 16px);
+    border:1px dashed rgba(239,68,68,.6);}
+  .slot.slot-bloqueado-gestion > *{display:none;}
+  .slot.slot-bloqueado-gestion::after{content:attr(data-bloqueo-motivo); position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700;
+    color:#b91c1c; text-align:center; padding:2px 4px; line-height:1.1;}
+
   .estado-pill{display:inline-block; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600;}
   .estado-pill.RESERVADO{background:#e5e7eb; color:#475569;}
   .estado-pill.PRESENTE{background:var(--verde-soft); color:var(--verde);}
@@ -282,6 +294,8 @@
     <option value="MALE">Male</option>
     <option value="JIME">Jime</option>
   </select>
+
+  <button id="btn-modo-gestion" class="nav-btn" style="display:none; margin-left:18px;" onclick="toggleModoGestion()">🛠️ Modo gestión: OFF</button>
 </div>
 
 <div class="chips-row">
@@ -391,6 +405,21 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- MODAL GESTIÓN DE HORARIO (solo admin · Fase 1: cerrar/reabrir) -->
+<div class="modal-bg" id="modal-gestion">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">🛠️ Gestionar horario</span>
+      <button class="modal-close" onclick="cerrarModal('modal-gestion')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="gestion-info" class="info-box"></div>
+      <div id="gestion-alerta"></div>
+      <div id="gestion-acciones"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ════════════════════════════════════════════════════════════════
    SUPABASE
@@ -487,6 +516,8 @@ let slotActual = null;
 let turnoSel = null;
 let filtroProf = '';
 let filtroPract = '';
+let modoGestion = false;   // Fase 1: modo admin para cerrar/reabrir horarios
+let gestionSlot = null;    // slot que se está gestionando
 
 /* ════════════════════════════════════════════════════════════════
    FECHAS
@@ -672,6 +703,7 @@ function render(){
       }
       slot.onclick = (ev) => {
         if(ev.target.closest('.turno')) return;
+        if(modoGestion && esAdminGeneral()){ abrirGestionSlot(fStr, hora, d, diaNum); return; }
         if (!validarSlotPasado(fStr, hora)) return;
         abrirNuevoDesdeSlot(fStr, hora, d, diaNum);
       };
@@ -682,8 +714,15 @@ function render(){
         const horaFin = String(parseInt(hora.slice(0,2),10)+1).padStart(2,'0')+':00';
         const bloq = Bloqueos.queAplica('BIOLAB', fStr, hora, horaFin, null, null);
         if (bloq) {
-          slot.classList.add('slot-bloqueado');
-          slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+          if (modoGestion && esAdminGeneral()) {
+            // En modo gestión el slot bloqueado queda clickeable para poder reabrirlo
+            slot.classList.add('slot-bloqueado-gestion');
+            slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+            slot.onclick = () => abrirGestionSlot(fStr, hora, d, diaNum);
+          } else {
+            slot.classList.add('slot-bloqueado');
+            slot.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+          }
         }
       }
     });
@@ -1068,6 +1107,134 @@ async function borrarTurno(){
 }
 
 /* ════════════════════════════════════════════════════════════════
+   MODO GESTIÓN (solo admin_general · Lu/Jime)
+   Fase 1: cerrar / reabrir horarios. NO toca el alta de turnos.
+   La escritura está además protegida por RLS (solo Lu y Jime).
+   ════════════════════════════════════════════════════════════════ */
+const EMAIL_PROFES = {
+  'brunitovelez99@gmail.com': 'Bruno',
+  'loz.magdalena@gmail.com':  'Male',
+  'liclucianavelaz@gmail.com':'Lu',
+  'jimenahllorente@gmail.com':'Jime',
+  'veronicasandler@hotmail.com':'Vero',
+};
+const PROFES_CIERRE = [
+  { email: '',                           label: 'Todos los profes' },
+  { email: 'brunitovelez99@gmail.com',   label: 'Bruno' },
+  { email: 'loz.magdalena@gmail.com',    label: 'Male' },
+  { email: 'liclucianavelaz@gmail.com',  label: 'Lu' },
+  { email: 'jimenahllorente@gmail.com',  label: 'Jime' },
+];
+
+function toggleModoGestion(){
+  if(!esAdminGeneral()) return;
+  modoGestion = !modoGestion;
+  const btn = document.getElementById('btn-modo-gestion');
+  if(btn){
+    btn.textContent = '🛠️ Modo gestión: ' + (modoGestion ? 'ON' : 'OFF');
+    btn.classList.toggle('activo', modoGestion);
+  }
+  const grid = document.getElementById('agenda');
+  if(grid) grid.classList.toggle('gestion-on', modoGestion);
+  render();
+}
+
+async function usuarioActual(){
+  try{
+    const { data: { session } } = await sb.auth.getSession();
+    const email = session?.user?.email || '';
+    let nombre = email;
+    if(session){
+      const { data: p } = await sb.from('personas').select('nombre').eq('auth_user_id', session.user.id).maybeSingle();
+      if(p?.nombre) nombre = p.nombre;
+    }
+    return { email, nombre };
+  }catch(e){ return { email:'', nombre:'' }; }
+}
+
+function abrirGestionSlot(fecha, horaCero, dateObj, diaNum){
+  if(!esAdminGeneral()){ toast('Solo admin','err'); return; }
+  if(!window.Bloqueos){ toast('Bloqueos no disponible','err'); return; }
+  const horaFin = String(parseInt(horaCero.slice(0,2),10)+1).padStart(2,'0')+':00';
+  const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  gestionSlot = { fecha, horaCero, horaFin, diaNum };
+
+  document.getElementById('gestion-info').innerHTML =
+    `📅 <b>${dateObj.getDate()} ${meses[dateObj.getMonth()]}</b> · 🕐 <b>${horaCero}–${horaFin}</b> · BioLab`;
+  document.getElementById('gestion-alerta').innerHTML = '';
+
+  let html = '';
+  const bloqs = Bloqueos.todosLosQueAplican('BIOLAB', fecha, horaCero, horaFin, null, null);
+  if(bloqs.length){
+    html += `<div class="info-box" style="background:#fef2f2; border-left-color:var(--rojo-x); color:#b91c1c;">🚫 Este horario tiene cierre(s) activo(s):</div>`;
+    bloqs.forEach(b => {
+      const quien = b.profesional_email ? (EMAIL_PROFES[b.profesional_email] || b.profesional_email) : 'Todos los profes';
+      html += `
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border);">
+          <div style="font-size:13px;"><b>${quien}</b><br><span style="color:var(--muted);">${b.motivo || ''}</span></div>
+          <button class="btn btn-verde" onclick="reabrirHorario(${b.id})">🔓 Reabrir</button>
+        </div>`;
+    });
+  }
+
+  html += `
+    <div style="margin-top:16px;">
+      <div class="form-row">
+        <label>🔒 Cerrar este horario para</label>
+        <select id="gestion-cerrar-prof">
+          ${PROFES_CIERRE.map(p => `<option value="${p.email}">${p.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Motivo</label>
+        <input type="text" id="gestion-cerrar-motivo" placeholder="Ej: Bruno ausente, sala en mantenimiento…" autocomplete="off">
+      </div>
+      <button class="btn btn-rojo" style="width:100%; margin-top:6px;" onclick="cerrarHorario()">🔒 Cerrar horario</button>
+    </div>`;
+
+  document.getElementById('gestion-acciones').innerHTML = html;
+  document.getElementById('modal-gestion').classList.add('activo');
+}
+
+async function cerrarHorario(){
+  if(!gestionSlot){ return; }
+  const alertaEl = document.getElementById('gestion-alerta');
+  const profEmail = document.getElementById('gestion-cerrar-prof').value || null;
+  const motivo = document.getElementById('gestion-cerrar-motivo').value.trim();
+  if(!motivo){ alertaEl.innerHTML = '<div class="err-box">Poné un motivo (ej: Bruno ausente).</div>'; return; }
+
+  const u = await usuarioActual();
+  const payload = {
+    area: 'BIOLAB',
+    profesional_email: profEmail,
+    practica_codigo: null,
+    fecha_desde: gestionSlot.fecha,
+    fecha_hasta: gestionSlot.fecha,
+    hora_desde: gestionSlot.horaCero,
+    hora_hasta: gestionSlot.horaFin,
+    motivo,
+    creado_por_email: u.email,
+    creado_por_nombre: u.nombre,
+  };
+  const { error } = await sb.from('bloqueos_agenda').insert(payload);
+  if(error){ alertaEl.innerHTML = `<div class="err-box">Error: ${error.message}</div>`; return; }
+  toast('Horario cerrado ✓','ok');
+  cerrarModal('modal-gestion');
+  if(window.Bloqueos) await Bloqueos.refrescar();
+  render();
+}
+
+async function reabrirHorario(id){
+  if(!confirm('¿Reabrir este horario? Se quita el cierre (el turno vuelve a quedar disponible).')) return;
+  const { error } = await sb.from('bloqueos_agenda').update({ activo: false }).eq('id', id);
+  if(error){ toast('Error: '+error.message,'err'); return; }
+  toast('Horario reabierto ✓','ok');
+  cerrarModal('modal-gestion');
+  if(window.Bloqueos) await Bloqueos.refrescar();
+  render();
+}
+
+/* ════════════════════════════════════════════════════════════════
    HELPERS
    ════════════════════════════════════════════════════════════════ */
 function cerrarModal(id){ document.getElementById(id).classList.remove('activo'); }
@@ -1110,6 +1277,11 @@ async function iniciarRealtime() {
 
 /* INIT */
 (async () => {
+  // Cargar rol primero, para saber si mostrar el botón de gestión (admin)
+  await cargarRolUsuario();
+  const btnG = document.getElementById('btn-modo-gestion');
+  if (btnG && esAdminGeneral()) btnG.style.display = '';
+
   // BLOQUEOS · cargar al arranque + auto-refresh por realtime
   if (window.Bloqueos) {
     await Bloqueos.cargar();
