@@ -152,6 +152,19 @@
   .turno.ausente{opacity:0.45; text-decoration:line-through;}
   .turno .tilde{color:var(--verde); font-weight:700; margin-left:3px;}
 
+  /* MOPLEX: casillero dividido (4 Bruno / 2 Male-Lu) */
+  .moplex-grid{display:flex; flex-direction:column; gap:2px; flex:1; min-height:0;}
+  .moplex-grid .turno{flex:1; padding:2px 6px; display:flex; flex-direction:column; justify-content:center; min-height:15px;}
+  .moplex-grid .turno-paciente{font-size:9.5px;}
+  .moplex-grid .turno-meta{margin-top:0; font-size:8.5px;}
+  .moplex-grid .turno-meta span:last-child{display:none;} /* profe redundante en celda dividida */
+  .moplex-libre{flex:1; display:flex; align-items:center; justify-content:center;
+    border:1px dashed #cbd5e1; border-radius:5px; background:#fafafa;
+    color:#94a3b8; font-size:9.5px; font-weight:700; cursor:pointer; min-height:15px;}
+  .moplex-libre:hover{background:#eff6ff; border-color:var(--accent); color:var(--accent);}
+  /* EVAL / SARKMED: ocupa todo el casillero */
+  .slot-eval-full .turno{flex:1; display:flex; flex-direction:column; justify-content:center;}
+
   /* Botón flotante */
   .fab{
     position:fixed; bottom:28px; right:28px;
@@ -775,10 +788,44 @@ function render(){
       if(filtroProf) turnosHora = turnosHora.filter(t => t.profesional === filtroProf);
       if(filtroPract) turnosHora = turnosHora.filter(t => t.practica === filtroPract);
 
-      if(turnosHora.length > 0){
-        turnosHora.sort((a,b) => hMin(a.hora_inicio) - hMin(b.hora_inicio));
-        turnosHora.forEach(t => slot.appendChild(crearChipTurno(t)));
+      // Separar por tipo para dibujar el casillero según la regla
+      const turnosEval = turnosHora.filter(t => ['EVALUACION_INGRESO','EVALUACION_DEPORTISTA','SARKMED'].includes(t.practica));
+      const turnosMoplex = turnosHora.filter(t => t.practica === 'MOPLEX');
+
+      if(turnosEval.length > 0){
+        // EVAL / SARKMED → ocupa TODO el casillero (turno completo, no permite otros)
         if(ap) slot.classList.add('slot-apertura');
+        slot.classList.add('slot-eval-full');
+        turnosEval.sort((a,b)=>hMin(a.hora_inicio)-hMin(b.hora_inicio));
+        turnosEval.forEach(t => slot.appendChild(crearChipTurno(t)));
+        turnosMoplex.forEach(t => slot.appendChild(crearChipTurno(t))); // por si quedó alguno suelto
+      } else if(turnosMoplex.length > 0){
+        // MOPLEX → dividir el casillero: 4 (Bruno, 15') o 2 (Male/Lu/Jime, 30')
+        if(ap) slot.classList.add('slot-apertura');
+        const profM = turnosMoplex[0].profesional;
+        const cap = capacidadMoplex(profM) || turnosMoplex.length;
+        const step = duracionMin('MOPLEX', profM) || 30;
+        const cont = document.createElement('div');
+        cont.className = 'moplex-grid';
+        for(let i=0; i<cap; i++){
+          const tt = minH(mIni + i*step);
+          const turno = turnosMoplex.find(t => t.hora_inicio === tt);
+          if(turno){
+            cont.appendChild(crearChipTurno(turno));
+          } else {
+            const libre = document.createElement('div');
+            libre.className = 'moplex-libre';
+            libre.textContent = '+ ' + tt;
+            libre.onclick = (ev) => {
+              ev.stopPropagation();
+              if(modoGestion && esAdminGeneral()){ abrirGestionSlot(fStr, hora, d, diaNum); return; }
+              if(!validarSlotPasado(fStr, tt)) return;
+              abrirNuevoDesdeSlot(fStr, hora, d, diaNum, apProf, { profesional: profM, practica:'MOPLEX', horaExacta: tt });
+            };
+            cont.appendChild(libre);
+          }
+        }
+        slot.appendChild(cont);
       } else {
         // Slot LIBRE y vacío → mostrar nombre(s) del/los profe(s) en verde chiquito
         let chips = [];
@@ -886,7 +933,7 @@ function abrirModalNuevo(){
   document.getElementById('modal-nuevo').classList.add('activo');
 }
 
-function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf){
+function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf, preset){
   slotActual = { fecha, horaCero, diaNum, apertura: !!aperturaProf, aperturaProf: aperturaProf || null };
   const meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
   const tituloAp = aperturaProf ? ` · <span style="color:#16a34a;font-weight:700;">🔓 abierto · ${EMAIL_PROFES[Object.keys(EMAIL_TO_CODE).find(e => EMAIL_TO_CODE[e]===aperturaProf)] || aperturaProf}</span>` : '';
@@ -921,6 +968,32 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf){
   }
 
   actualizarPracticasYHoras();
+
+  // Preselección rápida (ej: click en un sub-slot MOPLEX libre del casillero dividido)
+  if(preset){
+    const selProf = document.getElementById('sel-profesional');
+    if(preset.profesional){
+      const opP = Array.from(selProf.options).find(o => o.value === preset.profesional);
+      if(opP){ opP.disabled = false; opP.style.color = ''; }
+      selProf.value = preset.profesional;
+      actualizarPracticasYHoras();
+    }
+    if(preset.practica){
+      const selPr = document.getElementById('sel-practica');
+      const opR = Array.from(selPr.options).find(o => o.value === preset.practica);
+      if(opR){ opR.disabled = false; opR.style.color = ''; }
+      selPr.value = preset.practica;
+      actualizarHorasExactas();
+    }
+    if(preset.horaExacta){
+      const selH = document.getElementById('sel-hora-exacta');
+      if(!Array.from(selH.options).some(o => o.value === preset.horaExacta)){
+        selH.innerHTML += `<option value="${preset.horaExacta}">${preset.horaExacta}</option>`;
+      }
+      selH.value = preset.horaExacta;
+    }
+  }
+
   document.getElementById('modal-nuevo').classList.add('activo');
 }
 
