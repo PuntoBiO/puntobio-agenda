@@ -505,6 +505,11 @@ function capacidadMoplex(prof){
   if(['MALE','LU','JIME'].includes(prof)) return 2;
   return 0;
 }
+// Prácticas que hace un profe (repertorio general según la grilla). Sirve para
+// habilitar las prácticas correctas aunque el profe esté reemplazando a otro.
+function practicasDeProfe(code){
+  return [...new Set(DISP.filter(d => d.profesional === code).map(d => d.practica))];
+}
 
 // Disponibilidad hardcoded (subset ACTIVO=SI del Excel disponibilidad.xlsx)
 function minH(m){ return String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0'); }
@@ -872,13 +877,18 @@ function render(){
           const perm = !!bloq.recurrente;   // permanente (todas las semanas) = gris; temporal = rojo
           const motivoTxt = (perm ? '' : '🚫 ') + Bloqueos.rotuloCorto(bloq);
           if (modoGestion && esAdminGeneral()) {
-            // En modo gestión queda clickeable para gestionarlo
+            // En modo gestión queda marcado y clickeable para gestionarlo/reabrirlo
             slot.classList.add(perm ? 'slot-bloqueado-perm-gestion' : 'slot-bloqueado-gestion');
             slot.setAttribute('data-bloqueo-motivo', motivoTxt);
             slot.onclick = () => abrirGestionSlot(fStr, hora, d, diaNum);
           } else {
-            slot.classList.add(perm ? 'slot-bloqueado-perm' : 'slot-bloqueado');
-            slot.setAttribute('data-bloqueo-motivo', motivoTxt);
+            // Vista normal: cualquier cierre se ve IGUAL al CERRADO gris de la grilla
+            slot.classList.remove('slot-apertura','slot-libre','slot-eval-full');
+            slot.classList.add('cerrado');
+            slot.textContent = 'CERRADO';
+            slot.title = Bloqueos.rotuloCorto(bloq) || 'Cerrado';  // motivo al pasar el mouse
+            slot.style.cursor = 'not-allowed';
+            slot.onclick = null;
           }
         }
       }
@@ -947,24 +957,14 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf, pre
 
   const selP = document.getElementById('sel-profesional');
   selP.value = '';
+  // Siempre se pueden elegir TODOS los profesionales (puede haber un reemplazo).
+  // Solo se sugiere el de la grilla / la apertura, pero queda editable.
+  Array.from(selP.options).forEach(opt => { opt.disabled = false; opt.style.color = ''; });
   if(aperturaProf){
-    // Apertura: solo habilito el profe designado y lo dejo elegido
-    Array.from(selP.options).forEach(opt => {
-      if(opt.value === '') return;
-      opt.disabled = (opt.value !== aperturaProf);
-      opt.style.color = opt.disabled ? '#ccc' : '';
-    });
-    selP.value = aperturaProf;
+    selP.value = aperturaProf;                  // sugerido (apertura/cambio), editable
   } else {
-    // Profesionales disponibles en esa hora+día (grilla base)
-    const disp = disponiblesEnHora(diaNum, horaCero);
-    const profsDisp = [...new Set(disp.map(d => d.profesional))];
-    Array.from(selP.options).forEach(opt => {
-      if(opt.value === '') return;
-      opt.disabled = !profsDisp.includes(opt.value);
-      opt.style.color = opt.disabled ? '#ccc' : '';
-    });
-    if(profsDisp.length === 1) selP.value = profsDisp[0];
+    const profsDisp = [...new Set(disponiblesEnHora(diaNum, horaCero).map(d => d.profesional))];
+    if(profsDisp.length === 1) selP.value = profsDisp[0];  // sugerido por grilla, editable
   }
 
   actualizarPracticasYHoras();
@@ -1000,22 +1000,20 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf, pre
 function actualizarPracticasYHoras(){
   if(!slotActual) return;
   const selP = document.getElementById('sel-practica');
-  if(slotActual.apertura){
-    // Apertura: el profe designado puede hacer cualquier práctica de BioLab
-    Array.from(selP.options).forEach(opt => { if(opt.value==='') return; opt.disabled=false; opt.style.color=''; });
-    actualizarHorasExactas();
-    return;
-  }
   const prof = document.getElementById('sel-profesional').value;
-  const disp = disponiblesEnHora(slotActual.diaNum, slotActual.horaCero);
-  const dispP = prof ? disp.filter(d => d.profesional === prof) : disp;
-  const pracs = [...new Set(dispP.map(d => d.practica))];
+  // Prácticas habilitadas = repertorio del profe elegido (Lu nunca MOPLEX, etc.).
+  // En apertura, o si el profe no tiene grilla definida (ej. reemplazo/Jime), se habilitan todas.
+  let pracs = null; // null = todas
+  if(!slotActual.apertura && prof){
+    const rep = practicasDeProfe(prof);
+    pracs = rep.length ? rep : null;
+  }
   Array.from(selP.options).forEach(opt => {
     if(opt.value === '') return;
-    opt.disabled = !pracs.includes(opt.value);
+    opt.disabled = pracs ? !pracs.includes(opt.value) : false;
     opt.style.color = opt.disabled ? '#ccc' : '';
   });
-  if(selP.value && !pracs.includes(selP.value)) selP.value = '';
+  if(pracs && selP.value && !pracs.includes(selP.value)) selP.value = '';
   actualizarHorasExactas();
 }
 
@@ -1036,27 +1034,13 @@ function actualizarHorasExactas(){
   const dur = duracionMin(practica, prof);
   if(!dur) return;
   const mIni = hMin(slotActual.horaCero), mFin = mIni + 60;
-  const slots = new Set();
-  if(slotActual.apertura){
-    // Apertura: toda la franja [hora, hora+60] está abierta para ese profe
-    let m = mIni;
-    while(m + dur <= mFin){ slots.add(m); m += dur; }
-  } else {
-    const disp = DISP.filter(d =>
-      d.dia === slotActual.diaNum && d.profesional === prof && d.practica === practica &&
-      hMin(d.ini) < mFin && hMin(d.fin) > mIni
-    );
-    disp.forEach(d => {
-      let m = Math.max(hMin(d.ini), mIni);
-      const limite = Math.min(hMin(d.fin), mFin);
-      while(m + dur <= limite){ slots.add(m); m += dur; }
-    });
-  }
-  [...slots].sort((a,b)=>a-b).forEach(m => {
-    const v = minH(m);
-    selH.innerHTML += `<option value="${v}">${v}</option>`;
-  });
-  if(slots.size === 1) selH.value = minH([...slots][0]);
+  // Horarios exactos = subdivisiones por duración dentro de la franja de 1h.
+  // (Funciona igual para el profe de grilla o para un reemplazo.)
+  const slots = [];
+  let m = mIni;
+  while(m + dur <= mFin){ slots.push(m); m += dur; }
+  slots.forEach(m => { selH.innerHTML += `<option value="${minH(m)}">${minH(m)}</option>`; });
+  if(slots.length === 1) selH.value = minH(slots[0]);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1096,7 +1080,7 @@ async function cargarTratamientosExistentes(practica){
   // Estados cerrados: no sirven para asociar un turno nuevo
   const CERRADOS = ['BAJA','CANCELADO','FINALIZADO','CERRADO'];
   const { data, error } = await sb.from('tratamientos')
-    .select('id, codigo_id, estado, saldo_pendiente')
+    .select('id, codigo_id, estado, saldo_pendiente, total_sesiones')
     .eq('persona_id', Number(personaId))
     .eq('practica_codigo', cfg.prefix)
     .order('id', { ascending: false });
@@ -1118,15 +1102,42 @@ async function cargarTratamientosExistentes(practica){
     return;
   }
 
+  // Contar turnos YA cargados de este paciente por tratamiento (para saber qué tto está completo)
+  const usados = {};
+  try{
+    const { data: turnosP } = await sb.from('turnos_biolab')
+      .select('tratamiento_id')
+      .eq('persona_id', Number(personaId))
+      .neq('estado', 'CANCELADO');
+    (turnosP || []).forEach(r => { if(r.tratamiento_id) usados[r.tratamiento_id] = (usados[r.tratamiento_id] || 0) + 1; });
+  }catch(e){ /* si falla el conteo, igual se valida al guardar */ }
+
+  const estaCompleto = (t) => {
+    const tot = (t.total_sesiones != null) ? Number(t.total_sesiones) : null;
+    return (tot && tot > 0 && (usados[t.codigo_id] || 0) >= tot);
+  };
+
   sel.innerHTML = '<option value="">— Elegí el tratamiento —</option>' +
     activos.map(t => {
+      const tot = (t.total_sesiones != null) ? Number(t.total_sesiones) : null;
+      const used = usados[t.codigo_id] || 0;
+      const full = estaCompleto(t);
       const saldo = (t.saldo_pendiente != null) ? ' · saldo $' + Number(t.saldo_pendiente).toLocaleString('es-AR') : '';
-      return `<option value="${t.codigo_id}">${t.codigo_id}${t.estado ? ' · ' + t.estado : ''}${saldo}</option>`;
+      const ses = (tot && tot > 0) ? ` · ${used}/${tot} ses` : '';
+      const comp = full ? ' · COMPLETO' : '';
+      return `<option value="${t.codigo_id}"${full ? ' disabled' : ''}>${t.codigo_id}${t.estado ? ' · ' + t.estado : ''}${ses}${comp}${saldo}</option>`;
     }).join('');
 
-  // Si hay uno solo, lo dejo ya elegido para agilizar
-  if(activos.length === 1){ sel.value = activos[0].codigo_id; }
-  if(hint){ hint.style.color = 'var(--muted)'; hint.textContent = activos.length + ' tratamiento(s) de este paciente.'; }
+  // Auto-elegir solo si hay UN tratamiento con sesiones libres
+  const libres = activos.filter(t => !estaCompleto(t));
+  if(libres.length === 1){ sel.value = libres[0].codigo_id; }
+  if(hint){
+    hint.style.color = 'var(--muted)';
+    const completos = activos.length - libres.length;
+    hint.textContent = completos > 0
+      ? `${activos.length} tratamiento(s) · ${completos} completo(s) (sin sesiones libres)`
+      : `${activos.length} tratamiento(s) de este paciente.`;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1242,6 +1253,25 @@ async function guardarTurnoNuevo(){
     }
   }
 
+  // LÍMITE DE SESIONES DEL TRATAMIENTO: no asignar más turnos que sesiones tiene el tto
+  if(idTto){
+    try{
+      const { data: ttRow } = await sb.from('tratamientos')
+        .select('total_sesiones').eq('codigo_id', idTto).maybeSingle();
+      const totalSes = (ttRow && ttRow.total_sesiones != null) ? Number(ttRow.total_sesiones) : null;
+      if(totalSes && totalSes > 0){
+        const { count } = await sb.from('turnos_biolab')
+          .select('id_turno', { count:'exact', head:true })
+          .eq('tratamiento_id', idTto).neq('estado','CANCELADO');
+        const yaAsignados = count || 0;
+        if(yaAsignados >= totalSes){
+          alertaEl.innerHTML = `<div class="err-box"><b>Ya existe turno asignado para este tratamiento.</b><br>El tratamiento <b>${idTto}</b> tiene <b>${totalSes}</b> sesión(es) y ya están todas asignadas (${yaAsignados}/${totalSes}). Si necesitás otra sesión, agregala primero en <b>Tratamientos</b>.</div>`;
+          return;
+        }
+      }
+    }catch(e){ /* si el chequeo falla por red, no bloqueo la carga */ }
+  }
+
   const now = new Date();
   const idTurno = 'TD-' + now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0') + '-' + String(now.getHours()).padStart(2,'0') + String(now.getMinutes()).padStart(2,'0') + String(now.getSeconds()).padStart(2,'0');
 
@@ -1256,9 +1286,23 @@ async function guardarTurnoNuevo(){
     practica, obra_social: obraSocial, estado: 'RESERVADO', observaciones: obs
   });
   if(error){ alertaEl.innerHTML = `<div class="err-box">Error: ${error.message}</div>`; return; }
+
+  // Datos para el modal de WhatsApp (igual que en Consultorios)
+  let celularPac = null;
+  const perCache = personasCache.find(p => Number(p.id) === Number(personaId));
+  celularPac = perCache ? perCache.celular : null;
+  if(celularPac == null){
+    try{
+      const { data: per } = await sb.from('personas').select('celular').eq('id', Number(personaId)).maybeSingle();
+      celularPac = per ? per.celular : null;
+    }catch(e){ /* sin celular, el modal avisa */ }
+  }
+  const turnoGuardado = { fecha: slotActual.fecha, hora_inicio: horaInicio, profesional, practica, estado: 'RESERVADO' };
+
   cerrarModal('modal-nuevo');
   toast(idTto ? `Turno reservado ✓ · ${idTto}` : 'Turno reservado ✓','ok');
   await cargarTurnos(); render();
+  mostrarModalWhatsAppTurnos({ nombre: paciente, celular: celularPac }, [turnoGuardado]);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -1663,6 +1707,89 @@ async function iniciarRealtime() {
   render();
   iniciarRealtime();
 })();
+
+/* ════════════════════════════════════════════════════════════════
+   MÓDULO WHATSAPP TURNOS · BioLab (igual que Consultorios)
+   Al guardar un turno, ofrece enviar la confirmación por WhatsApp.
+   ════════════════════════════════════════════════════════════════ */
+function waEscapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Normaliza el celular a 549XXXXXXXXXX (lo que pide wa.me)
+function waLimpiarCelular(cel){
+  if(!cel) return null;
+  let num = cel.toString().replace(/\D/g,'');
+  if(!num) return null;
+  if(num.startsWith('549') && num.length >= 12) return num;
+  if(num.startsWith('54') && num.length >= 11) return '549' + num.substring(2);
+  if(num.length === 10) return '549' + num;        // 3515123456 → 5493515123456
+  if(num.length === 8)  return '549351' + num;     // 5123456    → 5493515123456 (Córdoba)
+  return num;
+}
+const WA_DIAS = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+function waFechaBonita(fechaISO){
+  const [a,m,d] = fechaISO.split('-').map(n => parseInt(n,10));
+  const dt = new Date(a, m-1, d);
+  return { diaSem: WA_DIAS[dt.getDay()], fechaCorta: `${String(d).padStart(2,'0')}/${String(m).padStart(2,'0')}` };
+}
+function waNombrePractica(codigo){
+  return { MOPLEX:'MOPLEX', EVALUACION_INGRESO:'Evaluación de Ingreso', EVALUACION_DEPORTISTA:'Evaluación Deportista', SARKMED:'SARKMED' }[codigo] || codigo;
+}
+function waArmarMensaje(paciente, turnos){
+  const primerNombre = (paciente.nombre || '').split(' ')[0] || '';
+  let msg = `Hola ${primerNombre}!\n`;
+  msg += `Te confirmamos tu turno en *PuntoBiO - BioLab*:\n\n`;
+  const ord = [...turnos].sort((a,b) => a.fecha!==b.fecha ? (a.fecha<b.fecha?-1:1) : (a.hora_inicio<b.hora_inicio?-1:1));
+  ord.forEach(t => {
+    const f = waFechaBonita(t.fecha);
+    const hora = String(t.hora_inicio).substring(0,5);
+    const practica = waNombrePractica(t.practica).replace(/&/g,'y');
+    msg += `> ${f.diaSem} ${f.fechaCorta} - ${hora}hs\n`;
+    msg += `  ${practica} con ${t.profesional}\n\n`;
+  });
+  msg += `Direccion: Libertad 1549, Bo Gral Paz\n`;
+  msg += `Si no podes venir, avisanos con 24hs de anticipacion.`;
+  return msg;
+}
+function waEnviar(paciente, turnos){
+  const tel = waLimpiarCelular(paciente.celular);
+  if(!tel){ alert('⚠️ El paciente no tiene celular cargado en el Padrón.\n\nCargalo en la ficha del paciente para poder enviar por WhatsApp.'); return false; }
+  if(!turnos || !turnos.length){ alert('⚠️ No hay turnos para enviar.'); return false; }
+  window.open(`https://wa.me/${tel}?text=${encodeURIComponent(waArmarMensaje(paciente, turnos))}`, '_blank');
+  return true;
+}
+function mostrarModalWhatsAppTurnos(paciente, turnos){
+  const viejo = document.getElementById('pb-modal-wa'); if(viejo) viejo.remove();
+  const ord = [...turnos].sort((a,b) => a.fecha!==b.fecha ? (a.fecha<b.fecha?-1:1) : (a.hora_inicio<b.hora_inicio?-1:1));
+  const turnosHTML = ord.map(t => {
+    const f = waFechaBonita(t.fecha);
+    const hora = String(t.hora_inicio).substring(0,5);
+    return `
+      <div style="padding:12px 14px;border-left:4px solid #1e9fe0;background:#f5f9fc;margin-bottom:8px;border-radius:6px;">
+        <div style="font-weight:600;color:#111;font-size:15px;">📅 ${f.diaSem} ${f.fechaCorta} · ${hora}hs</div>
+        <div style="font-size:13px;color:#555;margin-top:4px;">${waEscapeHtml(waNombrePractica(t.practica))} con <strong>${waEscapeHtml(t.profesional)}</strong></div>
+      </div>`;
+  }).join('');
+  const tieneTel = !!waLimpiarCelular(paciente.celular);
+  const avisoTel = tieneTel ? '' : `<div style="background:#fff4e5;border:1px solid #ffb74d;color:#7a4a00;padding:10px 12px;border-radius:6px;margin-bottom:15px;font-size:13px;">⚠️ El paciente no tiene celular cargado en el Padrón. Cargalo para poder enviar por WhatsApp.</div>`;
+  const modal = document.createElement('div');
+  modal.id = 'pb-modal-wa';
+  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;z-index:99999;padding:20px;`;
+  modal.innerHTML = `
+    <div style="background:white;border-radius:14px;max-width:520px;width:100%;padding:26px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.35);font-family:inherit;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><span style="font-size:28px;">✅</span><h2 style="margin:0;color:#111;font-size:20px;font-weight:700;">Turno guardado</h2></div>
+      <p style="margin:0 0 18px 38px;color:#666;font-size:14px;">${waEscapeHtml(paciente.nombre || '')}</p>
+      ${avisoTel}
+      <div style="margin-bottom:20px;">${turnosHTML}</div>
+      <div style="display:flex;gap:10px;">
+        <button id="pb-wa-send" ${tieneTel?'':'disabled'} style="flex:1;background:${tieneTel?'#25D366':'#bbb'};color:white;border:none;padding:14px;border-radius:8px;font-size:15px;font-weight:600;cursor:${tieneTel?'pointer':'not-allowed'};display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:20px;">💚</span> Enviar por WhatsApp</button>
+        <button id="pb-wa-close" style="background:#eee;color:#333;border:none;padding:14px 22px;border-radius:8px;font-size:15px;cursor:pointer;font-weight:500;">Cerrar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.getElementById('pb-wa-close').onclick = () => modal.remove();
+  if(tieneTel){ document.getElementById('pb-wa-send').onclick = () => { waEnviar(paciente, turnos); modal.remove(); }; }
+  modal.onclick = (e) => { if(e.target === modal) modal.remove(); };
+}
+/* ════════════════ FIN MÓDULO WHATSAPP TURNOS ════════════════ */
 </script>
 </body>
 </html>
