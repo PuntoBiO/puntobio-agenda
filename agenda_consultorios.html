@@ -100,6 +100,27 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .month-cell .md-count{font-size:12px;color:var(--accent-dim);font-weight:600}
 .month-cell .md-empty{font-size:12px;color:var(--text-muted)}
 @media (max-width:760px){.month-cell{min-height:64px;padding:5px 6px}.month-cell .md-num{font-size:12px}.month-dow{font-size:9px;padding:6px 2px}}
+/* ===== PANELES RESUMEN DEL MES ===== */
+.mes-panel{margin-bottom:16px}
+.mes-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px}
+.mes-stat{background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px 10px;text-align:center}
+.mes-stat .ms-num{font-size:26px;font-weight:800;color:var(--text);font-family:'JetBrains Mono',monospace;line-height:1}
+.mes-stat .ms-lbl{font-size:10.5px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-top:5px}
+.mes-stat.ok .ms-num{color:var(--s-presente)}
+.mes-stat.warn .ms-num{color:var(--s-ausente)}
+.mes-stat.sobre .ms-num{color:var(--c-sobre)}
+.mes-breakdown{background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px 16px}
+.mb-title{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.mb-prof{padding:9px 0;border-bottom:1px solid var(--border)}
+.mb-prof:last-child{border-bottom:none}
+.mb-prof-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:10px}
+.mb-prof-name{font-weight:700;font-size:14px;color:var(--text)}
+.mb-prof-total{font-size:12px;color:var(--accent-dim);font-weight:700;white-space:nowrap}
+.mb-prof-practs{display:flex;flex-wrap:wrap;gap:6px}
+.mb-chip{background:var(--bg-elev-2);border:1px solid var(--border);border-radius:12px;padding:3px 10px;font-size:12px;color:var(--text)}
+.mb-chip b{color:var(--accent-dim)}
+.mb-empty{font-size:12.5px;color:var(--text-dim);padding:6px 0}
+@media (max-width:760px){.mes-stats{grid-template-columns:repeat(2,1fr)}}
 .error-state{color:var(--s-ausente)}
 .multi-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:var(--accent);color:#fff;padding:12px 20px;border-radius:30px;box-shadow:0 8px 24px rgba(30,159,224,.4);display:none;gap:14px;align-items:center;z-index:50;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.04em}
 .multi-bar.is-visible{display:flex}
@@ -1664,6 +1685,60 @@ function renderMonth(container) {
   const inicio = lunesDe(primero);
   const finSemana = addDays(lunesDe(ultimo), 6);
   const totalDias = Math.round((finSemana - inicio) / 86400000) + 1;
+  const isoP = toISODate(primero), isoU = toISODate(ultimo);
+  const profFiltro = document.getElementById('filterProfesional').value;
+
+  // ===== Datos del mes (días del mes, sin cancelados, respetando filtro de profe) =====
+  const delMes = turnos.filter(t =>
+    t.fecha >= isoP && t.fecha <= isoU && t.estado !== 'CANCELADO' &&
+    (!profFiltro || t.profesional === profFiltro)
+  );
+  const total = delMes.length;
+  const presentes = delMes.filter(t => t.estado === 'PRESENTE').length;
+  const pendientes = delMes.filter(t => t.estado === 'PENDIENTE').length;
+  const ausentes = delMes.filter(t => t.estado === 'AUSENTE').length;
+  const sobreturnos = delMes.filter(t => t.estado === 'SOBRETURNO').length;
+
+  // Por profesional × especialidad
+  const porProf = {};
+  delMes.forEach(t => {
+    const prof = t.profesional || '—';
+    const lbl = REGLAS_PRACTICA[t.practica_codigo]?.label || t.practica_codigo || '—';
+    if (!porProf[prof]) porProf[prof] = { total: 0, practicas: {} };
+    porProf[prof].total++;
+    porProf[prof].practicas[lbl] = (porProf[prof].practicas[lbl] || 0) + 1;
+  });
+  const profsOrden = Object.keys(porProf).sort((x, y) => porProf[y].total - porProf[x].total);
+
+  let breakdownHTML = profsOrden.length
+    ? profsOrden.map(prof => {
+        const info = porProf[prof];
+        const chips = Object.entries(info.practicas)
+          .sort((m, n) => n[1] - m[1])
+          .map(([lbl, n]) => `<span class="mb-chip">${escapeHtml(lbl)}: <b>${n}</b></span>`).join('');
+        return `<div class="mb-prof">
+          <div class="mb-prof-head"><span class="mb-prof-name">${escapeHtml(prof)}</span><span class="mb-prof-total">${info.total} turno${info.total !== 1 ? 's' : ''}</span></div>
+          <div class="mb-prof-practs">${chips}</div>
+        </div>`;
+      }).join('')
+    : `<div class="mb-empty">No hay turnos este mes${profFiltro ? ' para ' + escapeHtml(profFiltro) : ''}.</div>`;
+
+  const panelHTML = `
+    <div class="mes-panel">
+      <div class="mes-stats">
+        <div class="mes-stat"><div class="ms-num">${total}</div><div class="ms-lbl">Turnos dados</div></div>
+        <div class="mes-stat ok"><div class="ms-num">${presentes}</div><div class="ms-lbl">Presentes (sesiones)</div></div>
+        <div class="mes-stat"><div class="ms-num">${pendientes}</div><div class="ms-lbl">Pendientes</div></div>
+        <div class="mes-stat warn"><div class="ms-num">${ausentes}</div><div class="ms-lbl">Ausentes</div></div>
+        <div class="mes-stat sobre"><div class="ms-num">${sobreturnos}</div><div class="ms-lbl">Sobreturnos</div></div>
+      </div>
+      <div class="mes-breakdown">
+        <div class="mb-title">Por profesional y especialidad${profFiltro ? ' · ' + escapeHtml(profFiltro) : ''}</div>
+        ${breakdownHTML}
+      </div>
+    </div>`;
+
+  // ===== Calendario =====
   const DOW = ['LUN','MAR','MIÉ','JUE','VIE','SÁB','DOM'];
   let html = `<div class="month-grid">` + DOW.map(d => `<div class="month-dow">${d}</div>`).join('');
   for (let i = 0; i < totalDias; i++) {
@@ -1672,7 +1747,7 @@ function renderMonth(container) {
     const enMes = d.getMonth() === mes;
     const hoy = mismoDia(d, new Date());
     const fer = feriadosMap.get(iso);
-    const cnt = enMes ? turnos.filter(t => t.fecha === iso && t.estado !== 'CANCELADO').length : 0;
+    const cnt = enMes ? turnos.filter(t => t.fecha === iso && t.estado !== 'CANCELADO' && (!profFiltro || t.profesional === profFiltro)).length : 0;
     let body = '';
     if (enMes) {
       if (fer) body = `<div class="md-count" style="color:var(--feriado-text)">${escapeHtml(fer)}</div>`;
@@ -1683,7 +1758,8 @@ function renderMonth(container) {
       <div class="md-num">${d.getDate()}</div>${body}</div>`;
   }
   html += `</div>`;
-  container.innerHTML = html;
+
+  container.innerHTML = panelHTML + html;
   container.querySelectorAll('.month-cell[data-fecha]').forEach(c => {
     c.addEventListener('click', () => {
       anchorDate = new Date(c.dataset.fecha + 'T00:00:00');
