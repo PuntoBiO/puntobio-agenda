@@ -102,6 +102,26 @@
   .month-cell .md-count{font-size:12px; color:var(--primary, #2563eb); font-weight:600;}
   .month-cell .md-empty{font-size:12px; color:var(--dim);}
   @media (max-width:760px){.month-cell{min-height:64px; padding:5px 6px;} .month-cell .md-num{font-size:12px;} .month-dow{font-size:9px; padding:6px 2px;}}
+  /* ===== PANELES RESUMEN DEL MES ===== */
+  .mes-panel{margin-bottom:16px;}
+  .mes-stats{display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:12px;}
+  .mes-stat{background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:12px 10px; text-align:center;}
+  .mes-stat .ms-num{font-size:26px; font-weight:800; color:var(--text); font-variant-numeric:tabular-nums; line-height:1;}
+  .mes-stat .ms-lbl{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-top:5px;}
+  .mes-stat.ok .ms-num{color:var(--verde);}
+  .mes-stat.warn .ms-num{color:#b45309;}
+  .mes-breakdown{background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:12px 16px;}
+  .mb-title{font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px;}
+  .mb-prof{padding:9px 0; border-bottom:1px solid var(--border);}
+  .mb-prof:last-child{border-bottom:none;}
+  .mb-prof-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; gap:10px;}
+  .mb-prof-name{font-weight:700; font-size:14px; color:var(--text);}
+  .mb-prof-total{font-size:12px; color:var(--primary); font-weight:700; white-space:nowrap;}
+  .mb-prof-practs{display:flex; flex-wrap:wrap; gap:6px;}
+  .mb-chip{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:3px 10px; font-size:12px; color:var(--text);}
+  .mb-chip b{color:var(--primary);}
+  .mb-empty{font-size:12.5px; color:var(--muted); padding:6px 0;}
+  @media (max-width:760px){.mes-stats{grid-template-columns:repeat(2,1fr);}}
   .agenda-grid{
     display:grid;
     grid-template-columns: 86px repeat(5, 1fr);
@@ -993,6 +1013,45 @@ function renderMes(grid){
   const inicio = lunesDeFecha(primero);
   const finSem = lunesDeFecha(ultimo); finSem.setDate(finSem.getDate()+6);
   const totalDias = Math.round((finSem - inicio) / 86400000) + 1;
+  const isoP = fmtFecha(primero), isoU = fmtFecha(ultimo);
+
+  // ===== Datos del mes (respeta filtros de profe / práctica) =====
+  const pasa = t => t.estado !== 'CANCELADO' &&
+    (!filtroProf || t.profesional === filtroProf) &&
+    (!filtroPract || t.practica === filtroPract);
+  const delMes = turnosSemana.filter(t => t.fecha >= isoP && t.fecha <= isoU && pasa(t));
+  const total = delMes.length;
+  const presentes = delMes.filter(t => t.estado === 'PRESENTE').length;
+  const pendientes = delMes.filter(t => t.estado === 'PENDIENTE').length;
+  const ausentes = delMes.filter(t => t.estado === 'AUSENTE').length;
+
+  const nm = p => p ? (p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()) : '—';
+  const porPract = {};
+  delMes.forEach(t => {
+    const lbl = practicaCorta(t.practica);
+    if(!porPract[lbl]) porPract[lbl] = { total:0, profes:{} };
+    porPract[lbl].total++;
+    const pn = nm(t.profesional);
+    porPract[lbl].profes[pn] = (porPract[lbl].profes[pn] || 0) + 1;
+  });
+  const pracOrden = Object.keys(porPract).sort((x, z) => porPract[z].total - porPract[x].total);
+  const breakdownHTML = pracOrden.length ? pracOrden.map(lbl => {
+    const info = porPract[lbl];
+    const chips = Object.entries(info.profes).sort((a, b) => b[1] - a[1])
+      .map(([p, n]) => `<span class="mb-chip">${p}: <b>${n}</b></span>`).join('');
+    return `<div class="mb-prof"><div class="mb-prof-head"><span class="mb-prof-name">${lbl}</span><span class="mb-prof-total">${info.total} turno${info.total!==1?'s':''}</span></div><div class="mb-prof-practs">${chips}</div></div>`;
+  }).join('') : '<div class="mb-empty">No hay turnos este mes.</div>';
+
+  const panelHTML = `<div class="mes-panel">
+    <div class="mes-stats">
+      <div class="mes-stat"><div class="ms-num">${total}</div><div class="ms-lbl">Turnos dados</div></div>
+      <div class="mes-stat ok"><div class="ms-num">${presentes}</div><div class="ms-lbl">Presentes (sesiones)</div></div>
+      <div class="mes-stat"><div class="ms-num">${pendientes}</div><div class="ms-lbl">Pendientes</div></div>
+      <div class="mes-stat warn"><div class="ms-num">${ausentes}</div><div class="ms-lbl">Ausentes</div></div>
+    </div>
+    <div class="mes-breakdown"><div class="mb-title">Por práctica y profesional</div>${breakdownHTML}</div>
+  </div>`;
+
   const DOW = ['LUN','MAR','MIÉ','JUE','VIE','SÁB','DOM'];
   const hoyStr = fmtFecha(new Date());
   let html = `<div class="month-grid">` + DOW.map(d => `<div class="month-dow">${d}</div>`).join('');
@@ -1002,7 +1061,7 @@ function renderMes(grid){
     const enMes = d.getMonth() === m;
     const hoy = iso === hoyStr;
     const fer = FERIADOS[iso];
-    const cnt = enMes ? turnosSemana.filter(t => t.fecha === iso && t.estado !== 'CANCELADO').length : 0;
+    const cnt = enMes ? turnosSemana.filter(t => t.fecha === iso && pasa(t)).length : 0;
     let body = '';
     if (enMes) {
       if (fer) body = `<div class="md-count" style="color:#b45309">${fer}</div>`;
@@ -1012,7 +1071,7 @@ function renderMes(grid){
     html += `<div class="month-cell ${enMes ? '' : 'otro-mes'} ${hoy ? 'hoy' : ''}" ${enMes ? `data-fecha="${iso}"` : ''}><div class="md-num">${d.getDate()}</div>${body}</div>`;
   }
   html += `</div>`;
-  grid.innerHTML = html;
+  grid.innerHTML = panelHTML + html;
   document.getElementById('rango-subtitulo').textContent = fmtMesTitulo();
   const cantActivos = turnosSemana.filter(t => t.estado !== 'CANCELADO').length;
   document.getElementById('contador-turnos').textContent = `${cantActivos} turnos activos`;
