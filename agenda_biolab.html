@@ -1102,15 +1102,28 @@ async function cargarTratamientosExistentes(practica){
     return;
   }
 
-  // Contar turnos YA cargados de este paciente por tratamiento (para saber qué tto está completo)
-  const usados = {};
+  // Turnos YA cargados de este paciente por tratamiento (con fecha/hora, para mostrarlos)
+  const turnosPorTto = {};
   try{
     const { data: turnosP } = await sb.from('turnos_biolab')
-      .select('tratamiento_id')
+      .select('tratamiento_id, fecha, hora_inicio')
       .eq('persona_id', Number(personaId))
       .neq('estado', 'CANCELADO');
-    (turnosP || []).forEach(r => { if(r.tratamiento_id) usados[r.tratamiento_id] = (usados[r.tratamiento_id] || 0) + 1; });
-  }catch(e){ /* si falla el conteo, igual se valida al guardar */ }
+    (turnosP || []).forEach(r => {
+      if(!r.tratamiento_id) return;
+      (turnosPorTto[r.tratamiento_id] = turnosPorTto[r.tratamiento_id] || []).push(r);
+    });
+  }catch(e){ /* si falla, igual se valida al guardar */ }
+
+  const usados = {};
+  Object.keys(turnosPorTto).forEach(k => { usados[k] = turnosPorTto[k].length; });
+
+  // "08/06 10:00, 12/06 15:00" — fechas de los turnos ya asignados a un tto
+  const fechasTto = (codigo) => {
+    const lista = (turnosPorTto[codigo] || []).slice().sort((x,y) =>
+      x.fecha !== y.fecha ? (x.fecha < y.fecha ? -1 : 1) : (x.hora_inicio < y.hora_inicio ? -1 : 1));
+    return lista.map(r => { const [a,m,d] = r.fecha.split('-'); return `${d}/${m} ${String(r.hora_inicio).substring(0,5)}`; }).join(', ');
+  };
 
   const estaCompleto = (t) => {
     const tot = (t.total_sesiones != null) ? Number(t.total_sesiones) : null;
@@ -1125,7 +1138,9 @@ async function cargarTratamientosExistentes(practica){
       const saldo = (t.saldo_pendiente != null) ? ' · saldo $' + Number(t.saldo_pendiente).toLocaleString('es-AR') : '';
       const ses = (tot && tot > 0) ? ` · ${used}/${tot} ses` : '';
       const comp = full ? ' · COMPLETO' : '';
-      return `<option value="${t.codigo_id}"${full ? ' disabled' : ''}>${t.codigo_id}${t.estado ? ' · ' + t.estado : ''}${ses}${comp}${saldo}</option>`;
+      const fechas = fechasTto(t.codigo_id);
+      const turnoTxt = fechas ? ` · turno: ${fechas}` : '';
+      return `<option value="${t.codigo_id}"${full ? ' disabled' : ''}>${t.codigo_id}${t.estado ? ' · ' + t.estado : ''}${ses}${comp}${turnoTxt}${saldo}</option>`;
     }).join('');
 
   // Auto-elegir solo si hay UN tratamiento con sesiones libres
@@ -1133,10 +1148,13 @@ async function cargarTratamientosExistentes(practica){
   if(libres.length === 1){ sel.value = libres[0].codigo_id; }
   if(hint){
     hint.style.color = 'var(--muted)';
-    const completos = activos.length - libres.length;
-    hint.textContent = completos > 0
-      ? `${activos.length} tratamiento(s) · ${completos} completo(s) (sin sesiones libres)`
-      : `${activos.length} tratamiento(s) de este paciente.`;
+    const comps = activos.filter(estaCompleto);
+    if(comps.length > 0){
+      hint.style.color = '#b45309';
+      hint.innerHTML = '⚠ Ya tiene turno asignado: ' + comps.map(t => `<b>${t.codigo_id}</b> → ${fechasTto(t.codigo_id)}`).join(' · ');
+    } else {
+      hint.textContent = `${activos.length} tratamiento(s) de este paciente.`;
+    }
   }
 }
 
