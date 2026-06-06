@@ -2949,15 +2949,136 @@ function construirShareCardCons(esp, semanas) {
     <div class="sc-foot">${nb('Consultá por estos horarios para anotarte 💪')}</div>`;
 }
 
+function _roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+// Dibuja la tarjeta de "Turnos disponibles" directo en un canvas (sin html2canvas,
+// que rompe los espacios entre palabras). Devuelve el canvas listo.
+async function dibujarShareCanvas(esp, semanas) {
+  const SCALE = 2, W = 560, PAD = 30;
+  const DIAS_CAP = ['Lunes','Martes','Miercoles','Jueves','Viernes'];
+  const fmt = d => `${pad(d.getDate())}/${pad(d.getMonth()+1)}`;
+  const base = lunesDe(anchorDate);
+  const logo = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = LOGO_PB_B64; });
+  const logoW = 76, logoH = logo.height * (logoW / logo.width);
+
+  function run(ctx, draw) {
+    let y = PAD;
+    if (draw) ctx.drawImage(logo, (W-logoW)/2, y, logoW, logoH);
+    y += logoH + 16;
+    // Titulo (PuntoBiO en celeste + resto oscuro), centrado
+    ctx.font = '700 23px Arial, sans-serif';
+    const p1 = 'PuntoBiO', p2 = ' · Turnos disponibles';
+    const w1 = ctx.measureText(p1).width, w2 = ctx.measureText(p2).width;
+    const tx = (W - (w1+w2)) / 2;
+    if (draw) {
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillStyle = '#1e9fe0'; ctx.fillText(p1, tx, y+18);
+      ctx.fillStyle = '#10222f'; ctx.fillText(p2, tx+w1, y+18);
+    }
+    y += 30;
+    // Subtitulo: especialidad
+    ctx.font = '500 15px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    if (draw) { ctx.fillStyle = '#46586a'; ctx.fillText(esp.label, W/2, y+13); }
+    y += 22;
+    // Rango de fechas
+    const ultV = addDays(base, (semanas-1)*7 + 4);
+    const rango = 'Del ' + fmt(base) + ' al ' + fmt(ultV) + (semanas > 1 ? ' · ' + semanas + ' semanas' : '');
+    ctx.font = '400 13px Arial, sans-serif';
+    if (draw) { ctx.fillStyle = '#7b8a99'; ctx.fillText(rango, W/2, y+12); }
+    y += 26;
+
+    for (let wk = 0; wk < semanas; wk++) {
+      const wkIni = addDays(base, wk*7);
+      const dias = Array.from({length:5}, (_,i) => addDays(wkIni, i));
+      if (semanas > 1) {
+        const hh = 30;
+        if (draw) {
+          _roundRectPath(ctx, PAD, y, W-PAD*2, hh, 9); ctx.fillStyle = '#e9f6fd'; ctx.fill();
+          ctx.font = '700 13px Arial, sans-serif'; ctx.fillStyle = '#1276a8'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(('Semana ' + fmt(dias[0]) + ' al ' + fmt(dias[4])).toUpperCase(), W/2, y+hh/2+1);
+        }
+        y += hh + 14;
+      }
+      dias.forEach((d, idx) => {
+        const iso = toISODate(d);
+        // Encabezado del dia + subraya
+        ctx.font = '700 15px Arial, sans-serif';
+        if (draw) { ctx.fillStyle = '#16364a'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.fillText(DIAS_CAP[idx] + ' ' + fmt(d), PAD, y+13); }
+        y += 20;
+        if (draw) { ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke(); }
+        y += 11;
+        const fer = feriadosMap.get(iso);
+        if (fer) {
+          ctx.font = '700 13px Arial, sans-serif';
+          if (draw) { ctx.fillStyle = '#c2410c'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.fillText('Feriado · ' + fer, PAD, y+12); }
+          y += 22;
+        } else {
+          const libres = HORAS.filter(h => slotLibreShare(esp, idx+1, h, iso)).map(h => pad(h) + ':00');
+          if (!libres.length) {
+            ctx.font = 'italic 13px Arial, sans-serif';
+            if (draw) { ctx.fillStyle = '#9aa7b4'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.fillText('Sin lugares', PAD, y+12); }
+            y += 22;
+          } else {
+            ctx.font = '700 14px Arial, sans-serif';
+            const chipH = 32, gap = 8, padX = 14;
+            let cx = PAD, rowY = y;
+            libres.forEach(t => {
+              const cw = ctx.measureText(t).width + padX*2;
+              if (cx + cw > W - PAD) { cx = PAD; rowY += chipH + gap; }
+              if (draw) {
+                _roundRectPath(ctx, cx, rowY, cw, chipH, 9);
+                ctx.fillStyle = '#f1f8fe'; ctx.fill();
+                ctx.strokeStyle = '#1e9fe0'; ctx.lineWidth = 1.5; ctx.stroke();
+                ctx.fillStyle = '#13608c'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText(t, cx + cw/2, rowY + chipH/2 + 1);
+              }
+              cx += cw + gap;
+            });
+            y = rowY + chipH;
+          }
+        }
+        y += 14;
+      });
+      y += 8;
+    }
+    // Pie
+    y += 4;
+    if (draw) { ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke(); }
+    y += 18;
+    ctx.font = '600 13px Arial, sans-serif';
+    if (draw) { ctx.fillStyle = '#5b6b7a'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillText('Consultá por estos horarios para anotarte 💪', W/2, y+12); }
+    y += 26;
+    return y;
+  }
+
+  // 1) medir alto
+  const scratch = document.createElement('canvas'); scratch.width = 10; scratch.height = 10;
+  const H = Math.ceil(run(scratch.getContext('2d'), false));
+  // 2) dibujar
+  const canvas = document.createElement('canvas');
+  canvas.width = W * SCALE; canvas.height = H * SCALE;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(SCALE, SCALE);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  run(ctx, true);
+  return canvas;
+}
+
 async function generarShareCons(formato) {
   const esp = ESPECIALIDADES_SHARE.find(e => e.key === espShareSel);
   const semanas = semanasShare;
-  const card = document.getElementById('shareConsCard');
   const loading = document.getElementById('csLoading');
   loading.style.display = 'block';
   const tBak = turnos, fBak = feriadosMap;
   try {
-    // Traer turnos + feriados de TODAS las semanas pedidas (sin tocar la vista)
     const ini = lunesDe(anchorDate);
     const fin = addDays(ini, semanas*7 - 1);
     const desde = toISODate(ini), hasta = toISODate(fin);
@@ -2968,16 +3089,10 @@ async function generarShareCons(formato) {
     if (tRes.error) throw tRes.error;
     const ferMap = new Map();
     (fRes.data || []).forEach(f => ferMap.set(String(f.fecha).slice(0,10), f.motivo));
-    // Swap temporal de los globales para reusar la logica de disponibilidad
     turnos = tRes.data || [];
     feriadosMap = ferMap;
-    card.innerHTML = construirShareCardCons(esp, semanas);
-    // restaurar globales antes de capturar (la captura lee el DOM, no los globales)
+    const canvas = await dibujarShareCanvas(esp, semanas);
     turnos = tBak; feriadosMap = fBak;
-
-    card.style.display = 'block';
-    await new Promise(r => setTimeout(r, 150));
-    const canvas = await html2canvas(card, { scale: 2, backgroundColor: '#ffffff', logging: false });
     const fname = `turnos-${esp.key.toLowerCase()}-${desde}-al-${hasta}`;
     if (formato === 'pdf') {
       const { jsPDF } = window.jspdf;
@@ -2999,7 +3114,6 @@ async function generarShareCons(formato) {
     turnos = tBak; feriadosMap = fBak;
     alert('No se pudo generar: ' + (err?.message || err));
   } finally {
-    card.style.display = 'none';
     loading.style.display = 'none';
     closeModal('modalCompartirCons');
   }
