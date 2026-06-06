@@ -206,6 +206,7 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 body.modo-gestion .grid-cell.is-libre.slot-bloqueado{cursor:pointer}
 body.modo-gestion .grid-cell.is-bloqueo.gest-fijo{cursor:pointer}
 body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9fe0;outline-offset:-2px}
+.slot-abierto-chip{display:inline-block;background:#dcfce7;border:1px solid #86efac;color:#166534;font-size:9px;font-weight:700;padding:2px 6px;border-radius:5px;margin-bottom:3px;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .slot-bloqueo-chip {
   display: flex;
   align-items: center;
@@ -796,7 +797,8 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
   const out = [];
   for (const prof of PROFESIONALES) {
     const practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora] || [];
-    if (!practicas.includes(real)) continue;
+    const habilitadoApertura = fecha && aperturaConsProfEn(fecha, hora, prof) && practicasHabitualesDe(prof).includes(real);
+    if (!practicas.includes(real) && !habilitadoApertura) continue;
 
     if (fecha) {
       // Chequear si el profesional ya tiene un turno en esta franja
@@ -948,6 +950,55 @@ function navigate(delta) {
 let modoGestion = false;
 let gestionSlotCons = null;
 const CONS_AREA = 'CONSULTORIOS';
+let aperturasCons = [];
+let _practicasHabituales = null;
+
+// Prácticas que un profe da habitualmente (unión de su disponibilidad fija en toda la semana).
+// Sirve para saber qué puede dar cuando se le abre un horario fijo a mano.
+function practicasHabitualesDe(prof){
+  if(!_practicasHabituales){
+    _practicasHabituales = {};
+    for(const p of PROFESIONALES){
+      const set = new Set();
+      const dias = DISPONIBILIDAD[p] || {};
+      for(const dia in dias){ const horas = dias[dia] || {}; for(const hh in horas){ (horas[hh]||[]).forEach(pr => set.add(pr)); } }
+      _practicasHabituales[p] = [...set];
+    }
+  }
+  return _practicasHabituales[prof] || [];
+}
+
+async function cargarAperturasCons(){
+  try{
+    const hoy = new Date().toISOString().substring(0,10);
+    const { data, error } = await supa.from('aperturas_agenda').select('*')
+      .eq('area', CONS_AREA).eq('activo', true).gte('fecha_hasta', hoy);
+    if(error) throw error;
+    aperturasCons = data || [];
+  }catch(e){ console.warn('No se pudieron cargar aperturas:', e); aperturasCons = []; }
+}
+function _hMinCons(hhmm){ const p=String(hhmm).split(':'); return (parseInt(p[0],10)||0)*60 + (parseInt(p[1],10)||0); }
+function aperturaConsAplica(a, fechaIso, hora){
+  const horaIni = pad(hora)+':00';
+  if(a.recurrente){
+    if(a.fecha_desde && fechaIso < a.fecha_desde) return false;
+    if(a.fecha_hasta && fechaIso > a.fecha_hasta) return false;
+    if(a.dia_semana != null){ const dow = new Date(fechaIso+'T00:00:00').getDay(); if(Number(a.dia_semana) !== dow) return false; }
+  } else {
+    if(!(fechaIso >= a.fecha_desde && fechaIso <= a.fecha_hasta)) return false;
+  }
+  if(a.hora_desde == null) return true;
+  const m = _hMinCons(horaIni), mFin = m + 60;
+  return _hMinCons(a.hora_desde) < mFin && _hMinCons(a.hora_hasta || a.hora_desde) > m;
+}
+function aperturasConsEn(fechaIso, hora){ return aperturasCons.filter(a => aperturaConsAplica(a, fechaIso, hora)); }
+function aperturaConsProfEn(fechaIso, hora, profNombre){
+  const email = (NOMBRE_A_EMAIL[profNombre]||'').toLowerCase();
+  return aperturasCons.some(a => aperturaConsAplica(a, fechaIso, hora) && (a.profesional_email||'').toLowerCase() === email);
+}
+function profesAbiertosEn(fechaIso, hora){
+  return aperturasConsEn(fechaIso, hora).map(a => nombreCortoEmail(a.profesional_email)).filter(Boolean);
+}
 
 function toggleModoGestion(){
   if(!esAdminGeneral()) return;
@@ -983,10 +1034,9 @@ function abrirGestionSlotCons(fecha, hora){
   document.getElementById('gestionAlerta').innerHTML='';
   const diaNum = f.getDay()===0 ? 7 : f.getDay();
   const fijo = esBloqueoFijo(diaNum, hora); // 'ALMUERZO' / 'CERRADO' si es horario fijo
+  const aps = aperturasConsEn(fecha, hora);
   let html='';
-  if(fijo){
-    html += `<div style="background:#eef0f3;border-left:3px solid var(--bloqueo-text);color:var(--text-dim);padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:13px">⏰ Este horario es <b>fijo</b> (${fijo === 'ALMUERZO' ? 'almuerzo' : 'fuera del horario de atención'}). Es parte del horario base del centro, no un cierre que se pueda reabrir desde acá.</div>`;
-  }
+  // Cierres activos → reabrir
   if(cierres.length){
     html += `<div style="background:#fef2f2;border-left:3px solid #dc2626;color:#b91c1c;padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:13px;font-weight:600">🚫 Cierres activos en este horario</div>`;
     cierres.forEach(b=>{
@@ -999,7 +1049,37 @@ function abrirGestionSlotCons(fecha, hora){
       </div>`;
     });
   }
-  if(!fijo){
+  // Aperturas activas (horario fijo abierto a mano) → quitar
+  if(aps.length){
+    html += `<div style="background:#ecfdf5;border-left:3px solid #16a34a;color:#166534;padding:8px 10px;border-radius:6px;margin:8px 0;font-size:13px;font-weight:600">🔓 Horario abierto a mano</div>`;
+    aps.forEach(a=>{
+      const quien = nombreCortoEmail(a.profesional_email);
+      const perm = a.recurrente ? ' · permanente' : '';
+      const mot = (a.motivo||'').trim();
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;color:var(--text)"><b>${escapeHtml(quien)}</b>${(mot&&mot!=='-')?' · '+escapeHtml(mot):''}<span style="color:var(--text-dim)">${perm}</span></div>
+        <button class="btn danger" style="white-space:nowrap" onclick="quitarAperturaCons(${a.id})">Quitar</button>
+      </div>`;
+    });
+  }
+  if(fijo){
+    // Horario fijo → permitir ABRIRLO excepcionalmente para un profe
+    const opc = PROFESIONALES.map(p=>`<option value="${p}">${p}</option>`).join('');
+    html += `<div style="margin-top:14px">
+      <div style="background:#eef0f3;border-left:3px solid var(--bloqueo-text);color:var(--text-dim);padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:12.5px">⏰ Horario <b>fijo</b> (${fijo==='ALMUERZO'?'almuerzo':'fuera del horario de atención'}). Podés abrirlo excepcionalmente para un profesional.</div>
+      <label class="form-label" style="display:block;margin-bottom:6px">🔓 Abrir este horario para</label>
+      <select class="form-select" id="gestAbrirQuien" style="width:100%;margin-bottom:8px">
+        <option value="">— Elegí profesional —</option>${opc}
+      </select>
+      <select class="form-select" id="gestAbrirTipo" style="width:100%;margin-bottom:8px">
+        <option value="dia">Solo este día (${pad(f.getDate())}/${pad(f.getMonth()+1)})</option>
+        <option value="semanal">Todos los ${DSEM[f.getDay()]} (permanente)</option>
+      </select>
+      <input class="form-input" id="gestAbrirMotivo" placeholder="Nota (opcional)" style="width:100%;margin-bottom:8px">
+      <button class="btn" style="width:100%;background:#16a34a;color:#fff;border-color:#16a34a" onclick="abrirHorarioCons()">🔓 Abrir horario</button>
+    </div>`;
+  } else {
+    // Horario normal → permitir CERRARLO
     const opcionesProf = PROFESIONALES.map(p=>`<option value="${p}">Solo ${p}</option>`).join('');
     html += `<div style="margin-top:14px">
       <label class="form-label" style="display:block;margin-bottom:6px">🔒 Cerrar este horario</label>
@@ -1053,6 +1133,40 @@ async function reabrirHorarioCons(id){
     await refresh();
   }catch(e){ alert('Error: '+(e.message||e)); }
 }
+
+async function abrirHorarioCons(){
+  if(!gestionSlotCons) return;
+  const quien = document.getElementById('gestAbrirQuien')?.value || '';
+  if(!quien){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">Elegí un profesional.</div>'; return; }
+  const email = NOMBRE_A_EMAIL[quien];
+  if(!email){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">No encontré el email de ese profesional.</div>'; return; }
+  const semanal = document.getElementById('gestAbrirTipo')?.value === 'semanal';
+  const motivo = (document.getElementById('gestAbrirMotivo')?.value||'').trim() || null;
+  const dow = new Date(gestionSlotCons.fecha+'T00:00:00').getDay();
+  try{
+    const u = await usuarioActualCons();
+    const { error } = await supa.from('aperturas_agenda').insert({
+      area: CONS_AREA, profesional_email: email, practica_codigo: null,
+      fecha_desde: gestionSlotCons.fecha, fecha_hasta: semanal ? '2099-12-31' : gestionSlotCons.fecha,
+      hora_desde: gestionSlotCons.horaIni, hora_hasta: gestionSlotCons.horaFin,
+      recurrente: semanal, dia_semana: semanal ? dow : null,
+      motivo, creado_por_email: u.email, creado_por_nombre: u.nombre
+    });
+    if(error){ alert('No se pudo abrir: '+error.message); return; }
+    closeModal('modalGestion');
+    await refresh();
+  }catch(e){ alert('Error: '+(e.message||e)); }
+}
+
+async function quitarAperturaCons(id){
+  if(!confirm('¿Quitar esta apertura? El horario vuelve a quedar cerrado.')) return;
+  try{
+    const { error } = await supa.from('aperturas_agenda').update({ activo:false }).eq('id', id);
+    if(error){ alert('No se pudo: '+error.message); return; }
+    closeModal('modalGestion');
+    await refresh();
+  }catch(e){ alert('Error: '+(e.message||e)); }
+}
 /* ════════════════ FIN MODO GESTIÓN ════════════════ */
 
 // =============================================
@@ -1092,7 +1206,7 @@ async function refresh() {
   showLoading();
   try {
     const { from, to } = rangoVisible();
-    await Promise.all([loadFeriados(from,to), loadTurnos(from,to)]);
+    await Promise.all([loadFeriados(from,to), loadTurnos(from,to), cargarAperturasCons()]);
     await Promise.all([loadSesionesDeTurnos(), loadTurnosDeTratamientos(), loadEvolucionesDeTurnos()]);
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
@@ -1303,7 +1417,9 @@ function renderWeek(container) {
       const diaNumero = idx+1;
       const iso = toISODate(d);
       if (feriadosMap.has(iso)) { cells.push(`<div class="grid-cell is-feriado"><div class="feriado-label">Feriado</div></div>`); return; }
-      const bloqueo = esBloqueoFijo(diaNumero, h);
+      const fijo = esBloqueoFijo(diaNumero, h);
+      const apsAqui = aperturasConsEn(iso, h);
+      const bloqueo = (fijo && apsAqui.length === 0) ? fijo : null;
       if (bloqueo) {
         const gest = (modoGestion && esAdminGeneral());
         cells.push(`<div class="grid-cell is-bloqueo ${gest?'gest-fijo':''}" ${gest?`data-fecha="${iso}" data-hora="${h}"`:''}><div class="bloqueo-label">${bloqueo}</div></div>`);
@@ -1340,6 +1456,20 @@ function renderWeek(container) {
   // Modo gestión: horarios fijos (CERRADO/ALMUERZO) también responden (muestran qué son)
   container.querySelectorAll('.grid-cell.gest-fijo').forEach(c => {
     c.addEventListener('click', () => abrirGestionSlotCons(c.dataset.fecha, parseInt(c.dataset.hora,10)));
+  });
+  // Marcar horarios ABIERTOS a mano (apertura sobre un horario que normalmente estaría cerrado)
+  container.querySelectorAll('.grid-cell.is-libre').forEach(c => {
+    const h = parseInt(c.dataset.hora,10);
+    const f = new Date(c.dataset.fecha+'T00:00:00');
+    const dn = f.getDay()===0 ? 7 : f.getDay();
+    if (!esBloqueoFijo(dn, h)) return; // solo los que normalmente estarían cerrados
+    const profs = profesAbiertosEn(c.dataset.fecha, h);
+    if (!profs.length) return;
+    const chip = document.createElement('div');
+    chip.className = 'slot-abierto-chip';
+    chip.textContent = '🔓 ' + profs.join(', ');
+    chip.title = 'Horario abierto a mano';
+    c.insertBefore(chip, c.firstChild);
   });
   container.querySelectorAll('.turno').forEach(el => {
     el.addEventListener('click', e => {
@@ -1570,6 +1700,8 @@ function abrirModalConSlots(slots) {
       dispProfs = profesionalesParaPracticaEn(s.diaNumero, s.hora, practicaFiltro, s.fecha);
     } else {
       dispProfs = disponiblesEn(s.diaNumero, s.hora).map(d => d.profesional);
+      // Sumar profes habilitados por apertura (Modo gestión) en esa fecha
+      profesAbiertosEn(s.fecha, s.hora).forEach(p => { if (!dispProfs.includes(p)) dispProfs.push(p); });
     }
     return {
       ...s,
@@ -1647,6 +1779,8 @@ function recalcularPracticaComun() {
   let comun = null;
   for (const s of slotsForm) {
     const ps = new Set(DISPONIBILIDAD[s.profesional]?.[s.diaNumero]?.[s.hora] || []);
+    // Apertura (Modo gestión): el profe puede dar sus prácticas habituales en ese horario abierto
+    if (aperturaConsProfEn(s.fecha, s.hora, s.profesional)) practicasHabitualesDe(s.profesional).forEach(pr => ps.add(pr));
     comun = comun === null ? ps : new Set([...comun].filter(x => ps.has(x)));
     if (comun.size === 0) break;
   }
@@ -1976,10 +2110,11 @@ function validarUnSlot(slot, datosForm) {
     const fechaTxt = slot.fecha.split('-').reverse().join('/');
     return { ok:false, errores:[`${fechaTxt} ${pad(slot.hora)}:00 ya pasó. No se pueden cargar turnos en el pasado.`] };
   }
-  if (esBloqueoFijo(slot.diaNumero, slot.hora)) return { ok:false, errores:[`${slot.fecha} ${pad(slot.hora)}:00 está cerrado.`] };
+  if (esBloqueoFijo(slot.diaNumero, slot.hora) && !aperturaConsProfEn(slot.fecha, slot.hora, profesional)) return { ok:false, errores:[`${slot.fecha} ${pad(slot.hora)}:00 está cerrado.`] };
 
   const practicasDisp = DISPONIBILIDAD[profesional]?.[slot.diaNumero]?.[slot.hora] || [];
-  if (!practicasDisp.includes(practica)) return { ok:false, errores:[`${profesional} no atiende ${practica} el ${slot.fecha} a las ${pad(slot.hora)}:00.`] };
+  const habilitadoApertura = aperturaConsProfEn(slot.fecha, slot.hora, profesional) && practicasHabitualesDe(profesional).includes(practica);
+  if (!practicasDisp.includes(practica) && !habilitadoApertura) return { ok:false, errores:[`${profesional} no atiende ${practica} el ${slot.fecha} a las ${pad(slot.hora)}:00.`] };
 
   const slotTurnos = turnos.filter(t => t.fecha===slot.fecha && parseInt(t.hora_inicio.slice(0,2),10)===slot.hora);
   const delProf = slotTurnos.filter(t => t.profesional===profesional);
