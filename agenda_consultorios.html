@@ -70,9 +70,10 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .subslot.sub-free.esp{background:#f5eefc;border-color:#cdb1ec;color:#7a52b3}
 .subslot.sub-free.esp:hover{background:#eee0fb;border-color:#b48fe0}
 .grid-cell.is-libre.has-sub::before{display:none}
-.grid-cell.slot-osteo{cursor:default}
+.grid-cell.slot-osteo{cursor:default;display:flex;flex-direction:column;gap:4px}
 .grid-cell.slot-osteo:hover{background:transparent}
 .grid-cell.slot-osteo::before{display:none}
+.grid-cell.slot-osteo .turno{flex:1;justify-content:flex-start}
 /* ===== COMPARTIR DISPONIBLES ===== */
 .cs-esp-btns{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 18px}
 .cs-esp{padding:9px 14px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg-elev);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;transition:all .12s}
@@ -1077,7 +1078,7 @@ async function cargarAperturasCons(){
       .eq('area', CONS_AREA).eq('activo', true).gte('fecha_hasta', hoy);
     if(error) throw error;
     aperturasCons = data || [];
-  }catch(e){ console.warn('No se pudieron cargar aperturas:', e); aperturasCons = []; }
+  }catch(e){ console.warn('No se pudieron cargar aperturas:', e?.message || e?.code || JSON.stringify(e)); aperturasCons = []; }
 }
 function _hMinCons(hhmm){ const p=String(hhmm).split(':'); return (parseInt(p[0],10)||0)*60 + (parseInt(p[1],10)||0); }
 function aperturaConsAplica(a, fechaIso, hora){
@@ -1753,13 +1754,19 @@ function esSobreTurnoCons(t) {
   return t.estado === 'SOBRETURNO' || (t.observaciones || '').includes('[REHAB]');
 }
 
-// ¿Hay un turno de especialidad (Osteo/Masaje) que bloquea el casillero entero?
-// Regla: si hay osteo/masaje, ocupa todo el turnero (no se divide en Cons 1/2/Rehab),
-// EXCEPTO martes y jueves a las 19h, donde Jime (Osteo) convive con Bruno (Fisio).
+// ¿Hay un turno INDIVIDUAL (Osteo, Masaje, DLM, Punción Seca, Terap. Manual) que
+// ocupa el casillero entero? Esas prácticas son exclusivas: un paciente por box,
+// se muestran como UN solo cuadrante (sin Cons 1/2 ni rehab) y no dejan reservar
+// otra cosa ahí.
+// EXCEPCIÓN: martes y jueves a las 19h, si lo único individual es Osteo/Masaje,
+// convive con la Fisio de Bruno (Jime atiende osteo en su lugar aparte).
 function osteoBloqueaSlot(slotTurnos, diaNumero, h) {
+  const individuales = slotTurnos.filter(t =>
+    !esSobreTurnoCons(t) && (reglaDe(t.practica_codigo)?.modalidad === 'INDIVIDUAL'));
+  if (individuales.length === 0) return false;
   const esMarJue19 = (diaNumero === 2 || diaNumero === 4) && h === 19;
-  if (esMarJue19) return false;
-  return slotTurnos.some(t => !esSobreTurnoCons(t) && esEspecialidadCons(t.practica_codigo));
+  if (esMarJue19 && individuales.every(t => esEspecialidadCons(t.practica_codigo))) return false;
+  return true;
 }
 
 // Arma el casillero dividido: Consultorio 1 · Consultorio 2 · Área Rehabilitación Física
