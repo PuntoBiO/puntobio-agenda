@@ -641,10 +641,12 @@ function fmtRango(){
    CONTROL DE ROL: solo admin_general puede cargar turnos en el pasado
    ════════════════════════════════════════════════════════════════ */
 let usuarioRol = null;
+let miEmailBio = '';
 async function cargarRolUsuario() {
   try {
     const { data: { session } } = await sb.auth.getSession();
-    if (!session) { usuarioRol = null; return; }
+    if (!session) { usuarioRol = null; miEmailBio = ''; return; }
+    miEmailBio = (session.user?.email || '').trim().toLowerCase();
     const { data: persona } = await sb
       .from('personas')
       .select('rol_principal')
@@ -657,6 +659,14 @@ async function cargarRolUsuario() {
   }
 }
 function esAdminGeneral() { return usuarioRol === 'admin_general'; }
+// Código corto del profesional logueado (BRUNO/MALE/LU/JIME)
+function miCodigoBio() { return EMAIL_TO_CODE[miEmailBio] || null; }
+// Emails que ven SOLO lo suyo (Bruno, Male, Vero). Admin/administrativas ven todo.
+const EMAILS_SOLO_SUYO_BIO = ['brunitovelez99@gmail.com','loz.magdalena@gmail.com','veronicasandler@hotmail.com'];
+function soloVeLoSuyo() {
+  if (esAdminGeneral()) return false;
+  return EMAILS_SOLO_SUYO_BIO.includes(miEmailBio) && !!miCodigoBio();
+}
 // Devuelve true si se puede continuar (no es pasado, o es admin y confirmó)
 function validarSlotPasado(fecha, horaCero) {
   const ahora = new Date();
@@ -761,9 +771,11 @@ function tipoSlot(fecha, diaNum, horaCero){
    ════════════════════════════════════════════════════════════════ */
 function render(){
   const grid = document.getElementById('agenda');
+  const soloMio = soloVeLoSuyo();
+  if (soloMio) filtroProf = miCodigoBio();           // profesional ve solo lo suyo (cubre vista mes)
   if (vistaActual === 'mes') { renderMes(grid); return; }
   grid.className = 'agenda-grid';
-  filtroProf = document.getElementById('filtro-prof').value;
+  filtroProf = soloMio ? miCodigoBio() : document.getElementById('filtro-prof').value;
   grid.innerHTML = '';
   const dias = diasSemana();
   const hoyStr = fmtFecha(new Date());
@@ -1864,6 +1876,10 @@ async function iniciarRealtime() {
   await cargarRolUsuario();
   const btnG = document.getElementById('btn-modo-gestion');
   if (btnG && esAdminGeneral()) btnG.style.display = 'inline-flex';
+  // Profesional que ve solo lo suyo: ocultar el filtro de profesional (queda fijo en él)
+  if (soloVeLoSuyo()) {
+    const fp = document.getElementById('filtro-prof'); if (fp) (fp.closest('label') || fp).style.display = 'none';
+  }
 
   // BLOQUEOS · cargar al arranque + auto-refresh por realtime
   if (window.Bloqueos) {

@@ -954,6 +954,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     await cargarRolUsuario();
     const _btnMG = document.getElementById('btnModoGestion');
     if (_btnMG && esAdminGeneral()){ _btnMG.style.display = 'inline-flex'; _btnMG.addEventListener('click', toggleModoGestion); }
+    // Profesionales que ven solo lo suyo: ocultar controles de gestión/carga
+    if (soloVeLoSuyo()) {
+      const fp = document.getElementById('filterProfesional'); if (fp && fp.closest('label')) fp.closest('label').style.display = 'none';
+      const mt = document.getElementById('multiToggle'); if (mt) mt.style.display = 'none';
+      const bc = document.getElementById('btnCompartirCons'); if (bc) bc.style.display = 'none';
+      const pf = document.getElementById('practicaFilter'); if (pf) pf.style.display = 'none';
+    }
     await Promise.all([loadPersonas(), refresh()]);
     iniciarRealtime();
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
@@ -985,6 +992,16 @@ async function cargarRolUsuario() {
   }
 }
 function esAdminGeneral() { return usuarioRol === 'admin_general'; }
+// Nombre corto del profesional logueado (Jime/Bruno/Male/Vero/Lu)
+function nombreProfeLogueado() { return nombreCortoEmail(USUARIO_FISIO?.email); }
+// Emails de profesionales que ven SOLO sus propios turnos (no toda la agenda).
+// Admin_general (Jime, Lu) y administrativas (Pau, Ale) NO están acá → ven todo.
+const EMAILS_SOLO_SUYO = ['brunitovelez99@gmail.com','loz.magdalena@gmail.com','veronicasandler@hotmail.com'];
+function soloVeLoSuyo() {
+  if (esAdminGeneral()) return false;
+  const e = (USUARIO_FISIO?.email || '').toLowerCase();
+  return EMAILS_SOLO_SUYO.includes(e);
+}
 // Devuelve true si se puede continuar (no es pasado, o es admin y confirmó)
 function validarSlotPasado(fecha, hora) {
   const ahora = new Date();
@@ -1510,8 +1527,11 @@ function isSlotSelected(fecha, hora) { return slotsSel.some(s => s.fecha === fec
 function renderWeek(container) {
   const inicio = lunesDe(anchorDate);
   const dias = Array.from({length:5}, (_,i) => addDays(inicio,i));
+  const soloMio = soloVeLoSuyo();
+  const miNombre = nombreProfeLogueado();
   const profFiltro = document.getElementById('filterProfesional').value;
-  const turnosFil = profFiltro ? turnos.filter(t => t.profesional===profFiltro) : turnos;
+  const turnosFil = soloMio ? turnos.filter(t => t.profesional === miNombre)
+                            : (profFiltro ? turnos.filter(t => t.profesional===profFiltro) : turnos);
 
   const cells = [`<div class="grid-cell grid-header"></div>`];
   dias.forEach(d => {
@@ -1536,6 +1556,12 @@ function renderWeek(container) {
         return;
       }
       const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
+      // Vista "solo lo mío" (Bruno/Male/etc.): muestra SOLO sus turnos, sin división
+      // ni lugares libres, y no permite reservar (la celda no es is-libre).
+      if (soloMio) {
+        cells.push(`<div class="grid-cell vista-mia" data-fecha="${iso}" data-hora="${h}">${slotTurnos.map(renderTurno).join('')}</div>`);
+        return;
+      }
       const selCls = isSlotSelected(iso, h) ? 'is-multi-sel' : '';
       // Si hay práctica filtrada, atenuar celdas donde nadie atiende esa práctica (considerando turnos existentes)
       let noDispCls = '';
@@ -1820,7 +1846,7 @@ function renderMonth(container) {
   const finSemana = addDays(lunesDe(ultimo), 6);
   const totalDias = Math.round((finSemana - inicio) / 86400000) + 1;
   const isoP = toISODate(primero), isoU = toISODate(ultimo);
-  const profFiltro = document.getElementById('filterProfesional').value;
+  const profFiltro = soloVeLoSuyo() ? nombreProfeLogueado() : document.getElementById('filterProfesional').value;
 
   // ===== Datos del mes (días del mes, sin cancelados, respetando filtro de profe) =====
   const delMes = turnos.filter(t =>
