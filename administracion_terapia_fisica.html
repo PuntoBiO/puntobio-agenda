@@ -474,7 +474,9 @@
         </div>
         <div class="form-group cp-campo-plan">
           <label>Aplicar desde</label>
-          <select id="cpAplicaDesde" onchange="cpRecalcular()"></select>
+          <select id="cpAplicaDesde" onchange="cpAplicaDesdeChange()"></select>
+          <input type="date" id="cpAplicaDesdeCustom" style="display:none; margin-top:6px;" onchange="cpRecalcular()">
+          <span id="cpAplicaDesdeNota" style="display:none; font-size:11px; color:#b45309; margin-top:3px;">✏️ Fecha libre (modo corrección). Revisá que el proporcional sea el correcto.</span>
         </div>
         <input type="hidden" id="cpFecha">
       </div>
@@ -2669,16 +2671,27 @@ window.abrirCambioPlan = () => {
     planesUnicos
       .map(pl => `<option value="${pl}">${pl}${tarifario[pl] ? ` — ${fmt$(tarifario[pl].valor_lista)}` : ''}${pl === i.plan ? ' (actual)' : ''}</option>`).join('');
 
-  // Casilla "Aplicar desde": dos opciones armadas sobre el PRÓXIMO VENCIMIENTO del alumno.
-  // Opción 1 = próximo vencimiento (este mes si todavía no venció). Opción 2 = el mes siguiente.
+  // Casilla "Aplicar desde": opciones armadas sobre el PRÓXIMO VENCIMIENTO del alumno,
+  // más el MES ACTUAL (si su día ya venció este mes) y una opción de FECHA LIBRE (corrección).
   const _dvenc = parseInt(i.dia_vencimiento, 10) || 1;
   const _v1 = cpProxFechaConDia(HOY, _dvenc);
   const _ult2 = new Date(_v1.getFullYear(), _v1.getMonth() + 2, 0).getDate();
   const _v2 = new Date(_v1.getFullYear(), _v1.getMonth() + 1, Math.min(_dvenc, _ult2));
   const _mesDe = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  $('#cpAplicaDesde').innerHTML =
+  // Mes actual: por si el día de vencimiento de este mes YA pasó y igual hay que aplicar desde este mes.
+  const _ultMesAct = new Date(HOY.getFullYear(), HOY.getMonth() + 1, 0).getDate();
+  const _v0 = new Date(HOY.getFullYear(), HOY.getMonth(), Math.min(_dvenc, _ultMesAct));
+  let _optsAplica = '';
+  if (_mesDe(_v0) < _mesDe(_v1)) {
+    _optsAplica += `<option value="${_mesDe(_v0)}|${_v0.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v0)} — ${nombreMes(_mesDe(_v0))} (mes actual)</option>`;
+  }
+  _optsAplica +=
     `<option value="${_mesDe(_v1)}|${_v1.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v1)} — ${nombreMes(_mesDe(_v1))} (su próximo vencimiento)</option>` +
-    `<option value="${_mesDe(_v2)}|${_v2.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v2)} — ${nombreMes(_mesDe(_v2))}</option>`;
+    `<option value="${_mesDe(_v2)}|${_v2.toISOString().split('T')[0]}">${cpFmtDiaCorto(_v2)} — ${nombreMes(_mesDe(_v2))}</option>` +
+    `<option value="__custom__">✏️ Otro mes / fecha (elegir)…</option>`;
+  $('#cpAplicaDesde').innerHTML = _optsAplica;
+  if ($('#cpAplicaDesdeCustom')) { $('#cpAplicaDesdeCustom').value = ''; $('#cpAplicaDesdeCustom').style.display = 'none'; }
+  if ($('#cpAplicaDesdeNota')) $('#cpAplicaDesdeNota').style.display = 'none';
   $('#cpFecha').value = _v1.toISOString().split('T')[0];
   $('#cpDiaNuevo').value = '';
   $('#cpImporte').value = 0;
@@ -2696,6 +2709,20 @@ window.abrirCambioPlan = () => {
   cpCargarDiasFijos(p.id);             // carga los días fijos de ESTE alumno (para el puente)
   cpSetModo('fecha');                 // arranca en "Solo fecha" (lo más usado)
   $('#modalCambioPlan').classList.add('activo');
+};
+
+// Muestra/oculta el calendario libre cuando se elige "Otro mes / fecha" en "Aplicar desde".
+window.cpAplicaDesdeChange = () => {
+  const sel = $('#cpAplicaDesde');
+  const custom = $('#cpAplicaDesdeCustom');
+  const nota = $('#cpAplicaDesdeNota');
+  const esCustom = !!(sel && sel.value === '__custom__');
+  if (custom) {
+    custom.style.display = esCustom ? '' : 'none';
+    if (esCustom && !custom.value) custom.value = HOY.toISOString().split('T')[0];
+  }
+  if (nota) nota.style.display = esCustom ? '' : 'none';
+  cpRecalcular();
 };
 
 // Carga los días fijos (nombres de día: Lunes, Miércoles...) del alumno, leyendo turno_alumnos.
@@ -2829,7 +2856,11 @@ function cpRecalcular() {
   // El mes desde el que ARRANCA el plan nuevo lo manda la casilla "Aplicar desde",
   // que se arma sobre el PRÓXIMO VENCIMIENTO del alumno (no sobre la fecha de hoy).
   // value = "YYYY-MM|YYYY-MM-DD"  →  mes que aplica | fecha efectiva.
-  const aplicaVal = $('#cpAplicaDesde') ? $('#cpAplicaDesde').value : '';
+  let aplicaVal = $('#cpAplicaDesde') ? $('#cpAplicaDesde').value : '';
+  if (aplicaVal === '__custom__') {
+    const _cd = $('#cpAplicaDesdeCustom') ? $('#cpAplicaDesdeCustom').value : '';
+    aplicaVal = _cd ? `${_cd.slice(0, 7)}|${_cd}` : '';
+  }
   const partsAplica = aplicaVal.split('|');
   const mesQueViene = partsAplica[0] || mesSiguienteStr(HOY);
   const fechaIso = partsAplica[1] || HOY.toISOString().split('T')[0];
