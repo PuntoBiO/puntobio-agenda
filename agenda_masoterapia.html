@@ -54,6 +54,13 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 /* El turno ocupa TODO el casillero (turnos únicos de 1 h) */
 .grid-cell.is-libre{display:flex;flex-direction:column;gap:3px}
 .grid-cell.is-libre .turno{flex:1;display:flex;flex-direction:column;justify-content:center;margin-bottom:0}
+/* Modo gestión: celda CERRADA clickeable para abrir */
+.grid-cell.is-bloqueo.gest-cerrado{cursor:pointer}
+.grid-cell.is-bloqueo.gest-cerrado:hover{background:#e8f5ee}
+#btnModoGestion.is-on{background:#1f2937;color:#fff;border-color:#1f2937}
+/* Cierres puestos a mano (Bloqueos) = mismo gris cerrado, visible */
+.grid-cell.is-libre.slot-bloqueado{background:var(--bloqueo-bg);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)}
+.grid-cell.is-libre.slot-bloqueado.is-vacia::after{content:"CERRADO";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--bloqueo-text);letter-spacing:.04em;pointer-events:none}
 .grid-cell.is-libre::before{content:"+";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:20px;color:var(--text-muted);opacity:0;transition:opacity .1s}
 .grid-cell.is-libre:hover::before{opacity:.6}
 .grid-cell.is-multi-sel{background:var(--accent-bg)!important;box-shadow:inset 0 0 0 2px var(--accent)}
@@ -211,6 +218,7 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
       <button class="nav-btn" id="prevBtn">←</button>
       <button class="nav-btn" id="todayBtn">HOY</button>
       <button class="nav-btn" id="nextBtn">→</button>
+      <button class="nav-btn" id="btnModoGestion" style="display:none">🛠️ Modo gestión: OFF</button>
     </div>
     <div class="filters">
       <label>Profesional:
@@ -232,7 +240,24 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
     <button class="chip c-masajes" data-practica="MASAJES_CERO"><span class="chip-dot" style="background:var(--c-masajes)"></span>Sin cargo</button>
   </div>
 
+  <div id="gestionBanner" style="display:none;margin:0 0 10px;padding:9px 14px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;font-size:12.5px;font-weight:600">🛠️ Modo gestión activo · tocá un horario para <b>cerrarlo</b>, <b>reabrirlo</b> o <b>abrirlo</b>. Apagalo para volver a reservar turnos normalmente.</div>
+
   <div id="agendaContainer"><div class="loading-state">Cargando turnos…</div></div>
+</div>
+
+<!-- MODAL GESTIÓN DE HORARIO (solo admin) -->
+<div class="modal-overlay" id="modalGestion">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <div class="modal-title">🛠️ Gestionar horario</div>
+      <button class="modal-close" data-close="modalGestion">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="gestionInfo" style="background:#f1fcf5;border-left:3px solid var(--accent);padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:10px"></div>
+      <div id="gestionAlerta"></div>
+      <div id="gestionAcciones"></div>
+    </div>
+  </div>
 </div>
 
 <div class="multi-bar" id="multiBar">
@@ -487,7 +512,8 @@ function esBloqueoFijo(diaNumero, hora, fechaIso) {
   // Si Vero atiende ese día/hora → no hay bloqueo (libre).
   // Si no atiende → CERRADO (o ALMUERZO para 13:00).
   // EXCEPCIÓN: si hay una apertura extra para esa fecha puntual → libre.
-  if (profesExtraEn(fechaIso, hora).length > 0) return null;   // apertura puntual → no bloqueo
+  if (profesExtraEn(fechaIso, hora).length > 0) return null;   // apertura puntual (hardcode) → no bloqueo
+  if (typeof aperturaTablaEn === 'function' && aperturaTablaEn(fechaIso, hora)) return null; // apertura desde Modo gestión → no bloqueo
   const veroDispDia = DISPONIBILIDAD.Vero?.[diaNumero] || {};
   if (veroDispDia[hora]) return null;          // Vero atiende → no bloqueo
   if (hora === 13) return 'ALMUERZO';          // todos almuerzan
@@ -584,6 +610,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     initNuevoForm();
     await cargarRolUsuario();
+    const _btnMG = document.getElementById('btnModoGestion');
+    if (_btnMG && esAdminGeneral()){ _btnMG.style.display = 'inline-flex'; _btnMG.addEventListener('click', toggleModoGestion); }
     await Promise.all([loadPersonas(), refresh()]);
     iniciarRealtime();
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
@@ -702,7 +730,7 @@ async function refresh() {
   showLoading();
   try {
     const { from, to } = rangoVisible();
-    await Promise.all([loadFeriados(from,to), loadTurnos(from,to)]);
+    await Promise.all([loadFeriados(from,to), loadTurnos(from,to), cargarAperturasMaso()]);
     await calcularOrdinalesYTratamientos();
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
@@ -929,7 +957,11 @@ function renderWeek(container) {
       const iso = toISODate(d);
       if (feriadosMap.has(iso)) { cells.push(`<div class="grid-cell is-feriado"><div class="feriado-label">Feriado</div></div>`); return; }
       const bloqueo = esBloqueoFijo(diaNumero, h, iso);
-      if (bloqueo) { cells.push(`<div class="grid-cell is-bloqueo"><div class="bloqueo-label">${bloqueo}</div></div>`); return; }
+      if (bloqueo) {
+        const gest = (modoGestion && esAdminGeneral() && bloqueo === 'CERRADO');
+        cells.push(`<div class="grid-cell is-bloqueo ${gest?'gest-cerrado':''}" ${gest?`data-fecha="${iso}" data-hora="${h}"`:''}><div class="bloqueo-label">${bloqueo}</div></div>`);
+        return;
+      }
       const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
       const turnosHTML = slotTurnos.map(renderTurno).join('');
       const selCls = isSlotSelected(iso, h) ? 'is-multi-sel' : '';
@@ -948,8 +980,13 @@ function renderWeek(container) {
   container.querySelectorAll('.grid-cell.is-libre').forEach(c => {
     c.addEventListener('click', e => {
       if (e.target.closest('.turno')) return;
+      if (modoGestion && esAdminGeneral()) { abrirGestionSlotMaso(c.dataset.fecha, parseInt(c.dataset.hora,10)); return; }
       onCeldaClick(c.dataset.fecha, parseInt(c.dataset.hora,10));
     });
+  });
+  // Modo gestión: celdas CERRADAS clickeables para ABRIR
+  container.querySelectorAll('.grid-cell.gest-cerrado').forEach(c => {
+    c.addEventListener('click', () => abrirGestionSlotMaso(c.dataset.fecha, parseInt(c.dataset.hora,10)));
   });
   container.querySelectorAll('.turno').forEach(el => {
     el.addEventListener('click', e => { e.stopPropagation(); onTurnoClick(el.dataset.turnoId); });
@@ -967,6 +1004,7 @@ function renderWeek(container) {
       if (bloq) {
         c.classList.add('slot-bloqueado');
         c.setAttribute('data-bloqueo-motivo', '🚫 ' + Bloqueos.rotuloCorto(bloq));
+        c.title = bloq.motivo || Bloqueos.rotuloCorto(bloq);
       }
     });
   }
@@ -1932,6 +1970,217 @@ function rangoVisible() {
 function escapeHtml(s) {
   return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+/* ════════════════════════════════════════════════════════════════
+   MODO GESTIÓN · Masoterapia (cerrar / reabrir / abrir) · solo admin
+   Reutiliza las tablas bloqueos_agenda y aperturas_agenda (area=MASOTERAPIA).
+   Agenda de Vero únicamente → no se elige ni se cambia profesional.
+   ════════════════════════════════════════════════════════════════ */
+let modoGestion = false;
+let aperturasMaso = [];
+let gestionSlotMaso = null;
+const MASO_AREA = 'MASOTERAPIA';
+
+function hMinMaso(hhmm){ const p = String(hhmm).split(':'); return (parseInt(p[0],10)||0)*60 + (parseInt(p[1],10)||0); }
+
+async function cargarAperturasMaso(){
+  try{
+    const hoy = new Date().toISOString().substring(0,10);
+    const { data, error } = await supa.from('aperturas_agenda').select('*')
+      .eq('area', MASO_AREA).eq('activo', true).gte('fecha_hasta', hoy);
+    if (error) throw error;
+    aperturasMaso = data || [];
+  }catch(e){ console.warn('No se pudieron cargar aperturas:', e); aperturasMaso = []; }
+}
+function aperturaMasoAplica(a, fechaIso, hora){
+  const horaIni = pad(hora)+':00';
+  if (a.recurrente){
+    if (a.fecha_desde && fechaIso < a.fecha_desde) return false;
+    if (a.fecha_hasta && fechaIso > a.fecha_hasta) return false;
+    if (a.dia_semana != null){
+      const dow = new Date(fechaIso+'T00:00:00').getDay();
+      if (Number(a.dia_semana) !== dow) return false;
+    }
+  } else {
+    if (!(fechaIso >= a.fecha_desde && fechaIso <= a.fecha_hasta)) return false;
+  }
+  if (a.hora_desde == null) return true;
+  const m = hMinMaso(horaIni), mFin = m + 60;
+  return hMinMaso(a.hora_desde) < mFin && hMinMaso(a.hora_hasta || a.hora_desde) > m;
+}
+function aperturaTablaEn(fechaIso, hora){
+  return aperturasMaso.find(a => aperturaMasoAplica(a, fechaIso, hora)) || null;
+}
+
+async function usuarioActualMaso(){
+  try{
+    const { data:{ session } } = await supa.auth.getSession();
+    const email = session?.user?.email || '';
+    let nombre = email;
+    if (session){
+      const { data:p } = await supa.from('personas').select('nombre').eq('auth_user_id', session.user.id).maybeSingle();
+      if (p?.nombre) nombre = p.nombre;
+    }
+    return { email, nombre };
+  }catch(e){ return { email:'', nombre:'' }; }
+}
+
+function toggleModoGestion(){
+  if (!esAdminGeneral()) return;
+  modoGestion = !modoGestion;
+  const btn = document.getElementById('btnModoGestion');
+  if (btn){ btn.textContent = '🛠️ Modo gestión: ' + (modoGestion ? 'ON' : 'OFF'); btn.classList.toggle('is-on', modoGestion); }
+  const banner = document.getElementById('gestionBanner');
+  if (banner) banner.style.display = modoGestion ? 'block' : 'none';
+  if (modoMulti){ modoMulti = false; document.body.classList.remove('is-multi-mode'); document.getElementById('multiToggle')?.classList.remove('is-on'); slotsSel = []; refreshMultiBar(); }
+  renderGrid();
+}
+
+function _cierresEnSlotMaso(fecha, horaIni, horaFin){
+  if (!window.Bloqueos) return [];
+  if (typeof Bloqueos.todosLosQueAplican === 'function'){
+    return Bloqueos.todosLosQueAplican(MASO_AREA, fecha, horaIni, horaFin, null, null) || [];
+  }
+  const b = Bloqueos.queAplica(MASO_AREA, fecha, horaIni, horaFin, null, null);
+  return b ? [b] : [];
+}
+
+function abrirGestionSlotMaso(fecha, hora){
+  if (!esAdminGeneral()) return;
+  const horaIni = pad(hora)+':00', horaFin = pad(hora+1)+':00';
+  const f = new Date(fecha+'T00:00:00');
+  const diaNumero = f.getDay()===0 ? 7 : f.getDay();
+  const veroAtiende = !!(DISPONIBILIDAD.Vero?.[diaNumero]?.[hora]);
+  const esAlmuerzo = (hora === 13);
+  gestionSlotMaso = { fecha, hora, horaIni, horaFin };
+
+  const cierres = _cierresEnSlotMaso(fecha, horaIni, horaFin);
+  const aps = aperturasMaso.filter(a => aperturaMasoAplica(a, fecha, hora));
+
+  const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  const DIASEM = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  document.getElementById('gestionInfo').innerHTML =
+    `📅 <b>${DIASEM[f.getDay()]} ${f.getDate()} ${MESES[f.getMonth()]}</b> · 🕐 <b>${horaIni}–${horaFin}</b> · Masoterapia (Vero)`;
+  document.getElementById('gestionAlerta').innerHTML = '';
+
+  let html = '';
+  if (cierres.length){
+    html += `<div style="background:#fef2f2;border-left:3px solid #dc2626;color:#b91c1c;padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:13px;font-weight:600">🚫 Horario cerrado</div>`;
+    cierres.forEach(b => {
+      const perm = b.recurrente ? ' · permanente' : '';
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;color:var(--text)">${escapeHtml(b.motivo||'(sin motivo)')}<span style="color:var(--text-dim)">${perm}</span></div>
+        <button class="btn" style="background:#16a34a;color:#fff;border-color:#16a34a;white-space:nowrap" onclick="reabrirHorarioMaso(${b.id})">🔓 Reabrir</button>
+      </div>`;
+    });
+  }
+  if (aps.length){
+    html += `<div style="background:#ecfdf5;border-left:3px solid #16a34a;color:#166534;padding:8px 10px;border-radius:6px;margin:8px 0;font-size:13px;font-weight:600">🔓 Abierto a mano</div>`;
+    aps.forEach(a => {
+      const perm = a.recurrente ? ' · permanente' : '';
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;color:var(--text)">${escapeHtml(a.motivo||'Apertura manual')}<span style="color:var(--text-dim)">${perm}</span></div>
+        <button class="btn danger" style="white-space:nowrap" onclick="quitarAperturaMaso(${a.id})">Quitar</button>
+      </div>`;
+    });
+  }
+
+  const mostrarCerrar = veroAtiende && cierres.length === 0;
+  const mostrarAbrir  = !veroAtiende && !esAlmuerzo && cierres.length === 0 && aps.length === 0;
+
+  if (mostrarCerrar){
+    html += `<div style="margin-top:14px">
+      <label class="form-label" style="display:block;margin-bottom:6px">🔒 Cerrar este horario</label>
+      <select class="form-select" id="gestCerrarTipo" style="width:100%;margin-bottom:8px">
+        <option value="dia">Solo este día (${pad(f.getDate())}/${pad(f.getMonth()+1)})</option>
+        <option value="semanal">Todos los ${DIASEM[f.getDay()]} (permanente)</option>
+      </select>
+      <input class="form-input" id="gestCerrarMotivo" placeholder="Motivo (ej: Vero ausente)" style="width:100%;margin-bottom:8px">
+      <button class="btn danger" style="width:100%" onclick="cerrarHorarioMaso()">🔒 Cerrar horario</button>
+    </div>`;
+  } else if (mostrarAbrir){
+    html += `<div style="margin-top:14px">
+      <label class="form-label" style="display:block;margin-bottom:6px">🔓 Abrir este horario para Vero</label>
+      <select class="form-select" id="gestAbrirTipo" style="width:100%;margin-bottom:8px">
+        <option value="dia">Solo este día (${pad(f.getDate())}/${pad(f.getMonth()+1)})</option>
+        <option value="semanal">Todos los ${DIASEM[f.getDay()]} (permanente)</option>
+      </select>
+      <input class="form-input" id="gestAbrirMotivo" placeholder="Nota (opcional)" style="width:100%;margin-bottom:8px">
+      <button class="btn" style="width:100%;background:#16a34a;color:#fff;border-color:#16a34a" onclick="abrirHorarioMaso()">🔓 Abrir horario</button>
+    </div>`;
+  } else if (esAlmuerzo && cierres.length === 0 && aps.length === 0){
+    html += `<div style="margin-top:10px;font-size:12.5px;color:var(--text-dim)">Este horario es el almuerzo. Si querés habilitarlo, primero cambiá la disponibilidad fija.</div>`;
+  }
+
+  document.getElementById('gestionAcciones').innerHTML = html;
+  openModal('modalGestion');
+}
+
+async function cerrarHorarioMaso(){
+  if (!gestionSlotMaso) return;
+  const motivo = (document.getElementById('gestCerrarMotivo')?.value || '').trim();
+  if (!motivo){ document.getElementById('gestionAlerta').innerHTML = '<div style="color:#dc2626;font-size:12px;margin-bottom:6px">Poné un motivo.</div>'; return; }
+  const semanal = document.getElementById('gestCerrarTipo')?.value === 'semanal';
+  const dow = new Date(gestionSlotMaso.fecha+'T00:00:00').getDay();
+  try{
+    const u = await usuarioActualMaso();
+    const { error } = await supa.from('bloqueos_agenda').insert({
+      area: MASO_AREA, profesional_email: null, practica_codigo: null,
+      fecha_desde: gestionSlotMaso.fecha,
+      fecha_hasta: semanal ? '2099-12-31' : gestionSlotMaso.fecha,
+      hora_desde: gestionSlotMaso.horaIni, hora_hasta: gestionSlotMaso.horaFin,
+      recurrente: semanal, dia_semana: semanal ? dow : null,
+      motivo, creado_por_email: u.email, creado_por_nombre: u.nombre
+    });
+    if (error){ alert('No se pudo cerrar: ' + error.message); return; }
+    closeModal('modalGestion');
+    if (window.Bloqueos) await Bloqueos.refrescar();
+    await refresh();
+  }catch(e){ alert('Error: ' + (e.message||e)); }
+}
+
+async function abrirHorarioMaso(){
+  if (!gestionSlotMaso) return;
+  const semanal = document.getElementById('gestAbrirTipo')?.value === 'semanal';
+  const motivo = (document.getElementById('gestAbrirMotivo')?.value || '').trim() || null;
+  const dow = new Date(gestionSlotMaso.fecha+'T00:00:00').getDay();
+  try{
+    const u = await usuarioActualMaso();
+    const { error } = await supa.from('aperturas_agenda').insert({
+      area: MASO_AREA, profesional_email: 'veronicasandler@hotmail.com', practica_codigo: null,
+      fecha_desde: gestionSlotMaso.fecha,
+      fecha_hasta: semanal ? '2099-12-31' : gestionSlotMaso.fecha,
+      hora_desde: gestionSlotMaso.horaIni, hora_hasta: gestionSlotMaso.horaFin,
+      recurrente: semanal, dia_semana: semanal ? dow : null,
+      motivo, creado_por_email: u.email, creado_por_nombre: u.nombre
+    });
+    if (error){ alert('No se pudo abrir: ' + error.message); return; }
+    closeModal('modalGestion');
+    await refresh();
+  }catch(e){ alert('Error: ' + (e.message||e)); }
+}
+
+async function reabrirHorarioMaso(id){
+  if (!confirm('¿Reabrir este horario? Vuelve a quedar disponible para turnos.')) return;
+  try{
+    const { error } = await supa.from('bloqueos_agenda').update({ activo:false }).eq('id', id);
+    if (error){ alert('No se pudo: ' + error.message); return; }
+    closeModal('modalGestion');
+    if (window.Bloqueos) await Bloqueos.refrescar();
+    await refresh();
+  }catch(e){ alert('Error: ' + (e.message||e)); }
+}
+
+async function quitarAperturaMaso(id){
+  if (!confirm('¿Quitar esta apertura? El horario vuelve a quedar cerrado.')) return;
+  try{
+    const { error } = await supa.from('aperturas_agenda').update({ activo:false }).eq('id', id);
+    if (error){ alert('No se pudo: ' + error.message); return; }
+    closeModal('modalGestion');
+    await refresh();
+  }catch(e){ alert('Error: ' + (e.message||e)); }
+}
+/* ════════════════ FIN MODO GESTIÓN ════════════════ */
 
 /* ════════════════════════════════════════════════════════════════
    MÓDULO WHATSAPP TURNOS · Masoterapia (igual que BioLab/Consultorios)
