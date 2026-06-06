@@ -2866,9 +2866,9 @@ const ESPECIALIDADES_SHARE = [
   { key:'FISIO',   short:'Kinesiologia & Fisioterapia', label:'Kinesiologia & Fisioterapia', cod:'FISIO',         tipo:'consultorio' },
   { key:'REHAB',   short:'Rehabilitacion fisica',       label:'Rehabilitacion fisica',       cod:'FISIO',         tipo:'rehab' },
   { key:'OSTEO',   short:'Osteopatia',                  label:'Osteopatia',                  cod:'OSTEOPATIA',    tipo:'especialidad' },
-  { key:'DLM',     short:'DLM',                         label:'Drenaje Linfatico (DLM)',     cod:'DLM',           tipo:'consultorio' },
-  { key:'PUNCION', short:'Puncion Seca',                label:'Puncion Seca',                cod:'PUNCION_SECA',  tipo:'consultorio' },
-  { key:'SUELO',   short:'Suelo Pelvico',               label:'Suelo Pelvico',               cod:'SUELO_PELVICO', tipo:'consultorio' },
+  { key:'DLM',     short:'DLM',                         label:'Drenaje Linfatico (DLM)',     cod:'DLM',           tipo:'individual', profe:'Male'  },
+  { key:'PUNCION', short:'Puncion Seca',                label:'Puncion Seca',                cod:'PUNCION_SECA',  tipo:'individual', profe:'Bruno' },
+  { key:'SUELO',   short:'Suelo Pelvico',               label:'Suelo Pelvico',               cod:'SUELO_PELVICO', tipo:'rehab' },
 ];
 let espShareSel = 'FISIO';
 let semanasShare = 1;
@@ -2899,16 +2899,38 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
     if (bl.some(b => !b.profesional_email && !b.practica_codigo)) return false;
   }
   const slotTurnos = turnos.filter(t => t.fecha===fecha && parseInt(t.hora_inicio.slice(0,2),10)===hora && t.estado!=='CANCELADO');
-  const hayEspecialidad = slotTurnos.some(t => esEspecialidadCons(t.practica_codigo));
+  const hayEspecialidad = slotTurnos.some(t => esEspecialidadCons(t.practica_codigo)); // osteo / masaje
+  const vacioCompleto = slotTurnos.length === 0;
+
+  // OSTEOPATÍA / MASAJE (especialidad)
   if (esp.tipo === 'especialidad') {
-    if (slotTurnos.length > 0) return false;
-    return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0;
+    const esMarJue19 = (diaNumero === 2 || diaNumero === 4) && hora === 19;
+    if (esMarJue19 && esp.cod === 'OSTEOPATIA') return !hayEspecialidad; // Jime osteo convive con la fisio de Bruno
+    if (!vacioCompleto) return false;                                    // osteo es exclusivo (bloquea consultorio y viceversa)
+    return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0; // donde atiende Jime
   }
+
+  // Si hay osteo/masaje en el horario, bloquea todo lo de consultorio/rehab/individual
   if (hayEspecialidad) return false;
+
+  // PUNCIÓN SECA / DLM (individuales): casillero LIBRE COMPLETO + que atienda el profe
+  if (esp.tipo === 'individual') {
+    if (!vacioCompleto) return false;
+    return disponiblesEn(diaNumero, hora).some(d => d.profesional === esp.profe && d.practicas.includes(esp.cod));
+  }
+
+  // REHABILITACIÓN FÍSICA / SUELO PÉLVICO: lugar de rehab (sobreturno) libre + hay kine de fisio
   if (esp.tipo === 'rehab') {
     const hayProfFisio = disponiblesEn(diaNumero, hora).some(d => d.practicas.includes('FISIO'));
     const sobreUsados = slotTurnos.filter(esSobreTurnoCons).length;
     return hayProfFisio && sobreUsados === 0;
+  }
+
+  // FISIO (consultorio): SOLO el cupo de los 2 consultorios (sin contar el de rehab)
+  const regla = REGLAS_PRACTICA[esp.cod];
+  if (regla && regla.modalidad === 'COMPARTIDO') {
+    const normales = slotTurnos.filter(t => normPractica(t.practica_codigo) === esp.cod && !esSobreTurnoCons(t)).length;
+    if (normales >= (regla.cap_normal || 2)) return false;
   }
   return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0;
 }
@@ -3053,6 +3075,12 @@ async function dibujarShareCanvas(esp, semanas) {
     y += 4;
     if (draw) { ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W-PAD, y); ctx.stroke(); }
     y += 18;
+    ctx.font = '700 14px Arial, sans-serif';
+    if (draw) { ctx.fillStyle = '#1276a8'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillText('Nuestros turnos disponibles · ' + esp.label, W/2, y+13); }
+    y += 19;
+    ctx.font = '400 12px Arial, sans-serif';
+    if (draw) { ctx.fillStyle = '#7b8a99'; ctx.textAlign = 'center'; ctx.fillText(rango, W/2, y+11); }
+    y += 22;
     ctx.font = '600 13px Arial, sans-serif';
     if (draw) { ctx.fillStyle = '#5b6b7a'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillText('Consultá por estos horarios para anotarte 💪', W/2, y+12); }
     y += 26;
