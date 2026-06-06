@@ -31,6 +31,9 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 .nav-controls{display:flex;gap:4px}
 .nav-btn{background:var(--bg-elev);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:4px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;letter-spacing:.04em;transition:all .15s}
 .nav-btn:hover{background:var(--bg-elev-2);border-color:var(--accent)}
+#btnModoGestion.is-on{background:#1f2937;color:#fff;border-color:#1f2937}
+body.modo-gestion .grid-cell.is-libre{cursor:pointer}
+body.modo-gestion .grid-cell.is-libre:hover{outline:2px dashed #1e9fe0;outline-offset:-2px}
 .filters{display:flex;gap:12px;align-items:center}
 .filters label{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em}
 .filters select{background:var(--bg-elev);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:4px;font-family:inherit;font-size:12px;cursor:pointer}
@@ -321,6 +324,7 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
       <button class="nav-btn" id="prevBtn">←</button>
       <button class="nav-btn" id="todayBtn">HOY</button>
       <button class="nav-btn" id="nextBtn">→</button>
+      <button class="nav-btn" id="btnModoGestion" style="display:none">🛠️ Modo gestión: OFF</button>
     </div>
     <div class="filters">
       <label>Profesional:
@@ -348,6 +352,8 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
     <button class="chip c-osteo" data-practica="OSTEOPATIA"><span class="chip-dot" style="background:var(--c-osteo)"></span>Osteo</button>
     <button class="chip c-tm" data-practica="TERAP_MANUAL"><span class="chip-dot" style="background:var(--c-tm)"></span>Terap Manual</button>
   </div>
+
+  <div id="gestionBanner" style="display:none;margin:0 0 10px;padding:9px 14px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;font-size:12.5px;font-weight:600">🛠️ Modo gestión activo · tocá un horario para <b>cerrarlo</b> (todo o un profe) o <b>reabrirlo</b>. Apagalo para volver a reservar turnos normalmente.</div>
 
   <div id="agendaContainer"><div class="loading-state">Cargando turnos…</div></div>
 </div>
@@ -483,6 +489,20 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
     </div>
     <div class="modal-body" id="detalleBody">—</div>
     <div class="modal-footer" id="detalleFooter"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalGestion">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-header">
+      <div class="modal-title">🛠️ Gestionar horario</div>
+      <button class="modal-close" data-close="modalGestion">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="gestionInfo" style="background:#eff6ff;border-left:3px solid #1e9fe0;padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:10px"></div>
+      <div id="gestionAlerta"></div>
+      <div id="gestionAcciones"></div>
+    </div>
   </div>
 </div>
 
@@ -706,6 +726,8 @@ function nombreCortoEmail(email) {
   if (!email) return '';
   return EMAIL_A_NOMBRE[email.toLowerCase()] || email.split('@')[0];
 }
+// Inverso: nombre corto → email (para guardar cierres/aperturas por profesional)
+const NOMBRE_A_EMAIL = Object.fromEntries(Object.entries(EMAIL_A_NOMBRE).map(([em,nom]) => [nom, em]));
 // Arma el texto del cartel de bloqueo: "Jime · Osteopatía · motivo".
 // Ignora el motivo cuando está vacío o es "-".
 function etiquetaBloqueo(b) {
@@ -815,6 +837,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     initNuevoForm();
     await cargarRolUsuario();
+    const _btnMG = document.getElementById('btnModoGestion');
+    if (_btnMG && esAdminGeneral()){ _btnMG.style.display = 'inline-flex'; _btnMG.addEventListener('click', toggleModoGestion); }
     await Promise.all([loadPersonas(), refresh()]);
     iniciarRealtime();
   } catch (e) { showError(e.message||'Error iniciando'); console.error(e); }
@@ -909,6 +933,114 @@ function navigate(delta) {
   anchorDate = addDays(anchorDate, delta * (currentView==='week' ? 7 : 28));
   refresh();
 }
+
+/* ════════════════════════════════════════════════════════════════
+   MODO GESTIÓN · Consultorios (cerrar / cerrar por profe / reabrir)
+   Solo admin_general. Reutiliza bloqueos_agenda (area=CONSULTORIOS).
+   No abre horarios estructuralmente cerrados (eso es horario fijo).
+   ════════════════════════════════════════════════════════════════ */
+let modoGestion = false;
+let gestionSlotCons = null;
+const CONS_AREA = 'CONSULTORIOS';
+
+function toggleModoGestion(){
+  if(!esAdminGeneral()) return;
+  modoGestion = !modoGestion;
+  const btn = document.getElementById('btnModoGestion');
+  if(btn){ btn.textContent = '🛠️ Modo gestión: ' + (modoGestion?'ON':'OFF'); btn.classList.toggle('is-on', modoGestion); }
+  const banner = document.getElementById('gestionBanner');
+  if(banner) banner.style.display = modoGestion ? 'block' : 'none';
+  document.body.classList.toggle('modo-gestion', modoGestion);
+  if(modoMulti){ modoMulti=false; document.body.classList.remove('is-multi-mode'); document.getElementById('multiToggle')?.classList.remove('is-on'); slotsSel=[]; refreshMultiBar(); }
+  renderGrid();
+}
+
+async function usuarioActualCons(){
+  try{
+    const { data:{ session } } = await supa.auth.getSession();
+    const email = session?.user?.email || '';
+    const nombre = (USUARIO_FISIO && USUARIO_FISIO.nombre) || email;
+    return { email, nombre };
+  }catch(e){ return { email:'', nombre:'' }; }
+}
+
+function abrirGestionSlotCons(fecha, hora){
+  if(!esAdminGeneral()) return;
+  if(!window.Bloqueos){ alert('Bloqueos no disponible'); return; }
+  const horaIni = pad(hora)+':00', horaFin = pad(hora+1)+':00';
+  const f = new Date(fecha+'T00:00:00');
+  gestionSlotCons = { fecha, hora, horaIni, horaFin };
+  const cierres = (Bloqueos.todosLosQueAplican(CONS_AREA, fecha, horaIni, horaFin, null, null)) || [];
+  const MESES=['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  const DSEM=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  document.getElementById('gestionInfo').innerHTML = `📅 <b>${DSEM[f.getDay()]} ${f.getDate()} ${MESES[f.getMonth()]}</b> · 🕐 <b>${horaIni}–${horaFin}</b>`;
+  document.getElementById('gestionAlerta').innerHTML='';
+  let html='';
+  if(cierres.length){
+    html += `<div style="background:#fef2f2;border-left:3px solid #dc2626;color:#b91c1c;padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:13px;font-weight:600">🚫 Cierres activos en este horario</div>`;
+    cierres.forEach(b=>{
+      const quien = b.profesional_email ? nombreCortoEmail(b.profesional_email) : 'Todo el horario';
+      const perm = b.recurrente ? ' · permanente' : '';
+      const mot = (b.motivo||'').trim();
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;color:var(--text)"><b>${escapeHtml(quien)}</b>${(mot&&mot!=='-')?' · '+escapeHtml(mot):''}<span style="color:var(--text-dim)">${perm}</span></div>
+        <button class="btn" style="background:#16a34a;color:#fff;border-color:#16a34a;white-space:nowrap" onclick="reabrirHorarioCons(${b.id})">🔓 Reabrir</button>
+      </div>`;
+    });
+  }
+  const opcionesProf = PROFESIONALES.map(p=>`<option value="${p}">Solo ${p}</option>`).join('');
+  html += `<div style="margin-top:14px">
+    <label class="form-label" style="display:block;margin-bottom:6px">🔒 Cerrar este horario</label>
+    <select class="form-select" id="gestCerrarQuien" style="width:100%;margin-bottom:8px">
+      <option value="">Todo el horario (todos los profes)</option>
+      ${opcionesProf}
+    </select>
+    <select class="form-select" id="gestCerrarTipo" style="width:100%;margin-bottom:8px">
+      <option value="dia">Solo este día (${pad(f.getDate())}/${pad(f.getMonth()+1)})</option>
+      <option value="semanal">Todos los ${DSEM[f.getDay()]} (permanente)</option>
+    </select>
+    <input class="form-input" id="gestCerrarMotivo" placeholder="Motivo (ej: Male ausente)" style="width:100%;margin-bottom:8px">
+    <button class="btn danger" style="width:100%" onclick="cerrarHorarioCons()">🔒 Cerrar horario</button>
+  </div>`;
+  document.getElementById('gestionAcciones').innerHTML = html;
+  openModal('modalGestion');
+}
+
+async function cerrarHorarioCons(){
+  if(!gestionSlotCons) return;
+  const motivo=(document.getElementById('gestCerrarMotivo')?.value||'').trim();
+  if(!motivo){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">Poné un motivo.</div>'; return; }
+  const quien=document.getElementById('gestCerrarQuien')?.value||'';
+  const semanal=document.getElementById('gestCerrarTipo')?.value==='semanal';
+  const dow=new Date(gestionSlotCons.fecha+'T00:00:00').getDay();
+  const profEmail = quien ? (NOMBRE_A_EMAIL[quien]||null) : null;
+  try{
+    const u=await usuarioActualCons();
+    const { error }=await supa.from('bloqueos_agenda').insert({
+      area:CONS_AREA, profesional_email:profEmail, practica_codigo:null,
+      fecha_desde:gestionSlotCons.fecha, fecha_hasta:semanal?'2099-12-31':gestionSlotCons.fecha,
+      hora_desde:gestionSlotCons.horaIni, hora_hasta:gestionSlotCons.horaFin,
+      recurrente:semanal, dia_semana:semanal?dow:null,
+      motivo, creado_por_email:u.email, creado_por_nombre:u.nombre
+    });
+    if(error){ alert('No se pudo cerrar: '+error.message); return; }
+    closeModal('modalGestion');
+    if(window.Bloqueos) await Bloqueos.refrescar();
+    await refresh();
+  }catch(e){ alert('Error: '+(e.message||e)); }
+}
+
+async function reabrirHorarioCons(id){
+  if(!confirm('¿Reabrir este horario? Vuelve a quedar disponible.')) return;
+  try{
+    const { error }=await supa.from('bloqueos_agenda').update({ activo:false }).eq('id', id);
+    if(error){ alert('No se pudo: '+error.message); return; }
+    closeModal('modalGestion');
+    if(window.Bloqueos) await Bloqueos.refrescar();
+    await refresh();
+  }catch(e){ alert('Error: '+(e.message||e)); }
+}
+/* ════════════════ FIN MODO GESTIÓN ════════════════ */
 
 // =============================================
 // TIEMPO REAL (Supabase Realtime)
@@ -1183,6 +1315,7 @@ function renderWeek(container) {
   container.querySelectorAll('.grid-cell.is-libre').forEach(c => {
     c.addEventListener('click', e => {
       if (e.target.closest('.turno')) return;
+      if (modoGestion && esAdminGeneral()) { abrirGestionSlotCons(c.dataset.fecha, parseInt(c.dataset.hora,10)); return; }
       onCeldaClick(c.dataset.fecha, parseInt(c.dataset.hora,10));
     });
   });
@@ -2101,6 +2234,21 @@ async function onTurnoClick(turnoId) {
     }
   }
 
+  const puedeEditarProf = esAdminGeneral() || usuarioRol === 'administrativa';
+  const profEditHTML = (puedeEditarProf && t.estado !== 'CANCELADO') ? `
+    <div style="margin-top:12px;padding:10px 12px;background:#f5f8ff;border:1px solid #cfe0ff;border-radius:8px">
+      <div style="font-size:12px;font-weight:700;color:#1e40af;margin-bottom:6px">✏️ Profesional que atiende (suplencias)</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="editProfSel" class="form-select" style="flex:1">
+          ${PROFESIONALES.map(p=>`<option value="${p}" ${p===t.profesional?'selected':''}>${p}</option>`).join('')}
+        </select>
+        <button class="btn primary" id="btnGuardarProf" data-id="${t.id}">Guardar</button>
+      </div>
+      ${t.estado==='PRESENTE'
+        ? `<div style="margin-top:8px;font-size:11.5px;color:#7a5a00;background:#fff4d6;border:1px solid #e0b800;border-radius:6px;padding:6px 8px">⚠️ Este turno ya está <b>PRESENTE</b>. Al cambiar el profesional, también se <b>re-reparte la sesión ya facturada</b> según el % del nuevo (Bruno/Male/Vero 65/35 · Jime/Lu 100% centro). El total de la sesión no cambia.</div>`
+        : `<div style="margin-top:6px;font-size:11.5px;color:var(--text-dim)">Cambialo <b>antes</b> de marcar Presente y la sesión se factura directo a nombre del profesional correcto.</div>`}
+    </div>` : '';
+
   document.getElementById('detalleBody').innerHTML = `
     <div class="detalle-grid">
       <div class="label">Paciente</div><div class="value">${escapeHtml(nombre)}</div>
@@ -2116,8 +2264,11 @@ async function onTurnoClick(turnoId) {
       ${t.observaciones?`<div class="label">Obs.</div><div class="value">${escapeHtml(t.observaciones)}</div>`:''}
     </div>
     ${avisoFaltantes}
+    ${profEditHTML}
     <div id="detalleAlert"></div>
   `;
+  const _bgp = document.getElementById('btnGuardarProf');
+  if (_bgp) _bgp.addEventListener('click', () => guardarProfesionalTurno(t.id));
   const footer = document.getElementById('detalleFooter');
   // Botón Ver HC: abre la historia clínica del paciente en el shell (app.html)
   const btnHC = t.persona_id
@@ -2179,6 +2330,69 @@ function confirmarCancelacion(id, t) {
     await cambiarEstado(id, 'CANCELADO');
   });
   openModal('modalConfirmarCancel');
+}
+
+// Reparto de la sesión según el profesional que atiende.
+// Bruno/Male/Vero = 65% profesional / 35% centro · Jime/Lu (y resto) = 100% centro.
+// El total (centro + profesional) se mantiene; sólo cambia la división.
+const PROF_65_35 = ['Bruno', 'Male', 'Vero'];
+function repartoSesionCons(profesional, total) {
+  let prof = 0;
+  if (PROF_65_35.includes(profesional)) prof = Math.round(total * 0.65 * 100) / 100;
+  const centro = Math.round((total - prof) * 100) / 100;
+  return { monto_profesional: prof, monto_centro: centro };
+}
+
+async function guardarProfesionalTurno(id) {
+  const sel = document.getElementById('editProfSel');
+  if (!sel) return;
+  const nuevo = sel.value;
+  const t = turnos.find(x => String(x.id) === String(id));
+  if (!t) return;
+  if (nuevo === t.profesional) { closeModal('modalDetalle'); return; }
+  const alertEl = () => document.getElementById('detalleAlert');
+
+  const yaPresente = (t.estado === 'PRESENTE');
+  let msg = `¿Cambiar el profesional de este turno a ${nuevo}?`;
+  if (yaPresente) msg += `\n\nEste turno ya está PRESENTE: también se re-reparte la sesión ya facturada según el % de ${nuevo}.`;
+  if (!confirm(msg)) return;
+
+  try {
+    // 1) Actualizar el turno (siempre)
+    const { error: eT } = await supa.from('turnos_consultorio')
+      .update({ profesional: nuevo, modificado_en: new Date().toISOString(), modificado_por: 'agenda_web' })
+      .eq('id', id);
+    if (eT) { const a = alertEl(); if (a) a.innerHTML = `<div class="form-alert">Error: ${escapeHtml(eT.message)}</div>`; return; }
+
+    // 2) Si el turno ya tiene sesión (PRESENTE), re-repartir montos
+    if (yaPresente) {
+      const { data: ses, error: eS } = await supa.from('sesiones')
+        .select('id, monto_centro, monto_profesional').eq('turno_id', id);
+      if (eS) {
+        const a = alertEl(); if (a) a.innerHTML = `<div class="form-alert">Turno actualizado, pero no pude leer la sesión: ${escapeHtml(eS.message)}</div>`;
+        await refresh(); return;
+      }
+      if (ses && ses.length) {
+        let errMsg = '', blocked = false;
+        for (const s of ses) {
+          const total = Number(s.monto_centro || 0) + Number(s.monto_profesional || 0);
+          const r = repartoSesionCons(nuevo, total);
+          const { data: upd, error: eU } = await supa.from('sesiones')
+            .update({ profesional: nuevo, monto_profesional: r.monto_profesional, monto_centro: r.monto_centro })
+            .eq('id', s.id).select('id');
+          if (eU) { errMsg = eU.message; break; }
+          if (!upd || !upd.length) { blocked = true; break; }
+        }
+        if (errMsg) { const a = alertEl(); if (a) a.innerHTML = `<div class="form-alert">Turno actualizado, pero la sesión no: ${escapeHtml(errMsg)}</div>`; return; }
+        if (blocked) { alert('⚠️ El turno se actualizó, pero la sesión NO se pudo modificar por permisos (RLS). Avisale a Pepe para habilitar el UPDATE en la tabla sesiones.'); }
+      }
+    }
+    closeModal('modalDetalle');
+    await refresh();
+  } catch (e) {
+    console.error(e);
+    const a = alertEl(); if (a) a.innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message || e)}</div>`;
+  }
 }
 
 async function cambiarEstado(id, nuevoEstado) {
