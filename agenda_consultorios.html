@@ -56,6 +56,18 @@ body.modo-gestion .grid-cell.is-libre:hover{outline:2px dashed #1e9fe0;outline-o
 .grid-cell.is-multi-sel{background:var(--accent-bg)!important;box-shadow:inset 0 0 0 2px var(--accent)}
 .grid-cell.is-multi-sel::before{content:"✓";color:var(--accent);font-size:24px;opacity:1;font-weight:700}
 body.is-multi-mode .grid-cell.is-libre{cursor:cell}
+/* ===== CASILLERO DIVIDIDO (Cons 1 · Cons 2 · Área Rehab) ===== */
+.subslots{display:flex;flex-direction:column;gap:3px;width:100%}
+.subslot{border-radius:5px}
+.subslot.sub-occ{display:flex;flex-direction:column;gap:3px}
+.subslot.sub-free{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.02em;color:var(--text-muted);background:var(--accent-bg);border:1px dashed var(--border);padding:6px 4px;line-height:1.15;min-height:24px;cursor:pointer;transition:all .1s}
+.subslot.sub-free small{font-size:8px;font-weight:500;opacity:.85;margin-top:2px;text-transform:none;letter-spacing:0;font-family:inherit}
+.subslot.sub-free:hover{border-color:var(--accent);color:var(--accent)}
+.subslot.sub-free.rehab{background:var(--c-sobre-bg);border-color:var(--c-sobre);color:var(--c-sobre)}
+.subslot.sub-free.rehab:hover{filter:brightness(.96)}
+.subslot.sub-free.esp{background:#f3eefc;border:1px dashed #b89ce0;color:#7a52b3}
+.subslot.sub-free.esp:hover{filter:brightness(.97)}
+.grid-cell.is-libre.has-sub::before{display:none}
 .grid-cell.is-bloqueo{background:var(--bloqueo-bg);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)}
 .grid-cell.is-bloqueo .bloqueo-label{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--bloqueo-text);text-align:center;padding-top:24px;letter-spacing:.04em}
 .grid-cell.is-feriado{background:var(--feriado-bg)}
@@ -1463,7 +1475,6 @@ function renderWeek(container) {
         return;
       }
       const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
-      const turnosHTML = slotTurnos.map(renderTurno).join('');
       const selCls = isSlotSelected(iso, h) ? 'is-multi-sel' : '';
       // Si hay práctica filtrada, atenuar celdas donde nadie atiende esa práctica (considerando turnos existentes)
       let noDispCls = '';
@@ -1471,13 +1482,14 @@ function renderWeek(container) {
         const profsCapaces = profesionalesParaPracticaEn(diaNumero, h, practicaFiltro, iso);
         if (profsCapaces.length === 0) noDispCls = 'is-no-disp';
       }
-      // SLOT LLENO · sin filtro, si ya hay turnos y no entra ninguno más → gris
-      let llenoCls = '';
-      const ocupadoReal = turnos.filter(t => t.fecha===iso && t.estado!=='CANCELADO' && parseInt(t.hora_inicio.slice(0,2),10)===h).length;
-      if (!practicaFiltro && ocupadoReal > 0 && !slotTieneLugar(diaNumero, h, iso)) {
-        llenoCls = 'slot-lleno';
+      // Celda atenuada (nadie atiende la práctica filtrada) → sin división, como antes.
+      if (noDispCls) {
+        cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls}" data-fecha="${iso}" data-hora="${h}">${slotTurnos.map(renderTurno).join('')}</div>`);
+        return;
       }
-      cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls} ${llenoCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
+      // Casillero dividido: Consultorio 1 · Consultorio 2 · Área Rehabilitación Física
+      const innerHTML = celdaSubslotsHTML(slotTurnos, diaNumero, h);
+      cells.push(`<div class="grid-cell is-libre has-sub ${selCls}" data-fecha="${iso}" data-hora="${h}">${innerHTML}</div>`);
     });
   });
 
@@ -1551,6 +1563,7 @@ function renderWeek(container) {
         c.classList.add('slot-bloqueado');
         c.setAttribute('data-bloqueo-motivo', 'CERRADO');
         c.title = bloqAmplio ? (etiquetaBloqueo(bloqAmplio) || 'Cerrado') : motivos;
+        const ss = c.querySelector('.subslots'); if (ss) ss.style.display = 'none'; // que no se vean Cons 1/2 debajo del CERRADO
         return;
       }
 
@@ -1675,6 +1688,45 @@ function renderTurno(t) {
     ? `<button class="turno-evo-btn ${tieneEvo?'tiene-evo':''}" data-evo-turno="${t.id}" title="${tieneEvo?'Ver / editar evolución':'Evolucionar a '+escapeHtml(nombre)}">📝</button>`
     : '';
   return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}">${btnEvo}<div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+}
+
+// ¿La práctica usa la sala de Especialidades (Osteo / Masaje), no los consultorios 1-2?
+function esEspecialidadCons(cod) {
+  const r = REGLAS_PRACTICA[normPractica(cod)];
+  return !!(r && Array.isArray(r.espacios) && r.espacios.includes('CONSULTORIO_ESPECIALIDADES'));
+}
+// ¿Es sobreturno / rehab (3er cupo, siempre con autorización del profesional)?
+function esSobreTurnoCons(t) {
+  return t.estado === 'SOBRETURNO' || (t.observaciones || '').includes('[REHAB]');
+}
+
+// Arma el casillero dividido: Consultorio 1 · Consultorio 2 · Área Rehabilitación Física
+// (+ Osteo · Jime los martes y jueves a las 19h). Ocupado = tarjeta de turno; libre = etiqueta.
+function celdaSubslotsHTML(slotTurnos, diaNumero, h) {
+  const sobre = slotTurnos.filter(esSobreTurnoCons);
+  const noSobre = slotTurnos.filter(t => !esSobreTurnoCons(t));
+  const esp = noSobre.filter(t => esEspecialidadCons(t.practica_codigo));   // osteo / masaje
+  const cons = noSobre.filter(t => !esEspecialidadCons(t.practica_codigo)); // fisio, dlm, punción, suelo, terap
+
+  const free = (cls, label, sub) => `<div class="subslot sub-free ${cls}">${label}${sub ? `<small>${sub}</small>` : ''}</div>`;
+  const occ = (cards, cls) => `<div class="subslot sub-occ ${cls || ''}">${cards}</div>`;
+
+  let html = '';
+  // Consultorio 1
+  html += cons[0] ? occ(renderTurno(cons[0])) : free('', 'Consultorio 1');
+  // Consultorio 2 (si hubiera más de 2 turnos de consultorio, se apilan acá)
+  if (cons.length >= 2) html += occ(cons.slice(1).map(renderTurno).join(''));
+  else html += free('', 'Consultorio 2');
+  // Área Rehabilitación Física = sobreturno, siempre con autorización del profesional
+  if (sobre.length) html += occ(sobre.map(renderTurno).join(''), 'rehab');
+  else html += free('rehab', 'Rehabilitación física', 'sobreturno · con autoriz. prof');
+  // Especialidades (Osteo / Masaje): se muestran si hay turno; el lugar libre de Jime Osteo
+  // aparece solo martes y jueves a las 19h (resto del tiempo no se muestra vacío).
+  const esMarJue19 = (diaNumero === 2 || diaNumero === 4) && h === 19;
+  if (esp.length) html += occ(esp.map(renderTurno).join(''), 'esp');
+  else if (esMarJue19) html += free('esp', 'Osteopatía · Jime', 'especialidades');
+
+  return `<div class="subslots">${html}</div>`;
 }
 
 function renderMonth(container) {
