@@ -1063,14 +1063,12 @@ function abrirGestionSlotCons(fecha, hora){
     });
   }
   if(fijo){
-    // Horario fijo → permitir ABRIRLO excepcionalmente para un profe
-    const opc = PROFESIONALES.map(p=>`<option value="${p}">${p}</option>`).join('');
+    // Horario fijo → permitir ABRIRLO excepcionalmente para uno o varios profes
+    const opc = PROFESIONALES.map(p=>`<label style="display:flex;align-items:center;gap:7px;padding:5px 2px;font-size:13px;cursor:pointer"><input type="checkbox" class="gestAbrirChk" value="${p}" style="width:16px;height:16px"> ${p}</label>`).join('');
     html += `<div style="margin-top:14px">
-      <div style="background:#eef0f3;border-left:3px solid var(--bloqueo-text);color:var(--text-dim);padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:12.5px">⏰ Horario <b>fijo</b> (${fijo==='ALMUERZO'?'almuerzo':'fuera del horario de atención'}). Podés abrirlo excepcionalmente para un profesional.</div>
+      <div style="background:#eef0f3;border-left:3px solid var(--bloqueo-text);color:var(--text-dim);padding:8px 10px;border-radius:6px;margin-bottom:8px;font-size:12.5px">⏰ Horario <b>fijo</b> (${fijo==='ALMUERZO'?'almuerzo':'fuera del horario de atención'}). Podés abrirlo para <b>uno o varios</b> profesionales (ej. Jime en Osteo + Bruno en Fisio).</div>
       <label class="form-label" style="display:block;margin-bottom:6px">🔓 Abrir este horario para</label>
-      <select class="form-select" id="gestAbrirQuien" style="width:100%;margin-bottom:8px">
-        <option value="">— Elegí profesional —</option>${opc}
-      </select>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:6px 10px;margin-bottom:8px;display:grid;grid-template-columns:1fr 1fr;gap:2px 14px">${opc}</div>
       <select class="form-select" id="gestAbrirTipo" style="width:100%;margin-bottom:8px">
         <option value="dia">Solo este día (${pad(f.getDate())}/${pad(f.getMonth()+1)})</option>
         <option value="semanal">Todos los ${DSEM[f.getDay()]} (permanente)</option>
@@ -1136,22 +1134,22 @@ async function reabrirHorarioCons(id){
 
 async function abrirHorarioCons(){
   if(!gestionSlotCons) return;
-  const quien = document.getElementById('gestAbrirQuien')?.value || '';
-  if(!quien){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">Elegí un profesional.</div>'; return; }
-  const email = NOMBRE_A_EMAIL[quien];
-  if(!email){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">No encontré el email de ese profesional.</div>'; return; }
+  const elegidos = [...document.querySelectorAll('.gestAbrirChk:checked')].map(c=>c.value);
+  if(!elegidos.length){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">Elegí al menos un profesional.</div>'; return; }
   const semanal = document.getElementById('gestAbrirTipo')?.value === 'semanal';
   const motivo = (document.getElementById('gestAbrirMotivo')?.value||'').trim() || null;
   const dow = new Date(gestionSlotCons.fecha+'T00:00:00').getDay();
   try{
     const u = await usuarioActualCons();
-    const { error } = await supa.from('aperturas_agenda').insert({
-      area: CONS_AREA, profesional_email: email, practica_codigo: null,
+    const filas = elegidos.map(nombre => ({
+      area: CONS_AREA, profesional_email: NOMBRE_A_EMAIL[nombre], practica_codigo: null,
       fecha_desde: gestionSlotCons.fecha, fecha_hasta: semanal ? '2099-12-31' : gestionSlotCons.fecha,
       hora_desde: gestionSlotCons.horaIni, hora_hasta: gestionSlotCons.horaFin,
       recurrente: semanal, dia_semana: semanal ? dow : null,
       motivo, creado_por_email: u.email, creado_por_nombre: u.nombre
-    });
+    })).filter(r => r.profesional_email);
+    if(!filas.length){ document.getElementById('gestionAlerta').innerHTML='<div class="form-alert">No encontré el email de esos profesionales.</div>'; return; }
+    const { error } = await supa.from('aperturas_agenda').insert(filas);
     if(error){ alert('No se pudo abrir: '+error.message); return; }
     closeModal('modalGestion');
     await refresh();
