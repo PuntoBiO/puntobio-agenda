@@ -48,6 +48,12 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 .grid-hour{background:var(--bg-elev-2);font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--text-dim);display:flex;align-items:flex-start;justify-content:center;padding-top:6px}
 .grid-cell.is-libre{cursor:pointer;transition:all .1s}
 .grid-cell.is-libre:hover{background:var(--accent-bg)}
+/* Maso: celda LIBRE y vacía = verde (es siempre Vero, no hace falta nombre) */
+.grid-cell.is-libre.is-vacia{background:#f1fcf5}
+.grid-cell.is-libre.is-vacia:hover{background:#dcf6e6}
+/* El turno ocupa TODO el casillero (turnos únicos de 1 h) */
+.grid-cell.is-libre{display:flex;flex-direction:column;gap:3px}
+.grid-cell.is-libre .turno{flex:1;display:flex;flex-direction:column;justify-content:center;margin-bottom:0}
 .grid-cell.is-libre::before{content:"+";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:20px;color:var(--text-muted);opacity:0;transition:opacity .1s}
 .grid-cell.is-libre:hover::before{opacity:.6}
 .grid-cell.is-multi-sel{background:var(--accent-bg)!important;box-shadow:inset 0 0 0 2px var(--accent)}
@@ -804,7 +810,7 @@ async function loadFeriados(from, to) {
 }
 
 async function loadPersonas() {
-  const { data, error } = await supa.from('personas').select('id, nombre, dni, obra_social, nro_afiliado_os').order('nombre', { ascending:true });
+  const { data, error } = await supa.from('personas').select('id, nombre, dni, celular, obra_social, nro_afiliado_os').order('nombre', { ascending:true });
   if (error) throw error;
   personas = data || [];
 }
@@ -933,7 +939,8 @@ function renderWeek(container) {
         const profsCapaces = profesionalesParaPracticaEn(diaNumero, h, practicaFiltro, iso);
         if (profsCapaces.length === 0) noDispCls = 'is-no-disp';
       }
-      cells.push(`<div class="grid-cell is-libre ${selCls} ${noDispCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
+      const vacia = slotTurnos.length === 0 ? 'is-vacia' : '';
+      cells.push(`<div class="grid-cell is-libre ${vacia} ${selCls} ${noDispCls}" data-fecha="${iso}" data-hora="${h}">${turnosHTML}</div>`);
     });
   });
 
@@ -1648,10 +1655,17 @@ async function guardarLote(payloads) {
     }
     const { error } = await supa.from('turnos_masoterapia').insert(payloads).select();
     if (error) throw error;
+    // === WhatsApp: datos para el modal post-guardado ===
+    const _perId = payloads[0] ? payloads[0].persona_id : null;
+    const _per = _perId ? personas.find(p => p.id === _perId) : null;
+    const _paciente = { nombre: (payloads[0] && payloads[0].paciente_nombre) || (_per ? _per.nombre : ''), celular: _per ? _per.celular : null };
+    const _turnosWA = payloads.map(p => ({ fecha: p.fecha, hora_inicio: p.hora_inicio, profesional: p.profesional, tipo: p.tipo_masaje || null }));
+    // === fin captura ===
     closeModal('modalNuevo');
     slotsSel = []; slotsForm = [];
     refreshMultiBar();
     await refresh();
+    if (_turnosWA.length > 0) mostrarModalWhatsAppTurnos(_paciente, _turnosWA);
   } catch (e) {
     mostrarAlerta('nuevoAlert', 'Error al guardar: ' + (e.message||e), 'error');
     console.error(e);
@@ -1918,6 +1932,84 @@ function rangoVisible() {
 function escapeHtml(s) {
   return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+/* ════════════════════════════════════════════════════════════════
+   MÓDULO WHATSAPP TURNOS · Masoterapia (igual que BioLab/Consultorios)
+   Al guardar, ofrece enviar la confirmación por WhatsApp.
+   ════════════════════════════════════════════════════════════════ */
+function waLimpiarCelular(cel){
+  if(!cel) return null;
+  let num = cel.toString().replace(/\D/g,'');
+  if(!num) return null;
+  if(num.startsWith('549') && num.length >= 12) return num;
+  if(num.startsWith('54') && num.length >= 11) return '549' + num.substring(2);
+  if(num.length === 10) return '549' + num;        // 3515123456 → 5493515123456
+  if(num.length === 8)  return '549351' + num;     // 5123456 → 5493515123456 (Córdoba)
+  return num;
+}
+const WA_DIAS = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+function waFechaBonita(fechaISO){
+  const [a,m,d] = fechaISO.split('-').map(n => parseInt(n,10));
+  const dt = new Date(a, m-1, d);
+  return { diaSem: WA_DIAS[dt.getDay()], fechaCorta: `${String(d).padStart(2,'0')}/${String(m).padStart(2,'0')}` };
+}
+function waArmarMensaje(paciente, turnos){
+  const primerNombre = (paciente.nombre || '').split(' ')[0] || '';
+  let msg = `Hola ${primerNombre}!\n`;
+  msg += `Te confirmamos tu turno en *PuntoBiO - Masoterapia*:\n\n`;
+  const ord = [...turnos].sort((a,b) => a.fecha!==b.fecha ? (a.fecha<b.fecha?-1:1) : (a.hora_inicio<b.hora_inicio?-1:1));
+  ord.forEach(t => {
+    const f = waFechaBonita(t.fecha);
+    const hora = String(t.hora_inicio).substring(0,5);
+    msg += `> ${f.diaSem} ${f.fechaCorta} - ${hora}hs\n`;
+    msg += `  Masoterapia con ${t.profesional || 'Vero'}\n\n`;
+  });
+  msg += `Direccion: Libertad 1549, Bo Gral Paz\n`;
+  msg += `Si no podes venir, avisanos con 24hs de anticipacion.`;
+  return msg;
+}
+function waEnviar(paciente, turnos){
+  const tel = waLimpiarCelular(paciente.celular);
+  if(!tel){ alert('⚠️ El paciente no tiene celular cargado en el Padrón.\n\nCargalo en la ficha del paciente para poder enviar por WhatsApp.'); return false; }
+  if(!turnos || !turnos.length){ alert('⚠️ No hay turnos para enviar.'); return false; }
+  window.open(`https://wa.me/${tel}?text=${encodeURIComponent(waArmarMensaje(paciente, turnos))}`, '_blank');
+  return true;
+}
+function mostrarModalWhatsAppTurnos(paciente, turnos){
+  const viejo = document.getElementById('pb-modal-wa'); if(viejo) viejo.remove();
+  const ord = [...turnos].sort((a,b) => a.fecha!==b.fecha ? (a.fecha<b.fecha?-1:1) : (a.hora_inicio<b.hora_inicio?-1:1));
+  const turnosHTML = ord.map(t => {
+    const f = waFechaBonita(t.fecha);
+    const hora = String(t.hora_inicio).substring(0,5);
+    const tipo = t.tipo ? ` · ${escapeHtml(t.tipo)}` : '';
+    return `
+      <div style="padding:12px 14px;border-left:4px solid #c2185b;background:#fce4ec;margin-bottom:8px;border-radius:6px;">
+        <div style="font-weight:600;color:#111;font-size:15px;">📅 ${f.diaSem} ${f.fechaCorta} · ${hora}hs</div>
+        <div style="font-size:13px;color:#555;margin-top:4px;">Masoterapia${tipo} con <strong>${escapeHtml(t.profesional || 'Vero')}</strong></div>
+      </div>`;
+  }).join('');
+  const tieneTel = !!waLimpiarCelular(paciente.celular);
+  const avisoTel = tieneTel ? '' : `<div style="background:#fff4e5;border:1px solid #ffb74d;color:#7a4a00;padding:10px 12px;border-radius:6px;margin-bottom:15px;font-size:13px;">⚠️ El paciente no tiene celular cargado en el Padrón. Cargalo para poder enviar por WhatsApp.</div>`;
+  const modal = document.createElement('div');
+  modal.id = 'pb-modal-wa';
+  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;z-index:99999;padding:20px;`;
+  modal.innerHTML = `
+    <div style="background:white;border-radius:14px;max-width:520px;width:100%;padding:26px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.35);font-family:inherit;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;"><span style="font-size:28px;">✅</span><h2 style="margin:0;color:#111;font-size:20px;font-weight:700;">Turno guardado</h2></div>
+      <p style="margin:0 0 18px 38px;color:#666;font-size:14px;">${escapeHtml(paciente.nombre || '')}</p>
+      ${avisoTel}
+      <div style="margin-bottom:20px;">${turnosHTML}</div>
+      <div style="display:flex;gap:10px;">
+        <button id="pb-wa-send" ${tieneTel?'':'disabled'} style="flex:1;background:${tieneTel?'#25D366':'#bbb'};color:white;border:none;padding:14px;border-radius:8px;font-size:15px;font-weight:600;cursor:${tieneTel?'pointer':'not-allowed'};display:flex;align-items:center;justify-content:center;gap:8px;"><span style="font-size:20px;">💚</span> Enviar por WhatsApp</button>
+        <button id="pb-wa-close" style="background:#eee;color:#333;border:none;padding:14px 22px;border-radius:8px;font-size:15px;cursor:pointer;font-weight:500;">Cerrar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  document.getElementById('pb-wa-close').onclick = () => modal.remove();
+  if(tieneTel){ document.getElementById('pb-wa-send').onclick = () => { waEnviar(paciente, turnos); modal.remove(); }; }
+  modal.onclick = (e) => { if(e.target === modal) modal.remove(); };
+}
+/* ════════════════ FIN MÓDULO WHATSAPP TURNOS ════════════════ */
 </script>
 </body>
 </html>
