@@ -88,10 +88,24 @@
 
   /* GRILLA */
   .agenda-wrap{padding:0 32px 100px;}
+  /* ===== VISTA MES ===== */
+  .month-grid{display:grid; grid-template-columns:repeat(7,1fr); border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#fff;}
+  .month-dow{background:var(--panel-2); font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; text-align:center; padding:10px 4px; border-right:1px solid var(--border); border-bottom:1px solid var(--border);}
+  .month-cell{min-height:96px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:8px 10px; cursor:pointer; display:flex; flex-direction:column; gap:5px; transition:background .1s;}
+  .month-cell:hover{background:var(--hover);}
+  .month-cell.otro-mes{background:#fafbfc; cursor:default;}
+  .month-cell.otro-mes:hover{background:#fafbfc;}
+  .month-cell.hoy{box-shadow:inset 0 0 0 2px var(--primary, #2563eb);}
+  .month-cell .md-num{font-size:14px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums;}
+  .month-cell.otro-mes .md-num{color:var(--dim);}
+  .month-cell .md-bar{height:6px; border-radius:3px; background:var(--primary, #2563eb); opacity:.85;}
+  .month-cell .md-count{font-size:12px; color:var(--primary, #2563eb); font-weight:600;}
+  .month-cell .md-empty{font-size:12px; color:var(--dim);}
+  @media (max-width:760px){.month-cell{min-height:64px; padding:5px 6px;} .month-cell .md-num{font-size:12px;} .month-dow{font-size:9px; padding:6px 2px;}}
   .agenda-grid{
     display:grid;
     grid-template-columns: 86px repeat(5, 1fr);
-    border:1px solid var(--border); border-radius:8px; overflow:hidden;
+    border:1px solid var(--border); border-radius:8px; overflow:visible;
     background:#fff;
   }
   .col-header{
@@ -99,6 +113,7 @@
     font-size:11px; color:var(--muted); text-transform:uppercase;
     font-weight:600; letter-spacing:0.5px;
     border-right:1px solid var(--border); border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:6; box-shadow:0 2px 6px rgba(0,0,0,.07);
   }
   .col-header.feriado{background:var(--naranja-soft); color:#b45309;}
   .col-header .dia-num{display:block; font-size:13px; color:var(--text); margin-top:3px; letter-spacing:0;}
@@ -322,8 +337,8 @@
     <div style="display:flex; gap:14px; align-items:center;">
       <span class="contador" id="contador-turnos">0 turnos activos</span>
       <div class="view-toggle">
-        <button class="activo">Semanal</button>
-        <button onclick="toast('Vista Mensual próximamente','ok')">Mensual</button>
+        <button id="btn-vista-semana" class="activo" onclick="setVista('semana')">Semanal</button>
+        <button id="btn-vista-mes" onclick="setVista('mes')">Mensual</button>
       </div>
     </div>
   </div>
@@ -566,6 +581,8 @@ function hMin(h){ const [hh,mm]=h.split(':').map(Number); return hh*60+mm; }
    ════════════════════════════════════════════════════════════════ */
 let semanaActual = lunesDeFecha(new Date());
 let turnosSemana = [];
+let vistaActual = 'semana';        // 'semana' | 'mes'
+let mesAncla = new Date();         // fecha de referencia del mes mostrado
 let personasCache = [];
 let slotActual = null;
 let turnoSel = null;
@@ -637,9 +654,18 @@ function validarSlotPasado(fecha, horaCero) {
    CARGA DE TURNOS
    ════════════════════════════════════════════════════════════════ */
 async function cargarTurnos(){
-  const fIni = fmtFecha(semanaActual);
-  const dFin = new Date(semanaActual); dFin.setDate(dFin.getDate()+4);
-  const fFin = fmtFecha(dFin);
+  let fIni, fFin;
+  if (vistaActual === 'mes') {
+    const y = mesAncla.getFullYear(), m = mesAncla.getMonth();
+    const primero = new Date(y, m, 1), ultimo = new Date(y, m+1, 0);
+    const ini = lunesDeFecha(primero);
+    const fin = lunesDeFecha(ultimo); fin.setDate(fin.getDate()+6);
+    fIni = fmtFecha(ini); fFin = fmtFecha(fin);
+  } else {
+    fIni = fmtFecha(semanaActual);
+    const dFin = new Date(semanaActual); dFin.setDate(dFin.getDate()+4);
+    fFin = fmtFecha(dFin);
+  }
   const { data, error } = await sb
     .from('turnos_biolab').select('*')
     .gte('fecha', fIni).lte('fecha', fFin)
@@ -714,8 +740,10 @@ function tipoSlot(fecha, diaNum, horaCero){
    RENDER
    ════════════════════════════════════════════════════════════════ */
 function render(){
-  filtroProf = document.getElementById('filtro-prof').value;
   const grid = document.getElementById('agenda');
+  if (vistaActual === 'mes') { renderMes(grid); return; }
+  grid.className = 'agenda-grid';
+  filtroProf = document.getElementById('filtro-prof').value;
   grid.innerHTML = '';
   const dias = diasSemana();
   const hoyStr = fmtFecha(new Date());
@@ -922,12 +950,75 @@ function filtroPractica(btn){
    NAVEGACIÓN
    ════════════════════════════════════════════════════════════════ */
 async function cambiarSemana(delta){
-  semanaActual.setDate(semanaActual.getDate() + delta*7);
+  if (vistaActual === 'mes') {
+    mesAncla = new Date(mesAncla.getFullYear(), mesAncla.getMonth() + delta, 1);
+  } else {
+    semanaActual.setDate(semanaActual.getDate() + delta*7);
+  }
   await Promise.all([cargarTurnos(), cargarAperturas()]); render();
 }
 async function irHoy(){
-  semanaActual = lunesDeFecha(new Date());
+  if (vistaActual === 'mes') { mesAncla = new Date(); }
+  else { semanaActual = lunesDeFecha(new Date()); }
   await Promise.all([cargarTurnos(), cargarAperturas()]); render();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   VISTA MES
+   ════════════════════════════════════════════════════════════════ */
+function fmtMesTitulo(){
+  const M=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  return `${M[mesAncla.getMonth()]} ${mesAncla.getFullYear()}`;
+}
+async function setVista(v){
+  if (v === vistaActual) return;
+  vistaActual = v;
+  if (v === 'mes') mesAncla = new Date(semanaActual);
+  else semanaActual = lunesDeFecha(mesAncla);
+  document.getElementById('btn-vista-semana').classList.toggle('activo', v === 'semana');
+  document.getElementById('btn-vista-mes').classList.toggle('activo', v === 'mes');
+  await Promise.all([cargarTurnos(), cargarAperturas()]); render();
+}
+async function irADia(iso){
+  vistaActual = 'semana';
+  semanaActual = lunesDeFecha(new Date(iso + 'T00:00:00'));
+  document.getElementById('btn-vista-semana').classList.add('activo');
+  document.getElementById('btn-vista-mes').classList.remove('activo');
+  await Promise.all([cargarTurnos(), cargarAperturas()]); render();
+}
+function renderMes(grid){
+  grid.className = '';
+  const y = mesAncla.getFullYear(), m = mesAncla.getMonth();
+  const primero = new Date(y, m, 1), ultimo = new Date(y, m+1, 0);
+  const inicio = lunesDeFecha(primero);
+  const finSem = lunesDeFecha(ultimo); finSem.setDate(finSem.getDate()+6);
+  const totalDias = Math.round((finSem - inicio) / 86400000) + 1;
+  const DOW = ['LUN','MAR','MIÉ','JUE','VIE','SÁB','DOM'];
+  const hoyStr = fmtFecha(new Date());
+  let html = `<div class="month-grid">` + DOW.map(d => `<div class="month-dow">${d}</div>`).join('');
+  for (let i = 0; i < totalDias; i++) {
+    const d = new Date(inicio); d.setDate(d.getDate() + i);
+    const iso = fmtFecha(d);
+    const enMes = d.getMonth() === m;
+    const hoy = iso === hoyStr;
+    const fer = FERIADOS[iso];
+    const cnt = enMes ? turnosSemana.filter(t => t.fecha === iso && t.estado !== 'CANCELADO').length : 0;
+    let body = '';
+    if (enMes) {
+      if (fer) body = `<div class="md-count" style="color:#b45309">${fer}</div>`;
+      else if (cnt > 0) body = `<div class="md-bar"></div><div class="md-count">${cnt} turno${cnt !== 1 ? 's' : ''}</div>`;
+      else body = `<div class="md-empty">—</div>`;
+    }
+    html += `<div class="month-cell ${enMes ? '' : 'otro-mes'} ${hoy ? 'hoy' : ''}" ${enMes ? `data-fecha="${iso}"` : ''}><div class="md-num">${d.getDate()}</div>${body}</div>`;
+  }
+  html += `</div>`;
+  grid.innerHTML = html;
+  document.getElementById('rango-subtitulo').textContent = fmtMesTitulo();
+  const cantActivos = turnosSemana.filter(t => t.estado !== 'CANCELADO').length;
+  document.getElementById('contador-turnos').textContent = `${cantActivos} turnos activos`;
+  grid.querySelectorAll('.month-cell[data-fecha]').forEach(c => {
+    c.addEventListener('click', () => irADia(c.dataset.fecha));
+  });
 }
 
 /* ════════════════════════════════════════════════════════════════
