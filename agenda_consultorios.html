@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda Consultorios · PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="bloqueos.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -71,6 +73,28 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .grid-cell.slot-osteo{cursor:default}
 .grid-cell.slot-osteo:hover{background:transparent}
 .grid-cell.slot-osteo::before{display:none}
+/* ===== COMPARTIR DISPONIBLES ===== */
+.cs-esp-btns{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 18px}
+.cs-esp{padding:9px 14px;border-radius:9px;border:1.5px solid var(--border);background:var(--bg-elev);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;transition:all .12s}
+.cs-esp:hover{border-color:var(--accent)}
+.cs-esp.is-sel{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cs-gen-btns{display:flex;gap:10px}
+.cs-gen{flex:1;padding:13px;border-radius:11px;border:none;color:#fff;font-size:14px;font-weight:700;cursor:pointer;transition:filter .12s}
+.cs-gen:hover{filter:brightness(1.06)}
+.cs-gen.img{background:#16a34a}
+.cs-gen.pdf{background:#1e9fe0}
+#shareConsCard{position:fixed;left:-9999px;top:0;width:520px;background:#0c1a2b;color:#e8eef5;font-family:'Inter',system-ui,-apple-system,sans-serif;padding:28px 26px;box-sizing:border-box}
+#shareConsCard .sc-logo{width:42px;height:42px;margin:0 auto 8px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#7fd2f5,#1e9fe0 60%,#0d5a85);box-shadow:0 0 18px rgba(30,159,224,.5)}
+#shareConsCard .sc-title{text-align:center;font-size:23px;font-weight:800;color:#fff;margin:0 0 2px;letter-spacing:.2px}
+#shareConsCard .sc-title b{color:#1e9fe0}
+#shareConsCard .sc-sub{text-align:center;font-size:12.5px;color:#8fa6bd;margin:0 0 20px}
+#shareConsCard .sc-day{margin-bottom:15px}
+#shareConsCard .sc-day-h{font-size:13.5px;font-weight:800;color:#1e9fe0;border-bottom:1px solid #1d3148;padding-bottom:5px;margin-bottom:9px;letter-spacing:.3px}
+#shareConsCard .sc-chips{display:flex;flex-wrap:wrap;gap:7px}
+#shareConsCard .sc-chip{background:#14304a;border:1px solid #1e9fe0;color:#cfeafb;font-weight:700;font-size:13px;padding:6px 12px;border-radius:9px;font-family:'JetBrains Mono',monospace}
+#shareConsCard .sc-none{font-size:12px;color:#62788f;font-style:italic}
+#shareConsCard .sc-fer{font-size:12.5px;color:#e0a300;font-weight:700}
+#shareConsCard .sc-foot{text-align:center;font-size:12.5px;color:#9fb4ca;margin-top:18px;border-top:1px solid #1d3148;padding-top:14px;font-weight:600}
 .grid-cell.is-bloqueo{background:var(--bloqueo-bg);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)}
 .grid-cell.is-bloqueo .bloqueo-label{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--bloqueo-text);text-align:center;padding-top:24px;letter-spacing:.04em}
 .grid-cell.is-feriado{background:var(--feriado-bg)}
@@ -382,6 +406,7 @@ body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9f
       <button class="nav-btn" id="todayBtn">HOY</button>
       <button class="nav-btn" id="nextBtn">→</button>
       <button class="nav-btn" id="btnModoGestion" style="display:none">🛠️ Modo gestión: OFF</button>
+      <button class="nav-btn" id="btnCompartirCons">📤 Compartir disponibles</button>
     </div>
     <div class="filters">
       <label>Profesional:
@@ -421,6 +446,28 @@ body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9f
   <button class="ghost" id="multiClear">Limpiar</button>
   <button id="multiCreate">Cargar datos →</button>
 </div>
+
+<!-- ===== COMPARTIR DISPONIBLES ===== -->
+<div class="modal-overlay" id="modalCompartirCons">
+  <div class="modal" style="max-width:470px">
+    <div class="modal-header">
+      <div class="modal-title">📤 Compartir disponibles</div>
+      <button class="modal-close" data-close="modalCompartirCons">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text-dim);margin:0 0 2px">Lista de <b>día y hora con turno libre</b> para enviar a quien consulta. Usa la semana que tenés en pantalla.</p>
+      <label class="form-label" style="display:block;margin:14px 0 2px;font-weight:700">¿Qué especialidad?</label>
+      <div class="cs-esp-btns" id="csEspBtns"></div>
+      <label class="form-label" style="display:block;margin:2px 0 8px;font-weight:700">¿Cómo lo querés generar?</label>
+      <div class="cs-gen-btns">
+        <button class="cs-gen img" onclick="generarShareCons('img')">🖼️ Imagen (WhatsApp)</button>
+        <button class="cs-gen pdf" onclick="generarShareCons('pdf')">📄 PDF</button>
+      </div>
+      <div id="csLoading" style="display:none;text-align:center;margin-top:14px;color:var(--text-dim);font-size:13px">Generando…</div>
+    </div>
+  </div>
+</div>
+<div id="shareConsCard"></div>
 
 <div class="modal-overlay" id="modalNuevo">
   <div class="modal">
@@ -954,6 +1001,7 @@ function bindEvents() {
     });
   });
   document.getElementById('filterProfesional').addEventListener('change', renderGrid);
+  document.getElementById('btnCompartirCons').addEventListener('click', abrirCompartirCons);
   document.querySelectorAll('#practicaFilter .chip').forEach(c => {
     c.addEventListener('click', () => {
       document.querySelectorAll('#practicaFilter .chip').forEach(b => b.classList.remove('is-active'));
@@ -2762,6 +2810,120 @@ async function cambiarEstado(id, nuevoEstado) {
     const a = document.getElementById('detalleAlert');
     if (a) a.innerHTML = `<div class="form-alert">Error: ${escapeHtml(e.message||e)}</div>`;
     console.error(e);
+  }
+}
+
+// =====  COMPARTIR DISPONIBLES (turnos libres por especialidad)  =====
+// Lista, por día y hora de la semana en pantalla, dónde hay lugar libre para la
+// especialidad elegida, respetando la exclusividad: Osteo ocupa todo el casillero
+// (libre solo si está vacío) y bloquea a Fisio/Rehab/DLM/etc.; y al revés, si hay
+// osteo/masaje en el slot, las demás no se ofrecen.
+const ESPECIALIDADES_SHARE = [
+  { key:'FISIO',   short:'Kinesiología & Fisioterapia', label:'Kinesiología & Fisioterapia', cod:'FISIO',         tipo:'consultorio' },
+  { key:'REHAB',   short:'Rehabilitación física',       label:'Rehabilitación física',       cod:'FISIO',         tipo:'rehab' },
+  { key:'OSTEO',   short:'Osteopatía',                  label:'Osteopatía',                  cod:'OSTEOPATIA',    tipo:'especialidad' },
+  { key:'DLM',     short:'DLM',                         label:'Drenaje Linfático (DLM)',     cod:'DLM',           tipo:'consultorio' },
+  { key:'PUNCION', short:'Punción Seca',                label:'Punción Seca',                cod:'PUNCION_SECA',  tipo:'consultorio' },
+  { key:'SUELO',   short:'Suelo Pélvico',               label:'Suelo Pélvico',               cod:'SUELO_PELVICO', tipo:'consultorio' },
+];
+let espShareSel = 'FISIO';
+
+function abrirCompartirCons() { espShareSel = 'FISIO'; renderEspBtns(); openModal('modalCompartirCons'); }
+function setEspShare(k) { espShareSel = k; renderEspBtns(); }
+function renderEspBtns() {
+  const cont = document.getElementById('csEspBtns');
+  if (!cont) return;
+  cont.innerHTML = ESPECIALIDADES_SHARE.map(e =>
+    `<button class="cs-esp ${e.key===espShareSel?'is-sel':''}" onclick="setEspShare('${e.key}')">${e.short}</button>`).join('');
+}
+
+// ¿Hay lugar libre para esa especialidad en ese día/hora/fecha?
+function slotLibreShare(esp, diaNumero, hora, fecha) {
+  if (feriadosMap.has(fecha)) return false;
+  if (esBloqueoFijo(diaNumero, hora) && aperturasConsEn(fecha, hora).length === 0) return false;
+  if (window.Bloqueos) {
+    const hi = pad(hora)+':00', hf = pad(hora+1)+':00';
+    const bl = Bloqueos.todosLosQueAplican('CONSULTORIOS', fecha, hi, hf, null, null) || [];
+    if (bl.some(b => !b.profesional_email && !b.practica_codigo)) return false;
+  }
+  const slotTurnos = turnos.filter(t => t.fecha===fecha && parseInt(t.hora_inicio.slice(0,2),10)===hora && t.estado!=='CANCELADO');
+  const hayEspecialidad = slotTurnos.some(t => esEspecialidadCons(t.practica_codigo));
+  if (esp.tipo === 'especialidad') {
+    if (slotTurnos.length > 0) return false;
+    return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0;
+  }
+  if (hayEspecialidad) return false;
+  if (esp.tipo === 'rehab') {
+    const hayProfFisio = disponiblesEn(diaNumero, hora).some(d => d.practicas.includes('FISIO'));
+    const sobreUsados = slotTurnos.filter(esSobreTurnoCons).length;
+    return hayProfFisio && sobreUsados === 0;
+  }
+  return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0;
+}
+
+function construirShareCardCons(esp) {
+  const DIAS_CAP = ['Lunes','Martes','Miércoles','Jueves','Viernes'];
+  const inicio = lunesDe(anchorDate);
+  const dias = Array.from({length:5}, (_,i) => addDays(inicio, i));
+  const fmt = d => `${pad(d.getDate())}/${pad(d.getMonth()+1)}`;
+  let secciones = '';
+  dias.forEach((d, idx) => {
+    const diaNumero = idx+1;
+    const iso = toISODate(d);
+    const fer = feriadosMap.get(iso);
+    let chips;
+    if (fer) {
+      chips = `<div class="sc-fer">Feriado · ${escapeHtml(fer)}</div>`;
+    } else {
+      const libres = HORAS.filter(h => slotLibreShare(esp, diaNumero, h, iso));
+      chips = libres.length
+        ? libres.map(h => `<span class="sc-chip">${pad(h)}:00</span>`).join('')
+        : `<div class="sc-none">Sin lugares</div>`;
+    }
+    secciones += `<div class="sc-day"><div class="sc-day-h">${DIAS_CAP[idx]} ${fmt(d)}</div><div class="sc-chips">${chips}</div></div>`;
+  });
+  return `
+    <div class="sc-logo"></div>
+    <div class="sc-title">PuntoBiO · <b>Turnos disponibles</b></div>
+    <div class="sc-sub">${escapeHtml(esp.label)} · Semana ${fmt(dias[0])} al ${fmt(dias[4])}</div>
+    ${secciones}
+    <div class="sc-foot">Consultá por estos horarios para anotarte 💪</div>`;
+}
+
+async function generarShareCons(formato) {
+  const esp = ESPECIALIDADES_SHARE.find(e => e.key === espShareSel);
+  const card = document.getElementById('shareConsCard');
+  const loading = document.getElementById('csLoading');
+  loading.style.display = 'block';
+  card.innerHTML = construirShareCardCons(esp);
+  card.style.display = 'block';
+  try {
+    await new Promise(r => setTimeout(r, 60));
+    const canvas = await html2canvas(card, { scale: 2, backgroundColor: '#0c1a2b', logging: false });
+    const inicio = lunesDe(anchorDate), fin = addDays(inicio, 4);
+    const fname = `turnos-${esp.key.toLowerCase()}-${toISODate(inicio)}-al-${toISODate(fin)}`;
+    if (formato === 'pdf') {
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF({ orientation:'portrait', unit:'px', format:[canvas.width, canvas.height] });
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, canvas.width, canvas.height);
+      pdf.save(fname + '.pdf');
+    } else {
+      await new Promise(res => canvas.toBlob(async (blob) => {
+        const file = new File([blob], fname + '.png', { type: 'image/png' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          try { await navigator.share({ files: [file], title: 'Turnos disponibles' }); res(); return; } catch(e) {}
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = fname + '.png'; a.click();
+        URL.revokeObjectURL(url); res();
+      }, 'image/png'));
+    }
+  } catch (err) {
+    alert('No se pudo generar: ' + (err?.message || err));
+  } finally {
+    card.style.display = 'none';
+    loading.style.display = 'none';
+    closeModal('modalCompartirCons');
   }
 }
 
