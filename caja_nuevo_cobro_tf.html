@@ -295,6 +295,13 @@
 
     <!-- Form -->
     <div id="form-cobro" class="form-cobro">
+      <!-- Pago parcial: paga una parte y queda debiendo el resto (NO es descuento) -->
+      <label for="es_parcial" style="display:flex; align-items:center; gap:8px; margin-bottom:10px; cursor:pointer; font-weight:600; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--panel-2);">
+        <input type="checkbox" id="es_parcial" style="width:18px; height:18px; cursor:pointer; flex:none;" />
+        🟠 Es pago parcial — paga una parte y queda debiendo el resto
+      </label>
+      <div id="parcial-hint" style="display:none; margin:-2px 0 12px; font-size:13px; font-weight:600; color:#b45309;"></div>
+
       <div class="form-grid">
         <div class="form-group">
           <label>Descuento temporal (este mes)</label>
@@ -508,6 +515,8 @@
     document.getElementById('descuento_temporal').value = 0;
     document.getElementById('importe').value = monto;
     document.getElementById('tipo_cobro').value = 'NORMAL';
+    document.getElementById('es_parcial').checked = false;
+    actualizarParcial();
 
     // Quick amounts: monto completo, mitad
     const qa = document.getElementById('quick-amounts');
@@ -520,8 +529,13 @@
       b.type = 'button'; b.className = 'quick-amount'; b.textContent = o.label;
       b.onclick = () => {
         document.getElementById('importe').value = o.val;
-        document.getElementById('descuento_temporal').value = Math.max(0, monto - o.val);
+        if (esParcial()) {
+          document.getElementById('descuento_temporal').value = 0;
+        } else {
+          document.getElementById('descuento_temporal').value = Math.max(0, monto - o.val);
+        }
         sincronizarTipoCobro();
+        actualizarParcialHint();
       };
       qa.appendChild(b);
     });
@@ -541,14 +555,69 @@
     document.getElementById('panel-alumno').scrollIntoView({behavior:'smooth', block:'start'});
   }
 
+  // Helpers de pago parcial
+  function esParcial(){
+    const cb = document.getElementById('es_parcial');
+    return !!(cb && cb.checked);
+  }
+  function montoAlumno(){
+    if (!alumnoSel) return 0;
+    return Math.max(0, (alumnoSel.valor_lista || 0) - (alumnoSel.descuento_libre || 0));
+  }
+  // Muestra cuánto queda debiendo (sólo en modo parcial)
+  function actualizarParcialHint(){
+    const hint = document.getElementById('parcial-hint');
+    if (!hint) return;
+    if (!esParcial() || !alumnoSel){ hint.style.display = 'none'; return; }
+    const monto = montoAlumno();
+    const imp = parseFloat(document.getElementById('importe').value) || 0;
+    const saldo = Math.max(0, Math.round(monto - imp));
+    if (imp <= 0){
+      hint.style.display = 'none';
+    } else if (saldo > 0){
+      hint.style.display = 'block';
+      hint.style.color = '#b45309';
+      hint.textContent = `🟠 Queda debiendo ${fmt(saldo)} — se guarda como SALDO PENDIENTE (no es descuento).`;
+    } else {
+      hint.style.display = 'block';
+      hint.style.color = '#166534';
+      hint.textContent = `✅ Cubre el mes completo (${fmt(monto)}). No queda saldo.`;
+    }
+  }
+  // Activa/desactiva el modo parcial: bloquea el descuento y fuerza tipo NORMAL.
+  function actualizarParcial(){
+    const inputDesc = document.getElementById('descuento_temporal');
+    const tipoSel = document.getElementById('tipo_cobro');
+    if (esParcial()){
+      // En parcial, lo que NO paga es deuda, no descuento → descuento bloqueado en 0.
+      inputDesc.value = 0;
+      inputDesc.disabled = true;
+      inputDesc.style.opacity = '0.5';
+      if (tipoSel.value !== 'CORTESIA') tipoSel.value = 'NORMAL';
+    } else {
+      inputDesc.disabled = false;
+      inputDesc.style.opacity = '';
+      // Al salir de parcial, recalcular descuento según importe actual
+      if (alumnoSel){
+        const imp = parseFloat(document.getElementById('importe').value) || 0;
+        inputDesc.value = Math.max(0, montoAlumno() - imp);
+      }
+      sincronizarTipoCobro();
+    }
+    actualizarParcialHint();
+  }
+
   // Recalcular importe cuando cambia el descuento temporal
   function setupDescuentoTemporal(){
     const inputDesc = document.getElementById('descuento_temporal');
     const inputImp = document.getElementById('importe');
+    const cbParcial = document.getElementById('es_parcial');
+
+    if (cbParcial) cbParcial.addEventListener('change', actualizarParcial);
 
     inputDesc.addEventListener('input', () => {
-      if (!alumnoSel) return;
-      const monto = alumnoSel.valor_lista - alumnoSel.descuento_libre;
+      if (!alumnoSel || esParcial()) return;
+      const monto = montoAlumno();
       const desc = Math.max(0, parseFloat(inputDesc.value) || 0);
       inputImp.value = Math.max(0, monto - desc);
       sincronizarTipoCobro();
@@ -556,7 +625,12 @@
 
     inputImp.addEventListener('input', () => {
       if (!alumnoSel) return;
-      const monto = alumnoSel.valor_lista - alumnoSel.descuento_libre;
+      if (esParcial()){
+        // En parcial NO tocamos el descuento; lo no pagado queda como saldo.
+        actualizarParcialHint();
+        return;
+      }
+      const monto = montoAlumno();
       const imp = parseFloat(inputImp.value) || 0;
       const desc = Math.max(0, monto - imp);
       inputDesc.value = desc;
@@ -570,6 +644,8 @@
     const tipoSel = document.getElementById('tipo_cobro');
     // Sólo auto-cambiamos si el usuario no eligió CORTESIA manualmente
     if (tipoSel.value === 'CORTESIA') return;
+    // En pago parcial el cobro es NORMAL (lo no pagado es deuda, no descuento)
+    if (esParcial()){ tipoSel.value = 'NORMAL'; return; }
     if (imp === 0) tipoSel.value = 'CORTESIA';
     else if (desc > 0) tipoSel.value = 'MANUAL';
     else tipoSel.value = 'NORMAL';
@@ -866,6 +942,12 @@
     document.getElementById('importe').value = '';
     document.getElementById('descuento_temporal').value = 0;
     document.getElementById('observaciones').value = '';
+    const cbP = document.getElementById('es_parcial');
+    if (cbP){ cbP.checked = false; }
+    const dT = document.getElementById('descuento_temporal');
+    dT.disabled = false; dT.style.opacity = '';
+    const hP = document.getElementById('parcial-hint');
+    if (hP) hP.style.display = 'none';
     document.getElementById('search').focus();
   }
 
@@ -875,20 +957,41 @@
       const importe = parseFloat(document.getElementById('importe').value);
       if (!importe || importe <= 0){ msg('El importe tiene que ser mayor a 0', 'error'); return; }
 
+      const parcial = esParcial();
+      const monto = montoAlumno();
+      const saldo = Math.max(0, Math.round(monto - importe));
+      const obsManual = (document.getElementById('observaciones').value || '').trim();
+
+      // En parcial: lo no pagado es DEUDA (no descuento). Si no queda saldo, no es parcial.
+      let descuentoTemp, tipoCobro, observaciones;
+      if (parcial){
+        if (saldo <= 0){
+          msg('El importe cubre todo el mes: destildá "Es pago parcial" o cobrá el total.', 'error');
+          return;
+        }
+        descuentoTemp = 0;
+        tipoCobro = 'NORMAL';
+        // Formato que lee el sistema de morosos: empieza con PARCIAL y trae saldo=NNN (entero, sin separadores)
+        observaciones = `PARCIAL · pagó ${fmt(importe)} · saldo=${saldo}` + (obsManual ? ` — ${obsManual}` : '');
+      } else {
+        descuentoTemp = parseFloat(document.getElementById('descuento_temporal').value) || 0;
+        tipoCobro = document.getElementById('tipo_cobro').value;
+        observaciones = obsManual || null;
+      }
+
       const btn = document.getElementById('btn-cobrar');
       btn.disabled = true; btn.textContent = 'Guardando...';
 
       const hoy = new Date().toISOString().substring(0,10);
-      const descuentoTemp = parseFloat(document.getElementById('descuento_temporal').value) || 0;
       const { error } = await sb.from('pagos_tf').insert({
         inscripcion_id: alumnoSel.inscripcion_id,
         mes_imputado: document.getElementById('mes_imputado').value,
         fecha: hoy,
         importe: importe,
         medio: document.getElementById('medio').value,
-        tipo_cobro: document.getElementById('tipo_cobro').value,
+        tipo_cobro: tipoCobro,
         descuento_temporal: descuentoTemp,
-        observaciones: document.getElementById('observaciones').value || null
+        observaciones: observaciones
       });
 
       btn.disabled = false; btn.textContent = 'Registrar cobro';
@@ -897,7 +1000,9 @@
 
       const nombreOk = alumnoSel.nombre;
       const importeOk = fmt(importe);
-      msg(`✅ Cobro registrado: ${importeOk} de ${nombreOk}`, 'success');
+      msg(parcial
+        ? `✅ Parcial registrado: ${importeOk} de ${nombreOk} · queda debiendo ${fmt(saldo)}`
+        : `✅ Cobro registrado: ${importeOk} de ${nombreOk}`, 'success');
 
       setTimeout(resetForm, 1500);
     });
