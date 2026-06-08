@@ -1184,6 +1184,22 @@ async function supabaseUpdate(tabla, filtro, data) {
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return true;
 }
+// Efectiviza las clases "suelta (pendiente de fijo)" cuyo fija_desde ya llegó:
+// las pasa a FIJAS (pendiente_fijo=false), como prometía el cartelito ("se vuelve fija en el vencimiento").
+// Idempotente (una vez en false ya no vuelve a entrar) y best-effort: si falla, no rompe la carga.
+async function efectivizarSueltasVencidas() {
+  try {
+    const d = new Date();
+    const hoyIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    await supabaseUpdate(
+      'turno_alumnos',
+      `activo=eq.true&pendiente_fijo=eq.true&fija_desde=lte.${hoyIso}`,
+      { pendiente_fijo: false }
+    );
+  } catch (e) {
+    console.warn('No se pudieron efectivizar las clases sueltas vencidas:', e.message || e);
+  }
+}
 // Insert que devuelve la fila creada
 async function supabaseInsertReturn(tabla, data) {
   const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}`, {
@@ -1350,6 +1366,9 @@ async function cargarDatos() {
       capacidad: t.capacidad,
       profes: mapaProfe[t.id] || []
     }));
+    // Efectivizar las clases "suelta (pendiente de fijo)" cuyo fija_desde ya llegó,
+    // ANTES de leer, así esta misma carga ya las muestra como fijas (sin el ⏳).
+    await efectivizarSueltasVencidas();
     // Cargar alumnos por turno (incluyendo fecha_desde y pendiente_fijo)
     const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,pendiente_fijo,personas(id,nombre,foto_perfil)&activo=eq.true');
 
