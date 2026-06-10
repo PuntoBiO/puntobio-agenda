@@ -1907,26 +1907,17 @@ function renderHome() {
   if (permisos.admin_total || permisos.operativo_general) {
     accesos.push({ icon: '💵', title: 'Caja diaria', desc: 'Cobros del día', id: 'caja-diaria' })
   }
-  // Profes/kines (vista acotada): los accesos van a las AGENDAS,
-  // nunca a los paneles administrativos de cada área.
+  // Profes/kines (vista acotada): solo la tarjeta "Agendas" (el selector ya los
+  // lleva a su agenda); los paneles administrativos de área son solo para admin.
   const esProfeHome = window.esProfeVistaAcotada()
-  if (permisos.ve_terapia_fisica) {
-    accesos.push(esProfeHome
-      ? { icon: '🏋️', title: 'Agenda TF', desc: 'Clases del día', id: 'agenda-tf' }
-      : { icon: '🏋️', title: 'Terapia Física', desc: 'Agenda + alumnos', id: 'terapia-fisica' })
+  if (permisos.ve_terapia_fisica && !esProfeHome) {
+    accesos.push({ icon: '🏋️', title: 'Terapia Física', desc: 'Agenda + alumnos', id: 'terapia-fisica' })
   }
-  if (permisos.ve_consultorios) {
-    accesos.push(esProfeHome
-      ? { icon: '🩺', title: 'Agenda Fisio', desc: 'Turnos del día', id: 'agenda-fisio' }
-      : { icon: '🩺', title: 'Consultorios', desc: 'Rehab + especialidades', id: 'consultorios' })
+  if (permisos.ve_consultorios && !esProfeHome) {
+    accesos.push({ icon: '🩺', title: 'Consultorios', desc: 'Rehab + especialidades', id: 'consultorios' })
   }
-  if (permisos.ve_biolab) {
-    accesos.push(esProfeHome
-      ? { icon: '🔬', title: 'Agenda BioLab', desc: 'Evaluaciones del día', id: 'agenda-biolab' }
-      : { icon: '🔬', title: 'BioLab', desc: 'Evaluaciones', id: 'biolab' })
-  }
-  if (esProfeHome && permisos.ve_masoterapia) {
-    accesos.push({ icon: '💆', title: 'Agenda Maso', desc: 'Turnos del día', id: 'agenda-masoterapia' })
+  if (permisos.ve_biolab && !esProfeHome) {
+    accesos.push({ icon: '🔬', title: 'BioLab', desc: 'Evaluaciones', id: 'biolab' })
   }
   if (permisos.operativo_general) {
     accesos.push({ icon: '👥', title: 'Padrón', desc: 'Buscar persona', id: 'padron' })
@@ -1983,15 +1974,39 @@ function renderHome() {
           </div>
         </div>
       </div>
+      ${esDuena ? `
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📊 Mis números como profesional</div>
+        </div>
+        <div class="panel-body" id="home-mismetricas-admin-body">
+          <div class="empty-state">
+            <span class="empty-state-icon">⏳</span>
+            Cargando…
+          </div>
+        </div>
+      </div>` : ''}
     </div>
     ` : `
-    <div style="margin-top: 8px;">
+    <div class="cols-2" style="margin-top: 8px;">
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">📅 Mis turnos de hoy</div>
           <div class="panel-link" onclick="abrirSelectorAgendas()" style="cursor:pointer">Ver agendas →</div>
         </div>
         <div class="panel-body" id="home-misturnos-body">
+          <div class="empty-state">
+            <span class="empty-state-icon">⏳</span>
+            Cargando…
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📊 Mis números</div>
+        </div>
+        <div class="panel-body" id="home-mismetricas-body">
           <div class="empty-state">
             <span class="empty-state-icon">⏳</span>
             Cargando…
@@ -2159,6 +2174,9 @@ async function cargarHomeData() {
       : `<div class="empty-state"><span class="empty-state-icon">✓</span>Sin alertas por ahora.</div>`
   }
 
+  // --- Panel "Mis números como profesional" (solo Lu y Jime atienden) ---
+  cargarMisNumerosPersonales()
+
   // --- Panel "Próximos turnos de hoy": lista real de las 4 áreas ---
   const hoyBody = document.getElementById('home-hoy-body')
   if (hoyBody) {
@@ -2184,56 +2202,83 @@ async function cargarHomeData() {
   }
 }
 
+// Alias del equipo para matchear el campo "profesional" (texto libre) en las
+// tablas de turnos. El matcheo es por PALABRA exacta (o inclusión si el alias
+// tiene 4+ letras), así "LU" no pisa a "LUDMILA" ni "LAUTARO".
+const ALIAS_EQUIPO = {
+  'liclucianavelaz@gmail.com': ['LU', 'LUCIANA', 'VELAZ'],
+  'jimenahllorente@gmail.com': ['JIME', 'JIMENA', 'LLORENTE'],
+  'loz.magdalena@gmail.com': ['MALE', 'MAGDALENA'],
+  'brunitovelez99@gmail.com': ['BRUNO'],
+  'veronicasandler@hotmail.com': ['VERO', 'VERONICA'],
+  'santiagoferreira1999@gmail.com': ['SANTI', 'SANTIAGO'],
+  'leacrespin97@gmail.com': ['LEAN', 'LEANDRO'],
+  'leut.molina@gmail.com': ['LAUTI', 'LAUTARO']
+}
+function normTexto(s) {
+  return String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+}
+function aliasDe(email, nombre) {
+  return ALIAS_EQUIPO[(email || '').toLowerCase().trim()]
+    || [normTexto(nombre).split(' ')[0]].filter(Boolean)
+}
+function esTurnoDe(misAlias, profTexto) {
+  const p = normTexto(profTexto)
+  if (!p) return false
+  const toks = p.split(/[^A-Z0-9]+/)
+  return misAlias.some(a => a && (toks.includes(a) || (a.length >= 4 && p.includes(a))))
+}
+
 // HOME PARA PROFES/KINES: solo SUS turnos (sin alertas ni datos administrativos).
 // Matchea el campo "profesional" (texto libre) contra apodos conocidos por email.
 async function cargarHomeDataProfe() {
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v }
-  const norm = s => String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+  const norm = normTexto
   const hhmm = t => String(t || '').substring(0, 5)
   const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
   const hoyISO = new Date().toISOString().substring(0, 10)
 
-  const ALIAS_PROFE = {
-    'loz.magdalena@gmail.com': ['MALE', 'MAGDALENA'],
-    'brunitovelez99@gmail.com': ['BRUNO'],
-    'veronicasandler@hotmail.com': ['VERO', 'VERONICA'],
-    'santiagoferreira1999@gmail.com': ['SANTI', 'SANTIAGO'],
-    'leacrespin97@gmail.com': ['LEAN', 'LEANDRO'],
-    'leut.molina@gmail.com': ['LAUTI', 'LAUTARO']
-  }
-  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
-  const misAlias = ALIAS_PROFE[miEmail] || [norm((usuario && usuario.nombre) || '').split(' ')[0]].filter(Boolean)
-  const esMio = prof => {
-    const p = norm(prof)
-    return p !== '' && misAlias.some(a => a && p.includes(a))
-  }
+  const misAlias = aliasDe(usuario && usuario.email, usuario && usuario.nombre)
+  const esMio = prof => esTurnoDe(misAlias, prof)
 
-  // Semana lunes → domingo
+  // Rangos: semana lunes → domingo, y mes calendario completo (para métricas)
   const d = new Date(); const dow = d.getDay()
   const lunes = new Date(d); lunes.setDate(d.getDate() - ((dow + 6) % 7))
   const domingo = new Date(lunes); domingo.setDate(lunes.getDate() + 6)
   const lunesStr = lunes.toISOString().substring(0, 10)
   const domingoStr = domingo.toISOString().substring(0, 10)
+  const mesActual = hoyISO.substring(0, 7)
+  const primerDiaMes = mesActual + '-01'
+  const ultDiaMes = mesActual + '-' + String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, '0')
+  const desde = primerDiaMes < lunesStr ? primerDiaMes : lunesStr
+  const hasta = ultDiaMes > domingoStr ? ultDiaMes : domingoStr
 
   let misHoy = []
   let cntSemana = 0
+  let areaMes = 0
+  const pacientesMes = new Set()
+  let tfClasesHoy = 0, tfAlumnosHoy = 0, tfCapHoy = 0, tfClasesSemana = 0
   try {
     const vacio = Promise.resolve({ data: [] })
     const [consR, bioR, masoR] = await Promise.all([
       permisos.ve_consultorios
-        ? supabase.from('turnos_consultorio').select('fecha, hora_inicio, paciente_nombre, profesional, practica_codigo, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        ? supabase.from('turnos_consultorio').select('fecha, hora_inicio, paciente_nombre, profesional, practica_codigo, estado').gte('fecha', desde).lte('fecha', hasta)
         : vacio,
       permisos.ve_biolab
-        ? supabase.from('turnos_biolab').select('fecha, hora_inicio, paciente, profesional, practica, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        ? supabase.from('turnos_biolab').select('fecha, hora_inicio, paciente, profesional, practica, estado').gte('fecha', desde).lte('fecha', hasta)
         : vacio,
       permisos.ve_masoterapia
-        ? supabase.from('turnos_masoterapia').select('fecha, hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        ? supabase.from('turnos_masoterapia').select('fecha, hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').gte('fecha', desde).lte('fecha', hasta)
         : vacio
     ])
 
     const procesar = (rows, icon, getQuien, getDetalle) => {
       ;(rows || []).filter(t => noCancelado(t.estado) && esMio(t.profesional)).forEach(t => {
-        cntSemana++
+        if (t.fecha >= lunesStr && t.fecha <= domingoStr) cntSemana++
+        if (t.fecha.substring(0, 7) === mesActual) {
+          areaMes++
+          pacientesMes.add(getQuien(t))
+        }
         if (t.fecha === hoyISO) {
           misHoy.push({ hora: hhmm(t.hora_inicio), icon, quien: getQuien(t), detalle: getDetalle(t) })
         }
@@ -2258,10 +2303,15 @@ async function cargarHomeDataProfe() {
         const porClase = {}
         ;(alus || []).forEach(a => { porClase[a.turno_id] = (porClase[a.turno_id] || 0) + 1 })
         clasesHoy.forEach(c => {
-          misHoy.push({ hora: hhmm(c.hora), icon: '🏋️', quien: ('Clase TF ' + (c.servicio || '')).trim(), detalle: (porClase[c.id] || 0) + '/' + (c.capacidad || '—') + ' alumnos' })
+          const n = porClase[c.id] || 0
+          tfClasesHoy++
+          tfAlumnosHoy += n
+          tfCapHoy += Number(c.capacidad || 0)
+          misHoy.push({ hora: hhmm(c.hora), icon: '🏋️', quien: ('Clase TF ' + (c.servicio || '')).trim(), detalle: n + '/' + (c.capacidad || '—') + ' alumnos' })
         })
       }
-      cntSemana += (clases || []).length
+      tfClasesSemana = (clases || []).length
+      cntSemana += tfClasesSemana
     }
 
     misHoy.sort((a, b) => a.hora.localeCompare(b.hora))
@@ -2273,6 +2323,31 @@ async function cargarHomeDataProfe() {
     console.warn('Home profe:', e.message)
     setText('kpi-profe-hoy', '—'); setText('kpi-profe-hoy-sub', '')
     setText('kpi-profe-semana', '—'); setText('kpi-profe-semana-sub', '')
+  }
+
+  // --- Panel "Mis números": métricas personales del profe ---
+  const metBody = document.getElementById('home-mismetricas-body')
+  if (metBody) {
+    const fila = (icono, label, valor) => `
+      <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+        <span style="font-size:16px">${icono}</span>
+        <span style="font-size:13px; flex:1">${label}</span>
+        <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${valor}</span>
+      </div>`
+    let filasMet = ''
+    // Bloque turnos por nombre (Male / Bruno / Vero)
+    if (permisos.ve_consultorios || permisos.ve_biolab || permisos.ve_masoterapia) {
+      filasMet += fila('📅', 'Mis turnos esta semana', cntSemana - tfClasesSemana)
+      filasMet += fila('🗓️', 'Mis turnos en ' + mesActual, areaMes)
+      filasMet += fila('🧑‍🤝‍🧑', 'Pacientes distintos en el mes', pacientesMes.size)
+    }
+    // Bloque TF (Santi / Lean / Lauti / Male)
+    if (permisos.ve_terapia_fisica) {
+      filasMet += fila('🏋️', 'Clases TF hoy', tfClasesHoy + ' (' + tfAlumnosHoy + ' alumnos)')
+      filasMet += fila('📊', 'Ocupación de hoy', tfCapHoy > 0 ? Math.round(tfAlumnosHoy / tfCapHoy * 100) + '%' : '—')
+      filasMet += fila('🗓️', 'Clases fijas por semana', tfClasesSemana)
+    }
+    metBody.innerHTML = filasMet || `<div class="empty-state"><span class="empty-state-icon">📭</span>Sin datos todavía.</div>`
   }
 
   const body = document.getElementById('home-misturnos-body')
@@ -2296,6 +2371,63 @@ async function cargarHomeDataProfe() {
         : `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ Tus turnos de hoy ya pasaron. Últimos del día:</div>`
       body.innerHTML = (proximos.length ? '' : nota) + filasHTML + (proximos.length ? nota : '')
     }
+  }
+}
+
+// MIS NÚMEROS (Lu y Jime): turnos que atienden ellas como profesionales,
+// matcheados por nombre en las 3 tablas de turnos. Solo llena el panel si existe.
+async function cargarMisNumerosPersonales() {
+  const body = document.getElementById('home-mismetricas-admin-body')
+  if (!body) return
+  try {
+    const hoyISO = new Date().toISOString().substring(0, 10)
+    const mesActual = hoyISO.substring(0, 7)
+    const d = new Date(); const dow = d.getDay()
+    const lunes = new Date(d); lunes.setDate(d.getDate() - ((dow + 6) % 7))
+    const domingo = new Date(lunes); domingo.setDate(lunes.getDate() + 6)
+    const lunesStr = lunes.toISOString().substring(0, 10)
+    const domingoStr = domingo.toISOString().substring(0, 10)
+    const primerDiaMes = mesActual + '-01'
+    const ultDiaMes = mesActual + '-' + String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, '0')
+    const desde = primerDiaMes < lunesStr ? primerDiaMes : lunesStr
+    const hasta = ultDiaMes > domingoStr ? ultDiaMes : domingoStr
+
+    const misAlias = aliasDe(usuario && usuario.email, usuario && usuario.nombre)
+    const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
+
+    const [consR, bioR, masoR] = await Promise.all([
+      supabase.from('turnos_consultorio').select('fecha, paciente_nombre, profesional, estado').gte('fecha', desde).lte('fecha', hasta),
+      supabase.from('turnos_biolab').select('fecha, paciente, profesional, estado').gte('fecha', desde).lte('fecha', hasta),
+      supabase.from('turnos_masoterapia').select('fecha, paciente_nombre, profesional, estado').gte('fecha', desde).lte('fecha', hasta)
+    ])
+
+    let hoy = 0, semana = 0, mes = 0
+    const pacientes = new Set()
+    const sumar = (rows, getQuien) => {
+      ;(rows || []).filter(t => noCancelado(t.estado) && esTurnoDe(misAlias, t.profesional)).forEach(t => {
+        if (t.fecha === hoyISO) hoy++
+        if (t.fecha >= lunesStr && t.fecha <= domingoStr) semana++
+        if (t.fecha.substring(0, 7) === mesActual) { mes++; pacientes.add(getQuien(t)) }
+      })
+    }
+    sumar(consR.data, t => t.paciente_nombre || '—')
+    sumar(bioR.data, t => t.paciente || '—')
+    sumar(masoR.data, t => t.paciente_nombre || '—')
+
+    const fila = (icono, label, valor) => `
+      <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+        <span style="font-size:16px">${icono}</span>
+        <span style="font-size:13px; flex:1">${label}</span>
+        <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${valor}</span>
+      </div>`
+    body.innerHTML =
+      fila('📅', 'Mis turnos hoy', hoy) +
+      fila('🗓️', 'Mis turnos esta semana', semana) +
+      fila('📈', 'Mis turnos en ' + mesActual, mes) +
+      fila('🧑‍🤝‍🧑', 'Pacientes distintos en el mes', pacientes.size)
+  } catch (e) {
+    console.warn('Mis números:', e.message)
+    body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">📭</span>No se pudieron cargar.</div>`
   }
 }
 
