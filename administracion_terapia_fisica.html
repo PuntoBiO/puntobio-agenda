@@ -381,6 +381,23 @@
   </div>
 </div>
 
+<!-- MODAL BITÁCORA DE CLASES -->
+<div class="modal-backdrop" id="modalBitacora">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <div>
+        <span class="modal-title modal-title-ver">📋 Bitácora de clases</span>
+        <div id="bitacoraMeta" style="font-size:12px; color:var(--text-dim); margin-top:2px;"></div>
+      </div>
+      <button class="modal-close" onclick="cerrarModal('modalBitacora')">×</button>
+    </div>
+    <div class="modal-body" id="bitacoraBody"></div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalBitacora')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL HC COMPLETA -->
 <div class="modal-backdrop" id="modalHC">
   <div class="modal modal-lg">
@@ -1611,6 +1628,7 @@ async function abrirModalVer() {
   }
   acc += btn('editar', '✏️ Editar', 'var(--bg-hover)', 'var(--text)');
   acc += btn('ficha', '📅 Horarios', 'var(--bg-hover)', 'var(--text)');
+  acc += btn('bitacora', '📋 Bitácora', 'var(--bg-hover)', 'var(--text)');
   if (puedeAlta) acc += btn('altatf', '➕ Dar alta TF', 'var(--azul)', '#fff');
   if (esActivo) acc += btn('baja', '❌ Baja', 'var(--rojo-soft)', 'var(--rojo)');
   const footer = $('#modalVer').querySelector('.modal-footer');
@@ -1624,9 +1642,103 @@ window.accionDesdeFicha = (accion) => {
   if (accion === 'cobrar') abrirModalCobrar();
   else if (accion === 'editar') abrirModalEditar();
   else if (accion === 'ficha') abrirFichaAlumno();
+  else if (accion === 'bitacora') abrirBitacoraAlumno();
   else if (accion === 'altatf') abrirAltaTF();
   else if (accion === 'baja') abrirModalBaja();
 };
+
+// ===== BITÁCORA DE CLASES (línea de tiempo de movimientos del alumno) =====
+// Junta en una sola línea de tiempo: presentes, ausentes (c/ y s/aviso),
+// recuperatorios programados y recuperados, y clases canceladas por el centro.
+async function abrirBitacoraAlumno() {
+  const f = alumnoActivo;
+  const p = f.persona;
+  $('#modalBitacora').classList.add('activo');
+  $('#bitacoraMeta').textContent = p.nombre || ('#' + p.id);
+  $('#bitacoraBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando bitácora…</div>';
+  try {
+    const hoy = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes] = await Promise.all([
+      sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
+      sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado').eq('persona_id', p.id).neq('estado', 'cancelado'),
+      sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
+      fichaTurnosSistema.length ? { data: fichaTurnosSistema } : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
+      sb.from('clases_cerradas').select('turno_id,fecha,tipo,motivo').eq('tipo', 'centro')
+    ]);
+    if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
+    const turnoMap = {};
+    (turnosRes.data || []).forEach(t => { turnoMap[t.id] = t; });
+    const nombreTurno = (id) => { const t = turnoMap[id]; return t ? `${t.servicio||''} ${t.dia||''} ${t.hora||''}`.trim() : ''; };
+    const fmtF = (iso) => { if (!iso) return ''; const pp = String(iso).slice(0,10).split('-'); return pp.length === 3 ? `${+pp[2]}/${+pp[1]}/${pp[0]}` : iso; };
+
+    const misTurnoIds = new Set((misTurnosRes.data || []).map(t => t.turno_id));
+    const recups = recupRes.data || [];
+    // Clases tomadas como recuperatorio (turno+fecha) para no duplicarlas con el "presente"
+    const claveRecup = new Set(recups.map(r => `${r.turno_recupero_id}-${r.fecha_recupero}`));
+
+    const eventos = [];
+    (asisRes.data || []).forEach(a => {
+      if (a.estado === 'presente') {
+        if (claveRecup.has(`${a.turno_id}-${a.fecha}`)) return;   // se muestra como recuperada
+        eventos.push({ fecha: a.fecha, tipo: 'presente', icono: '✅', color: '#166534', bg: '#dcfce7', titulo: 'Presente', sub: nombreTurno(a.turno_id) });
+      } else if (a.estado === 'ausente-justificada') {
+        eventos.push({ fecha: a.fecha, tipo: 'ausente_just', icono: '🟠', color: '#9a3412', bg: '#ffedd5', titulo: 'Ausente con aviso', sub: nombreTurno(a.turno_id) });
+      } else if (a.estado === 'ausente') {
+        eventos.push({ fecha: a.fecha, tipo: 'ausente', icono: '❌', color: '#b91c1c', bg: '#fee2e2', titulo: 'Ausente sin aviso', sub: nombreTurno(a.turno_id) });
+      }
+    });
+    recups.forEach(r => {
+      const fr = r.fecha_recupero;
+      if (!fr) return;
+      const programado = fr >= hoy;
+      const sinCupo = (r.tipo === 'cierre' || r.tipo === 'feriado');
+      const origen = r.tipo === 'cierre' ? 'clase cancelada' : r.tipo === 'feriado' ? 'feriado' : 'falta';
+      eventos.push({
+        fecha: fr,
+        tipo: programado ? 'recu_prog' : 'recu_hecho',
+        icono: programado ? '🗓️' : '♻️',
+        color: programado ? '#1e3a8a' : '#3730a3',
+        bg: programado ? '#dbeafe' : '#e0e7ff',
+        titulo: programado ? 'Recuperatorio programado' : 'Recuperada',
+        sub: `${nombreTurno(r.turno_recupero_id)} · por ${origen} del ${fmtF(r.fecha_ausencia)}${sinCupo ? ' (sin gastar cupo)' : ''}`
+      });
+    });
+    (cerradasRes.data || []).forEach(c => {
+      if (!misTurnoIds.has(c.turno_id)) return;
+      eventos.push({ fecha: c.fecha, tipo: 'cancelada', icono: '🚫', color: '#b91c1c', bg: '#fef2f2', titulo: 'Clase cancelada por el centro', sub: `${nombreTurno(c.turno_id)}${c.motivo ? ' · ' + c.motivo : ''}` });
+    });
+
+    eventos.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));   // más reciente primero
+
+    const cuenta = (t) => eventos.filter(e => e.tipo === t).length;
+    const resumen = `
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+        <span style="background:#dcfce7;color:#166534;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">✅ ${cuenta('presente')} presentes</span>
+        <span style="background:#ffedd5;color:#9a3412;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🟠 ${cuenta('ausente_just')} c/aviso</span>
+        <span style="background:#fee2e2;color:#b91c1c;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">❌ ${cuenta('ausente')} s/aviso</span>
+        <span style="background:#dbeafe;color:#1e3a8a;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🗓️ ${cuenta('recu_prog')} program.</span>
+        <span style="background:#e0e7ff;color:#3730a3;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">♻️ ${cuenta('recu_hecho')} recuperadas</span>
+        <span style="background:#fef2f2;color:#b91c1c;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🚫 ${cuenta('cancelada')} canceladas</span>
+      </div>`;
+
+    if (!eventos.length) {
+      $('#bitacoraBody').innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-dim);font-size:14px">Todavía no hay movimientos registrados para este alumno.</div>';
+      return;
+    }
+    const filas = eventos.map(e => `
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:9px 11px;border-radius:9px;background:${e.bg};margin-bottom:6px">
+        <div style="font-size:16px;line-height:1.2">${e.icono}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:13px;color:${e.color}">${e.titulo}</div>
+          ${e.sub ? `<div style="font-size:11.5px;color:var(--text-dim);margin-top:1px">${e.sub}</div>` : ''}
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);white-space:nowrap;font-weight:600">${fmtF(e.fecha)}</div>
+      </div>`).join('');
+    $('#bitacoraBody').innerHTML = resumen + filas;
+  } catch (e) {
+    $('#bitacoraBody').innerHTML = `<div style="padding:24px;color:var(--rojo);font-size:13px">No se pudo cargar la bitácora: ${e.message}</div>`;
+  }
+}
 
 // Lee el saldo pendiente por cambio de fecha guardado en la inscripción.
 // Tag: [DEUDA_CAMBIO importe=NNN concepto=puente_fecha mes=YYYY-MM venc=X->Y]
