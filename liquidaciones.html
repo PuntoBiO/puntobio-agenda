@@ -211,7 +211,30 @@ async function cargar(){
     document.getElementById('resultado').innerHTML = `<div class="empty">❌ Error: ${error.message}</div>`;
     return;
   }
-  if (!data || data.length === 0) {
+
+  // ===== MASAJES DE REGALO (cumpleaños) del mes =====
+  // El paciente no paga nada, así que NO hay fila en pagos_consultorio y el
+  // tratamiento no entraría nunca a esta pantalla. Pero la sesión SÍ existe
+  // (la creó el trigger al marcar PRESENTE) con la parte de Vero, que la
+  // asume PuntoBiO. Las traemos aparte para mostrarlas y sumarlas a lo que
+  // PB le debe al profesional.
+  let regalosMes = [];
+  try {
+    let qR = sb.from('sesiones')
+      .select('fecha, profesional, monto_profesional, tratamiento_id, tratamientos!inner(codigo_id, practica_codigo, personas(nombre))')
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
+      .eq('tratamientos.practica_codigo', 'MASAJES_R')
+      .order('fecha');
+    if (filtroProf && window._soloLoMioLiq) qR = qR.ilike('profesional', '%' + filtroProf + '%');
+    const { data: regData } = await qR;
+    regalosMes = regData || [];
+  } catch (e) {
+    console.warn('No se pudieron cargar los masajes de regalo:', e.message);
+  }
+  window._regalosMes = regalosMes;
+
+  if ((!data || data.length === 0) && regalosMes.length === 0) {
     document.getElementById('resultado').innerHTML = `<div class="empty">📭 Sin pagos en ${mes}</div>`;
     return;
   }
@@ -220,7 +243,7 @@ async function cargar(){
   // La parte profesional REAL de cada tratamiento sale de las sesiones (lo que se trabajó),
   // NO de los pagos (que pueden venir divididos). Ej: evaluación = 1 sesión de $40.000 prof,
   // aunque el pago haya entrado en 2 cuotas de $20.000.
-  const tratIds = [...new Set(data.map(p => p.tratamiento_id).filter(x => x != null))];
+  const tratIds = [...new Set((data || []).map(p => p.tratamiento_id).filter(x => x != null))];
   let sesionesData = [];
   if (tratIds.length > 0){
     const { data: sesData, error: sesErr } = await sb.from('sesiones')
@@ -229,7 +252,7 @@ async function cargar(){
     if (!sesErr && sesData) sesionesData = sesData;
   }
 
-  DATA = data;
+  DATA = data || [];
 
   // ===== PAGOS DE OBRAS SOCIALES (informativo, no afecta el cálculo) =====
   // Se filtran por la FECHA DE PAGO (cuándo entró a la cuenta del profesional),
@@ -252,7 +275,7 @@ async function cargar(){
   }
   window._pagosOS = pagosOS;
 
-  render(data, sesionesData, filtroProf);
+  render(data || [], sesionesData, filtroProf);
 }
 
 function render(pagos, sesiones, filtroProf){
@@ -564,8 +587,21 @@ function render(pagos, sesiones, filtroProf){
   html += `</div>`;
 
   // Resumen de cruces "quién le paga a quién" en texto claro
+  // Los MASAJES DE REGALO (cumpleaños) entran acá: PB le debe esa plata al profesional
+  // aunque no haya ningún pago del paciente (cortesía del centro).
+  const regalosVista = (window._regalosMes || []).filter(s => !filtroProf || normProf(s.profesional) === filtroProf);
+  const regPorProf = {}; const regCantProf = {}; let totalRegalos = 0;
+  for (const s of regalosVista){
+    const pr = normProf(s.profesional) || 'Vero';
+    const m = Number(s.monto_profesional) || 0;
+    regPorProf[pr] = (regPorProf[pr] || 0) + m;
+    regCantProf[pr] = (regCantProf[pr] || 0) + 1;
+    totalRegalos += m;
+  }
+  const hayRegalos = totalRegalos > 0.5;
+
   const hayDeudasCentro = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
-  if (netosFinalesVista.length > 0 || hayDeudasCentro){
+  if (netosFinalesVista.length > 0 || hayDeudasCentro || hayRegalos){
     html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Cobros a devolver</div>`;
     const ordenRC = ['Bruno','Male','Vero','Jime','Lu'];
     Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
@@ -575,6 +611,11 @@ function render(pagos, sesiones, filtroProf){
     });
     for (const n of netosFinalesVista){
       html += `<div class="cruce-linea"><b>${n[0]}</b> le debe <b>${fmt(n[2])}</b> a <b>${n[1]}</b></div>`;
+    }
+    for (const prof of Object.keys(regPorProf)){
+      if (regPorProf[prof] > 0.5){
+        html += `<div class="cruce-linea">🎁 <b>PuntoBiO</b> le debe <b>${fmt(regPorProf[prof])}</b> a <b>${prof}</b> por ${regCantProf[prof]} masaje${regCantProf[prof]>1?'s':''} de regalo (cumpleaños)</div>`;
+      }
     }
     html += `</div>`;
   }
@@ -604,10 +645,28 @@ function render(pagos, sesiones, filtroProf){
     html += `</tbody></table>`;
   }
 
+  // ===== BLOQUE: MASAJES DE REGALO (cumpleaños) =====
+  // El paciente no pagó nada (cortesía PuntoBiO): esta plata NO sale de los
+  // pagos de arriba. PB se la paga al profesional aparte.
+  if (regalosVista.length > 0){
+    html += `<h2 class="bloque-tit">🎁 Masajes de regalo (cumpleaños)</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">El paciente no pagó nada (cortesía del centro), así que estos montos <b>no figuran en los pagos de arriba</b>: PuntoBiO se los paga al profesional aparte. Ya están sumados en "Cobros a devolver".</p>`;
+    html += `<table style="margin-bottom:8px;"><thead><tr>
+        <th>Fecha</th><th>Paciente</th><th>Cupón</th><th>Profesional</th><th class="num">Para el profesional</th>
+      </tr></thead><tbody>`;
+    for (const s of regalosVista){
+      const t = s.tratamientos || {};
+      const nom = (t.personas && t.personas.nombre) || '—';
+      html += `<tr><td>${s.fecha}</td><td>${nom}</td><td style="font-family:monospace;">${t.codigo_id || '—'}</td><td>${badge(normProf(s.profesional) || 'Vero')}</td><td class="num">${fmt(Number(s.monto_profesional)||0)}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#fce7f3;color:#9d174d;"><td colspan="4">TOTAL regalos (lo asume PuntoBiO)</td><td class="num">${fmt(totalRegalos)}</td></tr>`;
+    html += `</tbody></table>`;
+  }
+
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
-  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista };
+  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
 }
 
 function toggleDetalle(prof){
