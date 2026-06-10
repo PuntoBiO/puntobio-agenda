@@ -2117,7 +2117,9 @@ let EVO_TURNO = {};      // persona_id -> {id, modulo, contenido, ...}
 let EVO_RECIENTES = [];  // últimas anotaciones cargadas (para reusar)
 let evoSeleccion = new Set(); // persona_id seleccionados para aplicar en lote
 let evoTurnoActual = null;    // el turno abierto
-let CLASES_CERRADAS = new Set();  // claves "turnoId-fecha" de clases ya cerradas
+let CLASES_CERRADAS = new Map();  // "turnoId-fecha" -> { tipo, motivo }
+//   tipo: 'finalizada' (cierre normal de fin de día) | 'auto' (cierre nocturno)
+//         | 'centro' (cancelada por el centro: da recuperatorio SIN gastar cupo)
 let DOLOR_RECIENTE = new Set();   // persona_id que tuvieron dolor en las últimas 2 semanas
 let DOLOR_DETALLE = {};           // persona_id -> {origen: 'profe'|'alumno'|'ambos', max_eva, zona}
 
@@ -2356,9 +2358,12 @@ async function cargarMensajesPendientes(t) {
 // Carga todas las clases cerradas de la semana visible (para los ✓/✗ de la grilla)
 async function cargarClasesCerradas() {
   try {
-    const filas = await supabaseQuery('clases_cerradas', `?select=turno_id,fecha`);
-    CLASES_CERRADAS = new Set((filas || []).map(f => `${f.turno_id}-${f.fecha}`));
-  } catch (e) { CLASES_CERRADAS = new Set(); console.warn('No se pudo cargar clases cerradas', e); }
+    const filas = await supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo`);
+    CLASES_CERRADAS = new Map((filas || []).map(f => [
+      `${f.turno_id}-${f.fecha}`,
+      { tipo: f.tipo || 'finalizada', motivo: f.motivo || null }
+    ]));
+  } catch (e) { CLASES_CERRADAS = new Map(); console.warn('No se pudo cargar clases cerradas', e); }
 }
 
 // RESPALDO del cierre automático (por si el cron de Supabase fallara un día).
@@ -2387,10 +2392,11 @@ async function cerrarClasesViejasAuto() {
         await supabaseInsert('clases_cerradas', {
           turno_id: c.turno_id,
           fecha: c.fecha,
+          tipo: 'auto',
           cerrada_por_nombre: 'Cierre automático',
           cerrada_por_email: 'sistema@puntobio'
         });
-        CLASES_CERRADAS.add(`${c.turno_id}-${c.fecha}`);
+        CLASES_CERRADAS.set(`${c.turno_id}-${c.fecha}`, { tipo: 'auto', motivo: null });
       } catch (e) { /* si ya existía u otro error, seguimos */ }
     }
   } catch (e) { console.warn('No se pudo cerrar clases viejas automáticamente', e); }
@@ -2422,6 +2428,11 @@ async function cargarEvosPorTurno() {
 // ¿Está cerrada esta clase (turno) en la fecha dada?
 function claseEstaCerrada(turnoId, fecha) {
   return CLASES_CERRADAS.has(`${turnoId}-${fecha}`);
+}
+// Si la clase fue CANCELADA POR EL CENTRO, devuelve { tipo:'centro', motivo }. Si no, null.
+function cierreCentroDe(turnoId, fecha) {
+  const c = CLASES_CERRADAS.get(`${turnoId}-${fecha}`);
+  return (c && c.tipo === 'centro') ? c : null;
 }
 
 // =============================================
@@ -2619,6 +2630,26 @@ async function diasFijosDePersona(personaId) {
     return dias;  // Set de nombres: {"Lunes","Miércoles"}
   } catch (e) { console.warn('No se pudo leer días fijos', e); return new Set(); }
 }
+// Turnos FIJOS (turno_id + desde cuándo) en que la persona está activa.
+// Sirve para saber si le corresponde el recupero de una clase cancelada por el centro.
+async function turnosFijosDePersona(personaId) {
+  try {
+    const filas = await supabaseQuery('turno_alumnos',
+      `?select=turno_id,fecha_desde&persona_id=eq.${personaId}&activo=eq.true`);
+    return (filas || []).map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null }));
+  } catch (e) { console.warn('No se pudo leer turnos fijos', e); return []; }
+}
+// Lista de clases CANCELADAS POR EL CENTRO: [{ turno_id, fecha, motivo }]
+function cierresCentroLista() {
+  const out = [];
+  CLASES_CERRADAS.forEach((v, k) => {
+    if (!v || v.tipo !== 'centro') return;
+    const dash = k.indexOf('-');                 // key = "turnoId-YYYY-MM-DD"
+    if (dash < 0) return;
+    out.push({ turno_id: k.slice(0, dash), fecha: k.slice(dash + 1), motivo: v.motivo || null });
+  });
+  return out;
+}
 // Nombre de día (Lunes..Viernes) de una fecha YYYY-MM-DD. null si es fin de semana.
 function nombreDiaDeFecha(fechaIso) {
   const f = new Date(fechaIso + 'T00:00:00');
@@ -2633,17 +2664,19 @@ function nombreDiaDeFecha(fechaIso) {
 async function estadoRecuperatorios(personaId) {
   const { plan: codPlan, diaCorte } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
-  const [ausencias, usados, diasFijos] = await Promise.all([
+  const [ausencias, usados, diasFijos, misTurnosFijos] = await Promise.all([
     ausenciasConAviso(personaId),
     recuperatoriosDe(personaId),
-    diasFijosDePersona(personaId)
+    diasFijosDePersona(personaId),
+    turnosFijosDePersona(personaId)
   ]);
   const hoy = hoyIso();
-  // Recupes normales ya usados, contados por CICLO de la falta (los de feriado NO cuentan)
+  // Recupes normales ya usados, contados por CICLO de la falta.
+  // Los de feriado y los de cierre-del-centro NO gastan cupo.
   const usadosPorMes = {};
   const fechasYaRecuperadas = new Set();
   usados.forEach(r => {
-    if (r.tipo === 'feriado') return;          // los feriados no gastan cupo
+    if (r.tipo === 'feriado' || r.tipo === 'cierre') return;   // no gastan cupo
     const ciclo = cicloDe(r.fecha_ausencia, diaCorte);
     usadosPorMes[ciclo] = (usadosPorMes[ciclo] || 0) + 1;
     fechasYaRecuperadas.add(r.fecha_ausencia);
@@ -2651,6 +2684,9 @@ async function estadoRecuperatorios(personaId) {
   // Feriados YA recuperados (para no ofrecerlos de nuevo)
   const feriadosYaRecuperados = new Set();
   usados.forEach(r => { if (r.tipo === 'feriado') feriadosYaRecuperados.add(r.fecha_ausencia); });
+  // Cierres-del-centro YA recuperados (por fecha, para no ofrecerlos de nuevo)
+  const cierresYaRecuperados = new Set();
+  usados.forEach(r => { if (r.tipo === 'cierre') cierresYaRecuperados.add(r.fecha_ausencia); });
 
   // Ausencias recuperables: con aviso, NO recuperadas ya, dentro de los 60 días
   const recuperables = [];
@@ -2674,6 +2710,26 @@ async function estadoRecuperatorios(personaId) {
       fecha: fFer, diasRestantes: 60 - dias,
       mes: cicloDe(fFer, diaCorte), tipo: 'feriado',
       motivo: FERIADOS[fFer]
+    });
+  });
+
+  // CLASES CANCELADAS POR EL CENTRO que pisan un turno FIJO de la persona.
+  // No gastan cupo (igual que feriado). Se ofrecen desde que se cancelan (incluso
+  // antes de la fecha original) y hasta 60 días después. La fila en recuperatorios_tf
+  // se crea recién al reservar.
+  const desdePorTurno = new Map();
+  misTurnosFijos.forEach(tf => desdePorTurno.set(tf.turno_id, tf.fecha_desde));
+  cierresCentroLista().forEach(cc => {
+    if (!desdePorTurno.has(cc.turno_id)) return;            // no es su turno fijo
+    const desde = desdePorTurno.get(cc.turno_id);
+    if (desde && cc.fecha < desde) return;                 // todavía no era fijo en esa clase
+    if (cierresYaRecuperados.has(cc.fecha)) return;        // ya lo recuperó
+    const dias = diasEntre(cc.fecha, hoy);
+    if (dias > 60) return;                                  // venció el plazo de 60 días
+    recuperables.push({
+      fecha: cc.fecha, diasRestantes: Math.max(0, 60 - dias),
+      mes: cicloDe(cc.fecha, diaCorte), tipo: 'cierre',
+      motivo: cc.motivo || 'Clase cancelada por el centro'
     });
   });
 
@@ -2914,10 +2970,11 @@ window.cerrarClase = async () => {
     await supabaseInsert('clases_cerradas', {
       turno_id: t.id,
       fecha,
+      tipo: 'finalizada',
       cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
       cerrada_por_email: USUARIO_ACTUAL?.email || null
     });
-    CLASES_CERRADAS.add(`${t.id}-${fecha}`);
+    CLASES_CERRADAS.set(`${t.id}-${fecha}`, { tipo: 'finalizada', motivo: null });
     toast('✓ Clase cerrada');
     renderModalBody(t.dia, t.hora, t.servicio);
     renderTurnos(); // refrescar los ✓/✗ de la grilla
@@ -2940,6 +2997,38 @@ window.reabrirClase = async () => {
     renderTurnos();
   } catch (e) {
     toast('No se pudo reabrir: ' + e.message, 'err');
+  }
+};
+
+// CANCELAR una clase POR EL CENTRO (ej: el profe no puede dar clase).
+// No es falta del alumno: a todos los fijos se les ofrece recuperatorio SIN gastar cupo
+// (igual que un feriado) y nadie se puede anotar en ese horario.
+// No hace falta marcar a nadie ausente: el cierre 'centro' genera el recupero solo.
+window.cancelarClaseCentro = async () => {
+  const t = evoTurnoActual;
+  if (!t) return;
+  const fecha = fechaRealDiaActivo();
+  const motivo = (prompt(
+    `Vas a CANCELAR esta clase desde el centro (${t.dia} ${t.hora}).\n\n` +
+    `Los alumnos NO pierden recuperatorio y nadie se va a poder anotar en este horario.\n\n` +
+    `Motivo (ej: "Jime no puede dar la clase"):`, ''
+  ) || '').trim();
+  if (motivo === '') return;   // canceló el prompt o lo dejó vacío
+  try {
+    await supabaseInsert('clases_cerradas', {
+      turno_id: t.id,
+      fecha,
+      tipo: 'centro',
+      motivo,
+      cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
+      cerrada_por_email: USUARIO_ACTUAL?.email || null
+    });
+    CLASES_CERRADAS.set(`${t.id}-${fecha}`, { tipo: 'centro', motivo });
+    toast('🚫 Clase cancelada por el centro. Los alumnos la recuperan sin gastar cupo.');
+    renderModalBody(t.dia, t.hora, t.servicio);
+    renderTurnos();
+  } catch (e) {
+    toast('No se pudo cancelar la clase: ' + e.message, 'err');
   }
 };
 
@@ -3139,9 +3228,9 @@ window.abrirSelectorRecupero = async () => {
     return;
   }
   const { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes } = est;
-  // Separar feriados (no gastan cupo) de las faltas normales
-  const feriados = recuperables.filter(r => r.tipo === 'feriado');
-  const faltas    = recuperables.filter(r => r.tipo !== 'feriado');
+  // Separar los que NO gastan cupo (feriados + cierres del centro) de las faltas normales
+  const feriados = recuperables.filter(r => r.tipo === 'feriado' || r.tipo === 'cierre');
+  const faltas    = recuperables.filter(r => r.tipo !== 'feriado' && r.tipo !== 'cierre');
   // De las faltas normales: las que todavía tienen cupo en su ciclo
   const disponibles = faltas.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
   const sinCupo     = faltas.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
@@ -3160,17 +3249,24 @@ window.abrirSelectorRecupero = async () => {
       No tiene ausencias <b>con aviso</b> ni feriados pendientes de recuperar (o ya pasaron los 60 días).<br>
       <span style="font-size:12px">Para una falta normal, primero marcá el ausente justificado en la clase.</span></div>`;
   } else {
-    // FERIADOS primero (no gastan cupo)
+    // FERIADOS y CIERRES DEL CENTRO primero (no gastan cupo)
     if (feriados.length) {
-      html += `<div style="font-size:13px;font-weight:600;margin-bottom:8px">🟠 Feriados para recuperar (no gastan cupo):</div>`;
+      html += `<div style="font-size:13px;font-weight:600;margin-bottom:8px">🟠 Para recuperar (no gastan cupo):</div>`;
       html += feriados.map(r => {
         const venceTxt = r.diasRestantes <= 7
           ? `<span style="color:#dc2626;font-weight:700">vence en ${r.diasRestantes} día${r.diasRestantes!==1?'s':''}</span>`
           : `vence en ${r.diasRestantes} días`;
-        return `<button onclick="confirmarRecupero('${r.fecha}','feriado')"
+        const esCierre = r.tipo === 'cierre';
+        const titulo = esCierre
+          ? `🚫 Clase cancelada del ${formatearFechaLarga(r.fecha)}`
+          : `🟠 Feriado del ${formatearFechaLarga(r.fecha)}`;
+        const sub = esCierre
+          ? `${r.motivo || 'Cierre del centro'} · ${venceTxt} · no gasta cupo`
+          : `${r.motivo || 'Feriado'} · ${venceTxt} · no gasta cupo`;
+        return `<button onclick="confirmarRecupero('${r.fecha}','${r.tipo}')"
           style="width:100%;text-align:left;background:#fff7ed;border:1.5px solid #fdba74;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
-          <div style="font-weight:700;font-size:14px;color:#9a3412">🟠 Feriado del ${formatearFechaLarga(r.fecha)}</div>
-          <div style="font-size:12px;color:#c2410c;margin-top:2px">${r.motivo || 'Feriado'} · ${venceTxt} · no gasta cupo</div>
+          <div style="font-weight:700;font-size:14px;color:#9a3412">${titulo}</div>
+          <div style="font-size:12px;color:#c2410c;margin-top:2px">${sub}</div>
         </button>`;
       }).join('');
     }
@@ -3208,6 +3304,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
   const nombre = agregarPersonaSel.nombre;
   const fechaRecupero = fechaDelDia(t.dia);
   const esFeriado = tipoRecup === 'feriado';
+  const esSinCupo = (tipoRecup === 'feriado' || tipoRecup === 'cierre');  // feriado y cierre no gastan cupo
   // === REGLA 15 DÍAS: un recuperatorio solo se puede agendar dentro de los 15 días
   // desde hoy hacia adelante (para no tapar plazas que sirven a los turnos fijos).
   const diasAdelante = diasEntre(hoyIso(), fechaRecupero);
@@ -3226,10 +3323,10 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
   try {
     // Re-chequeo de seguridad por si cambió algo (cupo / 60 días)
     const est = await estadoRecuperatorios(pid);
-    const r = est.recuperables.find(x => x.fecha === fechaAusencia && (esFeriado ? x.tipo === 'feriado' : x.tipo !== 'feriado'));
+    const r = est.recuperables.find(x => x.fecha === fechaAusencia && x.tipo === tipoRecup);
     if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa fecha ya no está disponible para recuperar.</div>'; return; }
-    // El cupo solo aplica a faltas normales; los feriados NO gastan cupo.
-    if (!esFeriado && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
+    // El cupo solo aplica a faltas normales; feriados y cierres del centro NO gastan cupo.
+    if (!esSinCupo && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
     }
     // 0) Anti-duplicado: si ya existe un recuperatorio PENDIENTE para este mismo
@@ -3237,7 +3334,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     //    Evita que un feriado/falta quede reprogramado dos veces.
     try {
       const yaExiste = await supabaseQuery('recuperatorios_tf',
-        `?select=id&persona_id=eq.${pid}&fecha_ausencia=eq.${fechaAusencia}&tipo=eq.${esFeriado?'feriado':'recuperatorio'}&estado=eq.pendiente`);
+        `?select=id&persona_id=eq.${pid}&fecha_ausencia=eq.${fechaAusencia}&tipo=eq.${tipoRecup}&estado=eq.pendiente`);
       if (yaExiste && yaExiste.length) {
         cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esta clase ya está reprogramada. Si querés cambiar el día, primero quitá al alumno del turno donde está reservado.</div>';
         return;
@@ -3249,7 +3346,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
       fecha_ausencia: fechaAusencia,
       fecha_recupero: fechaRecupero,
       turno_recupero_id: t.id,
-      tipo: esFeriado ? 'feriado' : 'recuperatorio',
+      tipo: tipoRecup,
       estado: 'pendiente',
       cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
       cargado_por_email: USUARIO_ACTUAL?.email || null
@@ -4317,9 +4414,15 @@ function renderPanelEvo() {
   // Bloque de cierre de clase: según esté cerrada, completa, o falten alumnos
   const fechaHoy = fechaRealDiaActivo();
   const cerrada = claseEstaCerrada(evoTurnoActual?.id, fechaHoy);
+  const cierreCentro = cierreCentroDe(evoTurnoActual?.id, fechaHoy);
   const completa = claseCompleta(evoTurnoActual);
   let bloqueCierre = '';
-  if (cerrada) {
+  if (cierreCentro) {
+    bloqueCierre = `<div class="cierre-box cerrada" style="background:#fef2f2;border-color:#fca5a5">
+        <div class="cierre-msg">🚫 <b>Clase cancelada por el centro</b>${cierreCentro.motivo ? ` — ${cierreCentro.motivo}` : ''}<br><small style="color:var(--texto-suave)">Los alumnos la recuperan sin gastar cupo. Nadie se puede anotar.</small></div>
+        <button class="cierre-reabrir" onclick="reabrirClase()">Reabrir</button>
+      </div>`;
+  } else if (cerrada) {
     bloqueCierre = `<div class="cierre-box cerrada">
         <div class="cierre-msg">🔒 <b>Clase cerrada</b> — ya está finalizada</div>
         <button class="cierre-reabrir" onclick="reabrirClase()">Reabrir</button>
@@ -4328,11 +4431,13 @@ function renderPanelEvo() {
     bloqueCierre = `<div class="cierre-box lista">
         <div class="cierre-msg">✅ <b>Clase lista para cerrar</b> — todos cargados</div>
         <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar clase</button>
+        <button class="cierre-reabrir" style="border-color:#fca5a5;color:#b91c1c" onclick="cancelarClaseCentro()">🚫 Cancelar (centro)</button>
       </div>`;
   } else {
     bloqueCierre = `<div class="cierre-box pendiente">
         <div class="cierre-msg">⏳ Faltan alumnos por cargar (evolución o ausencia) para poder cerrar</div>
         <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar igual</button>
+        <button class="cierre-reabrir" style="border-color:#fca5a5;color:#b91c1c" onclick="cancelarClaseCentro()">🚫 Cancelar (centro)</button>
       </div>`;
   }
   cont.innerHTML = `
