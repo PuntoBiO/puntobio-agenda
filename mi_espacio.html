@@ -5035,15 +5035,31 @@ window.pbVacacionesPreview = async function(){
       return;
     }
     window._vacSel = { desde, hasta };
-    const lista = fechas.map(f => `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid #f1f5f9">🚫 <b>${fmtFechaCorta(f.fecha)}</b> · ${esc(f.hora)} · ${esc(nombreServicio(f.servicio))}</div>`).join('');
-    let avisoCupo = '';
-    (res.ciclos||[]).forEach(c => {
-      if(c.excede){
-        avisoCupo += `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px">⚠️ En el ciclo que arranca el <b>${fmtFechaCorta(c.ciclo)}</b> vas a tener <b>${c.nuevas + c.usados}</b> recuperos (ya usaste ${c.usados}) y tu cupo es <b>${c.cupo}</b>: alguna clase podría quedar sin recuperar. Consultanos si tenés dudas.</div>`;
-      }
+    // Etiquetar cada falta: cubierta por el cupo del ciclo, o sin recupero
+    // (excede el cupo). Orden cronológico dentro de cada ciclo.
+    const _disp = {};
+    (res.ciclos||[]).forEach(c => { _disp[c.ciclo] = Math.max(0, (c.cupo||0) - (c.usados||0)); });
+    const _usadas = {};
+    fechas.forEach(f => {
+      const d = (f.ciclo in _disp) ? _disp[f.ciclo] : 0;
+      const u = _usadas[f.ciclo] || 0;
+      f._recuperable = u < d;
+      _usadas[f.ciclo] = u + 1;
     });
+    const conRec = fechas.filter(f => f._recuperable).length;
+    const sinRec = fechas.length - conRec;
+    const chipOk = '<span style="background:#dcfce7;color:#166534;border-radius:7px;padding:2px 8px;font-size:10.5px;font-weight:700;white-space:nowrap">✅ Se recupera</span>';
+    const chipNo = '<span style="background:#fee2e2;color:#b91c1c;border-radius:7px;padding:2px 8px;font-size:10.5px;font-weight:700;white-space:nowrap">❌ Sin recupero</span>';
+    const lista = fechas.map(f => `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>🚫 <b>${fmtFechaCorta(f.fecha)}</b> · ${esc(f.hora)} · ${esc(nombreServicio(f.servicio))}</span>
+        ${f._recuperable ? chipOk : chipNo}
+      </div>`).join('');
+    let avisoCupo = '';
+    if (sinRec > 0) {
+      avisoCupo = `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px">⚠️ <b>${sinRec} falta(s) quedan sin recupero</b> porque superan el cupo de recuperatorios de tu plan en ese ciclo (las clases cubiertas por tu plan se marcan en verde). Si tenés dudas, escribinos antes de confirmar.</div>`;
+    }
     cont.innerHTML = `
-      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s):</div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s) · ${conRec} con recupero${sinRec ? ` · ${sinRec} sin recupero` : ''}:</div>
       <div style="max-height:180px;overflow:auto">${lista}</div>
       ${avisoCupo}
       <button class="pb-modal-btn confirm" style="width:100%;margin-top:12px" onclick="pbVacacionesConfirmar()">✅ Confirmar vacaciones (${fechas.length} falta(s))</button>`;

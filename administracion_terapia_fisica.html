@@ -1721,6 +1721,50 @@ async function abrirVacacionesAlumno() {
     <div id="vacAdmPreview" style="margin-top:12px"></div>`;
 }
 
+// Marca cada falta del preview como recuperable (entra en el cupo del ciclo)
+// o sin recupero (excede el cupo). El orden es cronológico dentro de cada ciclo.
+function vacacionesEtiquetar(fechas, ciclos) {
+  const disponibles = {};
+  (ciclos || []).forEach(c => {
+    disponibles[c.ciclo] = Math.max(0, (c.cupo || 0) - (c.usados || 0));
+  });
+  const usadas = {};
+  (fechas || []).forEach(f => {
+    const d = (f.ciclo in disponibles) ? disponibles[f.ciclo] : 0;
+    const u = usadas[f.ciclo] || 0;
+    f._recuperable = u < d;
+    usadas[f.ciclo] = u + 1;
+  });
+  return fechas;
+}
+
+// Arma el link de WhatsApp con el resumen de las vacaciones (texto plano,
+// sin emojis, para que nunca salgan signos raros — lección de la Bitácora).
+function vacacionesWAUrl(p, desde, hasta, fechas) {
+  const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
+  if (!tel) return null;
+  const nombre1 = p.nombre ? p.nombre.split(' ')[0] : '';
+  const fmtR = (iso) => (iso || '').split('-').reverse().join('/');
+  const lineas = (fechas || []).map(f =>
+    `• ${fmtR(f.fecha)} · ${f.dia} ${f.hora} · ${f.servicio}` +
+    (f._recuperable ? '' : ' (sin recupero: excede el cupo del plan)')
+  ).join('\n');
+  const sinRec = (fechas || []).filter(f => !f._recuperable).length;
+  const msg = `Hola ${nombre1}! Te confirmamos tus vacaciones del ${fmtR(desde)} al ${fmtR(hasta)} en PuntoBiO.\n\nQuedaron avisadas estas faltas:\n${lineas}\n\nCada clase cubierta por tu plan se puede recuperar hasta 60 dias despues de su fecha (incluso antes del viaje).` +
+    (sinRec ? `\nLas marcadas como "sin recupero" exceden el cupo de recuperatorios de tu plan en ese ciclo.` : '') +
+    `\n\nProgramá tus recuperos desde Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\nO escribinos y lo coordinamos. Buen viaje!`;
+  const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
+  return `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
+}
+
+window.vacacionesWhatsApp = () => {
+  const s = window._vacAdmSel;
+  if (!s) return;
+  const url = vacacionesWAUrl(alumnoActivo.persona, s.desde, s.hasta, s.fechas);
+  if (!url) { alert('Este alumno no tiene celular cargado.'); return; }
+  window.open(url, '_blank');
+};
+
 window.vacacionesPreview = async () => {
   const p = alumnoActivo.persona;
   const cont = $('#vacAdmPreview');
@@ -1733,27 +1777,38 @@ window.vacacionesPreview = async () => {
       p_persona_id: p.id, p_desde: desde, p_hasta: hasta
     });
     if (error) throw error;
-    const fechas = (res && res.fechas) || [];
+    const fechas = vacacionesEtiquetar((res && res.fechas) || [], res && res.ciclos);
     if (!fechas.length) {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px">No tiene clases fijas dentro de ese rango (feriados y clases canceladas por el centro no se cuentan: se recuperan aparte y sin gastar cupo).</div>';
       return;
     }
-    window._vacAdmSel = { desde, hasta };
+    window._vacAdmSel = { desde, hasta, fechas };
+    const conRec = fechas.filter(f => f._recuperable).length;
+    const sinRec = fechas.length - conRec;
+    const chipOk  = '<span style="background:#dcfce7;color:#166534;border-radius:7px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">✅ Se recupera · cubierta por plan</span>';
+    const chipNo  = '<span style="background:#fee2e2;color:#b91c1c;border-radius:7px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">❌ Sin recupero · excede cupo</span>';
     const lista = fechas.map(f =>
-      `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--border)">🚫 <b>${fmtFechaArg(f.fecha)}</b> · ${f.dia} ${f.hora} · ${f.servicio}</div>`
+      `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>🚫 <b>${fmtFechaArg(f.fecha)}</b> · ${f.dia} ${f.hora} · ${f.servicio}</span>
+        ${f._recuperable ? chipOk : chipNo}
+      </div>`
     ).join('');
     let avisoCupo = '';
-    (res.ciclos || []).forEach(c => {
-      if (c.excede) {
-        avisoCupo += `<div style="background:rgba(245,158,11,.12);border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px">
-          ⚠️ En el ciclo que arranca el <b>${fmtFechaArg(c.ciclo)}</b> va a juntar <b>${c.nuevas + c.usados}</b> recuperos (ya usó ${c.usados}) y el cupo del plan ${res.plan || ''} es <b>${c.cupo}</b>: alguna clase puede quedar sin recuperar.</div>`;
-      }
-    });
+    if (sinRec > 0) {
+      const detalle = (res.ciclos || []).filter(c => c.excede)
+        .map(c => `ciclo del ${fmtFechaArg(c.ciclo)}: ${c.nuevas} falta(s) nuevas + ${c.usados} recupero(s) ya usados, cupo ${c.cupo}`)
+        .join(' · ');
+      avisoCupo = `<div style="background:rgba(245,158,11,.12);border:1px solid #f59e0b;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px">
+        ⚠️ <b>${sinRec} falta(s) quedan sin recupero</b> porque exceden el cupo del plan ${res.plan || ''} (${detalle}). Conviene avisárselo al alumno antes de confirmar.</div>`;
+    }
     cont.innerHTML = `
-      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s):</div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s) · ${conRec} con recupero${sinRec ? ` · ${sinRec} sin recupero` : ''}:</div>
       <div style="max-height:200px;overflow:auto">${lista}</div>
       ${avisoCupo}
-      <button class="btn-modal" style="background:var(--verde);color:#fff;width:100%;margin-top:12px" onclick="vacacionesConfirmar()">✅ Confirmar vacaciones (${fechas.length} falta(s))</button>`;
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn-modal" style="background:var(--verde);color:#fff;flex:1;min-width:200px" onclick="vacacionesConfirmar()">✅ Confirmar vacaciones (${fechas.length} falta(s))</button>
+        <button class="btn-modal" style="background:#25D366;color:#fff;flex:1;min-width:180px" onclick="vacacionesWhatsApp()">📲 Enviar por WhatsApp</button>
+      </div>`;
   } catch (e) {
     cont.innerHTML = `<div style="color:var(--rojo);font-size:13px">${e.message || 'No se pudo calcular.'}</div>`;
   }
@@ -1763,14 +1818,20 @@ window.vacacionesConfirmar = async () => {
   if (!window._vacAdmSel) return;
   const p = alumnoActivo.persona;
   const cont = $('#vacAdmPreview');
+  const sel = window._vacAdmSel;
   cont.innerHTML = '<div style="color:var(--text-dim);font-size:13px">⟳ Cargando vacaciones…</div>';
   try {
     const { data: res, error } = await sb.rpc('vacaciones_cargar', {
-      p_persona_id: p.id, p_desde: window._vacAdmSel.desde, p_hasta: window._vacAdmSel.hasta
+      p_persona_id: p.id, p_desde: sel.desde, p_hasta: sel.hasta
     });
     if (error) throw error;
-    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Vacaciones cargadas.'));
-    abrirVacacionesAlumno();  // refresca el modal con la carga nueva
+    // Éxito: mensaje + botón de WhatsApp con el resumen final
+    cont.innerHTML = `
+      <div style="background:#dcfce7;border:1px solid #16a34a;border-radius:8px;padding:10px 12px;font-size:13px;color:#166534">
+        ✅ ${res && res.mensaje ? res.mensaje : 'Vacaciones cargadas.'}
+      </div>
+      <button class="btn-modal" style="background:#25D366;color:#fff;width:100%;margin-top:10px" onclick="vacacionesWhatsApp()">📲 Enviar resumen por WhatsApp</button>
+      <button class="btn-modal" style="background:var(--bg-hover);color:var(--text);width:100%;margin-top:6px" onclick="abrirVacacionesAlumno()">↻ Ver vacaciones cargadas</button>`;
   } catch (e) {
     cont.innerHTML = `<div style="color:var(--rojo);font-size:13px">No se pudo cargar: ${e.message || e}</div>`;
   }
