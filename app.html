@@ -1882,13 +1882,13 @@ function renderHome() {
     kpis = `
       <div class="kpi-card" style="--kpi-color: var(--turquoise)">
         <div class="kpi-label">Mis turnos hoy</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-value" id="kpi-profe-hoy">…</div>
+        <div class="kpi-sub" id="kpi-profe-hoy-sub">calculando…</div>
       </div>
       <div class="kpi-card" style="--kpi-color: var(--green)">
         <div class="kpi-label">Esta semana</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-value" id="kpi-profe-semana">…</div>
+        <div class="kpi-sub" id="kpi-profe-semana-sub">calculando…</div>
       </div>
     `
   }
@@ -1944,6 +1944,7 @@ function renderHome() {
       </div>
     ` : ''}
 
+    ${(permisos.admin_total || permisos.operativo_general) ? `
     <div class="cols-2" style="margin-top: 8px;">
       <div class="panel">
         <div class="panel-header">
@@ -1971,6 +1972,22 @@ function renderHome() {
         </div>
       </div>
     </div>
+    ` : `
+    <div style="margin-top: 8px;">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📅 Mis turnos de hoy</div>
+          <div class="panel-link" onclick="abrirSelectorAgendas()" style="cursor:pointer">Ver agendas →</div>
+        </div>
+        <div class="panel-body" id="home-misturnos-body">
+          <div class="empty-state">
+            <span class="empty-state-icon">⏳</span>
+            Cargando…
+          </div>
+        </div>
+      </div>
+    </div>
+    `}
   `
 
   // Llenar KPIs y paneles con datos reales (no bloqueante)
@@ -1981,7 +1998,9 @@ function renderHome() {
 // HOME: KPIs Y PANELES CON DATOS REALES
 // ======================
 async function cargarHomeData() {
-  if (!permisos || !(permisos.admin_total || permisos.operativo_general)) return
+  if (!permisos) return
+  // Profes y kines: SOLO sus turnos. Nada administrativo (alertas, morosos, cobros).
+  if (!(permisos.admin_total || permisos.operativo_general)) { cargarHomeDataProfe(); return }
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v }
   const fmtPesos = n => '$ ' + Math.round(Number(n) || 0).toLocaleString('es-AR')
   const hoyISO = new Date().toISOString().substring(0, 10)
@@ -2149,6 +2168,121 @@ async function cargarHomeData() {
         ? (pasados > 0 ? `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ ${pasados} turno${pasados === 1 ? '' : 's'} ya pasaron</div>` : '')
         : `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ Los ${turnosHoy.length} turnos de hoy ya pasaron. Últimos del día:</div>`
       hoyBody.innerHTML = (proximos.length ? '' : nota) + filasHTML + (proximos.length ? nota : '')
+    }
+  }
+}
+
+// HOME PARA PROFES/KINES: solo SUS turnos (sin alertas ni datos administrativos).
+// Matchea el campo "profesional" (texto libre) contra apodos conocidos por email.
+async function cargarHomeDataProfe() {
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v }
+  const norm = s => String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+  const hhmm = t => String(t || '').substring(0, 5)
+  const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
+  const hoyISO = new Date().toISOString().substring(0, 10)
+
+  const ALIAS_PROFE = {
+    'loz.magdalena@gmail.com': ['MALE', 'MAGDALENA'],
+    'brunitovelez99@gmail.com': ['BRUNO'],
+    'veronicasandler@hotmail.com': ['VERO', 'VERONICA'],
+    'santiagoferreira1999@gmail.com': ['SANTI', 'SANTIAGO'],
+    'leacrespin97@gmail.com': ['LEAN', 'LEANDRO'],
+    'leut.molina@gmail.com': ['LAUTI', 'LAUTARO']
+  }
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  const misAlias = ALIAS_PROFE[miEmail] || [norm((usuario && usuario.nombre) || '').split(' ')[0]].filter(Boolean)
+  const esMio = prof => {
+    const p = norm(prof)
+    return p !== '' && misAlias.some(a => a && p.includes(a))
+  }
+
+  // Semana lunes → domingo
+  const d = new Date(); const dow = d.getDay()
+  const lunes = new Date(d); lunes.setDate(d.getDate() - ((dow + 6) % 7))
+  const domingo = new Date(lunes); domingo.setDate(lunes.getDate() + 6)
+  const lunesStr = lunes.toISOString().substring(0, 10)
+  const domingoStr = domingo.toISOString().substring(0, 10)
+
+  let misHoy = []
+  let cntSemana = 0
+  try {
+    const vacio = Promise.resolve({ data: [] })
+    const [consR, bioR, masoR] = await Promise.all([
+      permisos.ve_consultorios
+        ? supabase.from('turnos_consultorio').select('fecha, hora_inicio, paciente_nombre, profesional, practica_codigo, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        : vacio,
+      permisos.ve_biolab
+        ? supabase.from('turnos_biolab').select('fecha, hora_inicio, paciente, profesional, practica, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        : vacio,
+      permisos.ve_masoterapia
+        ? supabase.from('turnos_masoterapia').select('fecha, hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').gte('fecha', lunesStr).lte('fecha', domingoStr)
+        : vacio
+    ])
+
+    const procesar = (rows, icon, getQuien, getDetalle) => {
+      ;(rows || []).filter(t => noCancelado(t.estado) && esMio(t.profesional)).forEach(t => {
+        cntSemana++
+        if (t.fecha === hoyISO) {
+          misHoy.push({ hora: hhmm(t.hora_inicio), icon, quien: getQuien(t), detalle: getDetalle(t) })
+        }
+      })
+    }
+    procesar(consR.data, '🩺', t => t.paciente_nombre || '—', t => t.practica_codigo || '')
+    procesar(bioR.data, '🔬', t => t.paciente || '—', t => t.practica || '')
+    procesar(masoR.data, '💆', t => t.paciente_nombre || '—', t => t.tipo_masaje || '')
+
+    // TF: las clases fijas no tienen profesional asignado en la tabla, así que a
+    // quien ve Agenda TF (Santi/Lean/Lauti/Male) le mostramos las clases de HOY.
+    if (permisos.ve_terapia_fisica) {
+      const { data: clases } = await supabase.from('turnos').select('id, dia, hora, servicio, capacidad')
+      const diaHoy = norm(new Date().toLocaleDateString('es-AR', { weekday: 'long' }))
+      const clasesHoy = (clases || []).filter(c => norm(c.dia) === diaHoy)
+      if (clasesHoy.length) {
+        const { data: alus } = await supabase
+          .from('turno_alumnos')
+          .select('turno_id')
+          .eq('activo', true)
+          .in('turno_id', clasesHoy.map(c => c.id))
+        const porClase = {}
+        ;(alus || []).forEach(a => { porClase[a.turno_id] = (porClase[a.turno_id] || 0) + 1 })
+        clasesHoy.forEach(c => {
+          misHoy.push({ hora: hhmm(c.hora), icon: '🏋️', quien: ('Clase TF ' + (c.servicio || '')).trim(), detalle: (porClase[c.id] || 0) + '/' + (c.capacidad || '—') + ' alumnos' })
+        })
+      }
+      cntSemana += (clases || []).length
+    }
+
+    misHoy.sort((a, b) => a.hora.localeCompare(b.hora))
+    setText('kpi-profe-hoy', misHoy.length)
+    setText('kpi-profe-hoy-sub', 'turnos y clases')
+    setText('kpi-profe-semana', cntSemana)
+    setText('kpi-profe-semana-sub', lunesStr.substring(5) + ' → ' + domingoStr.substring(5))
+  } catch (e) {
+    console.warn('Home profe:', e.message)
+    setText('kpi-profe-hoy', '—'); setText('kpi-profe-hoy-sub', '')
+    setText('kpi-profe-semana', '—'); setText('kpi-profe-semana-sub', '')
+  }
+
+  const body = document.getElementById('home-misturnos-body')
+  if (body) {
+    if (!misHoy.length) {
+      body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">📭</span>No tenés turnos cargados para hoy.</div>`
+    } else {
+      const ahora = new Date().toTimeString().substring(0, 5)
+      const proximos = misHoy.filter(t => t.hora >= ahora)
+      const pasados = misHoy.length - proximos.length
+      const aMostrar = (proximos.length ? proximos : misHoy.slice(-5)).slice(0, 12)
+      const filasHTML = aMostrar.map(t => `
+        <div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-weight:800; font-size:13px; min-width:44px; font-variant-numeric:tabular-nums;">${t.hora}</span>
+          <span style="font-size:16px">${t.icon}</span>
+          <span style="font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.quien}</span>
+          <span style="font-size:11.5px; color:var(--text-dim); white-space:nowrap;">${t.detalle || ''}</span>
+        </div>`).join('')
+      const nota = proximos.length
+        ? (pasados > 0 ? `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ ${pasados} ya pasaron</div>` : '')
+        : `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ Tus turnos de hoy ya pasaron. Últimos del día:</div>`
+      body.innerHTML = (proximos.length ? '' : nota) + filasHTML + (proximos.length ? nota : '')
     }
   }
 }
