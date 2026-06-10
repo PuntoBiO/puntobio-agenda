@@ -277,6 +277,7 @@
         const p = mapPers[i.persona_id] || {};
         i.nombre = p.nombre || `(sin nombre ID ${i.persona_id})`;
         i.telefono = p.telefono || p.celular || p.tel || p.phone || '';
+        i.fecha_nacimiento = p.fecha_nacimiento || null;
       });
     }
     render();
@@ -359,6 +360,20 @@
   function clasificar(insc) {
     const precio = tarifario[`${insc.plan}__${insc.actividad}`] || 0;
     const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
+
+    // 🎂 SOLO MENORES DE 18: en el mes de su cumpleaños la cuota va con 25% OFF
+    // (regalo de cumpleaños; los mayores reciben el masaje y pagan cuota completa).
+    // Así, el menor que pagó su 75% NO figura como deudor del 25% restante.
+    function cuotaEfectiva(mesStr) {
+      const fnac = insc.fecha_nacimiento ? String(insc.fecha_nacimiento) : null;
+      if (!fnac) return montoMensual;
+      const anioMes = Number(mesStr.slice(0, 4));
+      const edadQueCumple = anioMes - Number(fnac.slice(0, 4));
+      const esMenor = edadQueCumple < 18;
+      const esMesCumple = fnac.slice(5, 7) === mesStr.slice(5, 7);
+      return (esMenor && esMesCumple) ? Math.round(montoMensual * 0.75) : montoMensual;
+    }
+
     const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;
     const fechaInicio = fechaInicioStr ? new Date(fechaInicioStr + 'T00:00:00') : null;
     function debeEseMes(mesStr) {
@@ -367,8 +382,8 @@
       const ultDiaMes = new Date(y, m, 0);
       return fechaInicio <= ultDiaMes;
     }
-    const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, montoMensual, false) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
-    const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), montoMensual, true) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
+    const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, cuotaEfectiva(mesActual), false) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
+    const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), cuotaEfectiva(mesAnterior(mesActual)), true) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
     const hoy = new Date();
     const mesHoyStr = calcMesActual();
     // Clasificar el mes elegido en el selector respecto al mes real de hoy (comparación YYYY-MM).
