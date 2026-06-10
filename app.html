@@ -1305,10 +1305,9 @@ async function actualizarBadgeMensajes() {
   } catch (e) { console.warn('Error badge mensajes:', e); }
 }
 
-async function actualizarBadgeMorososTF() {
-  if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
-  const badge = document.getElementById('badge-morosos-tf')
-  if (!badge) return
+async function contarMorososTF() {
+  // Cuenta morosos TF (mismo criterio que el badge / morosos_tf.html).
+  // Devuelve el número, o null si algo falla. Cachea para el Inicio.
   try {
     const hoy = new Date()
     const yyyy = hoy.getFullYear()
@@ -1322,7 +1321,7 @@ async function actualizarBadgeMorososTF() {
       supabase.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
       supabase.from('tarifario_tf').select('plan, actividad, valor_lista')
     ])
-    if (insR.error || pagR.error || tarR.error) { console.warn('Error badge morosos:', insR.error || pagR.error || tarR.error); return }
+    if (insR.error || pagR.error || tarR.error) { console.warn('Error morosos:', insR.error || pagR.error || tarR.error); return null }
 
     const tarifario = {}
     ;(tarR.data || []).forEach(t => { tarifario[`${t.plan}__${t.actividad}`] = Number(t.valor_lista) })
@@ -1380,15 +1379,25 @@ async function actualizarBadgeMorososTF() {
 
       if (debeActual + debeAnt > 0) count++
     }
-
-    if (count > 0) {
-      badge.style.display = 'inline-block'
-      badge.textContent = count > 99 ? '99+' : String(count)
-    } else {
-      badge.style.display = 'none'
-    }
+    window._morososCountCache = count
+    return count
   } catch (e) {
-    console.warn('No se pudo calcular badge morosos:', e.message)
+    console.warn('No se pudo calcular morosos:', e.message)
+    return null
+  }
+}
+
+async function actualizarBadgeMorososTF() {
+  if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
+  const badge = document.getElementById('badge-morosos-tf')
+  if (!badge) return
+  const count = await contarMorososTF()
+  if (count === null) return
+  if (count > 0) {
+    badge.style.display = 'inline-block'
+    badge.textContent = count > 99 ? '99+' : String(count)
+  } else {
+    badge.style.display = 'none'
   }
 }
 window.actualizarBadgeMorososTF = actualizarBadgeMorososTF
@@ -1845,23 +1854,23 @@ function renderHome() {
     kpis = `
       <div class="kpi-card" style="--kpi-color: var(--turquoise)">
         <div class="kpi-label">Turnos hoy</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-value" id="kpi-home-turnos">…</div>
+        <div class="kpi-sub" id="kpi-home-turnos-sub">calculando…</div>
       </div>
       <div class="kpi-card" style="--kpi-color: var(--green)">
-        <div class="kpi-label">Ingresos hoy</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-label">Cuotas TF del mes</div>
+        <div class="kpi-value" id="kpi-home-cuotas">…</div>
+        <div class="kpi-sub" id="kpi-home-cuotas-sub">cobrado este mes</div>
       </div>
       <div class="kpi-card" style="--kpi-color: var(--amber)">
         <div class="kpi-label">Pendientes cobro</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-value" id="kpi-home-pendientes">…</div>
+        <div class="kpi-sub" id="kpi-home-pendientes-sub">calculando…</div>
       </div>
       <div class="kpi-card" style="--kpi-color: var(--red)">
         <div class="kpi-label">Alertas</div>
-        <div class="kpi-value">—</div>
-        <div class="kpi-sub">próximamente</div>
+        <div class="kpi-value" id="kpi-home-alertas">…</div>
+        <div class="kpi-sub" id="kpi-home-alertas-sub">calculando…</div>
       </div>
     `
   } else {
@@ -1934,13 +1943,12 @@ function renderHome() {
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">📅 Próximos turnos de hoy</div>
-          <div class="panel-link">Ver todos →</div>
+          <div class="panel-link" onclick="abrirSelectorAgendas()" style="cursor:pointer">Ver agendas →</div>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="home-hoy-body">
           <div class="empty-state">
-            <span class="empty-state-icon">📭</span>
-            Acá vas a ver los turnos del día.<br>
-            <span style="font-size: 11px; opacity: 0.7;">Se va a conectar cuando migremos las agendas</span>
+            <span class="empty-state-icon">⏳</span>
+            Cargando…
           </div>
         </div>
       </div>
@@ -1948,17 +1956,211 @@ function renderHome() {
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">⚠️ Alertas</div>
-          <div class="panel-link">Ver todas →</div>
+          <div class="panel-link" onclick="irA('morosos-tf')" style="cursor:pointer">Ver morosos →</div>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="home-alertas-body">
           <div class="empty-state">
-            <span class="empty-state-icon">✓</span>
-            Sin alertas por ahora.
+            <span class="empty-state-icon">⏳</span>
+            Cargando…
           </div>
         </div>
       </div>
     </div>
   `
+
+  // Llenar KPIs y paneles con datos reales (no bloqueante)
+  cargarHomeData()
+}
+
+// ======================
+// HOME: KPIs Y PANELES CON DATOS REALES
+// ======================
+async function cargarHomeData() {
+  if (!permisos || !(permisos.admin_total || permisos.operativo_general)) return
+  const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v }
+  const fmtPesos = n => '$ ' + Math.round(Number(n) || 0).toLocaleString('es-AR')
+  const hoyISO = new Date().toISOString().substring(0, 10)
+  const hoy = new Date()
+  const mesActual = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0')
+
+  // --- KPI 1 + Panel: Turnos de HOY en las 4 áreas ---
+  // Consultorios / BioLab / Maso: turnos con fecha de hoy (excluye cancelados).
+  // TF: clases fijas cuyo "dia" coincide con hoy + conteo de alumnos activos.
+  let turnosHoy = []
+  try {
+    const [consR, bioR, masoR, tfClasesR] = await Promise.all([
+      supabase.from('turnos_consultorio').select('hora_inicio, paciente_nombre, profesional, practica_codigo, estado').eq('fecha', hoyISO),
+      supabase.from('turnos_biolab').select('hora_inicio, paciente, profesional, practica, estado').eq('fecha', hoyISO),
+      supabase.from('turnos_masoterapia').select('hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').eq('fecha', hoyISO),
+      supabase.from('turnos').select('id, dia, hora, servicio, capacidad')
+    ])
+    const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
+    const hhmm = t => String(t || '').substring(0, 5)
+    let cntCons = 0, cntBio = 0, cntMaso = 0, cntTF = 0
+
+    ;(consR.data || []).filter(t => noCancelado(t.estado)).forEach(t => {
+      cntCons++
+      turnosHoy.push({ hora: hhmm(t.hora_inicio), icon: '🩺', quien: t.paciente_nombre || '—', detalle: [t.practica_codigo, t.profesional].filter(Boolean).join(' · ') })
+    })
+    ;(bioR.data || []).filter(t => noCancelado(t.estado)).forEach(t => {
+      cntBio++
+      turnosHoy.push({ hora: hhmm(t.hora_inicio), icon: '🔬', quien: t.paciente || '—', detalle: [t.practica, t.profesional].filter(Boolean).join(' · ') })
+    })
+    ;(masoR.data || []).filter(t => noCancelado(t.estado)).forEach(t => {
+      cntMaso++
+      turnosHoy.push({ hora: hhmm(t.hora_inicio), icon: '💆', quien: t.paciente_nombre || '—', detalle: [t.tipo_masaje, t.profesional].filter(Boolean).join(' · ') })
+    })
+
+    // Clases TF de hoy: "dia" es texto; normalizamos mayúsculas y acentos para comparar
+    const norm = s => String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+    const diaHoy = norm(new Date().toLocaleDateString('es-AR', { weekday: 'long' }))
+    const clasesHoy = (tfClasesR.data || []).filter(c => norm(c.dia) === diaHoy)
+    if (clasesHoy.length) {
+      const { data: alus } = await supabase
+        .from('turno_alumnos')
+        .select('turno_id')
+        .eq('activo', true)
+        .in('turno_id', clasesHoy.map(c => c.id))
+      const porClase = {}
+      ;(alus || []).forEach(a => { porClase[a.turno_id] = (porClase[a.turno_id] || 0) + 1 })
+      clasesHoy.forEach(c => {
+        const n = porClase[c.id] || 0
+        cntTF += n
+        turnosHoy.push({ hora: hhmm(c.hora), icon: '🏋️', quien: ('Clase TF ' + (c.servicio || '')).trim(), detalle: n + '/' + (c.capacidad || '—') + ' alumnos' })
+      })
+    }
+
+    turnosHoy.sort((a, b) => a.hora.localeCompare(b.hora))
+    setText('kpi-home-turnos', cntCons + cntBio + cntMaso + cntTF)
+    setText('kpi-home-turnos-sub', cntCons + ' cons · ' + cntBio + ' bio · ' + cntMaso + ' maso · ' + cntTF + ' TF')
+  } catch (e) {
+    console.warn('Turnos hoy:', e.message)
+    setText('kpi-home-turnos', '—')
+    setText('kpi-home-turnos-sub', 'no se pudo cargar')
+  }
+
+  // --- KPI 2: Cuotas TF cobradas en el mes ---
+  let cuotasMes = null
+  try {
+    const { data, error } = await supabase
+      .from('pagos_tf')
+      .select('importe')
+      .eq('mes_imputado', mesActual)
+    if (!error && data) {
+      cuotasMes = data.reduce((s, p) => s + Number(p.importe || 0), 0)
+      setText('kpi-home-cuotas', fmtPesos(cuotasMes))
+      setText('kpi-home-cuotas-sub', data.length + ' pagos · ' + mesActual)
+    } else setText('kpi-home-cuotas', '—')
+  } catch (e) { setText('kpi-home-cuotas', '—') }
+
+  // --- KPI 3: Pendientes de cobro (morosos TF + tratamientos con saldo) ---
+  let morosos = null, tratPend = null
+  try {
+    morosos = (typeof window._morososCountCache === 'number')
+      ? window._morososCountCache
+      : await contarMorososTF()
+  } catch (e) { morosos = null }
+  try {
+    const { count } = await supabase
+      .from('tratamientos')
+      .select('id', { count: 'exact', head: true })
+      .gt('saldo_pendiente', 0)
+    tratPend = count ?? null
+  } catch (e) { tratPend = null }
+  const totPend = (morosos || 0) + (tratPend || 0)
+  setText('kpi-home-pendientes', (morosos === null && tratPend === null) ? '—' : totPend)
+  setText('kpi-home-pendientes-sub', `${morosos ?? '—'} morosos TF · ${tratPend ?? '—'} consult.`)
+
+  // --- Alertas: morosos TF + pagos OS sin leer + cuentas a pagar vencidas ---
+  let pagosOS = 0
+  try {
+    const { count } = await supabase
+      .from('pagos_obras_sociales')
+      .select('id', { count: 'exact', head: true })
+      .eq('leido', false)
+    pagosOS = count || 0
+  } catch (e) { pagosOS = 0 }
+
+  // Cuentas a pagar vencidas: la RLS hace que solo Lu y Jime reciban filas;
+  // para el resto del equipo esto devuelve vacío y la alerta no aparece.
+  let ctasVencidas = [], ctasVencidasTotal = 0
+  try {
+    const { data, error } = await supabase
+      .from('cuentas_pagar')
+      .select('valor, vencimiento')
+      .eq('estado', 'pendiente')
+      .lt('vencimiento', hoyISO)
+    if (!error && data) {
+      ctasVencidas = data
+      ctasVencidasTotal = data.reduce((s, g) => s + Number(g.valor || 0), 0)
+    }
+  } catch (e) { /* sin permiso o sin datos: no es alerta */ }
+
+  const alertas = []
+  if (morosos > 0) alertas.push({
+    icon: '🔔', texto: `${morosos} moroso${morosos === 1 ? '' : 's'} en Terapia Física`, destino: 'morosos-tf'
+  })
+  if (pagosOS > 0) alertas.push({
+    icon: '💳', texto: `${pagosOS} pago${pagosOS === 1 ? '' : 's'} de obras sociales sin revisar`, destino: 'pagos-obras-sociales'
+  })
+  if (ctasVencidas.length > 0) alertas.push({
+    icon: '💸', texto: `${ctasVencidas.length} cuenta${ctasVencidas.length === 1 ? '' : 's'} a pagar vencida${ctasVencidas.length === 1 ? '' : 's'} (${fmtPesos(ctasVencidasTotal)})`, destino: 'cuentas-pagar'
+  })
+
+  const totAlertas = (morosos || 0) + pagosOS + ctasVencidas.length
+  setText('kpi-home-alertas', totAlertas)
+  setText('kpi-home-alertas-sub', alertas.length ? alertas.length + ' tema' + (alertas.length === 1 ? '' : 's') + ' para mirar' : 'todo en orden')
+
+  const alertasBody = document.getElementById('home-alertas-body')
+  if (alertasBody) {
+    alertasBody.innerHTML = alertas.length
+      ? alertas.map(a => `
+          <div onclick="navegarDesdeHome('${a.destino}')" style="display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid rgba(0,0,0,0.05); cursor:pointer;">
+            <span style="font-size:18px">${a.icon}</span>
+            <span style="font-size:13px; flex:1">${a.texto}</span>
+            <span style="color:var(--text-dim); font-size:12px">→</span>
+          </div>`).join('')
+      : `<div class="empty-state"><span class="empty-state-icon">✓</span>Sin alertas por ahora.</div>`
+  }
+
+  // --- Panel "Próximos turnos de hoy": lista real de las 4 áreas ---
+  const hoyBody = document.getElementById('home-hoy-body')
+  if (hoyBody) {
+    if (!turnosHoy.length) {
+      hoyBody.innerHTML = `<div class="empty-state"><span class="empty-state-icon">📭</span>No hay turnos cargados para hoy.</div>`
+    } else {
+      const ahora = new Date().toTimeString().substring(0, 5)
+      const proximos = turnosHoy.filter(t => t.hora >= ahora)
+      const pasados = turnosHoy.length - proximos.length
+      const aMostrar = (proximos.length ? proximos : turnosHoy.slice(-5)).slice(0, 12)
+      const filasHTML = aMostrar.map(t => `
+        <div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-weight:800; font-size:13px; min-width:44px; font-variant-numeric:tabular-nums;">${t.hora}</span>
+          <span style="font-size:16px">${t.icon}</span>
+          <span style="font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${t.quien}</span>
+          <span style="font-size:11.5px; color:var(--text-dim); white-space:nowrap;">${t.detalle || ''}</span>
+        </div>`).join('')
+      const nota = proximos.length
+        ? (pasados > 0 ? `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ ${pasados} turno${pasados === 1 ? '' : 's'} ya pasaron</div>` : '')
+        : `<div style="font-size:11.5px; color:var(--text-dim); padding:6px 4px;">✓ Los ${turnosHoy.length} turnos de hoy ya pasaron. Últimos del día:</div>`
+      hoyBody.innerHTML = (proximos.length ? '' : nota) + filasHTML + (proximos.length ? nota : '')
+    }
+  }
+}
+
+// Navegar desde el Inicio simulando click en el ítem del sidebar (mantiene la UI sincronizada)
+window.navegarDesdeHome = function(modulo) {
+  const target = Array.from(document.querySelectorAll('.nav-item'))
+    .find(n => (n.getAttribute('onclick') || '').includes(`irA('${modulo}')`))
+  if (target) { target.click(); return }
+  try {
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+    const fakeEvt = { target: { closest: () => null } }
+    const origEvent = window.event
+    Object.defineProperty(window, 'event', { value: fakeEvt, configurable: true, writable: true })
+    window.irA(modulo)
+    if (origEvent !== undefined) window.event = origEvent
+  } catch (e) { console.warn('navegarDesdeHome', e) }
 }
 
 // ======================
