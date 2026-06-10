@@ -1740,19 +1740,22 @@ function vacacionesEtiquetar(fechas, ciclos) {
 
 // Arma el link de WhatsApp con el resumen de las vacaciones (texto plano,
 // sin emojis, para que nunca salgan signos raros — lección de la Bitácora).
-function vacacionesWAUrl(p, desde, hasta, fechas) {
+function vacacionesWAUrl(p, desde, hasta, fechas, esBon) {
   const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
   if (!tel) return null;
   const nombre1 = p.nombre ? p.nombre.split(' ')[0] : '';
   const fmtR = (iso) => (iso || '').split('-').reverse().join('/');
   const lineas = (fechas || []).map(f =>
     `• ${fmtR(f.fecha)} · ${f.dia} ${f.hora} · ${f.servicio}` +
-    (f._recuperable ? '' : ' (sin recupero: excede el cupo del plan)')
+    (esBon || f._recuperable ? '' : ' (sin recupero: excede el cupo del plan)')
   ).join('\n');
-  const sinRec = (fechas || []).filter(f => !f._recuperable).length;
-  const msg = `Hola ${nombre1}! Te confirmamos tus vacaciones del ${fmtR(desde)} al ${fmtR(hasta)} en PuntoBiO.\n\nQuedaron avisadas estas faltas:\n${lineas}\n\nCada clase cubierta por tu plan se puede recuperar hasta 60 dias despues de su fecha (incluso antes del viaje).` +
-    (sinRec ? `\nLas marcadas como "sin recupero" exceden el cupo de recuperatorios de tu plan en ese ciclo.` : '') +
-    `\n\nProgramá tus recuperos desde Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\nO escribinos y lo coordinamos. Buen viaje!`;
+  const sinRec = esBon ? 0 : (fechas || []).filter(f => !f._recuperable).length;
+  const cierre = esBon
+    ? `Con tu plan bonificado no hace falta recuperar nada: venis cuando quieras. Solo dejamos avisadas las faltas para la agenda.`
+    : `Cada clase cubierta por tu plan se puede recuperar hasta 60 dias despues de su fecha (incluso antes del viaje).` +
+      (sinRec ? `\nLas marcadas como "sin recupero" exceden el cupo de recuperatorios de tu plan en ese ciclo.` : '') +
+      `\n\nProgramá tus recuperos desde Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\nO escribinos y lo coordinamos.`;
+  const msg = `Hola ${nombre1}! Te confirmamos tus vacaciones del ${fmtR(desde)} al ${fmtR(hasta)} en PuntoBiO.\n\nQuedaron avisadas estas faltas:\n${lineas}\n\n${cierre} Buen viaje!`;
   const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
   return `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
 }
@@ -1760,7 +1763,7 @@ function vacacionesWAUrl(p, desde, hasta, fechas) {
 window.vacacionesWhatsApp = () => {
   const s = window._vacAdmSel;
   if (!s) return;
-  const url = vacacionesWAUrl(alumnoActivo.persona, s.desde, s.hasta, s.fechas);
+  const url = vacacionesWAUrl(alumnoActivo.persona, s.desde, s.hasta, s.fechas, s.bon);
   if (!url) { alert('Este alumno no tiene celular cargado.'); return; }
   window.open(url, '_blank');
 };
@@ -1782,19 +1785,23 @@ window.vacacionesPreview = async () => {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px">No tiene clases fijas dentro de ese rango (feriados y clases canceladas por el centro no se cuentan: se recuperan aparte y sin gastar cupo).</div>';
       return;
     }
-    window._vacAdmSel = { desde, hasta, fechas };
-    const conRec = fechas.filter(f => f._recuperable).length;
-    const sinRec = fechas.length - conRec;
+    const esBon = !!(res && res.bonificado);
+    window._vacAdmSel = { desde, hasta, fechas, bon: esBon };
+    const conRec = esBon ? fechas.length : fechas.filter(f => f._recuperable).length;
+    const sinRec = esBon ? 0 : fechas.length - conRec;
     const chipOk  = '<span style="background:#dcfce7;color:#166534;border-radius:7px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">✅ Se recupera · cubierta por plan</span>';
     const chipNo  = '<span style="background:#fee2e2;color:#b91c1c;border-radius:7px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">❌ Sin recupero · excede cupo</span>';
     const lista = fechas.map(f =>
       `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
         <span>🚫 <b>${fmtFechaArg(f.fecha)}</b> · ${f.dia} ${f.hora} · ${f.servicio}</span>
-        ${f._recuperable ? chipOk : chipNo}
+        ${esBon ? '' : (f._recuperable ? chipOk : chipNo)}
       </div>`
     ).join('');
     let avisoCupo = '';
-    if (sinRec > 0) {
+    if (esBon) {
+      avisoCupo = `<div style="background:rgba(139,92,246,.10);border:1px solid #8b5cf6;border-radius:8px;padding:8px 10px;font-size:12.5px;margin-top:8px">
+        💜 <b>Plan bonificado:</b> no se generan recuperatorios — viene cuando quiere. Las faltas solo quedan avisadas para la agenda.</div>`;
+    } else if (sinRec > 0) {
       const detalle = (res.ciclos || []).filter(c => c.excede)
         .map(c => `ciclo del ${fmtFechaArg(c.ciclo)}: ${c.nuevas} falta(s) nuevas + ${c.usados} recupero(s) ya usados, cupo ${c.cupo}`)
         .join(' · ');
@@ -1802,7 +1809,7 @@ window.vacacionesPreview = async () => {
         ⚠️ <b>${sinRec} falta(s) quedan sin recupero</b> porque exceden el cupo del plan ${res.plan || ''} (${detalle}). Conviene avisárselo al alumno antes de confirmar.</div>`;
     }
     cont.innerHTML = `
-      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s) · ${conRec} con recupero${sinRec ? ` · ${sinRec} sin recupero` : ''}:</div>
+      <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s)${esBon ? ' · plan bonificado (sin recuperatorios)' : ` · ${conRec} con recupero${sinRec ? ` · ${sinRec} sin recupero` : ''}`}:</div>
       <div style="max-height:200px;overflow:auto">${lista}</div>
       ${avisoCupo}
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
