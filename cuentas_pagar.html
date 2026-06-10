@@ -271,7 +271,8 @@ tfoot td { padding: 12px; font-weight: 800; border-top: 2px solid var(--borde); 
     <h2 id="modalTitulo">Nuevo gasto</h2>
     <div class="campo">
       <label>Descripción *</label>
-      <input type="text" id="fDescripcion" placeholder="Ej: ALQUILER, SUELDO PAULA, CLARO WIFI…">
+      <input type="text" id="fDescripcion" list="listaDescripciones" placeholder="Elegí una conocida o escribí una nueva…" oninput="autocompletarDesdeDescripcion()">
+      <datalist id="listaDescripciones"></datalist>
     </div>
     <div class="campos-2">
       <div class="campo">
@@ -401,6 +402,42 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 
+// ---------- Catálogo de descripciones conocidas ----------
+// Trae TODAS las descripciones distintas de la tabla (todos los meses) y arma
+// el desplegable. Si se elige una conocida, autocompleta categoría y tipo
+// con los del registro más reciente que la usó.
+let catalogoDescripciones = {}   // { 'ALQUILER': { categoria, tipo }, ... }
+
+async function cargarCatalogoDescripciones() {
+  const { data, error } = await supabase
+    .from('cuentas_pagar')
+    .select('descripcion, categoria, tipo')
+    .order('id', { ascending: false })
+    .limit(1000)
+  if (error || !data) return
+  catalogoDescripciones = {}
+  data.forEach(g => {
+    const d = (g.descripcion || '').trim()
+    if (d && !catalogoDescripciones[d]) {
+      catalogoDescripciones[d] = { categoria: g.categoria || 'OTROS', tipo: g.tipo || 'Proveedores' }
+    }
+  })
+  const lista = document.getElementById('listaDescripciones')
+  lista.innerHTML = Object.keys(catalogoDescripciones)
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(d => `<option value="${esc(d)}"></option>`)
+    .join('')
+}
+
+window.autocompletarDesdeDescripcion = function() {
+  const d = document.getElementById('fDescripcion').value.trim()
+  const conocida = catalogoDescripciones[d]
+  if (conocida) {
+    document.getElementById('fCategoria').value = conocida.categoria
+    document.getElementById('fTipo').value = conocida.tipo
+  }
+}
+
 // ---------- Arranque ----------
 async function init() {
   const { data: { session } } = await supabase.auth.getSession()
@@ -414,6 +451,7 @@ async function init() {
   document.getElementById('guardia').style.display = 'none'
   document.getElementById('app').style.display = 'block'
   await cargarMes()
+  cargarCatalogoDescripciones()
 }
 
 // ---------- Datos ----------
@@ -597,6 +635,7 @@ window.guardar = async function() {
     if (error) throw error
     cerrarModal()
     await cargarMes()
+    cargarCatalogoDescripciones()
   } catch (e) {
     alert('Error al guardar: ' + e.message)
   } finally {
