@@ -3015,14 +3015,26 @@ window.cancelarClaseCentro = async () => {
   ) || '').trim();
   if (motivo === '') return;   // canceló el prompt o lo dejó vacío
   try {
-    await supabaseInsert('clases_cerradas', {
-      turno_id: t.id,
-      fecha,
-      tipo: 'centro',
-      motivo,
-      cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
-      cerrada_por_email: USUARIO_ACTUAL?.email || null
-    });
+    // Si la clase YA estaba cerrada (finalizada/auto), la CONVERTIMOS a 'centro'
+    // en vez de insertar otra (la tabla tiene unique por turno_id+fecha).
+    const yaCerrada = await supabaseQuery('clases_cerradas',
+      `?select=turno_id&turno_id=eq.${t.id}&fecha=eq.${fecha}&limit=1`);
+    if (yaCerrada && yaCerrada.length) {
+      await supabaseUpdate('clases_cerradas',
+        `turno_id=eq.${t.id}&fecha=eq.${fecha}`,
+        { tipo: 'centro', motivo,
+          cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
+          cerrada_por_email: USUARIO_ACTUAL?.email || null });
+    } else {
+      await supabaseInsert('clases_cerradas', {
+        turno_id: t.id,
+        fecha,
+        tipo: 'centro',
+        motivo,
+        cerrada_por_nombre: USUARIO_ACTUAL?.nombre || null,
+        cerrada_por_email: USUARIO_ACTUAL?.email || null
+      });
+    }
     CLASES_CERRADAS.set(`${t.id}-${fecha}`, { tipo: 'centro', motivo });
     toast('🚫 Clase cancelada por el centro. Los alumnos la recuperan sin gastar cupo.');
     renderModalBody(t.dia, t.hora, t.servicio);
