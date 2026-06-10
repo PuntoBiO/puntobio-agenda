@@ -2687,6 +2687,9 @@ async function estadoRecuperatorios(personaId) {
   const fechasYaRecuperadas = new Set();
   usados.forEach(r => {
     if (r.tipo === 'feriado' || r.tipo === 'cierre') return;   // no gastan cupo
+    // Créditos SIN destino (generados al avisar falta desde Mi Espacio o por
+    // VACACIONES): la falta sigue recuperable y todavía no gastó cupo.
+    if (!r.fecha_recupero) return;
     const ciclo = cicloDe(r.fecha_ausencia, diaCorte);
     usadosPorMes[ciclo] = (usadosPorMes[ciclo] || 0) + 1;
     fechasYaRecuperadas.add(r.fecha_ausencia);
@@ -3351,28 +3354,45 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     if (!esSinCupo && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
       cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
     }
-    // 0) Anti-duplicado: si ya existe un recuperatorio PENDIENTE para este mismo
-    //    día (misma persona + misma fecha_ausencia + mismo tipo), no crear otro.
-    //    Evita que un feriado/falta quede reprogramado dos veces.
+    // 0) Anti-duplicado / reutilización de crédito:
+    //    - Si ya existe una fila CON destino (fecha_recupero) para esta falta,
+    //      ya está reprogramada → no duplicar.
+    //    - Si existe un crédito SIN destino (lo crean el aviso de falta desde
+    //      Mi Espacio y las VACACIONES), lo completamos en vez de insertar otro.
+    let creditoSinDestinoId = null;
     try {
-      const yaExiste = await supabaseQuery('recuperatorios_tf',
-        `?select=id&persona_id=eq.${pid}&fecha_ausencia=eq.${fechaAusencia}&tipo=eq.${tipoRecup}&estado=eq.pendiente`);
-      if (yaExiste && yaExiste.length) {
+      const previos = await supabaseQuery('recuperatorios_tf',
+        `?select=id,fecha_recupero&persona_id=eq.${pid}&fecha_ausencia=eq.${fechaAusencia}&tipo=eq.${tipoRecup}&estado=in.(pendiente,asignado)`);
+      const reservado = (previos || []).find(x => x.fecha_recupero);
+      if (reservado) {
         cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esta clase ya está reprogramada. Si querés cambiar el día, primero quitá al alumno del turno donde está reservado.</div>';
         return;
       }
+      const credito = (previos || []).find(x => !x.fecha_recupero);
+      if (credito) creditoSinDestinoId = credito.id;
     } catch (e0) { console.warn('No se pudo verificar duplicado de recuperatorio', e0); }
     // 1) Registrar el recuperatorio (los de feriado van con tipo 'feriado' y NO descuentan cupo)
-    await supabaseInsert('recuperatorios_tf', {
-      persona_id: pid,
-      fecha_ausencia: fechaAusencia,
-      fecha_recupero: fechaRecupero,
-      turno_recupero_id: t.id,
-      tipo: tipoRecup,
-      estado: 'pendiente',
-      cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
-      cargado_por_email: USUARIO_ACTUAL?.email || null
-    });
+    if (creditoSinDestinoId) {
+      // Completar el crédito existente con el destino elegido
+      await supabaseUpdate('recuperatorios_tf', `id=eq.${creditoSinDestinoId}`, {
+        fecha_recupero: fechaRecupero,
+        turno_recupero_id: t.id,
+        estado: 'pendiente',
+        cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+        cargado_por_email: USUARIO_ACTUAL?.email || null
+      });
+    } else {
+      await supabaseInsert('recuperatorios_tf', {
+        persona_id: pid,
+        fecha_ausencia: fechaAusencia,
+        fecha_recupero: fechaRecupero,
+        turno_recupero_id: t.id,
+        tipo: tipoRecup,
+        estado: 'pendiente',
+        cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+        cargado_por_email: USUARIO_ACTUAL?.email || null
+      });
+    }
     // 2) Agregarlo al turno del día (igual que un agregado puntual)
     const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
     // BLOQUEOS · chequear antes del insert
@@ -4005,8 +4025,16 @@ window.quitarAgregado = async (agregadoId, dia, hora, servicio, personaId, tipoA
       const fechaRec = fechaDelDia(dia);
       if (t && fechaRec) {
         try {
+          // Falta normal: el crédito vuelve a quedar SIN destino (la clase
+          // pendiente se reactiva y se puede reprogramar otro día, desde el
+          // mostrador o desde Mi Espacio).
+          await supabaseUpdate('recuperatorios_tf',
+            `persona_id=eq.${personaId}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fechaRec}&estado=in.(pendiente,asignado)&tipo=eq.recuperatorio`,
+            { estado: 'pendiente', fecha_recupero: null, turno_recupero_id: null });
+          // Feriados y cierres del centro: se borra la fila (vuelven a
+          // ofrecerse solos porque se calculan aparte).
           await supabaseDelete('recuperatorios_tf',
-            `persona_id=eq.${personaId}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fechaRec}&estado=eq.pendiente`);
+            `persona_id=eq.${personaId}&turno_recupero_id=eq.${t.id}&fecha_recupero=eq.${fechaRec}&estado=in.(pendiente,asignado)&tipo=in.(feriado,cierre)`);
         } catch (e2) {
           console.warn('No se pudo reactivar la clase pendiente', e2);
           toast('Se quitó del turno, pero revisá la reserva del recuperatorio', 'warn');
