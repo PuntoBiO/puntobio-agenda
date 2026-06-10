@@ -1845,11 +1845,24 @@ window.vacacionesConfirmar = async () => {
 };
 
 window.cancelarVacaciones = async (vacId) => {
-  if (!confirm('¿Cancelar estas vacaciones?\n\nSe deshacen las faltas avisadas de los días que todavía no pasaron. Las fechas con recupero ya programado quedan como están.')) return;
+  if (!confirm('¿Cancelar estas vacaciones?\n\nSe deshacen las faltas avisadas de los días que todavía no pasaron y el alumno vuelve a sus clases — salvo que su lugar haya quedado ocupado por un recuperatorio de otro alumno: esas clases quedan como falta avisada para reprogramar. Las fechas con recupero ya programado tampoco se tocan.')) return;
   try {
     const { data: res, error } = await sb.rpc('vacaciones_cancelar', { p_vacacion_id: vacId });
     if (error) throw error;
     alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Vacaciones canceladas.'));
+    // Si hay clases ocupadas provisoriamente por recuperos de otros,
+    // ofrecer avisarle al alumno por WhatsApp que las reprograme.
+    const rep = (res && res.reprogramar) || [];
+    const p = alumnoActivo.persona;
+    const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
+    if (rep.length && tel && confirm('¿Avisarle por WhatsApp que tiene ' + rep.length + ' clase(s) para reprogramar?')) {
+      const fmtR = (iso) => (iso || '').split('-').reverse().join('/');
+      const nombre1 = p.nombre ? p.nombre.split(' ')[0] : '';
+      const lineas = rep.map(x => `• ${fmtR(x.fecha)} · ${x.dia} ${x.hora} · ${x.servicio}`).join('\n');
+      const msg = `Hola ${nombre1}! Cancelamos tus vacaciones en PuntoBiO y ya volvés a figurar en tus clases de siempre, salvo estas, que están ocupadas provisoriamente por un recuperatorio de otro alumno:\n\n${lineas}\n\nEsas quedaron como falta avisada: reprogramalas en otro día u horario desde Mi Espacio (https://www.puntobio.com.ar/mi_espacio.html) o escribinos y lo coordinamos. Gracias!`;
+      const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
+      window.open(`https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`, '_blank');
+    }
     abrirVacacionesAlumno();
   } catch (e) {
     alert('No se pudo cancelar:\n\n' + (e.message || e));
