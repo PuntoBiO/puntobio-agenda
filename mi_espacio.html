@@ -175,6 +175,19 @@
   .banner-aviso .ba-texto{font-size:13.5px;line-height:1.5;color:var(--texto)}
   .banner-aviso .ba-texto b{color:var(--ambar);font-weight:700;display:block;margin-bottom:2px;font-size:14px}
 
+  /* Banner de cumpleaños: aparece solo el día que la persona cumple años */
+  .banner-cumple{
+    display:none;align-items:flex-start;gap:14px;
+    padding:14px 16px;
+    background:linear-gradient(135deg, var(--celeste-soft), rgba(30,159,224,.05));
+    border:1px solid rgba(30,159,224,.45);
+    border-radius:14px;margin-bottom:18px;
+    box-shadow:0 4px 18px var(--celeste-glow);
+  }
+  .banner-cumple .ba-icono{font-size:24px;line-height:1;flex-shrink:0}
+  .banner-cumple .ba-texto{font-size:13.5px;line-height:1.5;color:var(--texto)}
+  .banner-cumple .ba-texto b{color:var(--celeste);font-weight:700;display:block;margin-bottom:2px;font-size:15px}
+
   .card{
     background:linear-gradient(180deg, var(--card-bg-top), var(--card-bg-bot));
     border:1px solid var(--gris-borde);
@@ -835,6 +848,12 @@
     <!-- Mini-resumen semanal / mensual (se llena en JS) -->
     <div id="resumen-chip" class="resumen-chip reveal d1" style="display:none"></div>
 
+    <!-- Banner de cumpleaños (se muestra solo cuando corresponde; el texto lo arma el JS) -->
+    <div class="banner-cumple reveal d1" id="bannerCumple">
+      <span class="ba-icono">🎂</span>
+      <div class="ba-texto" id="bannerCumpleTexto"></div>
+    </div>
+
     <!-- Banner prominente: regla de las 2 horas -->
     <div class="banner-aviso reveal d1">
       <span class="ba-icono">⏰</span>
@@ -1120,7 +1139,7 @@ function hoyISO(){
   // 2) ¿qué persona soy? (RLS Nivel C: solo veo mi propia fila)
   const { data:per, error } = await sb
     .from('personas')
-    .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular')
+    .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular, fecha_nacimiento')
     .eq('auth_user_id', session.user.id)
     .maybeSingle();
 
@@ -1218,6 +1237,60 @@ async function cargarEspacio(per){
   const nombre = (per.nombre||'').trim() || 'alumno';
   $('nombre').textContent = nombre;
   cargarAvatar(per);                    // foto de perfil o iniciales
+
+  // 🎂 Banner de cumpleaños y regalo:
+  //  - El DÍA del cumpleaños: saludo + regalo (mayores: cupón de masaje · menores: 25% OFF en la cuota)
+  //  - Menor durante TODO su mes: recordatorio del 25% OFF
+  //  - Mayor con cupón PENDIENTE (vale 60 días): recordatorio del masaje con su código
+  try {
+    if (per.fecha_nacimiento) {
+      const hoyISO = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Cordoba', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+      const fnac = String(per.fecha_nacimiento);
+      const mdHoy = hoyISO.slice(5,10);
+      const mdNac = fnac.slice(5,10);
+      const anioHoy = Number(hoyISO.slice(0,4));
+      const bisiesto = (anioHoy % 4 === 0 && anioHoy % 100 !== 0) || anioHoy % 400 === 0;
+      const esCumple = (mdNac === mdHoy) || (mdNac === '02-29' && mdHoy === '03-01' && !bisiesto);
+      const esMenor = (anioHoy - Number(fnac.slice(0,4))) < 18;
+      const esMesCumple = fnac.slice(5,7) === hoyISO.slice(5,7);
+      const fmtAr = (iso) => { const [a,m,d] = String(iso).split('-'); return `${d}/${m}/${a}`; };
+      const nom = String(nombre).replace(/[<>&]/g, '');
+
+      // Cupón de masaje vigente (solo mayores; el RLS solo deja ver el propio)
+      let cupon = null;
+      if (!esMenor) {
+        try {
+          const { data: cup } = await sb.from('cupones_cumple')
+            .select('estado, vence_el, tratamientos(codigo_id)')
+            .eq('persona_id', per.id).eq('anio', anioHoy).maybeSingle();
+          if (cup && cup.estado === 'PENDIENTE') cupon = { codigo: cup.tratamientos?.codigo_id || '', vence: cup.vence_el };
+        } catch(e) { /* sin cupón */ }
+      }
+
+      const b = document.getElementById('bannerCumple');
+      const t = document.getElementById('bannerCumpleTexto');
+      if (b && t) {
+        if (esCumple) {
+          let regalo = '';
+          if (esMenor) {
+            regalo = `🎁 Y te dejamos un regalo: <b>25% de descuento en la cuota de este mes</b>. Ya queda aplicado, no tenés que hacer nada.`;
+          } else if (cupon) {
+            regalo = `🎁 Y te dejamos un regalo: un <b>masaje descontracturante (espalda y cuello) con Verónica Sandler</b>, cortesía del centro.<br>`
+                   + `Tu cupón: <b style="font-family:monospace">${cupon.codigo}</b> · válido hasta el <b>${fmtAr(cupon.vence)}</b>. Escribinos por WhatsApp para reservar tu turno.`;
+          }
+          t.innerHTML = `<b>¡Feliz cumpleaños, ${nom}! 🎂</b>Todo el equipo de PuntoBiO te desea un día hermoso. ¡Que lo disfrutes mucho! 💙${regalo ? '<br>' + regalo : ''}`;
+          b.style.display = 'flex';
+        } else if (esMenor && esMesCumple) {
+          t.innerHTML = `<b>🎂 ¡Este mes es tu cumpleaños!</b>La cuota de este mes va con <b>25% de descuento</b>, regalo de PuntoBiO. Ya queda aplicado, no tenés que hacer nada.`;
+          b.style.display = 'flex';
+        } else if (cupon) {
+          t.innerHTML = `<b>🎁 Tenés un masaje de regalo pendiente</b>Masaje espalda y cuello con Verónica Sandler, cortesía de PuntoBiO por tu cumpleaños. `
+                      + `Tu cupón: <b style="font-family:monospace">${cupon.codigo}</b> · válido hasta el <b>${fmtAr(cupon.vence)}</b>. Escribinos por WhatsApp para reservar tu turno.`;
+          b.style.display = 'flex';
+        }
+      }
+    }
+  } catch(e) { /* si algo falla, simplemente no se muestra el banner */ }
 
   // Traemos todo lo del alumno en paralelo, filtrando SIEMPRE por su persona_id.
   // (No dependemos solo del RLS: el equipo con doble rol no debe ver datos de otros aquí.)
