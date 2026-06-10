@@ -21,6 +21,16 @@
   .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
   h2 { font-size: 15px; color: var(--text-soft); margin: 22px 0 10px; text-transform: uppercase; letter-spacing: 0.5px; }
 
+  /* Cards de resumen */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 8px; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .card-value { font-size: 22px; font-weight: 700; }
+  .card-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+  .card.rosa { border-color: rgba(219,39,119,.45); } .card.rosa .card-value { color: var(--rosa); }
+  .card.verde { border-color: rgba(22,163,74,.45); } .card.verde .card-value { color: var(--verde); }
+  .card.naranja { border-color: rgba(217,119,6,.45); } .card.naranja .card-value { color: var(--naranja); }
+
   /* Cards de cumpleañeros de HOY */
   .hoy-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
   .hoy-card {
@@ -50,13 +60,16 @@
 
   .empty, .loading { text-align: center; padding: 36px; color: var(--text-dim); background: var(--bg-card); border: 1px dashed var(--border); border-radius: 12px; }
 
-  /* Tabla de próximos */
-  table { width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: 10px; overflow: hidden; }
-  thead { background: #f8fafc; }
-  th { padding: 11px 12px; text-align: left; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-  td { padding: 11px 12px; border-top: 1px solid var(--border); vertical-align: middle; }
-  tr.row:hover { background: var(--bg-hover); }
-  .fecha-col { white-space: nowrap; font-weight: 600; color: var(--text-soft); }
+  /* Agenda de próximos: agrupada por fecha */
+  .agenda { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .agenda-dia { display: flex; gap: 14px; padding: 13px 16px; border-top: 1px solid var(--border); align-items: baseline; flex-wrap: wrap; }
+  .agenda-dia:first-child { border-top: none; }
+  .agenda-dia:hover { background: var(--bg-hover); }
+  .agenda-fecha { min-width: 110px; font-weight: 700; color: var(--text-soft); white-space: nowrap; }
+  .agenda-count { min-width: 105px; color: var(--rosa); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  .agenda-nombres { flex: 1; min-width: 200px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .nombre-chip { background: var(--bg-hover); border: 1px solid var(--border); padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+  .nombre-chip b { color: var(--rosa); font-weight: 600; }
 
   .toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%) translateY(80px);
@@ -68,7 +81,7 @@
   @media (max-width: 640px) {
     body { padding: 12px; }
     .hoy-grid { grid-template-columns: 1fr; }
-    th:nth-child(4), td:nth-child(4) { display: none; }
+    .agenda-fecha, .agenda-count { min-width: 0; }
   }
 </style>
 </head>
@@ -76,16 +89,26 @@
 
 <h1>🎂 Cumpleaños</h1>
 <div class="sub">
-  El saludo por <b>mail</b> sale solo todos los días a las 9:00 (con el cupón de regalo si la persona está activa).
-  El de <b>WhatsApp</b> lo mandás vos con un toque. El cupón 🎁 es un masaje EyC con Vero, vale 60 días,
-  y su número es el código de tratamiento que se usa para dar el turno en la agenda de maso.
+  Solo se muestran <b>pacientes activos</b> (TF activo, o tratamiento/pack de consultorio, maso o biolab de los últimos 6 meses).
+  El <b>mail</b> con el cupón de regalo sale solo todos los días a las 9:00; el <b>WhatsApp</b> lo mandás vos con un toque.
+  El cupón 🎁 es un masaje EyC con Vero, vale 60 días, y su número es el código de tratamiento para dar el turno en la agenda de maso.
+</div>
+
+<div class="cards" id="resumen" style="display:none">
+  <div class="card rosa"><div class="card-label">Cumpleaños hoy</div><div class="card-value" id="rHoy">—</div></div>
+  <div class="card naranja"><div class="card-label">Cupones pendientes</div><div class="card-value" id="rPend">—</div><div class="card-sub">vigentes, sin usar</div></div>
+  <div class="card verde"><div class="card-label">Masajes regalo realizados</div><div class="card-value" id="rReal">—</div><div class="card-sub" id="rRealSub">en el año</div></div>
+  <div class="card verde"><div class="card-label">Para Vero por regalos</div><div class="card-value" id="rVero">—</div><div class="card-sub">lo asume PuntoBiO · se liquida como siempre</div></div>
 </div>
 
 <h2>Hoy</h2>
 <div id="hoy" class="loading">Cargando…</div>
 
-<h2>Próximos 30 días</h2>
+<h2>Agenda — próximos 30 días</h2>
 <div id="proximos" class="loading">Cargando…</div>
+
+<h2>Proyección de masajes regalo</h2>
+<div id="proyeccion" class="loading">Cargando…</div>
 
 <div class="toast" id="toast"></div>
 
@@ -107,9 +130,11 @@ function msgWA(nombre, cupon) {
   return m;
 }
 
-let personas = [];        // todas las personas con fecha_nacimiento
-let enviados = {};        // persona_id -> { MAIL: row, WHATSAPP: row } (del año actual)
-let cupones = {};         // persona_id -> { codigo, estado, vence_el } (del año actual)
+let personas = [];        // personas con fecha_nacimiento
+let activos = new Set();  // persona_id con "algo activo"
+let enviados = {};        // persona_id -> { MAIL, WHATSAPP } del año actual
+let cupones = {};         // persona_id -> { codigo, estado, vence_el } del año actual
+let precioRegalo = 0;     // precio vigente de MASAJES_R (lo que cobra Vero por masaje)
 let usuarioEmail = '';
 
 function hoyAR() {
@@ -122,7 +147,6 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 3500);
 }
 
-// Normaliza un celular argentino al formato de wa.me (549 + área + número)
 function waNumero(raw) {
   let d = String(raw || '').replace(/\D/g, '');
   if (!d) return null;
@@ -139,7 +163,6 @@ function edadQueCumple(fechaNac, fechaCumple) {
 function esBaja(estado) { return /baja/i.test(String(estado || '')); }
 function esBisiesto(a) { return (a % 4 === 0 && a % 100 !== 0) || a % 400 === 0; }
 
-// Próxima ocurrencia del cumpleaños (29/02 → 01/03 en años no bisiestos)
 function proximaOcurrencia(fechaNac, hoy) {
   const anioHoy = Number(hoy.slice(0, 4));
   const md = fechaNac.slice(5, 10);
@@ -170,6 +193,10 @@ function fmtHora(ts) {
   } catch (e) { return ''; }
 }
 
+function fmt$(n) {
+  return '$' + Number(n || 0).toLocaleString('es-AR', { maximumFractionDigits: 0 });
+}
+
 function sumarDias(iso, n) {
   const [a, m, d] = iso.split('-').map(Number);
   const dt = new Date(a, m - 1, d + n);
@@ -193,18 +220,37 @@ async function cargar() {
 
   const hoy = hoyAR();
   const anio = Number(hoy.slice(0, 4));
+  const hace180 = sumarDias(hoy, -180);
 
-  const [rPer, rEnv, rCup] = await Promise.all([
+  const [rPer, rEnv, rCup, rInsc, rTtos, rPrecio] = await Promise.all([
     sb.from('personas')
       .select('id, nombre, fecha_nacimiento, celular, telefono, email, mail, estado, es_equipo')
       .not('fecha_nacimiento', 'is', null)
       .order('nombre'),
     sb.from('cumpleanos_enviados').select('*').eq('anio', anio),
-    sb.from('cupones_cumple').select('persona_id, estado, vence_el, tratamientos(codigo_id)').eq('anio', anio)
+    sb.from('cupones_cumple').select('persona_id, estado, vence_el, tratamiento_id, tratamientos(codigo_id)').eq('anio', anio),
+    // "Algo activo": inscripción TF activa/bonificada…
+    sb.from('inscripciones_tf').select('persona_id').in('estado', ['ACTIVO', 'BONIFICADO']),
+    // …o tratamiento/pack (no regalo) de los últimos 6 meses
+    sb.from('tratamientos').select('persona_id').neq('practica_codigo', 'MASAJES_R').gte('fecha_alta', hace180),
+    // Precio vigente del masaje de regalo (lo que cobra Vero por cada uno)
+    sb.from('tarifario_precios').select('valor, vigente_desde, vigente_hasta').eq('practica_codigo', 'MASAJES_R')
   ]);
+
+  precioRegalo = 0;
+  try {
+    const vig = (rPrecio.data || [])
+      .filter(r => r.vigente_desde <= hoy && (!r.vigente_hasta || r.vigente_hasta >= hoy))
+      .sort((a, b) => b.vigente_desde.localeCompare(a.vigente_desde))[0];
+    precioRegalo = Number(vig?.valor || 0);
+  } catch (e) { precioRegalo = 0; }
 
   if (rPer.error) { document.getElementById('hoy').innerHTML = 'Error cargando datos: ' + rPer.error.message; return; }
   personas = rPer.data || [];
+
+  activos = new Set();
+  (rInsc.data || []).forEach(r => activos.add(r.persona_id));
+  (rTtos.data || []).forEach(r => activos.add(r.persona_id));
 
   enviados = {};
   (rEnv.data || []).forEach(r => {
@@ -214,25 +260,91 @@ async function cargar() {
 
   cupones = {};
   (rCup.data || []).forEach(c => {
-    cupones[c.persona_id] = { codigo: c.tratamientos?.codigo_id || '', estado: c.estado, vence_el: c.vence_el };
+    cupones[c.persona_id] = { codigo: c.tratamientos?.codigo_id || '', estado: c.estado, vence_el: c.vence_el, tratamiento_id: c.tratamiento_id };
   });
 
   render(hoy);
+  cargarResumen(rCup.data || [], anio);
+}
+
+// Resumen: cupones pendientes / realizados / $ para Vero (suma de las sesiones de los regalos)
+async function cargarResumen(cupsAnio, anio) {
+  const pendientes = cupsAnio.filter(c => c.estado === 'PENDIENTE').length;
+  const realizados = cupsAnio.filter(c => c.estado === 'REALIZADO');
+
+  let totalVero = 0;
+  const ttoIds = realizados.map(c => c.tratamiento_id).filter(Boolean);
+  if (ttoIds.length) {
+    try {
+      const { data: ses } = await sb.from('sesiones').select('monto_profesional').in('tratamiento_id', ttoIds);
+      totalVero = (ses || []).reduce((acc, s) => acc + Number(s.monto_profesional || 0), 0);
+    } catch (e) { console.warn('No se pudo sumar lo de Vero:', e.message); }
+  }
+
+  document.getElementById('rPend').textContent = pendientes;
+  document.getElementById('rReal').textContent = realizados.length;
+  document.getElementById('rRealSub').textContent = 'en ' + anio;
+  document.getElementById('rVero').textContent = fmt$(totalVero);
+  document.getElementById('resumen').style.display = '';
 }
 
 function render(hoy) {
+  // Solo pacientes ACTIVOS y no de baja
   const lista = personas
+    .filter(p => activos.has(p.id) && !esBaja(p.estado))
     .map(p => ({ ...p, prox: proximaOcurrencia(p.fecha_nacimiento, hoy) }))
     .filter(p => p.prox);
 
-  const deHoy = lista.filter(p => p.prox === hoy && !esBaja(p.estado));
+  const deHoy = lista.filter(p => p.prox === hoy);
   const limite = sumarDias(hoy, 30);
   const proximos = lista
-    .filter(p => p.prox > hoy && p.prox <= limite && !esBaja(p.estado))
+    .filter(p => p.prox > hoy && p.prox <= limite)
     .sort((a, b) => a.prox.localeCompare(b.prox) || a.nombre.localeCompare(b.nombre));
 
+  document.getElementById('rHoy').textContent = deHoy.length;
   renderHoy(deHoy);
-  renderProximos(proximos);
+  renderAgenda(proximos);
+  renderProyeccion(lista, hoy);
+}
+
+// Proyección: cuántos cumpleaños de pacientes activos hay en el mes actual
+// y los 2 siguientes → tope de masajes regalo que PuntoBiO podría asumir.
+function renderProyeccion(listaActivos, hoy) {
+  const cont = document.getElementById('proyeccion');
+  const MESES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+  const anioHoy = Number(hoy.slice(0, 4));
+  const mesHoy = Number(hoy.slice(5, 7));
+
+  const filas = [];
+  for (let k = 0; k < 3; k++) {
+    const m = ((mesHoy - 1 + k) % 12) + 1;
+    const anio = anioHoy + Math.floor((mesHoy - 1 + k) / 12);
+    // Cumpleaños de activos en ese mes (29/02 cuenta en febrero, o en marzo si no es bisiesto)
+    const gente = listaActivos.filter(p => {
+      let mesNac = Number(p.fecha_nacimiento.slice(5, 7));
+      const diaNac = Number(p.fecha_nacimiento.slice(8, 10));
+      if (mesNac === 2 && diaNac === 29 && !esBisiesto(anio)) mesNac = 3;
+      return mesNac === m;
+    });
+    filas.push({ label: `${MESES[m - 1]} ${anio}`, cant: gente.length });
+  }
+
+  cont.className = '';
+  cont.innerHTML = `<table>
+    <thead><tr><th>Mes</th><th>Cumpleaños (pacientes activos)</th><th>Masajes regalo (tope)</th><th>Costo máximo para PuntoBiO</th></tr></thead>
+    <tbody>
+      ${filas.map(f => `<tr class="row">
+        <td class="fecha-col">${f.label}</td>
+        <td>${f.cant}</td>
+        <td>${f.cant}</td>
+        <td><b>${fmt$(f.cant * precioRegalo)}</b></td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  <div style="font-size:12px; color:var(--text-dim); margin-top:8px;">
+    Es el <b>tope</b>: un masaje por cumpleañero activo, a ${fmt$(precioRegalo)} c/u (precio vigente de MASAJES_R).
+    Solo se paga el que <b>efectivamente se hace</b> (turno con Vero marcado PRESENTE) — el cupón que vence sin usarse no cuesta nada.
+  </div>`;
 }
 
 function chipCupon(c) {
@@ -246,7 +358,7 @@ function renderHoy(deHoy) {
   const cont = document.getElementById('hoy');
   if (!deHoy.length) {
     cont.className = 'empty';
-    cont.innerHTML = 'Hoy no cumple años nadie 🙂';
+    cont.innerHTML = 'Hoy no cumple años ningún paciente activo 🙂';
     return;
   }
   cont.className = 'hoy-grid';
@@ -257,19 +369,16 @@ function renderHoy(deHoy) {
     const tel = waNumero(p.celular || p.telefono);
     const tieneMail = !!(p.email || p.mail);
 
-    // WhatsApp
     let btnWa;
     if (!tel) btnWa = `<span class="sin-dato">sin celular cargado</span>`;
     else if (env.WHATSAPP) btnWa = `<span class="chip ok">✓ WhatsApp enviado ${fmtHora(env.WHATSAPP.enviado_en)}</span> <button class="btn btn-wa" onclick="mandarWA(${p.id})">Reenviar</button>`;
     else btnWa = `<button class="btn btn-wa" onclick="mandarWA(${p.id})">💬 Saludar por WhatsApp</button>`;
 
-    // Mail
     let mailEstado;
     if (!tieneMail) mailEstado = `<span class="sin-dato">sin mail cargado</span>`;
     else if (env.MAIL) mailEstado = `<span class="chip ok">✓ Mail enviado ${fmtHora(env.MAIL.enviado_en)}</span>`;
     else mailEstado = `<span class="chip warn">Mail pendiente</span> <button class="btn btn-mail" onclick="mandarMail(${p.id}, this)">📧 Mandar ahora</button>`;
 
-    // Cupón (el cron lo crea solo si la persona está activa; este botón es manual)
     const cuponHtml = cup
       ? chipCupon(cup)
       : `<button class="btn btn-cupon" onclick="generarCupon(${p.id}, this)">🎁 Generar cupón de masaje</button>`;
@@ -286,35 +395,31 @@ function renderHoy(deHoy) {
   }).join('');
 }
 
-function renderProximos(proximos) {
+// Agenda agrupada: fecha → cantidad → nombres
+function renderAgenda(proximos) {
   const cont = document.getElementById('proximos');
   if (!proximos.length) {
     cont.className = 'empty';
-    cont.innerHTML = 'No hay cumpleaños en los próximos 30 días.';
+    cont.innerHTML = 'No hay cumpleaños de pacientes activos en los próximos 30 días.';
     return;
   }
-  cont.className = '';
-  cont.innerHTML = `<table>
-    <thead><tr><th>Fecha</th><th>Nombre</th><th>Cumple</th><th>Contacto</th></tr></thead>
-    <tbody>
-      ${proximos.map(p => {
-        const edad = edadQueCumple(p.fecha_nacimiento, p.prox);
-        const tel = waNumero(p.celular || p.telefono);
-        const tieneMail = !!(p.email || p.mail);
-        const contacto = [
-          tel ? '<span class="chip ok">cel ✓</span>' : '<span class="chip baja">sin cel</span>',
-          tieneMail ? '<span class="chip ok">mail ✓</span>' : '<span class="chip baja">sin mail</span>',
-          p.es_equipo ? '<span class="chip off">equipo</span>' : ''
-        ].join(' ');
-        return `<tr class="row">
-          <td class="fecha-col">${fmtFecha(p.prox)}</td>
-          <td>${esc(p.nombre)}</td>
-          <td>${edad} años</td>
-          <td>${contacto}</td>
-        </tr>`;
-      }).join('')}
-    </tbody>
-  </table>`;
+
+  const porFecha = new Map();
+  proximos.forEach(p => {
+    if (!porFecha.has(p.prox)) porFecha.set(p.prox, []);
+    porFecha.get(p.prox).push(p);
+  });
+
+  cont.className = 'agenda';
+  cont.innerHTML = [...porFecha.entries()].map(([fecha, gente]) => `
+    <div class="agenda-dia">
+      <div class="agenda-fecha">${fmtFecha(fecha)}</div>
+      <div class="agenda-count">${gente.length} cumpleaños</div>
+      <div class="agenda-nombres">
+        ${gente.map(p => `<span class="nombre-chip">${esc(p.nombre)} <b>${edadQueCumple(p.fecha_nacimiento, p.prox)}</b></span>`).join('')}
+      </div>
+    </div>
+  `).join('');
 }
 
 // ===== Acciones =====
