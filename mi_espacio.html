@@ -1894,25 +1894,14 @@ function iniciarCountdown(turnoId, fechaISO){
 window.deshacerFalta = async function(turnoId, fechaISO){
   if(!confirm('¿Deshacer el aviso de falta? Volvés a quedar como reservado en esa clase.')) return;
   try {
-    let ok = false;
-    // Intento 1: RPC alumno_deshacer_falta (si Lu la creó en Supabase)
-    try {
-      const { error } = await sb.rpc('alumno_deshacer_falta', {
-        p_turno_id: turnoId,
-        p_fecha: fechaISO
-      });
-      if(!error) ok = true;
-    } catch(_){ /* la función puede no existir, intentamos fallback */ }
-
-    // Intento 2 (fallback): DELETE directo sobre asistencia
-    if(!ok){
-      const { error } = await sb.from('asistencia')
-        .delete()
-        .eq('turno_id', turnoId)
-        .eq('fecha', fechaISO)
-        .eq('estado', 'ausente-justificada');
-      if(error) throw error;
-    }
+    // RPC con control de cupo: si tu lugar ya fue ocupado por otro compañero,
+    // la base rechaza con 'lugar_ocupado' y la falta queda avisada.
+    // (Sin fallback de borrado directo: el cupo se respeta SIEMPRE.)
+    const { error } = await sb.rpc('alumno_deshacer_falta', {
+      p_turno_id: turnoId,
+      p_fecha: fechaISO
+    });
+    if(error) throw error;
 
     // Limpiar UI: volver al estado inicial
     clearInterval(TIMERS_DESHACER[turnoId]);
@@ -1922,7 +1911,16 @@ window.deshacerFalta = async function(turnoId, fechaISO){
     if(slot) slot.innerHTML = '';
     if(btn){ btn.style.display = ''; btn.disabled = false; btn.textContent = '🚫 Avisar falta'; }
   } catch(e){
-    alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
+    const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+    if(raw.includes('lugar_ocupado')){
+      alert('😕 Tu lugar ya fue tomado por otro compañero.\n\n' +
+        'Tu falta sigue avisada y conservás el recuperatorio: ' +
+        'usalo para reprogramar la clase en otro horario desde "Mis recuperatorios".');
+    } else if(raw.includes('aviso_no_encontrado')){
+      alert('No encontramos el aviso de falta. Recargá la página y probá de nuevo.');
+    } else {
+      alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
+    }
   }
 };
 
