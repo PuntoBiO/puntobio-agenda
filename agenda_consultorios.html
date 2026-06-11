@@ -1494,7 +1494,7 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
   const ttoIds = ttos.map(t => t.id);
   const [resSes, resTur] = await Promise.all([
     supa.from('sesiones').select('tratamiento_id').in('tratamiento_id', ttoIds),
-    supa.from('turnos_consultorio').select('tratamiento_id, estado').in('tratamiento_id', ttoIds).eq('estado', 'PENDIENTE')
+    supa.from('turnos_consultorio').select('tratamiento_id, estado').in('tratamiento_id', ttoIds).in('estado', ['PENDIENTE','SOBRETURNO'])
   ]);
   const cumpPorTto = {};
   (resSes.data || []).forEach(s => { cumpPorTto[s.tratamiento_id] = (cumpPorTto[s.tratamiento_id] || 0) + 1; });
@@ -1703,10 +1703,13 @@ function calcularNumeroSesion(t) {
   const maxSesionRegistrada = sesiones.reduce((m, s) => Math.max(m, s.numero_sesion || 0), 0);
   const turnIdsConSesion = new Set(sesiones.map(s => s.turno_id).filter(Boolean));
   const todosLosTurnosDelTto = turnosPorTto.get(t.tratamiento_id) || [];
+  // OJO: SOBRETURNO SÍ es válido (es una sesión real del tto, 3er cupo REHAB con
+  // autorización del profesional). Antes se excluía acá y eso corría la numeración:
+  // el sobreturno no mostraba S y el turno siguiente salía con un número de menos
+  // (caso Héctor Ceballos: martes sobreturno sin S, jueves mostraba S6 en vez de S7).
   const turnosValidos = todosLosTurnosDelTto.filter(x =>
     x.estado !== 'CANCELADO' &&
     x.estado !== 'AUSENTE' &&
-    x.estado !== 'SOBRETURNO' &&
     x.estado !== 'PRESENTE' &&   // PRESENTE ya cumplió su sesión, no es pendiente
     !turnIdsConSesion.has(x.id)
   );
@@ -1729,10 +1732,10 @@ function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
   // Sesiones ya cumplidas/consumidas (máximo entre las dos fuentes, sin duplicar).
   const cumplidas = contarSesionesConsumidas(tratamientoId);
 
-  // Turnos PENDIENTE futuros (todavía no cumplidos): los que sumarán cuando se marquen presentes.
+  // Turnos PENDIENTE o SOBRETURNO futuros (todavía no cumplidos): los que sumarán cuando se marquen presentes.
   // Estos ya están incluidos dentro de `cumplidas` porque PENDIENTE cuenta en el consumo,
   // así que las "faltantes" son simplemente el total menos lo ya previsto.
-  const futurasValidas = todos.filter(x => x.estado === 'PENDIENTE').length;
+  const futurasValidas = todos.filter(x => x.estado === 'PENDIENTE' || x.estado === 'SOBRETURNO').length;
 
   const faltantes = Math.max(0, totalSesiones - cumplidas);
   return { faltantes, totalEsperado: totalSesiones, cumplidas, futurasValidas };
@@ -1740,7 +1743,7 @@ function calcularTurnosFaltantes(tratamientoId, totalSesiones) {
 
 // === TOPE DE SESIONES ===
 // Cuenta cuántas sesiones YA CONSUMEN un tratamiento (las que cuentan contra el tope).
-// Regla: PENDIENTE + PRESENTE cuentan. AUSENTE, CANCELADO y SOBRETURNO NO cuentan.
+// Regla: PENDIENTE + PRESENTE + SOBRETURNO cuentan. AUSENTE y CANCELADO NO cuentan.
 //
 // Hay DOS fuentes de verdad que representan la MISMA realidad (las visitas del paciente):
 //   1) tabla `sesiones` -> sesiones cumplidas, muchas migradas del Excel con turno_id NULL.
@@ -1766,9 +1769,10 @@ function contarSesionesConsumidas(tratamientoId) {
   // tenía huecos (ej. nº 1..8 + 10 = 9 reales pero max=10), bloqueando ttos con cupo libre.
   const cumplidasHist = sesiones.length;
 
-  // Fuente 2: turnos de la agenda que consumen sesión (PENDIENTE + PRESENTE).
+  // Fuente 2: turnos de la agenda que consumen sesión (PENDIENTE + PRESENTE + SOBRETURNO).
+  // SOBRETURNO consume igual: es una sesión real del tratamiento (3er cupo REHAB).
   const turnosQueConsumen = todos.filter(x =>
-    x.estado === 'PENDIENTE' || x.estado === 'PRESENTE'
+    x.estado === 'PENDIENTE' || x.estado === 'PRESENTE' || x.estado === 'SOBRETURNO'
   ).length;
 
   // Las dos fuentes describen las mismas visitas. Tomamos el MÁXIMO, no la suma,
@@ -2505,7 +2509,7 @@ async function onGuardarTurno() {
   // === VALIDACIÓN TOPE DE SESIONES ===
   // Si el turno pertenece a un tratamiento con cupo definido, no dejar
   // agendar más turnos que sesiones tenga el tratamiento.
-  // Cuenta PENDIENTE + PRESENTE (no AUSENTE/CANCELADO/SOBRETURNO).
+  // Cuenta PENDIENTE + PRESENTE + SOBRETURNO (no AUSENTE/CANCELADO).
   if (datosForm.tratamiento_id) {
     const { data: ttoTope, error: errTope } = await supa
       .from('tratamientos')
@@ -2536,12 +2540,12 @@ async function onGuardarTurno() {
     if (ttoTope && ttoTope.total_sesiones) {
       // CONTEO REAL: consultamos a Supabase TODOS los turnos del tratamiento
       // (no solo los de la semana visible en pantalla, que era el bug).
-      // Cuentan PENDIENTE + PRESENTE. No cuentan AUSENTE/CANCELADO/SOBRETURNO.
+      // Cuentan PENDIENTE + PRESENTE + SOBRETURNO. No cuentan AUSENTE/CANCELADO.
       const { data: turnosTto, error: errCount } = await supa
         .from('turnos_consultorio')
         .select('id, estado')
         .eq('tratamiento_id', datosForm.tratamiento_id)
-        .in('estado', ['PENDIENTE', 'PRESENTE']);
+        .in('estado', ['PENDIENTE', 'PRESENTE', 'SOBRETURNO']);
       if (errCount) {
         mostrarAlerta('nuevoAlert', 'No se pudo verificar el tope de sesiones. Probá de nuevo.', 'error');
         return;
@@ -3347,7 +3351,7 @@ function evoRenderModal() {
   const borgBtns  = Array.from({length:11}, (_,n) => `<button class="evo-borg-btn"  data-borg="${n}"  onclick="evoSetBorg(${n})">${n}</button>`).join('');
   // Si el turno ya está PRESENTE, mostrar mini-aviso. Si está PENDIENTE, avisar que pasa a presente al guardar.
   let avisoPresente = '';
-  if (t.estado === 'PENDIENTE') {
+  if (t.estado === 'PENDIENTE' || t.estado === 'SOBRETURNO') {
     avisoPresente = `<div class="evo-aviso-presente">✓ Al guardar esta evolución, el turno pasa automáticamente a <strong>PRESENTE</strong> y se genera la sesión.</div>`;
   } else if (t.estado === 'PRESENTE') {
     avisoPresente = `<div class="evo-aviso-presente" style="background:#eef0f3;border-color:var(--border-light);color:var(--text-dim)">El turno ya está marcado como PRESENTE. La evolución se suma sin cambiar nada más.</div>`;
@@ -3625,10 +3629,11 @@ async function evoGuardar() {
       const { error } = await supa.from('evoluciones_fisio').insert(fila);
       if (error) throw error;
     }
-    // Sólo si está PENDIENTE lo pasamos a PRESENTE. Si ya estaba PRESENTE/AUSENTE, no tocamos.
+    // Si está PENDIENTE o SOBRETURNO lo pasamos a PRESENTE. Si ya estaba PRESENTE/AUSENTE, no tocamos.
+    // SOBRETURNO también: si el profe evoluciona, el paciente vino → la sesión se tiene que generar.
     // Esto cubre el caso de que secretaría haya marcado presente antes: la evolución se suma
     // y el flujo de la sesión sigue su curso normal.
-    if (t.estado === 'PENDIENTE') {
+    if (t.estado === 'PENDIENTE' || t.estado === 'SOBRETURNO') {
       try {
         await supa.from('turnos_consultorio')
           .update({ estado:'PRESENTE', modificado_en:new Date().toISOString(), modificado_por:'evolucion_web' })
@@ -3827,8 +3832,8 @@ async function admTtoCancelarTratamiento() {
     // Cancelar tratamiento
     const { error: e1 } = await supa.from('tratamientos').update({ estado: 'CANCELADO' }).eq('id', _admTtoCtx.tratamientoId);
     if (e1) throw e1;
-    // Cancelar turnos pendientes de ese tratamiento
-    const { error: e2 } = await supa.from('turnos_consultorio').update({ estado:'CANCELADO', modificado_en:new Date().toISOString(), modificado_por:'admin_tto' }).eq('tratamiento_id', _admTtoCtx.tratamientoId).eq('estado','PENDIENTE');
+    // Cancelar turnos pendientes (incluye SOBRETURNO, que también es un turno futuro vivo)
+    const { error: e2 } = await supa.from('turnos_consultorio').update({ estado:'CANCELADO', modificado_en:new Date().toISOString(), modificado_por:'admin_tto' }).eq('tratamiento_id', _admTtoCtx.tratamientoId).in('estado',['PENDIENTE','SOBRETURNO']);
     if (e2) console.warn('Error al cancelar turnos pendientes:', e2);
     document.getElementById('admTtoAlert').innerHTML = `<div class="form-alert success">✓ Tratamiento cancelado</div>`;
     setTimeout(async () => { closeModal('modalAdminTto'); await refresh(); }, 1000);
