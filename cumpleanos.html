@@ -107,7 +107,7 @@
 
 <h2>🎰 Sorteo del mes</h2>
 <div class="sub" style="margin-top:-4px;">
-  Se sortea <b>al cierre del mes</b> entre los cumpleañeros del mes (alumnos TF activos, sin equipo).
+  Se sortea <b>al cierre del mes</b> entre los cumpleañeros del mes (alumnos TF activos, sin equipo y sin bonificados — ellos reciben solo el saludo).
   Un solo sorteo por mes: una vez hecho, queda registrado y no se puede repetir.
 </div>
 <div style="margin-bottom:10px;">
@@ -135,17 +135,21 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acqui
 
 // Saludo de WhatsApp del día del cumple (sin emojis: algunos teléfonos los rompen en el link).
 // SOLO saludo: el regalo ahora se gana en el sorteo de fin de mes.
-function msgWA(nombre) {
-  return `¡Feliz cumpleaños, ${nombre}! Todo el equipo de PuntoBiO te desea un día hermoso. ¡Que lo disfrutes mucho!`
-       + ` Y un dato: a fin de mes sorteamos premios entre los cumpleañeros del mes. ¡Mucha suerte!`;
+function msgWA(nombre, esBonif) {
+  let m = `¡Feliz cumpleaños, ${nombre}! Todo el equipo de PuntoBiO te desea un día hermoso. ¡Que lo disfrutes mucho!`;
+  if (!esBonif) m += ` Y un dato: a fin de mes sorteamos premios entre los cumpleañeros del mes. ¡Mucha suerte!`;
+  return m;
 }
 
 let personas = [];        // personas con fecha_nacimiento
-let activos = new Set();  // persona_id con "algo activo"
+let activos = new Set();  // persona_id alumno TF (ACTIVO o BONIFICADO): recibe saludo
+let bonif = new Set();    // persona_id BONIFICADO: saluda pero NO participa del sorteo
 let enviados = {};        // persona_id -> { MAIL, WHATSAPP } del año actual
 let cupones = {};         // persona_id -> { codigo, estado, vence_el } del año actual
 let cuponesLista = [];    // todos los cupones del año (para el resumen mensual)
 let sorteos = [];         // sorteos_cumple del año actual (y anterior)
+let gastoPorTto = {};     // tratamiento_id -> $ que cobró Vero (sesiones del masaje regalo)
+let _ultimaLista = null, _ultimoHoy = null; // para re-render del resumen mensual
 let precioRegalo = 0;     // precio vigente de MASAJES_R (lo que cobra Vero por masaje)
 let usuarioEmail = '';
 
@@ -241,7 +245,7 @@ async function cargar() {
     sb.from('cumpleanos_enviados').select('*').eq('anio', anio),
     sb.from('cupones_cumple').select('persona_id, estado, vence_el, creado_en, tratamiento_id, tratamientos(codigo_id)').eq('anio', anio),
     // "Activo" = SOLO alumnos TF con inscripción activa o bonificada
-    sb.from('inscripciones_tf').select('persona_id').in('estado', ['ACTIVO', 'BONIFICADO']),
+    sb.from('inscripciones_tf').select('persona_id, estado').in('estado', ['ACTIVO', 'BONIFICADO']),
     // Precio vigente del masaje de regalo (lo que cobra Vero por cada uno)
     sb.from('tarifario_precios').select('valor, vigente_desde, vigente_hasta').eq('practica_codigo', 'MASAJES_R'),
     // Sorteos ya hechos (del año actual y el anterior, por si se sortea diciembre en enero)
@@ -260,7 +264,13 @@ async function cargar() {
   personas = rPer.data || [];
 
   activos = new Set();
-  (rInsc.data || []).forEach(r => activos.add(r.persona_id));
+  bonif = new Set();
+  (rInsc.data || []).forEach(r => {
+    activos.add(r.persona_id);
+    if (r.estado === 'BONIFICADO') bonif.add(r.persona_id);
+  });
+  // Si la persona tiene además una inscripción ACTIVA, no es solo bonificada
+  (rInsc.data || []).forEach(r => { if (r.estado === 'ACTIVO') bonif.delete(r.persona_id); });
 
   enviados = {};
   (rEnv.data || []).forEach(r => {
@@ -287,13 +297,19 @@ async function cargarResumen(cupsAnio, anio) {
   const realizados = cupsAnio.filter(c => c.estado === 'REALIZADO');
 
   let totalVero = 0;
-  const ttoIds = realizados.map(c => c.tratamiento_id).filter(Boolean);
+  gastoPorTto = {};
+  const ttoIds = cupsAnio.map(c => c.tratamiento_id).filter(Boolean);
   if (ttoIds.length) {
     try {
-      const { data: ses } = await sb.from('sesiones').select('monto_profesional').in('tratamiento_id', ttoIds);
-      totalVero = (ses || []).reduce((acc, s) => acc + Number(s.monto_profesional || 0), 0);
+      const { data: ses } = await sb.from('sesiones').select('tratamiento_id, monto_profesional').in('tratamiento_id', ttoIds);
+      (ses || []).forEach(s => {
+        gastoPorTto[s.tratamiento_id] = (gastoPorTto[s.tratamiento_id] || 0) + Number(s.monto_profesional || 0);
+      });
+      totalVero = realizados.reduce((acc, c) => acc + (gastoPorTto[c.tratamiento_id] || 0), 0);
     } catch (e) { console.warn('No se pudo sumar lo de Vero:', e.message); }
   }
+  // Re-dibujar el resumen mensual ahora que está el gasto por masaje
+  if (_ultimaLista) renderResumenMensual(_ultimaLista, _ultimoHoy);
 
   document.getElementById('rPend').textContent = pendientes;
   document.getElementById('rReal').textContent = realizados.length;
@@ -316,6 +332,7 @@ function render(hoy) {
     .sort((a, b) => a.prox.localeCompare(b.prox) || a.nombre.localeCompare(b.nombre));
 
   document.getElementById('rHoy').textContent = deHoy.length;
+  _ultimaLista = lista; _ultimoHoy = hoy;
   renderHoy(deHoy);
   renderAgenda(proximos);
   renderProyeccion(lista, hoy);
@@ -350,29 +367,59 @@ function renderResumenMensual(listaActivos, hoy) {
     else porMes[m].pendientes++;
   });
 
+  // Gasto real para PuntoBiO por mes: lo que cobró Vero por los masajes regalo
+  // de los cupones CREADOS ese mes (incluye los del sorteo y los anteriores).
+  const gastoMes = Array(12).fill(0);
+  cuponesLista.forEach(c => {
+    const m = Number(String(c.creado_en).slice(5, 7)) - 1;
+    if (isNaN(m) || m < 0 || m > 11) return;
+    gastoMes[m] += gastoPorTto[c.tratamiento_id] || 0;
+  });
+
+  // Ganadores del sorteo por mes (del año actual)
+  const ganadoresMes = Array.from({ length: 12 }, () => []);
+  sorteos.filter(s => s.anio === anioHoy).forEach(s => {
+    if (s.mes >= 1 && s.mes <= 12) ganadoresMes[s.mes - 1].push(s);
+  });
+
   cont.className = '';
   cont.innerHTML = `<table>
     <thead><tr>
-      <th>Mes</th><th>Cumpleaños (alumnos TF)</th><th>Cupones dados</th>
-      <th>✓ Realizados</th><th>⏳ Pendientes</th><th>✗ Vencidos</th>
+      <th>Mes</th><th>Cumpleaños</th><th>🏆 Ganadores del sorteo</th>
+      <th>💵 Gasto PuntoBiO</th><th>Cupones</th>
     </tr></thead>
     <tbody>
       ${MESES.map((nombre, i) => {
         const pm = porMes[i];
         const esActual = (i + 1) === mesHoy;
+        const gans = ganadoresMes[i];
+        const ganHtml = gans.length
+          ? gans.map(g => {
+              const p = personas.find(x => x.id === g.persona_id) || { nombre: 'ID ' + g.persona_id };
+              const premioIco = g.premio === 'MASAJE' ? '🎁' : '🎂25%';
+              const tel = waNumero(p.celular || p.telefono);
+              const btn = tel ? `<button class="btn btn-wa" style="padding:2px 8px;font-size:11px;" onclick="waGanador(${g.persona_id})" title="Avisar por WhatsApp">💬</button>` : '';
+              return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;white-space:nowrap;">
+                <span class="nombre-chip" style="font-weight:600;">${esc(p.nombre)}</span>
+                <span style="font-size:11px;">${premioIco}</span>${btn}
+              </div>`;
+            }).join('')
+          : '<span style="color:var(--text-dim);">—</span>';
+        const cupHtml = pm.creados
+          ? `${pm.creados}${pm.realizados ? ` <span class="chip ok">✓${pm.realizados}</span>` : ''}${pm.pendientes ? ` <span class="chip warn">⏳${pm.pendientes}</span>` : ''}${pm.vencidos ? ` <span class="chip baja">✗${pm.vencidos}</span>` : ''}`
+          : '—';
         return `<tr class="row" style="${esActual ? 'background:var(--azul-soft);font-weight:600;' : ''}">
           <td class="fecha-col">${nombre}${esActual ? ' ←' : ''}</td>
           <td>${cumplesMes[i]}</td>
-          <td>${pm.creados}</td>
-          <td>${pm.realizados ? `<span class="chip ok">${pm.realizados}</span>` : '—'}</td>
-          <td>${pm.pendientes ? `<span class="chip warn">${pm.pendientes}</span>` : '—'}</td>
-          <td>${pm.vencidos ? `<span class="chip baja">${pm.vencidos}</span>` : '—'}</td>
+          <td>${ganHtml}</td>
+          <td>${gastoMes[i] > 0 ? '<b>' + fmt$(gastoMes[i]) + '</b>' : '<span style="color:var(--text-dim);">$0</span>'}</td>
+          <td>${cupHtml}</td>
         </tr>`;
       }).join('')}
     </tbody>
   </table>
   <div style="font-size:12px; color:var(--text-dim); margin-top:8px;">
-    Los cupones se cuentan en el mes del cumpleaños (cuando se crearon). Los meses futuros muestran los cumpleaños que vienen, todavía sin cupones.
+    El gasto es lo que cobra Vero por los masajes regalo <b>efectivamente realizados</b> de los cupones de ese mes — el cupón pendiente o vencido no cuesta nada. 🎁 = masaje · 🎂25% = descuento en la cuota (no es plata que sale).
   </div>`;
 }
 
@@ -382,7 +429,7 @@ function renderProyeccion(listaActivos, hoy) {
   const cont = document.getElementById('proyeccion');
   cont.className = '';
   cont.innerHTML = `
-    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:12px;padding:14px 16px;font-size:13.5px;line-height:1.6;">
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;font-size:13.5px;line-height:1.6;">
       🎰 Con el sorteo, el costo máximo del programa es <b>fijo</b>:
       hasta <b>3 masajes por mes</b> × ${fmt$(precioRegalo)} c/u (precio vigente de MASAJES_R)
       = <b>${fmt$(3 * precioRegalo)} por mes como máximo</b>.<br>
@@ -476,7 +523,7 @@ window.mandarWA = async function (personaId) {
   const tel = waNumero(p.celular || p.telefono);
   if (!tel) { toast('Esta persona no tiene celular cargado.'); return; }
 
-  const url = `https://wa.me/${tel}?text=${encodeURIComponent(msgWA((p.nombre || '').trim()))}`;
+  const url = `https://wa.me/${tel}?text=${encodeURIComponent(msgWA((p.nombre || '').trim(), bonif.has(p.id)))}`;
   window.open(url, '_blank');
 
   const anio = Number(hoyAR().slice(0, 4));
@@ -523,7 +570,7 @@ function cumpleanerosDelMes(anio, mes) {
   // Mismos criterios que el RPC: alumnos TF activos, no equipo, no baja,
   // que cumplen en ese mes.
   return personas
-    .filter(p => activos.has(p.id) && !esBaja(p.estado) && !p.es_equipo)
+    .filter(p => activos.has(p.id) && !bonif.has(p.id) && !esBaja(p.estado) && !p.es_equipo)
     .filter(p => Number(String(p.fecha_nacimiento).slice(5, 7)) === mes)
     .map(p => ({ ...p, edad: anio - Number(String(p.fecha_nacimiento).slice(0, 4)) }))
     .sort((a, b) => a.nombre.localeCompare(b.nombre));
@@ -546,26 +593,27 @@ window.renderSorteo = function () {
   cont.className = '';
 
   if (ganadores.length) {
-    // Ya sorteado: mostrar resultado + WhatsApp por ganador
+    // Ya sorteado: los ganadores se muestran como cards (igual estilo que los de HOY)
     cont.innerHTML = `
-      <div style="background:#161616;border:1px solid #2a2a2a;border-radius:12px;padding:14px 16px;">
-        <div style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">
-          ✅ Sorteo de ${MESES_LARGO[mes - 1]} ${anio} ya realizado${ganadores[0].creado_por ? ' por ' + esc(ganadores[0].creado_por) : ''}.
-        </div>
+      <div style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">
+        ✅ Sorteo de ${MESES_LARGO[mes - 1]} ${anio} ya realizado${ganadores[0].creado_por ? ' por ' + esc(ganadores[0].creado_por) : ''}.
+      </div>
+      <div class="hoy-grid">
         ${ganadores.map(g => {
           const p = personas.find(x => x.id === g.persona_id) || { nombre: 'ID ' + g.persona_id };
           const cup = cupones[g.persona_id] || null;
           const premio = g.premio === 'MASAJE'
-            ? `🎁 Masaje EyC con Vero ${cup ? `· <span class="cupon-codigo">${esc(cup.codigo)}</span> · ${cup.estado === 'PENDIENTE' ? 'vence ' + fmtFechaArg(cup.vence_el) : cup.estado.toLowerCase()}` : ''}`
-            : `🎂 25% OFF en la cuota de <b>${mesLabelDesc(g.mes_descuento)}</b>`;
+            ? `<span class="chip rosa">🎁 Masaje EyC con Vero</span>${cup ? ` <span class="cupon-codigo">${esc(cup.codigo)}</span><div style="font-size:12px;color:var(--text-dim);margin-top:6px;">${cup.estado === 'PENDIENTE' ? '⏳ Pendiente · vence ' + fmtFechaArg(cup.vence_el) : (cup.estado === 'REALIZADO' ? '✓ Realizado' : '✗ Vencido')}</div>` : ''}`
+            : `<span class="chip rosa">🎂 25% OFF en la cuota de ${mesLabelDesc(g.mes_descuento)}</span><div style="font-size:12px;color:var(--text-dim);margin-top:6px;">Se aplica solo al cobrar ese mes</div>`;
           const tel = waNumero(p.celular || p.telefono);
           const btnWa = tel
             ? `<button class="btn btn-wa" onclick="waGanador(${g.persona_id})">💬 Avisar por WhatsApp</button>`
             : `<span class="sin-dato">sin celular cargado</span>`;
-          return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-top:1px solid #222;">
-            <b style="min-width:160px;">🏆 ${esc(p.nombre)}</b>
-            <span style="font-size:13px;">${premio}</span>
-            ${btnWa}
+          return `<div class="hoy-card">
+            <div class="hoy-nombre">🏆 ${esc(p.nombre)}</div>
+            <div class="hoy-edad">Ganador/a del sorteo</div>
+            <div>${premio}</div>
+            <div class="hoy-acciones">${btnWa}</div>
           </div>`;
         }).join('')}
       </div>`;
@@ -580,7 +628,7 @@ window.renderSorteo = function () {
   }
 
   cont.innerHTML = `
-    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:12px;padding:14px 16px;">
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;">
       <div style="font-size:13px;margin-bottom:8px;">
         Participan <b>${candidatos.length}</b> cumpleañero${candidatos.length > 1 ? 's' : ''} de ${MESES_LARGO[mes - 1]} ${anio}:
       </div>
