@@ -1225,6 +1225,8 @@ async function init() {
 
   // Badge dinámico del sidebar Morosos TF (se calcula en vivo, no hardcoded)
   actualizarBadgeMorososTF()
+  // Badge de Cumpleaños: saludos de WhatsApp pendientes (hoy + atrasados 7 días)
+  actualizarBadgeCumple()
   // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
   actualizarBadgeMensajes()
 
@@ -1402,6 +1404,60 @@ async function actualizarBadgeMorososTF() {
 }
 window.actualizarBadgeMorososTF = actualizarBadgeMorososTF
 
+// ============================================================
+// 🎂 BADGE CUMPLEAÑOS: saludos de WhatsApp pendientes.
+// Cuenta los alumnos TF (activos o bonificados) que cumplen HOY
+// o cumplieron en los últimos 7 días (desde el lanzamiento del
+// sistema de saludos, 10/6/2026) y todavía no recibieron el WhatsApp.
+// El mail no entra acá porque sale solo a las 9:00.
+// ============================================================
+async function actualizarBadgeCumple() {
+  if (!permisos || !(permisos.operativo_general || permisos.admin_total)) return
+  const badge = document.getElementById('badge-cumple')
+  if (!badge) return
+  try {
+    const INICIO_SALUDOS = '2026-06-10'
+    const hoy = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Cordoba', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    const anio = Number(hoy.slice(0, 4))
+    const bis = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0
+    const haceDias = (n) => {
+      const [a, m, d] = hoy.split('-').map(Number)
+      const dt = new Date(a, m - 1, d - n)
+      const p = (x) => String(x).padStart(2, '0')
+      return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`
+    }
+    const desde = haceDias(7)
+
+    const [rPer, rInsc, rEnv] = await Promise.all([
+      supabase.from('personas').select('id, fecha_nacimiento, estado').not('fecha_nacimiento', 'is', null),
+      supabase.from('inscripciones_tf').select('persona_id').in('estado', ['ACTIVO', 'BONIFICADO']),
+      supabase.from('cumpleanos_enviados').select('persona_id').eq('anio', anio).eq('canal', 'WHATSAPP')
+    ])
+    if (rPer.error || rInsc.error || rEnv.error) return
+
+    const activos = new Set((rInsc.data || []).map(r => r.persona_id))
+    const conWA = new Set((rEnv.data || []).map(r => r.persona_id))
+
+    let count = 0
+    for (const p of (rPer.data || [])) {
+      if (!activos.has(p.id) || /baja/i.test(String(p.estado || '')) || conWA.has(p.id)) continue
+      const md = String(p.fecha_nacimiento).slice(5, 10)
+      let f = `${anio}-${md}`
+      if (md === '02-29' && !bis) f = `${anio}-03-01`
+      // Cumple hoy, o cumplió en los últimos 7 días (desde el lanzamiento)
+      if (f === hoy || (f < hoy && f >= desde && f >= INICIO_SALUDOS)) count++
+    }
+
+    if (count > 0) {
+      badge.style.display = 'inline-block'
+      badge.textContent = count > 99 ? '99+' : String(count)
+    } else {
+      badge.style.display = 'none'
+    }
+  } catch (e) { console.warn('No se pudo calcular el badge de cumpleaños:', e.message) }
+}
+window.actualizarBadgeCumple = actualizarBadgeCumple
+
 const fmtMonto = n => '$' + Math.round(Number(n) || 0).toLocaleString('es-AR')
 function fmtFechaOS(iso) {
   if (!iso) return '—'
@@ -1564,6 +1620,7 @@ function buildNav() {
     items.push(`<div class="nav-item" onclick="irA('cumpleanos')">
       <span class="nav-icon">🎂</span>
       <span class="nav-label">Cumpleaños</span>
+      <span class="nav-badge" id="badge-cumple" style="display:none"></span>
     </div>`)
   }
 
