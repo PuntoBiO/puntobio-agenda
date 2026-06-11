@@ -2229,13 +2229,26 @@ function esTurnoDe(misAlias, profTexto) {
   return misAlias.some(a => a && (toks.includes(a) || (a.length >= 4 && p.includes(a))))
 }
 
-// MIS NÚMEROS REALES: lo que cada profesional ATENDIÓ (sesiones registradas a su
-// nombre, que es lo que liquida) y lo que EVOLUCIONÓ (observaciones de HC que
-// escribió). Diario / semana lunes-domingo / mes calendario.
-async function calcularMisNumerosAtendidos() {
-  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
-  const misAlias = aliasDe(miEmail, usuario && usuario.nombre)
+// MIS NÚMEROS REALES: lo que cada uno ATENDIÓ según su rol.
+// - Kines/maso (Male, Bruno, Jime, Vero, Lu): sesiones realizadas (tabla sesiones,
+//   por nombre) + evoluciones de fisio que escribió (evoluciones_fisio, por email).
+// - Profes TF (Santi, Lean, Lauti, Lu, Male): alumnos que evolucionó en TF
+//   (evoluciones_tf, por email) = una fila por alumno atendido.
+// Rangos: hoy / semana lunes-domingo / MES CALENDARIO.
 
+// Trae todas las filas paginando de a 1000 (PostgREST corta en 1000 por pedido)
+async function fetchTodo(armarQuery, maxPaginas = 6) {
+  let filas = []
+  for (let p = 0; p < maxPaginas; p++) {
+    const { data, error } = await armarQuery().range(p * 1000, p * 1000 + 999)
+    if (error || !data) break
+    filas = filas.concat(data)
+    if (data.length < 1000) break
+  }
+  return filas
+}
+
+function rangosCalendario() {
   const hoyISO = new Date().toISOString().substring(0, 10)
   const mesActual = hoyISO.substring(0, 7)
   const d = new Date(); const dow = d.getDay()
@@ -2245,64 +2258,126 @@ async function calcularMisNumerosAtendidos() {
   const domingoStr = domingo.toISOString().substring(0, 10)
   const primerDiaMes = mesActual + '-01'
   const ultDiaMes = mesActual + '-' + String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, '0')
-  const desde = primerDiaMes < lunesStr ? primerDiaMes : lunesStr
-  const hasta = ultDiaMes > domingoStr ? ultDiaMes : domingoStr
-
-  // Fecha LOCAL de un timestamp (las evoluciones se guardan con hora; evita
-  // que una evolución de las 22hs caiga en el día siguiente por el huso UTC)
-  const fechaLocalDe = ts => {
-    const x = new Date(ts)
-    return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0')
+  return {
+    hoyISO, mesActual, lunesStr, domingoStr, primerDiaMes, ultDiaMes,
+    desde: primerDiaMes < lunesStr ? primerDiaMes : lunesStr,
+    hasta: ultDiaMes > domingoStr ? ultDiaMes : domingoStr
   }
+}
+
+async function calcularMisNumerosAtendidos() {
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  const misAlias = aliasDe(miEmail, usuario && usuario.nombre)
+  const R = rangosCalendario()
 
   const r = {
-    ses: { hoy: 0, sem: 0, mes: 0 },
-    evo: { hoy: 0, sem: 0, mes: 0 },
+    ses: { hoy: 0, sem: 0, mes: 0 },        // sesiones realizadas (kines/maso)
+    evoFisio: { hoy: 0, sem: 0, mes: 0 },   // evoluciones de fisio escritas
+    evoTF: { hoy: 0, sem: 0, mes: 0 },      // alumnos evolucionados en TF
     pacientesMes: 0,
-    mesActual: mesActual
+    mesActual: R.mesActual
+  }
+  const clasificar = (fecha, obj) => {
+    if (!fecha) return
+    if (fecha === R.hoyISO) obj.hoy++
+    if (fecha >= R.lunesStr && fecha <= R.domingoStr) obj.sem++
+    if (fecha.substring(0, 7) === R.mesActual) obj.mes++
   }
   try {
-    const [sesR, evoR] = await Promise.all([
-      supabase.from('sesiones').select('fecha, profesional').gte('fecha', desde).lte('fecha', hasta),
-      supabase.from('hc_observaciones').select('creado_en, persona_id').eq('autor_email', miEmail).gte('creado_en', desde + 'T00:00:00')
+    const [sesiones, evosFisio, evosTF] = await Promise.all([
+      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional').gte('fecha', R.desde).lte('fecha', R.hasta)),
+      fetchTodo(() => supabase.from('evoluciones_fisio').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', R.desde).lte('fecha', R.hasta)),
+      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', R.desde).lte('fecha', R.hasta))
     ])
-    const clasificar = (fecha, obj) => {
-      if (fecha === hoyISO) obj.hoy++
-      if (fecha >= lunesStr && fecha <= domingoStr) obj.sem++
-      if (fecha.substring(0, 7) === mesActual) obj.mes++
-    }
-    ;(sesR.data || []).filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => clasificar(s.fecha, r.ses))
-    const pacientes = new Set()
-    ;(evoR.data || []).forEach(e => {
-      const f = fechaLocalDe(e.creado_en)
-      clasificar(f, r.evo)
-      if (f.substring(0, 7) === mesActual && e.persona_id) pacientes.add(e.persona_id)
+    sesiones.filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => clasificar(s.fecha, r.ses))
+    const personas = new Set()
+    evosFisio.forEach(e => {
+      clasificar(e.fecha, r.evoFisio)
+      if (e.fecha && e.fecha.substring(0, 7) === R.mesActual && e.persona_id) personas.add('F' + e.persona_id)
     })
-    r.pacientesMes = pacientes.size
+    evosTF.forEach(e => {
+      clasificar(e.fecha, r.evoTF)
+      if (e.fecha && e.fecha.substring(0, 7) === R.mesActual && e.persona_id) personas.add('T' + e.persona_id)
+    })
+    r.pacientesMes = personas.size
   } catch (e) {
     console.warn('Mis números atendidos:', e.message)
   }
   return r
 }
 
-// Grilla HOY / SEMANA / MES para el panel "Mis números"
-function gridMisNumeros(n) {
+// Grilla HOY / SEMANA / MES. Solo muestra las filas que aplican al rol:
+// mostrar.sesiones (kines/maso) y mostrar.tf (profes TF).
+function gridMisNumeros(n, mostrar) {
   const celda = v => `<span style="font-size:13px; font-weight:800; text-align:right; font-variant-numeric:tabular-nums;">${v}</span>`
-  const filaG = (icono, label, a, b, c) => `
+  const filaG = (icono, label, o) => `
     <div style="display:grid; grid-template-columns: 1fr 48px 48px 48px; gap:6px; align-items:center; padding:8px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
       <span style="font-size:13px;">${icono} ${label}</span>
-      ${celda(a)}${celda(b)}${celda(c)}
+      ${celda(o.hoy)}${celda(o.sem)}${celda(o.mes)}
+    </div>`
+  let filas = ''
+  if (mostrar.sesiones) {
+    filas += filaG('🩺', 'Sesiones realizadas', n.ses)
+    filas += filaG('📝', 'Evoluciones fisio', n.evoFisio)
+  }
+  if (mostrar.tf) {
+    filas += filaG('🏋️', 'Alumnos evolucionados (TF)', n.evoTF)
+  }
+  filas += `
+    <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+      <span style="font-size:13px; flex:1">🧑‍🤝‍🧑 Personas distintas en el mes</span>
+      <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${n.pacientesMes}</span>
     </div>`
   return `
     <div style="display:grid; grid-template-columns: 1fr 48px 48px 48px; gap:6px; padding:4px 4px 6px; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">
       <span></span><span style="text-align:right">Hoy</span><span style="text-align:right">Semana</span><span style="text-align:right">Mes</span>
-    </div>
-    ${filaG('🩺', 'Sesiones atendidas', n.ses.hoy, n.ses.sem, n.ses.mes)}
-    ${filaG('📝', 'Evoluciones escritas', n.evo.hoy, n.evo.sem, n.evo.mes)}
-    <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
-      <span style="font-size:13px; flex:1">🧑‍🤝‍🧑 Pacientes evolucionados en el mes</span>
-      <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${n.pacientesMes}</span>
-    </div>`
+    </div>` + filas
+}
+
+// 🏆 RANKING DEL CENTRO: evoluciones del MES por profesional (fisio + TF),
+// para ver quién se pone la camiseta. Conteos exactos por email (16 queries head).
+const NOMBRES_RANKING = {
+  'liclucianavelaz@gmail.com': 'Lu',
+  'jimenahllorente@gmail.com': 'Jime',
+  'loz.magdalena@gmail.com': 'Male',
+  'brunitovelez99@gmail.com': 'Bruno',
+  'veronicasandler@hotmail.com': 'Vero',
+  'santiagoferreira1999@gmail.com': 'Santi',
+  'leacrespin97@gmail.com': 'Lean',
+  'leut.molina@gmail.com': 'Lauti'
+}
+async function rankingEvolucionesMesHTML() {
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  const R = rangosCalendario()
+  const emails = Object.keys(NOMBRES_RANKING)
+  try {
+    const contar = (tabla, email) => supabase.from(tabla)
+      .select('id', { count: 'exact', head: true })
+      .eq('autor_email', email)
+      .gte('fecha', R.primerDiaMes)
+      .lte('fecha', R.ultDiaMes)
+    const resultados = await Promise.all(emails.flatMap(e => [contar('evoluciones_fisio', e), contar('evoluciones_tf', e)]))
+    const porProfe = emails.map((e, i) => ({
+      email: e,
+      nombre: NOMBRES_RANKING[e],
+      total: (resultados[i * 2].count || 0) + (resultados[i * 2 + 1].count || 0)
+    })).filter(p => p.total > 0).sort((a, b) => b.total - a.total)
+
+    if (!porProfe.length) return ''
+    const medalla = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '&nbsp;&nbsp;' + (i + 1) + '.'
+    const filas = porProfe.map((p, i) => `
+      <div style="display:flex; align-items:center; gap:10px; padding:7px 4px; border-bottom:1px solid rgba(0,0,0,0.05); ${p.email === miEmail ? 'font-weight:800;' : ''}">
+        <span style="font-size:13px; min-width:28px;">${medalla(i)}</span>
+        <span style="font-size:13px; flex:1">${p.nombre}${p.email === miEmail ? ' (vos)' : ''}</span>
+        <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums;">${p.total}</span>
+      </div>`).join('')
+    return `
+      <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:10px 4px 4px;">🏆 Evoluciones del mes · equipo</div>
+      ${filas}`
+  } catch (e) {
+    console.warn('Ranking evoluciones:', e.message)
+    return ''
+  }
 }
 
 // HOME PARA PROFES/KINES: solo SUS turnos (sin alertas ni datos administrativos).
@@ -2401,11 +2476,15 @@ async function cargarHomeDataProfe() {
     setText('kpi-profe-semana', '—'); setText('kpi-profe-semana-sub', '')
   }
 
-  // --- Panel "Mis números": lo que ESTE profe atendió y evolucionó ---
+  // --- Panel "Mis números": lo que ESTE profe atendió, según su rol ---
   const metBody = document.getElementById('home-mismetricas-body')
   if (metBody) {
     const mios = await calcularMisNumerosAtendidos()
-    let filasMet = gridMisNumeros(mios)
+    // Santiago/Lean/Lauti (solo TF) NO ven la fila de sesiones: no les aplica.
+    let filasMet = gridMisNumeros(mios, {
+      sesiones: !!(permisos.ve_consultorios || permisos.ve_biolab || permisos.ve_masoterapia),
+      tf: !!permisos.ve_terapia_fisica
+    })
     // Totales del centro (referencia, NO personales) para quien ve la Agenda TF
     if (permisos.ve_terapia_fisica) {
       const fila = (icono, label, valor) => `
@@ -2419,6 +2498,8 @@ async function cargarHomeDataProfe() {
         ${fila('📊', 'Ocupación de hoy', tfCapHoy > 0 ? Math.round(tfAlumnosHoy / tfCapHoy * 100) + '%' : '—')}`
     }
     metBody.innerHTML = filasMet
+    // 🏆 Ranking del equipo (se agrega cuando termina de contar)
+    rankingEvolucionesMesHTML().then(htmlRank => { if (htmlRank) metBody.innerHTML += htmlRank })
   }
 
   const body = document.getElementById('home-misturnos-body')
@@ -2467,7 +2548,9 @@ async function cargarMisNumerosPersonales() {
     const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
 
     const mios = await calcularMisNumerosAtendidos()
-    body.innerHTML = gridMisNumeros(mios)
+    body.innerHTML = gridMisNumeros(mios, { sesiones: true, tf: true })
+    // 🏆 Ranking del equipo (se agrega cuando termina de contar)
+    rankingEvolucionesMesHTML().then(htmlRank => { if (htmlRank) body.innerHTML += htmlRank })
   } catch (e) {
     console.warn('Mis números:', e.message)
     body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">📭</span>No se pudieron cargar.</div>`
