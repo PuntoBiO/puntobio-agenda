@@ -2030,7 +2030,7 @@ async function cargarHomeData() {
   if (!(permisos.admin_total || permisos.operativo_general)) { cargarHomeDataProfe(); return }
   const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v }
   const fmtPesos = n => '$ ' + Math.round(Number(n) || 0).toLocaleString('es-AR')
-  const hoyISO = new Date().toISOString().substring(0, 10)
+  const hoyISO = hoyLocalISO()
   const hoy = new Date()
   const mesActual = hoy.getFullYear() + '-' + String(hoy.getMonth() + 1).padStart(2, '0')
 
@@ -2218,6 +2218,12 @@ const ALIAS_EQUIPO = {
 function normTexto(s) {
   return String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
 }
+// Fecha LOCAL en formato YYYY-MM-DD. OJO: nunca usar toISOString() para "hoy",
+// porque es UTC y después de las 21hs (Argentina) ya marca el día siguiente.
+function fechaLocalISO(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+}
+function hoyLocalISO() { return fechaLocalISO(new Date()) }
 function aliasDe(email, nombre) {
   return ALIAS_EQUIPO[(email || '').toLowerCase().trim()]
     || [normTexto(nombre).split(' ')[0]].filter(Boolean)
@@ -2249,13 +2255,13 @@ async function fetchTodo(armarQuery, maxPaginas = 6) {
 }
 
 function rangosCalendario() {
-  const hoyISO = new Date().toISOString().substring(0, 10)
+  const hoyISO = hoyLocalISO()
   const mesActual = hoyISO.substring(0, 7)
   const d = new Date(); const dow = d.getDay()
   const lunes = new Date(d); lunes.setDate(d.getDate() - ((dow + 6) % 7))
   const domingo = new Date(lunes); domingo.setDate(lunes.getDate() + 6)
-  const lunesStr = lunes.toISOString().substring(0, 10)
-  const domingoStr = domingo.toISOString().substring(0, 10)
+  const lunesStr = fechaLocalISO(lunes)
+  const domingoStr = fechaLocalISO(domingo)
   const primerDiaMes = mesActual + '-01'
   const ultDiaMes = mesActual + '-' + String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, '0')
   return {
@@ -2270,33 +2276,45 @@ async function calcularMisNumerosAtendidos() {
   const misAlias = aliasDe(miEmail, usuario && usuario.nombre)
   const R = rangosCalendario()
 
+  // Últimos 14 días para el gráfico de actividad personal
+  const dias14 = []
+  for (let i = 13; i >= 0; i--) {
+    const f = new Date(); f.setDate(f.getDate() - i)
+    dias14.push(fechaLocalISO(f))
+  }
+  const desdeDatos = dias14[0] < R.desde ? dias14[0] : R.desde
+
   const r = {
     ses: { hoy: 0, sem: 0, mes: 0 },        // sesiones realizadas (kines/maso)
     evoFisio: { hoy: 0, sem: 0, mes: 0 },   // evoluciones de fisio escritas
     evoTF: { hoy: 0, sem: 0, mes: 0 },      // alumnos evolucionados en TF
     pacientesMes: 0,
-    mesActual: R.mesActual
+    mesActual: R.mesActual,
+    dias14: dias14,
+    porDia: {}                               // { 'YYYY-MM-DD': total de actividad personal }
   }
-  const clasificar = (fecha, obj) => {
+  dias14.forEach(f => { r.porDia[f] = 0 })
+  const clasificar = (fecha, obj, cuentaParaGrafico) => {
     if (!fecha) return
     if (fecha === R.hoyISO) obj.hoy++
     if (fecha >= R.lunesStr && fecha <= R.domingoStr) obj.sem++
     if (fecha.substring(0, 7) === R.mesActual) obj.mes++
+    if (cuentaParaGrafico && r.porDia[fecha] !== undefined) r.porDia[fecha]++
   }
   try {
     const [sesiones, evosFisio, evosTF] = await Promise.all([
-      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional').gte('fecha', R.desde).lte('fecha', R.hasta)),
-      fetchTodo(() => supabase.from('evoluciones_fisio').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', R.desde).lte('fecha', R.hasta)),
-      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', R.desde).lte('fecha', R.hasta))
+      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional').gte('fecha', desdeDatos).lte('fecha', R.hasta)),
+      fetchTodo(() => supabase.from('evoluciones_fisio').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', desdeDatos).lte('fecha', R.hasta)),
+      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', desdeDatos).lte('fecha', R.hasta))
     ])
-    sesiones.filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => clasificar(s.fecha, r.ses))
+    sesiones.filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => clasificar(s.fecha, r.ses, true))
     const personas = new Set()
     evosFisio.forEach(e => {
-      clasificar(e.fecha, r.evoFisio)
+      clasificar(e.fecha, r.evoFisio, true)
       if (e.fecha && e.fecha.substring(0, 7) === R.mesActual && e.persona_id) personas.add('F' + e.persona_id)
     })
     evosTF.forEach(e => {
-      clasificar(e.fecha, r.evoTF)
+      clasificar(e.fecha, r.evoTF, true)
       if (e.fecha && e.fecha.substring(0, 7) === R.mesActual && e.persona_id) personas.add('T' + e.persona_id)
     })
     r.pacientesMes = personas.size
@@ -2304,6 +2322,29 @@ async function calcularMisNumerosAtendidos() {
     console.warn('Mis números atendidos:', e.message)
   }
   return r
+}
+
+// 📈 Gráfico de barras de actividad personal (últimos 14 días).
+// Actividad = sesiones realizadas + evoluciones escritas ese día.
+function graficoActividadHTML(n) {
+  const valores = n.dias14.map(f => n.porDia[f] || 0)
+  const max = Math.max(...valores, 1)
+  const hoy = hoyLocalISO()
+  const barras = n.dias14.map((f, i) => {
+    const v = valores[i]
+    const h = Math.max(Math.round(v / max * 56), v > 0 ? 4 : 2)
+    const esHoy = f === hoy
+    const dia = f.substring(8, 10)
+    return `
+      <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:3px;" title="${f}: ${v}">
+        <span style="font-size:9px; font-weight:700; color:${esHoy ? 'var(--turquoise)' : 'var(--text-dim)'};">${v || ''}</span>
+        <div style="width:70%; height:${h}px; border-radius:4px 4px 0 0; background:${esHoy ? 'var(--turquoise)' : 'rgba(100,116,139,0.35)'};"></div>
+        <span style="font-size:9px; color:${esHoy ? 'var(--turquoise)' : 'var(--text-dim)'}; font-weight:${esHoy ? '800' : '400'};">${dia}</span>
+      </div>`
+  }).join('')
+  return `
+    <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:10px 4px 6px;">📈 Mi actividad · últimos 14 días</div>
+    <div style="display:flex; align-items:flex-end; gap:2px; padding:0 4px 6px; border-bottom:1px solid rgba(0,0,0,0.05);">${barras}</div>`
 }
 
 // Grilla HOY / SEMANA / MES. Solo muestra las filas que aplican al rol:
@@ -2318,6 +2359,8 @@ function gridMisNumeros(n, mostrar) {
   let filas = ''
   if (mostrar.sesiones) {
     filas += filaG('🩺', 'Sesiones realizadas', n.ses)
+  }
+  if (mostrar.evoFisio) {
     filas += filaG('📝', 'Evoluciones fisio', n.evoFisio)
   }
   if (mostrar.tf) {
@@ -2364,13 +2407,20 @@ async function rankingEvolucionesMesHTML() {
     })).filter(p => p.total > 0).sort((a, b) => b.total - a.total)
 
     if (!porProfe.length) return ''
+    const maxTotal = porProfe[0].total || 1
     const medalla = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '&nbsp;&nbsp;' + (i + 1) + '.'
-    const filas = porProfe.map((p, i) => `
-      <div style="display:flex; align-items:center; gap:10px; padding:7px 4px; border-bottom:1px solid rgba(0,0,0,0.05); ${p.email === miEmail ? 'font-weight:800;' : ''}">
+    const filas = porProfe.map((p, i) => {
+      const pct = Math.max(Math.round(p.total / maxTotal * 100), 3)
+      return `
+      <div style="display:flex; align-items:center; gap:8px; padding:6px 4px; border-bottom:1px solid rgba(0,0,0,0.05); ${p.email === miEmail ? 'font-weight:800;' : ''}">
         <span style="font-size:13px; min-width:28px;">${medalla(i)}</span>
-        <span style="font-size:13px; flex:1">${p.nombre}${p.email === miEmail ? ' (vos)' : ''}</span>
-        <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums;">${p.total}</span>
-      </div>`).join('')
+        <span style="font-size:13px; min-width:52px;">${p.nombre}${p.email === miEmail ? ' (vos)' : ''}</span>
+        <div style="flex:1; background:rgba(100,116,139,0.12); border-radius:99px; height:12px; overflow:hidden;">
+          <div style="width:${pct}%; height:100%; border-radius:99px; background:${p.email === miEmail ? 'var(--turquoise)' : 'rgba(100,116,139,0.45)'};"></div>
+        </div>
+        <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; min-width:34px; text-align:right;">${p.total}</span>
+      </div>`
+    }).join('')
     return `
       <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:10px 4px 4px;">🏆 Evoluciones del mes · equipo</div>
       ${filas}`
@@ -2387,7 +2437,7 @@ async function cargarHomeDataProfe() {
   const norm = normTexto
   const hhmm = t => String(t || '').substring(0, 5)
   const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
-  const hoyISO = new Date().toISOString().substring(0, 10)
+  const hoyISO = hoyLocalISO()
 
   const misAlias = aliasDe(usuario && usuario.email, usuario && usuario.nombre)
   const esMio = prof => esTurnoDe(misAlias, prof)
@@ -2396,8 +2446,8 @@ async function cargarHomeDataProfe() {
   const d = new Date(); const dow = d.getDay()
   const lunes = new Date(d); lunes.setDate(d.getDate() - ((dow + 6) % 7))
   const domingo = new Date(lunes); domingo.setDate(lunes.getDate() + 6)
-  const lunesStr = lunes.toISOString().substring(0, 10)
-  const domingoStr = domingo.toISOString().substring(0, 10)
+  const lunesStr = fechaLocalISO(lunes)
+  const domingoStr = fechaLocalISO(domingo)
   const mesActual = hoyISO.substring(0, 7)
   const primerDiaMes = mesActual + '-01'
   const ultDiaMes = mesActual + '-' + String(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()).padStart(2, '0')
@@ -2483,6 +2533,7 @@ async function cargarHomeDataProfe() {
     // Santiago/Lean/Lauti (solo TF) NO ven la fila de sesiones: no les aplica.
     let filasMet = gridMisNumeros(mios, {
       sesiones: !!(permisos.ve_consultorios || permisos.ve_biolab || permisos.ve_masoterapia),
+      evoFisio: !!permisos.ve_consultorios,
       tf: !!permisos.ve_terapia_fisica
     })
     // Totales del centro (referencia, NO personales) para quien ve la Agenda TF
@@ -2497,6 +2548,7 @@ async function cargarHomeDataProfe() {
         ${fila('🏋️', 'Clases TF hoy', tfClasesHoy + ' (' + tfAlumnosHoy + ' alumnos)')}
         ${fila('📊', 'Ocupación de hoy', tfCapHoy > 0 ? Math.round(tfAlumnosHoy / tfCapHoy * 100) + '%' : '—')}`
     }
+    filasMet += graficoActividadHTML(mios)
     metBody.innerHTML = filasMet
     // 🏆 Ranking del equipo (se agrega cuando termina de contar)
     rankingEvolucionesMesHTML().then(htmlRank => { if (htmlRank) metBody.innerHTML += htmlRank })
@@ -2548,7 +2600,7 @@ async function cargarMisNumerosPersonales() {
     const noCancelado = e => !String(e || '').toLowerCase().includes('cancel')
 
     const mios = await calcularMisNumerosAtendidos()
-    body.innerHTML = gridMisNumeros(mios, { sesiones: true, tf: true })
+    body.innerHTML = gridMisNumeros(mios, { sesiones: true, evoFisio: true, tf: true }) + graficoActividadHTML(mios)
     // 🏆 Ranking del equipo (se agrega cuando termina de contar)
     rankingEvolucionesMesHTML().then(htmlRank => { if (htmlRank) body.innerHTML += htmlRank })
   } catch (e) {
