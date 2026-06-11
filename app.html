@@ -2285,7 +2285,9 @@ async function calcularMisNumerosAtendidos() {
   const desdeDatos = dias14[0] < R.desde ? dias14[0] : R.desde
 
   const r = {
-    ses: { hoy: 0, sem: 0, mes: 0 },        // sesiones realizadas (kines/maso)
+    sesCons: { hoy: 0, sem: 0, mes: 0 },    // sesiones de consultorio (fisio/espec)
+    sesBio: { hoy: 0, sem: 0, mes: 0 },     // evaluaciones BioLab
+    sesMaso: { hoy: 0, sem: 0, mes: 0 },    // sesiones de masoterapia
     evoFisio: { hoy: 0, sem: 0, mes: 0 },   // evoluciones de fisio escritas
     evoTF: { hoy: 0, sem: 0, mes: 0 },      // alumnos evolucionados en TF
     pacientesMes: 0,
@@ -2303,11 +2305,15 @@ async function calcularMisNumerosAtendidos() {
   }
   try {
     const [sesiones, evosFisio, evosTF] = await Promise.all([
-      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional').gte('fecha', desdeDatos).lte('fecha', R.hasta)),
+      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, turno_biolab_id, turno_maso_id').gte('fecha', desdeDatos).lte('fecha', R.hasta)),
       fetchTodo(() => supabase.from('evoluciones_fisio').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', desdeDatos).lte('fecha', R.hasta)),
       fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id').eq('autor_email', miEmail).gte('fecha', desdeDatos).lte('fecha', R.hasta))
     ])
-    sesiones.filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => clasificar(s.fecha, r.ses, true))
+    sesiones.filter(s => esTurnoDe(misAlias, s.profesional)).forEach(s => {
+      // La tabla sesiones junta las 3 áreas: separamos por el origen del turno
+      const destino = s.turno_biolab_id ? r.sesBio : (s.turno_maso_id ? r.sesMaso : r.sesCons)
+      clasificar(s.fecha, destino, true)
+    })
     const personas = new Set()
     evosFisio.forEach(e => {
       clasificar(e.fecha, r.evoFisio, true)
@@ -2356,16 +2362,24 @@ function gridMisNumeros(n, mostrar) {
       <span style="font-size:13px;">${icono} ${label}</span>
       ${celda(o.hoy)}${celda(o.sem)}${celda(o.mes)}
     </div>`
-  let filas = ''
+  // Cada uno ve SOLO las áreas donde realmente trabaja: mostramos las filas
+  // con actividad en el período. Si todas están en 0 (ej: arranque de mes),
+  // mostramos las que le corresponden por permiso para que no quede vacío.
+  const candidatas = []
   if (mostrar.sesiones) {
-    filas += filaG('🩺', 'Sesiones realizadas', n.ses)
+    candidatas.push({ icon: '🩺', label: 'Sesiones consultorio', o: n.sesCons })
+    candidatas.push({ icon: '🔬', label: 'Evaluaciones BioLab', o: n.sesBio })
+    candidatas.push({ icon: '💆', label: 'Sesiones masoterapia', o: n.sesMaso })
   }
   if (mostrar.evoFisio) {
-    filas += filaG('📝', 'Evoluciones fisio', n.evoFisio)
+    candidatas.push({ icon: '📝', label: 'Evoluciones fisio', o: n.evoFisio })
   }
   if (mostrar.tf) {
-    filas += filaG('🏋️', 'Alumnos evolucionados (TF)', n.evoTF)
+    candidatas.push({ icon: '🏋️', label: 'Alumnos evolucionados (TF)', o: n.evoTF })
   }
+  let visibles = candidatas.filter(c => (c.o.hoy + c.o.sem + c.o.mes) > 0)
+  if (!visibles.length) visibles = candidatas
+  let filas = visibles.map(c => filaG(c.icon, c.label, c.o)).join('')
   filas += `
     <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
       <span style="font-size:13px; flex:1">🧑‍🤝‍🧑 Personas que atendí este mes (sin repetir)</span>
