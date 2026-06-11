@@ -3387,9 +3387,20 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
       const credito = (previos || []).find(x => !x.fecha_recupero);
       if (credito) creditoSinDestinoId = credito.id;
     } catch (e0) { console.warn('No se pudo verificar duplicado de recuperatorio', e0); }
+    // BLOQUEOS · se chequea ANTES de tocar recuperatorios_tf. (Antes se chequeaba
+    // después de guardar, y si el día estaba bloqueado quedaba una fila huérfana
+    // con destino que "tapaba" la falta sin que el alumno esté en ninguna clase.)
+    if (await chequearBloqueoTF_(t, fechaRecupero)) {
+      cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">El día ${fechaRecupero.split('-').reverse().join('/')} está bloqueado por administración. No se puede agendar el recuperatorio en ese día.</div>`;
+      return;
+    }
     // 1) Registrar el recuperatorio (los de feriado van con tipo 'feriado' y NO descuentan cupo)
+    let recupRowId = null;      // para deshacer si falla el paso 2
+    let eraCredito = false;
     if (creditoSinDestinoId) {
       // Completar el crédito existente con el destino elegido
+      eraCredito = true;
+      recupRowId = creditoSinDestinoId;
       await supabaseUpdate('recuperatorios_tf', `id=eq.${creditoSinDestinoId}`, {
         fecha_recupero: fechaRecupero,
         turno_recupero_id: t.id,
@@ -3398,7 +3409,7 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
         cargado_por_email: USUARIO_ACTUAL?.email || null
       });
     } else {
-      await supabaseInsert('recuperatorios_tf', {
+      const insRec = await supabaseInsertReturn('recuperatorios_tf', {
         persona_id: pid,
         fecha_ausencia: fechaAusencia,
         fecha_recupero: fechaRecupero,
@@ -3408,16 +3419,28 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
         cargado_por_nombre: USUARIO_ACTUAL?.nombre || null,
         cargado_por_email: USUARIO_ACTUAL?.email || null
       });
+      recupRowId = (insRec && insRec[0]) ? insRec[0].id : null;
     }
-    // 2) Agregarlo al turno del día (igual que un agregado puntual)
+    // 2) Agregarlo al turno del día (igual que un agregado puntual).
+    //    Si ESTE paso falla, deshacemos el paso 1: la falta tiene que quedar
+    //    disponible de nuevo, no "tapada" por una fila sin clase (caso Gladys 11/6).
     const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
-    // BLOQUEOS · chequear antes del insert
-    if (await chequearBloqueoTF_(t, fechaRecupero)) {
-      cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">El día ${fechaRecupero.split('-').reverse().join('/')} está bloqueado por administración. No se puede agendar el recuperatorio en ese día.</div>`;
-      return;
+    let filas;
+    try {
+      filas = await supabaseInsertReturn('turno_agregados',
+        { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
+    } catch (eAg) {
+      try {
+        if (recupRowId && eraCredito) {
+          // El crédito venía de un aviso de falta: lo devolvemos a "sin destino"
+          await supabaseUpdate('recuperatorios_tf', `id=eq.${recupRowId}`,
+            { fecha_recupero: null, turno_recupero_id: null });
+        } else if (recupRowId) {
+          await supabaseDelete('recuperatorios_tf', `id=eq.${recupRowId}`);
+        }
+      } catch (eRb) { console.warn('No se pudo deshacer el recuperatorio tras el fallo', eRb); }
+      throw eAg;
     }
-    const filas = await supabaseInsertReturn('turno_agregados',
-      { turno_id: t.id, persona_id: pid, fecha: fechaRecupero, tipo: 'recuperatorio', agregado_por: quien, forzado: SOBRECUPO_AUTORIZADO });
     const agId = (filas && filas[0]) ? filas[0].id : null;
     const key = `${t.id}-${fechaRecupero}`;
     if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
