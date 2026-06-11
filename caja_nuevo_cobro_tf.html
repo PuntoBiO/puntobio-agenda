@@ -315,6 +315,7 @@
       </div>
 
       <div class="quick-amounts" id="quick-amounts"></div>
+      <div id="sorteo-hint" style="display:none;margin-top:8px;padding:8px 12px;border-radius:8px;background:rgba(219,39,119,.12);border:1px solid rgba(219,39,119,.35);color:#f9a8d4;font-size:13px;"></div>
 
       <div class="form-grid" style="margin-top:14px;">
         <div class="form-group">
@@ -360,6 +361,7 @@
 
   let alumnos = [];        // todos los alumnos TF (inscripciones + personas + tarifario)
   let alumnoSel = null;    // alumno actualmente seleccionado
+  let descSorteo = new Set(); // 'persona_id|YYYY-MM': ganadores del sorteo de cumple con 25% OFF
 
   // === Utilidades ===
   const fmt = n => '$' + Number(n||0).toLocaleString('es-AR');
@@ -372,10 +374,13 @@
   // === Init ===
   async function init(){
     try {
-      const [inscR, tarR] = await Promise.all([
+      const [inscR, tarR, sorR] = await Promise.all([
         sb.from('inscripciones_tf').select('id, plan, actividad, descuento_libre, dia_vencimiento, estado, persona_id'),
-        sb.from('tarifario_tf').select('plan, actividad, valor_lista')
+        sb.from('tarifario_tf').select('plan, actividad, valor_lista'),
+        // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF (todos: la tabla es chica)
+        sb.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO')
       ]);
+      descSorteo = new Set(((sorR && sorR.data) || []).map(s => s.persona_id + '|' + s.mes_descuento));
       if (inscR.error) throw inscR.error;
       if (tarR.error) throw tarR.error;
 
@@ -444,6 +449,8 @@
       if (i === 0) opt.selected = true;
       sel.appendChild(opt);
     }
+    // Si cambia el mes a imputar, re-evaluar el 25% OFF del sorteo
+    sel.addEventListener('change', aplicarDescuentoSorteo);
   }
 
   // === Búsqueda ===
@@ -517,6 +524,7 @@
     document.getElementById('tipo_cobro').value = 'NORMAL';
     document.getElementById('es_parcial').checked = false;
     actualizarParcial();
+    aplicarDescuentoSorteo();
 
     // Quick amounts: monto completo, mitad
     const qa = document.getElementById('quick-amounts');
@@ -641,6 +649,41 @@
       inputDesc.value = desc;
       sincronizarTipoCobro();
     });
+  }
+
+  // 🎰 25% OFF del sorteo de cumpleaños: si el alumno ganó el descuento para
+  // el mes que se está imputando, se precarga solo (descuento + importe + obs).
+  // Si se cambia a un mes sin premio, se deshace solo (solo si lo puso esta función).
+  const OBS_SORTEO = '🎂 25% OFF ganador sorteo cumpleañeros';
+  function aplicarDescuentoSorteo(){
+    const hint = document.getElementById('sorteo-hint');
+    if (!alumnoSel){ if (hint) hint.style.display = 'none'; return; }
+    const mes = document.getElementById('mes_imputado').value;
+    const gana = descSorteo.has(alumnoSel.persona_id + '|' + mes);
+    const monto = montoAlumno();
+    const obs = document.getElementById('observaciones');
+    if (gana && !esParcial()){
+      const desc = Math.round(monto * 0.25);
+      document.getElementById('descuento_temporal').value = desc;
+      document.getElementById('importe').value = monto - desc;
+      sincronizarTipoCobro();
+      if (obs && !obs.value.includes(OBS_SORTEO)) obs.value = (obs.value ? obs.value + ' · ' : '') + OBS_SORTEO;
+      if (hint){
+        hint.style.display = 'block';
+        hint.textContent = '🎰 Ganó el sorteo de cumpleañeros: la cuota de este mes va con 25% OFF (ya precargado: paga ' + fmt(monto - desc) + ').';
+      }
+    } else {
+      // Deshacer SOLO si el precargado vino del sorteo (lo delata la observación)
+      if (obs && obs.value.includes(OBS_SORTEO)){
+        obs.value = obs.value.replace(' · ' + OBS_SORTEO, '').replace(OBS_SORTEO, '').trim();
+        if (!esParcial()){
+          document.getElementById('descuento_temporal').value = 0;
+          document.getElementById('importe').value = monto;
+          sincronizarTipoCobro();
+        }
+      }
+      if (hint) hint.style.display = 'none';
+    }
   }
 
   function sincronizarTipoCobro(){

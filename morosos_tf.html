@@ -191,6 +191,7 @@
   const fmt = (n) => '$' + Math.round(n).toLocaleString('es-AR');
 
   let inscripciones = [], pagos = [], tarifario = {};
+  let descSorteo = new Set();   // 'persona_id|YYYY-MM' de ganadores del sorteo con 25% OFF
   let filtroActivo = 'todos', mesActual, inscripcionEnAccion = null;
   let busquedaTexto = '';
 
@@ -246,11 +247,14 @@
   async function cargarTodo() {
     $('tabla-wrap').innerHTML = '<div class="loading">Cargando...</div>';
     const mesAnt = mesAnterior(mesActual);
-    const [insR, pagR, tarR] = await Promise.all([
+    const [insR, pagR, tarR, sorR] = await Promise.all([
       supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
       supa.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
-      supa.from('tarifario_tf').select('plan, actividad, valor_lista')
+      supa.from('tarifario_tf').select('plan, actividad, valor_lista'),
+      // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF en estos meses
+      supa.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO').in('mes_descuento', [mesActual, mesAnt])
     ]);
+    descSorteo = new Set((sorR.data || []).map(s => s.persona_id + '|' + s.mes_descuento));
     if (insR.error || pagR.error || tarR.error) {
       $('tabla-wrap').innerHTML = '<div class="empty">❌ Error: ' + (insR.error?.message || pagR.error?.message || tarR.error?.message) + '</div>';
       return;
@@ -361,17 +365,13 @@
     const precio = tarifario[`${insc.plan}__${insc.actividad}`] || 0;
     const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
 
-    // 🎂 SOLO MENORES DE 18: en el mes de su cumpleaños la cuota va con 25% OFF
-    // (regalo de cumpleaños; los mayores reciben el masaje y pagan cuota completa).
-    // Así, el menor que pagó su 75% NO figura como deudor del 25% restante.
+    // 🎰 GANADORES DEL SORTEO DE CUMPLEAÑOS: si la persona ganó el 25% OFF
+    // para un mes (premio del sorteo de fin de mes), su cuota efectiva de ese
+    // mes es el 75%. Así, el que pagó su 75% NO figura como deudor del resto.
     function cuotaEfectiva(mesStr) {
-      const fnac = insc.fecha_nacimiento ? String(insc.fecha_nacimiento) : null;
-      if (!fnac) return montoMensual;
-      const anioMes = Number(mesStr.slice(0, 4));
-      const edadQueCumple = anioMes - Number(fnac.slice(0, 4));
-      const esMenor = edadQueCumple < 18;
-      const esMesCumple = fnac.slice(5, 7) === mesStr.slice(5, 7);
-      return (esMenor && esMesCumple) ? Math.round(montoMensual * 0.75) : montoMensual;
+      return descSorteo.has(insc.persona_id + '|' + mesStr)
+        ? Math.round(montoMensual * 0.75)
+        : montoMensual;
     }
 
     const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;

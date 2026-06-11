@@ -1238,10 +1238,10 @@ async function cargarEspacio(per){
   $('nombre').textContent = nombre;
   cargarAvatar(per);                    // foto de perfil o iniciales
 
-  // 🎂 Banner de cumpleaños y regalo:
-  //  - El DÍA del cumpleaños: saludo + regalo (mayores: cupón de masaje · menores: 25% OFF en la cuota)
-  //  - Menor durante TODO su mes: recordatorio del 25% OFF
-  //  - Mayor con cupón PENDIENTE (vale 60 días): recordatorio del masaje con su código
+  // 🎂 Banner de cumpleaños y sorteo:
+  //  - El DÍA del cumpleaños: saludo (el regalo ya no es automático: se sortea a fin de mes)
+  //  - Ganador del sorteo con cupón de masaje PENDIENTE: recordatorio con su código (hasta que lo use o venza)
+  //  - Ganador menor con 25% OFF: aviso mientras el mes del descuento no haya pasado
   try {
     if (per.fecha_nacimiento) {
       const hoyISO = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Argentina/Cordoba', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
@@ -1251,41 +1251,46 @@ async function cargarEspacio(per){
       const anioHoy = Number(hoyISO.slice(0,4));
       const bisiesto = (anioHoy % 4 === 0 && anioHoy % 100 !== 0) || anioHoy % 400 === 0;
       const esCumple = (mdNac === mdHoy) || (mdNac === '02-29' && mdHoy === '03-01' && !bisiesto);
-      const esMenor = (anioHoy - Number(fnac.slice(0,4))) < 18;
-      const esMesCumple = fnac.slice(5,7) === hoyISO.slice(5,7);
+      const mesHoy = hoyISO.slice(0,7);
       const fmtAr = (iso) => { const [a,m,d] = String(iso).split('-'); return `${d}/${m}/${a}`; };
       const nom = String(nombre).replace(/[<>&]/g, '');
 
-      // Cupón de masaje vigente (solo mayores; el RLS solo deja ver el propio)
+      // Cupón de masaje vigente (el RLS solo deja ver el propio)
       let cupon = null;
-      if (!esMenor) {
-        try {
-          const { data: cup } = await sb.from('cupones_cumple')
-            .select('estado, vence_el, tratamientos(codigo_id)')
-            .eq('persona_id', per.id).eq('anio', anioHoy).maybeSingle();
-          if (cup && cup.estado === 'PENDIENTE') cupon = { codigo: cup.tratamientos?.codigo_id || '', vence: cup.vence_el };
-        } catch(e) { /* sin cupón */ }
-      }
+      try {
+        const { data: cup } = await sb.from('cupones_cumple')
+          .select('estado, vence_el, tratamientos(codigo_id)')
+          .eq('persona_id', per.id).eq('anio', anioHoy).maybeSingle();
+        if (cup && cup.estado === 'PENDIENTE') cupon = { codigo: cup.tratamientos?.codigo_id || '', vence: cup.vence_el };
+      } catch(e) { /* sin cupón */ }
+
+      // ¿Ganó el sorteo con 25% OFF? (vale para el mes del descuento, que es el siguiente al sorteo)
+      let descuentoGanado = null;
+      try {
+        const { data: sor } = await sb.from('sorteos_cumple')
+          .select('premio, mes_descuento')
+          .eq('persona_id', per.id).eq('premio', 'DESCUENTO')
+          .gte('mes_descuento', mesHoy)
+          .order('id', { ascending: false }).limit(1).maybeSingle();
+        if (sor) descuentoGanado = sor.mes_descuento;
+      } catch(e) { /* sin premio */ }
+
+      const MESES_B = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+      const mesLabel = (yyyymm) => { const [a,m] = String(yyyymm).split('-').map(Number); return `${MESES_B[m-1]} ${a}`; };
 
       const b = document.getElementById('bannerCumple');
       const t = document.getElementById('bannerCumpleTexto');
       if (b && t) {
         if (esCumple) {
-          let regalo = '';
-          if (esMenor) {
-            regalo = `🎁 Y te dejamos un regalo: <b>25% de descuento en la cuota de este mes</b>. Ya queda aplicado, no tenés que hacer nada.`;
-          } else if (cupon) {
-            regalo = `🎁 Y te dejamos un regalo: un <b>masaje descontracturante (espalda y cuello) con Verónica Sandler</b>, cortesía del centro.<br>`
-                   + `Tu cupón: <b style="font-family:monospace">${cupon.codigo}</b> · válido hasta el <b>${fmtAr(cupon.vence)}</b>. Escribinos por WhatsApp para reservar tu turno.`;
-          }
-          t.innerHTML = `<b>¡Feliz cumpleaños, ${nom}! 🎂</b>Todo el equipo de PuntoBiO te desea un día hermoso. ¡Que lo disfrutes mucho! 💙${regalo ? '<br>' + regalo : ''}`;
-          b.style.display = 'flex';
-        } else if (esMenor && esMesCumple) {
-          t.innerHTML = `<b>🎂 ¡Este mes es tu cumpleaños!</b>La cuota de este mes va con <b>25% de descuento</b>, regalo de PuntoBiO. Ya queda aplicado, no tenés que hacer nada.`;
+          t.innerHTML = `<b>¡Feliz cumpleaños, ${nom}! 🎂</b>Todo el equipo de PuntoBiO te desea un día hermoso. ¡Que lo disfrutes mucho! 💙<br>`
+                      + `🎰 Y un dato: a fin de mes sorteamos premios entre los cumpleañeros del mes. ¡Mucha suerte!`;
           b.style.display = 'flex';
         } else if (cupon) {
-          t.innerHTML = `<b>🎁 Tenés un masaje de regalo pendiente</b>Masaje espalda y cuello con Verónica Sandler, cortesía de PuntoBiO por tu cumpleaños. `
+          t.innerHTML = `<b>🎁 Tenés un masaje de regalo pendiente</b>Masaje espalda y cuello con Verónica Sandler, premio de PuntoBiO por tu cumpleaños. `
                       + `Tu cupón: <b style="font-family:monospace">${cupon.codigo}</b> · válido hasta el <b>${fmtAr(cupon.vence)}</b>. Escribinos por WhatsApp para reservar tu turno.`;
+          b.style.display = 'flex';
+        } else if (descuentoGanado) {
+          t.innerHTML = `<b>🎉 ¡Ganaste el sorteo de cumpleañeros!</b>La cuota de <b>${mesLabel(descuentoGanado)}</b> va con <b>25% de descuento</b>, regalo de PuntoBiO. Ya queda aplicado, no tenés que hacer nada.`;
           b.style.display = 'flex';
         }
       }
