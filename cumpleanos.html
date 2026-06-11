@@ -111,7 +111,7 @@
   Un solo sorteo por mes: una vez hecho, queda registrado y no se puede repetir.
 </div>
 <div style="margin-bottom:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
-  <select id="sorteoMes" onchange="renderSorteo()" style="background:var(--bg-card);color:var(--text);border:1px solid rgba(219,39,119,.4);border-radius:8px;padding:7px 10px;font-size:13px;font-weight:600;"></select>
+  <select id="sorteoMes" onchange="cambioMesSorteo()" style="background:var(--bg-card);color:var(--text);border:1px solid rgba(219,39,119,.4);border-radius:8px;padding:7px 10px;font-size:13px;font-weight:600;"></select>
   <label style="font-size:13px;color:var(--text-soft);display:flex;align-items:center;gap:6px;">
     🏆 Ganadores:
     <select id="sorteoCant" onchange="renderSorteo()" style="background:var(--bg-card);color:var(--rosa);border:1px solid rgba(219,39,119,.4);border-radius:8px;padding:7px 10px;font-size:13px;font-weight:700;">
@@ -121,7 +121,7 @@
 </div>
 <div id="sorteo" class="loading">Cargando…</div>
 
-<h2>Agenda — próximos 30 días</h2>
+<h2>📅 Agenda — atrasados · hoy · próximos 30 días</h2>
 <div id="proximos" class="loading">Cargando…</div>
 
 <h2 style="color:var(--naranja);">💵 Costo del programa</h2>
@@ -156,6 +156,7 @@ let cuponesLista = [];    // todos los cupones del año (para el resumen mensual
 let sorteos = [];         // sorteos_cumple del año actual (y anterior)
 let gastoPorTto = {};     // tratamiento_id -> $ que cobró Vero (sesiones del masaje regalo)
 let _ultimaLista = null, _ultimoHoy = null; // para re-render del resumen mensual
+let excluidosSorteo = new Set(); // persona_id sacados a mano del sorteo de este mes (con la ✕)
 let precioRegalo = 0;     // precio vigente de MASAJES_R (lo que cobra Vero por masaje)
 let usuarioEmail = '';
 
@@ -184,6 +185,17 @@ function edadQueCumple(fechaNac, fechaCumple) {
 
 function esBaja(estado) { return /baja/i.test(String(estado || '')); }
 function esBisiesto(a) { return (a % 4 === 0 && a % 100 !== 0) || a % 400 === 0; }
+
+// Cumpleaños YA pasado de este año (para detectar saludos atrasados).
+// Devuelve la fecha si cayó en los últimos `dias` días (sin contar hoy).
+function ocurrenciaPasada(fechaNac, hoy, dias) {
+  const anioHoy = Number(hoy.slice(0, 4));
+  const md = String(fechaNac).slice(5, 10);
+  let f = `${anioHoy}-${md}`;
+  if (md === '02-29' && !esBisiesto(anioHoy)) f = `${anioHoy}-03-01`;
+  const desde = sumarDias(hoy, -dias);
+  return (f < hoy && f >= desde) ? f : null;
+}
 
 function proximaOcurrencia(fechaNac, hoy) {
   const anioHoy = Number(hoy.slice(0, 4));
@@ -337,10 +349,18 @@ function render(hoy) {
     .filter(p => p.prox > hoy && p.prox <= limite)
     .sort((a, b) => a.prox.localeCompare(b.prox) || a.nombre.localeCompare(b.nombre));
 
+  // ⚠️ Atrasados: cumplieron en los últimos 7 días (finde, feriado…) y nadie
+  // les mandó el WhatsApp todavía. El mail sale solo, así que solo miramos WA.
+  const atrasados = personas
+    .filter(p => activos.has(p.id) && !esBaja(p.estado))
+    .map(p => ({ ...p, fcum: ocurrenciaPasada(p.fecha_nacimiento, hoy, 7) }))
+    .filter(p => p.fcum && !(enviados[p.id] && enviados[p.id]['WHATSAPP']))
+    .sort((a, b) => a.fcum.localeCompare(b.fcum) || a.nombre.localeCompare(b.nombre));
+
   document.getElementById('rHoy').textContent = deHoy.length;
   _ultimaLista = lista; _ultimoHoy = hoy;
   renderHoy(deHoy);
-  renderAgenda(proximos);
+  renderAgenda(deHoy, proximos, atrasados, hoy);
   renderProyeccion(lista, hoy);
   renderResumenMensual(lista, hoy);
 }
@@ -499,30 +519,74 @@ function renderHoy(deHoy) {
 }
 
 // Agenda agrupada: fecha → cantidad → nombres
-function renderAgenda(proximos) {
+function renderAgenda(deHoy, proximos, atrasados, hoy) {
   const cont = document.getElementById('proximos');
-  if (!proximos.length) {
+  if (!deHoy.length && !proximos.length && !atrasados.length) {
     cont.className = 'empty';
     cont.innerHTML = 'No hay cumpleaños de alumnos TF activos en los próximos 30 días.';
     return;
   }
 
+  // Fila de persona: nombre + edad + estado de envío + botón de WhatsApp.
+  // El botón solo se habilita HOY (o si quedó atrasado de días pasados).
+  const fila = (p, fecha, modo) => {
+    const edad = edadQueCumple(p.fecha_nacimiento, fecha);
+    const env = enviados[p.id] || {};
+    const tel = waNumero(p.celular || p.telefono);
+    const yaWa = !!env['WHATSAPP'];
+    let accion;
+    if (yaWa) {
+      accion = `<span class="chip ok">✓ WhatsApp enviado${env['WHATSAPP'].enviado_en ? ' ' + fmtHora(env['WHATSAPP'].enviado_en) : ''}</span>`;
+    } else if (!tel) {
+      accion = `<span class="sin-dato">sin celular cargado</span>`;
+    } else if (modo === 'hoy') {
+      accion = `<button class="btn btn-wa" onclick="mandarWA(${p.id})">💬 Enviar feliz cumpleaños</button>`;
+    } else if (modo === 'atrasado') {
+      accion = `<button class="btn btn-wa" onclick="mandarWA(${p.id})">💬 Enviar saludo atrasado</button>`;
+    } else {
+      accion = `<button class="btn" disabled style="background:var(--bg-hover);color:var(--text-dim);border:1px solid var(--border);" title="Se habilita el día del cumpleaños">💬 Se habilita ese día</button>`;
+    }
+    return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 0;border-top:1px solid var(--border);">
+      <span style="min-width:230px;"><b>${esc(p.nombre)}</b> <b style="color:var(--rosa);">${edad}</b>${p.es_equipo ? '' : ''}${bonif.has(p.id) ? ' <span style="font-size:10px;color:var(--text-dim);">(bonif: solo saludo)</span>' : ''}</span>
+      ${accion}
+    </div>`;
+  };
+
+  const bloqueDia = (fecha, gente, modo, etiqueta) => `
+    <div class="agenda-dia" style="display:block;${modo === 'hoy' ? 'background:var(--rosa-soft);box-shadow:inset 4px 0 0 var(--rosa);' : (modo === 'atrasado' ? 'background:var(--naranja-soft);box-shadow:inset 4px 0 0 var(--naranja);' : '')}">
+      <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;">
+        <div class="agenda-fecha" style="${modo === 'hoy' ? 'color:var(--rosa);font-weight:700;' : (modo === 'atrasado' ? 'color:var(--naranja);font-weight:700;' : '')}">${etiqueta || fmtFecha(fecha)}</div>
+        <div class="agenda-count">${gente.length} cumpleaños</div>
+      </div>
+      <div style="margin-top:6px;">${gente.map(p => fila(p, fecha, modo)).join('')}</div>
+    </div>`;
+
+  let html = '';
+
+  // ⚠️ Atrasados (finde / feriado sin secretarias): botón habilitado igual
+  if (atrasados.length) {
+    const porFechaAtr = new Map();
+    atrasados.forEach(p => {
+      if (!porFechaAtr.has(p.fcum)) porFechaAtr.set(p.fcum, []);
+      porFechaAtr.get(p.fcum).push(p);
+    });
+    html += [...porFechaAtr.entries()].map(([fecha, gente]) =>
+      bloqueDia(fecha, gente, 'atrasado', `⚠️ ${fmtFecha(fecha)} — sin saludo todavía`)).join('');
+  }
+
+  // 🎂 HOY, bien remarcado
+  if (deHoy.length) html += bloqueDia(hoy, deHoy, 'hoy', `🎂 HOY · ${fmtFecha(hoy)}`);
+
+  // Próximos días (botón deshabilitado hasta que llegue el día)
   const porFecha = new Map();
   proximos.forEach(p => {
     if (!porFecha.has(p.prox)) porFecha.set(p.prox, []);
     porFecha.get(p.prox).push(p);
   });
+  html += [...porFecha.entries()].map(([fecha, gente]) => bloqueDia(fecha, gente, 'proximo')).join('');
 
   cont.className = 'agenda';
-  cont.innerHTML = [...porFecha.entries()].map(([fecha, gente]) => `
-    <div class="agenda-dia">
-      <div class="agenda-fecha">${fmtFecha(fecha)}</div>
-      <div class="agenda-count">${gente.length} cumpleaños</div>
-      <div class="agenda-nombres">
-        ${gente.map(p => `<span class="nombre-chip">${esc(p.nombre)} <b>${edadQueCumple(p.fecha_nacimiento, p.prox)}</b></span>`).join('')}
-      </div>
-    </div>
-  `).join('');
+  cont.innerHTML = html;
 }
 
 // ===== Acciones =====
@@ -590,6 +654,13 @@ function mesLabelDesc(yyyymm) {
   return `${MESES_LARGO[m - 1].toLowerCase()} ${a}`;
 }
 
+window.cambioMesSorteo = function () {
+  excluidosSorteo = new Set();  // al cambiar de mes, se resetean las exclusiones
+  renderSorteo();
+};
+window.excluirSorteo = function (personaId) { excluidosSorteo.add(personaId); renderSorteo(); };
+window.incluirSorteo = function (personaId) { excluidosSorteo.delete(personaId); renderSorteo(); };
+
 window.renderSorteo = function () {
   const cont = document.getElementById('sorteo');
   const sel = document.getElementById('sorteoMes');
@@ -637,16 +708,23 @@ window.renderSorteo = function () {
   }
 
   const cantElegida = Number(document.getElementById('sorteoCant').value) || 3;
-  const cant = Math.min(cantElegida, candidatos.length);
+  const enJuego = candidatos.filter(c => !excluidosSorteo.has(c.id));
+  const cant = Math.min(cantElegida, enJuego.length);
+  const chip = (c) => excluidosSorteo.has(c.id)
+    ? `<span class="nombre-chip" style="background:var(--bg-hover);border:1px dashed var(--border);opacity:.65;text-decoration:line-through;">${esc(c.nombre)} <b>${c.edad}</b><button title="Volver a incluir" onclick="incluirSorteo(${c.id})" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px;text-decoration:none;display:inline-block;">↩</button></span>`
+    : `<span class="nombre-chip" style="background:var(--bg-card);border:1px solid rgba(219,39,119,.25);">${esc(c.nombre)} <b>${c.edad}</b>${c.edad < 18 ? ' <span style="font-size:10px;color:var(--text-dim);">(menor)</span>' : ''}<button title="Sacar del sorteo" onclick="excluirSorteo(${c.id})" style="border:none;background:none;cursor:pointer;color:var(--rojo);font-weight:700;font-size:12px;margin-left:4px;">✕</button></span>`;
   cont.innerHTML = `
     <div style="background:var(--rosa-soft);border:1px solid rgba(219,39,119,.35);border-radius:12px;padding:16px 18px;">
       <div style="font-size:13.5px;margin-bottom:8px;color:var(--text);">
-        🎟️ Participan <b style="color:var(--rosa);">${candidatos.length}</b> cumpleañero${candidatos.length > 1 ? 's' : ''} de <b>${MESES_LARGO[mes - 1]} ${anio}</b>:
+        🎟️ Participan <b style="color:var(--rosa);">${enJuego.length}</b> de ${candidatos.length} cumpleañero${candidatos.length > 1 ? 's' : ''} de <b>${MESES_LARGO[mes - 1]} ${anio}</b>
+        <span style="font-size:11.5px;color:var(--text-dim);">(con la ✕ sacás a alguien del sorteo; ↩ lo vuelve a incluir)</span>:
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">
-        ${candidatos.map(c => `<span class="nombre-chip" style="background:var(--bg-card);border:1px solid rgba(219,39,119,.25);">${esc(c.nombre)} <b>${c.edad}</b>${c.edad < 18 ? ' <span style="font-size:10px;color:var(--text-dim);">(menor)</span>' : ''}</span>`).join('')}
+        ${candidatos.map(chip).join('')}
       </div>
-      <button class="btn" style="background:var(--rosa);color:#fff;font-size:14px;padding:10px 20px;border:none;" onclick="sortear(${anio}, ${mes}, this)">🎰 Sortear ${cant} ganador${cant > 1 ? 'es' : ''}</button>
+      ${enJuego.length
+        ? `<button class="btn" style="background:var(--rosa);color:#fff;font-size:14px;padding:10px 20px;border:none;" onclick="sortear(${anio}, ${mes}, this)">🎰 Sortear ${cant} ganador${cant > 1 ? 'es' : ''}</button>`
+        : `<span class="sin-dato">Sacaste a todos — no queda nadie para sortear.</span>`}
       <div style="font-size:12px;color:var(--text-soft);margin-top:10px;">
         Mayores de 18 ganan el masaje con Vero (cupón por 60 días) · menores ganan 25% OFF en la cuota de ${mesLabelDesc(mes === 12 ? (anio + 1) + '-01' : anio + '-' + String(mes + 1).padStart(2, '0'))}.
         El sorteo lo hace la base al azar y queda registrado: no se puede repetir.
@@ -656,10 +734,12 @@ window.renderSorteo = function () {
 
 window.sortear = async function (anio, mes, btn) {
   const cant = Number(document.getElementById('sorteoCant').value) || 3;
-  if (!confirm(`¿Hacer el sorteo de ${MESES_LARGO[mes - 1]} ${anio}? Se eligen hasta ${cant} ganador${cant > 1 ? 'es' : ''} al azar y NO se puede repetir.`)) return;
+  const excl = Array.from(excluidosSorteo);
+  const exclTxt = excl.length ? ` (con ${excl.length} excluido${excl.length > 1 ? 's' : ''})` : '';
+  if (!confirm(`¿Hacer el sorteo de ${MESES_LARGO[mes - 1]} ${anio}${exclTxt}? Se eligen hasta ${cant} ganador${cant > 1 ? 'es' : ''} al azar y NO se puede repetir.`)) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Sorteando…'; }
   try {
-    const { data, error } = await sb.rpc('sortear_cumple', { p_anio: anio, p_mes: mes, p_cantidad: cant });
+    const { data, error } = await sb.rpc('sortear_cumple', { p_anio: anio, p_mes: mes, p_cantidad: cant, p_excluidos: excl });
     if (error) throw error;
     if (data?.error) { toast(data.error); }
     else if (data?.ya_sorteado) { toast('Ese mes ya estaba sorteado.'); }
