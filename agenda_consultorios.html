@@ -3640,6 +3640,8 @@ async function evoGuardar() {
           .eq('id', t.id);
       } catch (e) { console.warn('No se pudo marcar presente automáticamente', e); }
     }
+    // Si el kine que firma NO es el profesional del turno → ofrecer pasar todo a su nombre.
+    await evoOfrecerTraspasoProfesional(t);
     closeModal('modalEvolucion');
     await refresh();
   } catch (e) {
@@ -3648,6 +3650,54 @@ async function evoGuardar() {
   } finally {
     btn.disabled = false; btn.textContent = txt;
   }
+}
+
+// ===== Traspaso de profesional al evolucionar =====
+// Caso real: el turno quedó cargado a nombre de Bruno (porque el viernes suele estar Bruno),
+// pero ese día atendió Male y es ella quien evoluciona. Al guardar la evolución, si el kine
+// logueado (firmante) es un kine facturante distinto al profesional del turno, se le pregunta
+// si quiere pasar el turno + la sesión a su nombre. Si acepta:
+//   1) turnos_consultorio.profesional → firmante (la agenda lo muestra a su nombre)
+//   2) evoluciones_fisio.profesional → firmante (la evolución queda coherente)
+//   3) sesiones del turno → se re-reparten con el % del firmante (mismo criterio que el
+//      cambio manual de profesional del detalle: Bruno/Male/Vero 65/35 · Jime/Lu 100% centro)
+// Solo aplica a Bruno/Male/Vero. Si evoluciona un admin (Lu/Jime) en nombre de otro, no se
+// ofrece nada: ahí se usa el cambio manual del detalle del turno como hasta ahora.
+const KINES_TRASPASO_EVO = ['Bruno','Male','Vero'];
+async function evoOfrecerTraspasoProfesional(t) {
+  try {
+    const firmante = nombreProfeLogueado();                          // Jime/Bruno/Male/Vero/Lu
+    if (!firmante || !KINES_TRASPASO_EVO.includes(firmante)) return; // solo kines facturantes
+    if (!t || !t.profesional || t.profesional === firmante) return;  // ya está a su nombre
+    const ok = confirm(`Este turno está cargado a nombre de ${t.profesional}, pero la evolución la firmaste vos (${firmante}).\n\n¿Pasamos el turno y la sesión a tu nombre?\n(La facturación se re-reparte con tu porcentaje; el total de la sesión no cambia.)`);
+    if (!ok) return;
+    // 1) Turno
+    const { error: eT } = await supa.from('turnos_consultorio')
+      .update({ profesional: firmante, modificado_en: new Date().toISOString(), modificado_por: 'evolucion_web' })
+      .eq('id', t.id);
+    if (eT) { alert('La evolución se guardó, pero no pude cambiar el profesional del turno: ' + eT.message + '\nHacelo a mano desde el detalle del turno.'); return; }
+    // 2) Evolución (quedó guardada con el profesional viejo)
+    try { await supa.from('evoluciones_fisio').update({ profesional: firmante }).eq('turno_id', t.id); }
+    catch (e) { console.warn('No se pudo actualizar el profesional en la evolución', e); }
+    // 3) Sesiones ya facturadas del turno → re-reparto (la sesión la crea el trigger al pasar a PRESENTE,
+    //    que corre antes que esto, así que acá ya existe).
+    const { data: ses, error: eS } = await supa.from('sesiones')
+      .select('id, monto_centro, monto_profesional').eq('turno_id', t.id);
+    if (eS) { alert('El turno pasó a tu nombre, pero no pude leer la sesión para re-repartirla: ' + eS.message); return; }
+    if (ses && ses.length) {
+      let blocked = false;
+      for (const s of ses) {
+        const total = Number(s.monto_centro || 0) + Number(s.monto_profesional || 0);
+        const r = repartoSesionCons(firmante, total);
+        const { data: upd, error: eU } = await supa.from('sesiones')
+          .update({ profesional: firmante, monto_profesional: r.monto_profesional, monto_centro: r.monto_centro })
+          .eq('id', s.id).select('id');
+        if (eU) { alert('El turno pasó a tu nombre, pero la sesión no se pudo re-repartir: ' + eU.message); return; }
+        if (!upd || !upd.length) { blocked = true; }
+      }
+      if (blocked) alert('⚠️ El turno pasó a tu nombre, pero la sesión NO se pudo modificar por permisos (RLS). Avisale a Lu/Pepe.');
+    }
+  } catch (e) { console.warn('Traspaso de profesional desde evolución falló', e); }
 }
 
 // ===== Borrar una evolución =====
