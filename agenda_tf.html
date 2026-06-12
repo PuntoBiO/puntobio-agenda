@@ -2026,7 +2026,9 @@ function toggleEstado(dia, hora, servicio, id, nuevoEstado) {
   const actual = asistenciaEstados[key] || 'reservado';
   if (nuevoEstado === 'ausente') {
     if (actual === 'ausente' || actual === 'ausente-justificada') {
-      // Ya estaba ausente → vuelve a reservado
+      // Ya estaba ausente → vuelve a reservado. OJO: su lugar pudo haber sido
+      // tomado por un recuperatorio mientras estaba ausente → chequear cupo.
+      if (!chequearVueltaDeAusente(t, fechaClase, id)) return;
       guardarAsistencia(t, id, 'reservado').then(() => {
         renderModalBody(dia, hora, servicio);
         renderTurnos();
@@ -2046,6 +2048,12 @@ function toggleEstado(dia, hora, servicio, id, nuevoEstado) {
     return;
   }
   const destino = actual === nuevoEstado ? 'reservado' : nuevoEstado;
+  // Si estaba AUSENTE y lo están volviendo a sumar (presente / reservado),
+  // chequear que su lugar no haya sido tomado por un recuperatorio.
+  if ((actual === 'ausente' || actual === 'ausente-justificada') &&
+      (destino === 'presente' || destino === 'reservado')) {
+    if (!chequearVueltaDeAusente(t, fechaClase, id)) return;
+  }
   guardarAsistencia(t, id, destino).then(() => {
     renderModalBody(dia, hora, servicio);
     renderTurnos();
@@ -2071,11 +2079,12 @@ function puedeEditarModulos() {
   const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
   return EMAILS_EDITAN_MODULOS.includes(e);
 }
-// ¿Quién puede autorizar SOBRECUPO en un turno lleno? (las dos admin generales)
+// ¿Quién puede autorizar SOBRECUPO en un turno lleno? (SOLO Lu)
 const EMAILS_ADMIN = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com'];
+const EMAILS_SOBRECUPO = ['liclucianavelaz@gmail.com'];
 function puedeAutorizarSobrecupo() {
   const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
-  return EMAILS_ADMIN.includes(e);
+  return EMAILS_SOBRECUPO.includes(e);
 }
 // ¿Quién puede BORRAR/SACAR un alumno del turno? (solo las dos admin generales)
 // Los profes solo marcan presente/ausente, no borran.
@@ -2506,6 +2515,47 @@ function ausentesDelDia(t, fecha) {
   return n;
 }
 
+// ¿Puede VOLVER al turno un alumno que estaba ausente, sin pasar el cupo?
+// (su lugar pudo haber sido tomado por un recuperatorio/suelta mientras estaba
+// ausente). Cuenta los que VIENEN ese día sin contarlo a él, y se fija si
+// entra uno más. Devuelve { puede, vienen, capacidad }.
+function lugarParaVolver(t, fecha, personaId) {
+  const alumnos = getAlumnos(t, fecha);
+  let vienen = 0;
+  alumnos.forEach(a => {
+    if (String(a.id) === String(personaId)) return;       // él no cuenta (estaba ausente)
+    const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
+    if (est === 'ausente' || est === 'ausente-justificada') return;  // ausentes liberan lugar
+    vienen++;
+  });
+  return { puede: (vienen + 1) <= t.capacidad, vienen, capacidad: t.capacidad };
+}
+
+// Control al des-marcar una ausencia (volver a reservado o marcar presente):
+// si el lugar ya fue tomado, solo Lu puede autorizar que vuelva igual (sobrecupo).
+// Devuelve true si se puede seguir.
+function chequearVueltaDeAusente(t, fecha, personaId) {
+  const r = lugarParaVolver(t, fecha, personaId);
+  if (r.puede) return true;
+  const nombre = nombrePersona(personaId);
+  if (!puedeAutorizarSobrecupo()) {
+    alert(
+      `🚫 SU LUGAR YA FUE OCUPADO\n\n` +
+      `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+      `Cupo: ${r.capacidad} · Ya vienen: ${r.vienen} (sin contar a ${nombre})\n\n` +
+      `Mientras estaba ausente, su lugar lo tomó un recuperatorio o una clase suelta.\n` +
+      `No se puede volver a sumar sin pasar el cupo. Si hace falta igual, lo tiene que autorizar Lu.`
+    );
+    return false;
+  }
+  return confirm(
+    `⚠️ EL LUGAR DE ${nombre.toUpperCase()} YA FUE OCUPADO\n\n` +
+    `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+    `Cupo: ${r.capacidad} · Ya vienen: ${r.vienen} (sin contarlo)\n\n` +
+    `Si lo volvés a sumar, la clase queda con ${r.vienen + 1}/${r.capacidad} (SOBRECUPO).\n\n` +
+    `¿Querés autorizarlo igual?`
+  );
+}
 // Estado de evolución de un turno+fecha, medido sobre los PRESENTES.
 // Un alumno cuenta para evolución solo si NO está ausente.
 // Devuelve: { presentes, ausentes, evolucionados, completa }
@@ -3494,7 +3544,7 @@ function chequearCupo(t, accionTexto, esPuntual, fecha) {
       `${t.servicio} · ${t.hora} · ${t.dia}\n` +
       `Cupo: ${t.capacidad} · Anotados: ${ocup}${infoAusentes}\n\n` +
       `Este turno ya está lleno y no se puede sobrepasar el cupo.\n` +
-      `Si hace falta agregar a alguien igual, lo tiene que autorizar Lu o Jime.`
+      `Si hace falta agregar a alguien igual, lo tiene que autorizar Lu.`
     );
     return false;
   }
