@@ -1601,7 +1601,7 @@ async function cargarEspacio(per){
     // 4) Agenda
     bloqueAgenda(window._agendaData),
     // 5) Deportivo
-    bloquePerfilDeportivo(perfilDeportivo, cargasDeportivas),
+    bloquePerfilDeportivo(perfilDeportivo, cargasDeportivas, adjuntosAlumno),
     bloqueCompetencias(competenciasAlumno),
     // 6) Estudios e historia clínica
     bloqueEvaluacionesBiolab(adjuntosAlumno),
@@ -2677,6 +2677,7 @@ const CATS_ADJUNTO = {
   estudio:       { label: 'Informe de estudio',   icono: '🩻', color: '#1e9fe0' },
   consideracion: { label: 'Consideración médica', icono: '📋', color: '#a855f7' },
   otro:          { label: 'Otro',                 icono: '📎', color: '#64748b' },
+  plan_entrenamiento: { label: 'Plan de entrenamiento', icono: '🏅', color: '#ea580c' },
 };
 
 // "Evaluaciones Biolab" muestra SOLO el PDF armado que genera el equipo con "Generar PDF".
@@ -2687,7 +2688,7 @@ function esEvalBiolab(a){ return a && /\/evaluacion-[^/]*\.pdf$/i.test(a.storage
 function bloqueAdjuntos(adjuntos){
   // Solo lo que subió el propio paciente. Lo que carga el equipo no se muestra acá
   // (las evaluaciones van en "Evaluaciones Biolab"; los archivos técnicos quedan internos).
-  adjuntos = (adjuntos || []).filter(a => a.subido_por_alumno === true);
+  adjuntos = (adjuntos || []).filter(a => a.subido_por_alumno === true && a.categoria !== 'plan_entrenamiento');
   let lista = '';
   if(!adjuntos || adjuntos.length === 0){
     lista = `<p class="empty">Todavía no subiste nada. Acá podés cargar tu apto físico, estudios médicos (resonancia, ecografía, RX), consideraciones del doctor, etc. El equipo los va a ver en tu historia clínica.</p>`;
@@ -3653,7 +3654,7 @@ function _fmtFechaPB(iso){
   return `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()} · ${hh}`;
 }
 
-function bloquePerfilDeportivo(p, cargas){
+function bloquePerfilDeportivo(p, cargas, adjuntos){
   const cargasArr = cargas || [];
   let cuerpo;
 
@@ -3703,10 +3704,117 @@ function bloquePerfilDeportivo(p, cargas){
       </div>`;
   }
 
+  // PLANES DE ENTRENAMIENTO EXTERNOS (jornada 78): PDFs que le da su entrenador
+  // de afuera (running, etc). Separado de los estudios médicos a propósito.
+  const planes = (adjuntos || []).filter(a => a.categoria === 'plan_entrenamiento' && a.subido_por_alumno === true);
+  let planesHtml = '';
+  if (planes.length) {
+    planesHtml = planes.map(a => {
+      const tit = a.titulo || a.nombre_original || 'Plan sin título';
+      const sp = String(a.storage_path||'').replace(/'/g, "\\'");
+      return `<div class="adj-item">
+        <div class="adj-cat" style="background:#ea580c22;color:#ea580c">🏅 Plan</div>
+        <div class="adj-cont">
+          <div class="adj-titulo">${esc(tit)}</div>
+          <div class="adj-meta"><span>Subido el ${fmtFecha(a.creado_en)}</span></div>
+          ${a.notas ? `<div class="adj-notas">${esc(a.notas)}</div>` : ''}
+        </div>
+        <div class="adj-acciones">
+          <button class="ag-btn ag-btn-azul" onclick="pbVerAdjunto(${a.id}, '${sp}')">👁 Ver</button>
+          <button class="ag-btn ag-btn-naranja" onclick="pbBorrarAdjunto(${a.id}, '${sp}', '${esc(tit).replace(/'/g,"\\'")}')">🗑 Borrar</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  cuerpo += `
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid rgba(148,163,184,.18)">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:8px">🏅 Mis planes de entrenamiento</div>
+      ${planesHtml || `<p class="empty" style="margin:0 0 8px">¿Tu entrenador de afuera te pasó un plan en PDF? Subilo acá para tenerlo a mano y que el equipo lo conozca.</p>`}
+      <button class="ag-btn ag-btn-verde" style="margin-top:8px" onclick="pbAbrirSubirPlan()">📤 Subir plan de entrenamiento</button>
+    </div>`;
+
   const _nDep = cargasArr.length;
-  const _resDep = _nDep ? `${_nDep} ${_nDep===1?'actividad':'actividades'}` : 'Sin cargar';
+  const _resDep = _nDep ? `${_nDep} ${_nDep===1?'actividad':'actividades'}${planes.length ? ' · ' + planes.length + (planes.length===1?' plan':' planes') : ''}` : (planes.length ? `${planes.length} ${planes.length===1?'plan':'planes'}` : 'Sin cargar');
   return colapsable(`Mi carga deportiva${badgeNuevoSi('perfil-deportivo')}`, _resDep, `${cuerpo}`, 'd4');
 }
+
+// Modal simple para subir un plan de entrenamiento externo (categoría fija)
+window.pbAbrirSubirPlan = function(){
+  pbAbrirModal({
+    titulo: '🏅 Subir plan de entrenamiento',
+    cuerpoHTML: `
+      <div class="adj-form">
+        <div class="adj-form-row">
+          <label class="adj-label" for="plan-titulo">Título corto</label>
+          <input type="text" id="plan-titulo" class="adj-input" placeholder="Ej: Plan de running · junio" maxlength="100" required>
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="plan-archivo">Archivo (PDF o imagen)</label>
+          <input type="file" id="plan-archivo" class="adj-input" accept=".pdf,image/*" required>
+          <div class="adj-help">Máximo 10 MB</div>
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="plan-notas">Notas (opcional)</label>
+          <textarea id="plan-notas" class="adj-input" rows="3" placeholder="Ej: me lo dio mi entrenador de running, arranca el lunes" maxlength="500"></textarea>
+        </div>
+        <div id="plan-status" style="margin-top:8px"></div>
+      </div>`,
+    botones: [
+      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: 'Subir', cls: 'confirm', onclick: 'pbConfirmarSubirPlan()' },
+    ]
+  });
+};
+
+window.pbConfirmarSubirPlan = async function(){
+  const titulo = document.getElementById('plan-titulo').value.trim();
+  const archivoInput = document.getElementById('plan-archivo');
+  const notas = document.getElementById('plan-notas').value.trim() || null;
+  const status = document.getElementById('plan-status');
+  if(!titulo){ status.innerHTML = '<div class="adj-error">Poné un título</div>'; return; }
+  if(!archivoInput.files || archivoInput.files.length === 0){ status.innerHTML = '<div class="adj-error">Elegí un archivo</div>'; return; }
+  const archivo = archivoInput.files[0];
+  if(archivo.size > 10 * 1024 * 1024){
+    status.innerHTML = '<div class="adj-error">El archivo es muy grande (máximo 10 MB). Probá comprimirlo.</div>';
+    return;
+  }
+  status.innerHTML = '<div class="adj-info">Subiendo… esto puede tardar unos segundos</div>';
+  try {
+    const pid = window._personaIdActual;
+    const nombreOriginal = archivo.name;
+    const ext = nombreOriginal.includes('.') ? nombreOriginal.split('.').pop() : '';
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2,8)}${ext?'.'+ext:''}`;
+    const storagePath = `${pid}/${uniqueName}`;
+    const { error: upErr } = await sb.storage.from('hc-adjuntos').upload(storagePath, archivo, {
+      contentType: archivo.type || 'application/octet-stream',
+      upsert: false,
+    });
+    if(upErr) throw upErr;
+    const { error: insErr } = await sb.from('hc_adjuntos').insert({
+      persona_id: pid,
+      historia_id: null,
+      storage_path: storagePath,
+      nombre_original: nombreOriginal,
+      tipo_mime: archivo.type || null,
+      tamano_bytes: archivo.size,
+      categoria: 'plan_entrenamiento',
+      titulo: titulo,
+      fecha_estudio: null,
+      notas: notas,
+      autor_nombre: window._personaNombreActual || 'Alumno',
+      subido_por_alumno: true,
+    });
+    if(insErr){
+      try { await sb.storage.from('hc-adjuntos').remove([storagePath]); } catch(e){}
+      throw insErr;
+    }
+    status.innerHTML = '<div class="adj-ok">¡Listo! Plan subido. Recargando…</div>';
+    setTimeout(() => { pbCerrarModal(); location.reload(); }, 900);
+  } catch(err) {
+    console.error('Error subiendo plan:', err);
+    status.innerHTML = '<div class="adj-error">No se pudo subir. Probá de nuevo o escribinos.</div>';
+  }
+};
 
 window.pbAbrirPerfilDep = function(cargaId){
   // Si recibo id → editar esa carga existente; si no → crear nueva
