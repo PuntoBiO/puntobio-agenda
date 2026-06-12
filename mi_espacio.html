@@ -1392,6 +1392,17 @@ async function cargarEspacio(per){
       .eq('persona_id', pid)
       .order('creado_en', {ascending:true}),
   ]);
+  // PROFES POR TURNO (jornada 78): para mostrarle al alumno quién da cada clase.
+  // Defensivo: si RLS bloquea la lectura, el mapa queda vacío y no se muestra nada.
+  window._profesPorTurno = {};
+  try {
+    const tpRes = await sb.from('turno_profes').select('turno_id, nombre_profe');
+    (tpRes.data || []).forEach(p => {
+      if (!window._profesPorTurno[p.turno_id]) window._profesPorTurno[p.turno_id] = [];
+      window._profesPorTurno[p.turno_id].push(p.nombre_profe);
+    });
+  } catch(e) { window._profesPorTurno = {}; }
+
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = (misTurnosRes.data || [])
     .map(r => r.turnos)
@@ -1734,7 +1745,7 @@ function bloqueMisClases(turnos, asistencias){
     rows += `<div class="clase-fija">
       <div class="cf-info">
         <div class="cf-dia">${dia} · ${hora}</div>
-        <div class="cf-sub">${serv} · Próxima: ${proxLegible}</div>
+        <div class="cf-sub">${serv}${profesDeTurnoTxt(t.id) ? ' · 🏋️ Con ' + esc(profesDeTurnoTxt(t.id)) : ''} · Próxima: ${proxLegible}</div>
       </div>
       ${accionHTML}
     </div>`;
@@ -2063,6 +2074,13 @@ function dotServicio(servicio){
   if(s.includes('KINE') || s.includes('REHAB')) return 'kine';
   return 'ent';
 }
+// Profes que dan un turno, en texto legible: "Lu", "Lu y Male" (jornada 78)
+function profesDeTurnoTxt(turnoId){
+  const lista = (window._profesPorTurno && window._profesPorTurno[turnoId]) || [];
+  if(!lista.length) return '';
+  if(lista.length === 1) return lista[0];
+  return lista.slice(0,-1).join(', ') + ' y ' + lista[lista.length-1];
+}
 // Nombre "humano" del servicio (Title Case)
 function nombreServicio(servicio){
   if(!servicio) return 'Clase';
@@ -2274,7 +2292,10 @@ function renderAgendaDia(fechaISO){
       filas += `<div class="ag-turno" ${bloqCls}>
         <div class="ag-turno-info">
           <span class="ag-dot ${dot}"></span>
-          <span class="ag-turno-nombre">${esc(nom)}${miClaseTag}${cambioTag}${bloqMark}</span>
+          <div style="display:flex;flex-direction:column;min-width:0">
+            <span class="ag-turno-nombre">${esc(nom)}${miClaseTag}${cambioTag}${bloqMark}</span>
+            ${profesDeTurnoTxt(t.id) ? `<span style="font-size:11px;color:#94a3b8">🏋️ Con ${esc(profesDeTurnoTxt(t.id))}</span>` : ''}
+          </div>
         </div>
         <div class="ag-turno-right">
           <div class="ag-cupo-num ${niv.cls}">${textoCupo}</div>
