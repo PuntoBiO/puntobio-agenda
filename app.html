@@ -3274,8 +3274,9 @@ function renderEquipo() {
       es la capacidad dividida por la cantidad de profes: una clase de 12 con 2 profes da 6 de referencia a cada uno,
       pero los alumnos van al que los evolucionó). <b>Alumnos por hora</b> = atendidos ÷ horas dadas.
       Se descuentan feriados y clases canceladas por el centro.
-      <b>Coberturas pactadas</b> (cargadas en el módulo Feriados): ese día las clases del cubierto
-      se acreditan enteras al que cubre — horas y cupos — y al cubierto no le cuentan.
+      <b>Coberturas pactadas</b> (cargadas en el módulo Feriados): el que cubre evoluciona con su login,
+      y los alumnos de ese día se reparten mitad y mitad con el compañero ausente; horas y cupos de cada uno
+      no cambian. En días normales NO hay reparto: cada alumno es de quien lo evolucionó.
     </div>`
   cargarEquipoDesempeno(mesVer)
 }
@@ -3331,16 +3332,18 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!profesDeTurno[p.turno_id].includes(e)) profesDeTurno[p.turno_id].push(e)
     })
 
-    // COBERTURAS PACTADAS (módulo Feriados): ese día, las clases del cubierto
-    // pasan ENTERAS al que cubre (horas + cupos). El cubierto no se perjudica
-    // y el cubridor recibe el crédito completo de lo que dio (jornada 78).
-    // Mapa: 'fecha|emailCubierto' -> emailCubridor
-    const coberturas = {}
+    // COBERTURAS PACTADAS (módulo Feriados) — regla acordada (jornada 78):
+    // ese día las HORAS y CUPOS de cada uno quedan como están en la grilla
+    // (el ausente no se perjudica), y los ALUMNOS EVOLUCIONADOS por el cubridor
+    // ese día se reparten MITAD Y MITAD entre cubridor y ausente.
+    // En días normales NO hay reparto: cada alumno es de quien lo evolucionó.
+    // Mapa: 'fecha|emailCubridor' -> emailAusente
+    const cubreA = {}
     ;(cobR.data || []).forEach(c => {
       if (!c.fecha || !c.se_lo_toma || !c.cubre) return
       const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], c.se_lo_toma))
       const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre))
-      if (eDe && eA && eDe !== eA) coberturas[c.fecha + '|' + eDe] = eA
+      if (eDe && eA && eDe !== eA) cubreA[c.fecha + '|' + eA] = eDe
     })
 
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
@@ -3369,13 +3372,10 @@ async function cargarEquipoDesempeno(mesVer) {
         if (cancelada.has(tid + '|' + d.fecha)) return
         const profes = profesDeTurno[tid]
         profes.forEach(e => {
-          // Si ese día este profe está cubierto por otro (módulo Feriados),
-          // la clase se le acredita ENTERA al cubridor.
-          const eFinal = coberturas[d.fecha + '|' + e] || e
-          st[eFinal].horasPrev++
+          st[e].horasPrev++
           if (d.fecha <= corte) {
-            st[eFinal].horas++
-            st[eFinal].cuposEq += t.capacidad / profes.length
+            st[e].horas++
+            st[e].cuposEq += t.capacidad / profes.length
           }
         })
       })
@@ -3387,7 +3387,18 @@ async function cargarEquipoDesempeno(mesVer) {
     ;(evoRows || []).forEach(ev => {
       const e = emailAEquipo[String(ev.autor_email || '').toLowerCase().trim()]
       if (!e || !ev.fecha || ev.fecha > corte) return
-      sumar(st[e].tf, ev.fecha, ev.persona_id)
+      const ausente = cubreA[ev.fecha + '|' + e]
+      if (ausente) {
+        // Día de cobertura: el cubridor evoluciona con su login, pero la mitad
+        // de esos alumnos se acreditan al compañero ausente.
+        st[e].tf.n += 0.5
+        st[ausente].tf.n += 0.5
+        st[e].tf.fechas[ev.fecha] = (st[e].tf.fechas[ev.fecha] || 0) + 0.5
+        st[ausente].tf.fechas[ev.fecha] = (st[ausente].tf.fechas[ev.fecha] || 0) + 0.5
+        if (ev.persona_id) st[e].tf.personas.add(ev.persona_id)
+      } else {
+        sumar(st[e].tf, ev.fecha, ev.persona_id)
+      }
     })
 
     // SESIONES por área (con persona vía tratamiento, para "personas distintas")
@@ -3417,7 +3428,7 @@ async function cargarEquipoDesempeno(mesVer) {
       return {
         email: e, nombre: NOMBRES_RANKING[e],
         horas: s.horas, horasPrev: s.horasPrev,
-        evol: s.tf.n, personasTF: s.tf.personas.size,
+        evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
         evalIng: s.evalIng.n, maso: s.maso.n, otras: s.otras.n, ses
@@ -3725,7 +3736,7 @@ window.abrirReglasBono = function() {
         </table>
         <p style="margin:0 0 10px;"><b>3 · Plus:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas).</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
-        <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona con su login y le suma todo a él; al cubierto ese día no le cuenta.</p>
+        <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona a todos con su propio login, y los alumnos de ese día se reparten <b>mitad y mitad</b> entre los dos. Las horas y cupos de cada uno quedan igual: nadie pierde por tomarse el día. <b>Ojo:</b> esto vale SOLO en días de cobertura — en clases normales cada alumno es 100% de quien lo evolucionó.</p>
         <p style="margin:0 0 10px;"><b>6 · Faltas sin cobertura:</b> faltar a dar clase sin cobertura registrada (por el motivo que sea) hace <b>caer el bono del mes completo</b>.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
         <p style="margin:0;"><b>8 · Cierre y pago:</b> cierra el último día del mes a las 23:59 con el número de tu tarjeta. Se paga <b>a partir del 15 del mes siguiente</b>, por separado del sueldo. Vigente desde <b>junio 2026</b> (se paga desde julio).</p>
