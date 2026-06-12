@@ -2328,6 +2328,79 @@ function rangosCalendario() {
   }
 }
 
+// ===============================================
+// HORAS TF (grilla turno_profes, jornada 78)
+// ===============================================
+// Días calendario entre dos fechas ISO (inclusive) con su día normalizado (LUNES, MARTES...)
+function listaDiasISO(desdeISO, hastaISO) {
+  const out = []
+  const [y1, m1, d1] = desdeISO.split('-').map(Number)
+  const [y2, m2, d2] = hastaISO.split('-').map(Number)
+  const fin = new Date(y2, m2 - 1, d2)
+  for (let f = new Date(y1, m1 - 1, d1); f <= fin; f.setDate(f.getDate() + 1)) {
+    out.push({ fecha: fechaLocalISO(f), dia: normTexto(f.toLocaleDateString('es-AR', { weekday: 'long' })) })
+  }
+  return out
+}
+
+// Horas de clase TF que dio UN profe (hoy / semana / mes, hasta hoy) según la
+// grilla turno_profes, descontando feriados y clases canceladas por el centro
+// (tipo 'centro'). Los cierres 'finalizada' y 'auto' son clases que SÍ se dieron.
+// También cuenta los alumnos PRESENTES en sus clases (tabla asistencia).
+// Devuelve null si el profe no tiene clases en la grilla.
+async function calcularHorasTF(misAlias) {
+  try {
+    const R = rangosCalendario()
+    const [tpR, tR] = await Promise.all([
+      supabase.from('turno_profes').select('turno_id, nombre_profe'),
+      supabase.from('turnos').select('id, dia')
+    ])
+    const diaPorTurno = {}
+    ;(tR.data || []).forEach(t => { diaPorTurno[t.id] = normTexto(t.dia) })
+    const misTurnos = new Map()
+    ;(tpR.data || []).forEach(p => {
+      if (esTurnoDe(misAlias, p.nombre_profe) && diaPorTurno[p.turno_id]) {
+        misTurnos.set(p.turno_id, diaPorTurno[p.turno_id])
+      }
+    })
+    if (!misTurnos.size) return null
+    const ids = Array.from(misTurnos.keys())
+    const [ferR, cerR, asisRows] = await Promise.all([
+      supabase.from('feriados').select('fecha').gte('fecha', R.desde).lte('fecha', R.hasta),
+      supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').in('turno_id', ids).gte('fecha', R.desde).lte('fecha', R.hasta),
+      fetchTodo(() => supabase.from('asistencia').select('persona_id, fecha, turno_id').eq('estado', 'presente').in('turno_id', ids).gte('fecha', R.desde).lte('fecha', R.hasta))
+    ])
+    const esFeriado = new Set((ferR.data || []).map(f => f.fecha))
+    const cancelada = new Set((cerR.data || []).map(c => c.turno_id + '|' + c.fecha))
+    const horas = { hoy: 0, sem: 0, mes: 0 }
+    const desdeCalc = R.primerDiaMes < R.lunesStr ? R.primerDiaMes : R.lunesStr
+    listaDiasISO(desdeCalc, R.hoyISO).forEach(d => {
+      if (esFeriado.has(d.fecha)) return
+      misTurnos.forEach((diaTurno, id) => {
+        if (diaTurno !== d.dia) return
+        if (cancelada.has(id + '|' + d.fecha)) return
+        if (d.fecha === R.hoyISO) horas.hoy++
+        if (d.fecha >= R.lunesStr && d.fecha <= R.domingoStr) horas.sem++
+        if (d.fecha.substring(0, 7) === R.mesActual) horas.mes++
+      })
+    })
+    const pres = { hoy: 0, sem: 0, mes: 0 }
+    const personas = new Set()
+    ;(asisRows || []).forEach(a => {
+      if (a.fecha === R.hoyISO) pres.hoy++
+      if (a.fecha >= R.lunesStr && a.fecha <= R.domingoStr) pres.sem++
+      if (a.fecha && a.fecha.substring(0, 7) === R.mesActual) {
+        pres.mes++
+        if (a.persona_id) personas.add(a.persona_id)
+      }
+    })
+    return { horas, pres, personasMes: personas.size }
+  } catch (e) {
+    console.warn('Horas TF:', e.message)
+    return null
+  }
+}
+
 async function calcularMisNumerosAtendidos() {
   const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
   const misAlias = aliasDe(miEmail, usuario && usuario.nombre)
@@ -2384,6 +2457,8 @@ async function calcularMisNumerosAtendidos() {
   } catch (e) {
     console.warn('Mis números atendidos:', e.message)
   }
+  // Horas TF según grilla (solo aplica a quienes dan clases: tiene su propio try)
+  r.horasTF = await calcularHorasTF(misAlias)
   return r
 }
 
@@ -2437,6 +2512,16 @@ function gridMisNumeros(n, mostrar) {
   let visibles = candidatas.filter(c => (c.o.hoy + c.o.sem + c.o.mes) > 0)
   if (!visibles.length) visibles = candidatas
   let filas = visibles.map(c => filaG(c.icon, c.label, c.o)).join('')
+  // Horas de clase TF dadas (grilla turno_profes) + alumnos presentes en esas horas
+  if (n.horasTF) {
+    filas += filaG('🕒', 'Horas de clase TF dadas', n.horasTF.horas)
+    filas += filaG('🙋', 'Alumnos presentes en mis clases', n.horasTF.pres)
+    filas += `
+    <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+      <span style="font-size:13px; flex:1">🏋️ Personas distintas en mis clases este mes</span>
+      <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${n.horasTF.personasMes}</span>
+    </div>`
+  }
   filas += `
     <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
       <span style="font-size:13px; flex:1">🧑‍🤝‍🧑 Personas que atendí este mes (sin repetir)</span>
@@ -3150,14 +3235,146 @@ function renderAuditoria() {
 }
 
 // ======================
-// MODULO: EQUIPO (usuarios y permisos)
+// MODULO: EQUIPO (desempeño del equipo · solo admin)
+// Reemplaza el iframe de usuarios.html que duplicaba el sistema (jornada 78).
 // ======================
+let EQUIPO_MES_OFFSET = 0
 function renderEquipo() {
   const contentEl = document.getElementById('content')
-  contentEl.classList.add('module-embed')
+  contentEl.classList.remove('module-embed')
+  const base = new Date()
+  const mesVer = new Date(base.getFullYear(), base.getMonth() + EQUIPO_MES_OFFSET, 1)
+  const titulo = mesVer.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
   contentEl.innerHTML = `
-    <iframe src="usuarios.html" class="module-iframe-tab" title="Usuarios y Permisos"></iframe>
-  `
+    <div class="hero">
+      <div class="hero-tag">Equipo</div>
+      <h1>👨‍⚕️ Desempeño del equipo</h1>
+      <p class="hero-sub">Horas de clase, sesiones y personas atendidas por cada profe</p>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; margin:6px 0 14px;">
+      <button onclick="equipoCambiarMes(-1)" style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;">←</button>
+      <span style="font-weight:800; font-size:15px; text-transform:capitalize; min-width:160px; text-align:center;">${titulo}</span>
+      <button onclick="equipoCambiarMes(1)" ${EQUIPO_MES_OFFSET >= 0 ? 'disabled style="opacity:0.35; border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; font-size:14px;"' : 'style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;"'}>→</button>
+    </div>
+    <div class="panel">
+      <div class="panel-body" id="equipo-dash-body">
+        <div class="empty-state"><span class="empty-state-icon">⏳</span>Calculando desempeño del equipo…</div>
+      </div>
+    </div>
+    <div style="font-size:11.5px; color:var(--text-dim); padding:10px 4px;">
+      🕒 Horas TF = clases según la grilla de profes, descontando feriados y clases canceladas por el centro.
+      🙋 Presentes = alumnos marcados presentes en sus clases. 🩺🔬💆 Sesiones = registradas a su nombre en cada área.
+    </div>`
+  cargarEquipoDesempeno(mesVer)
+}
+window.equipoCambiarMes = function(delta) {
+  if (EQUIPO_MES_OFFSET + delta > 0) return
+  EQUIPO_MES_OFFSET += delta
+  renderEquipo()
+}
+async function cargarEquipoDesempeno(mesVer) {
+  const body = document.getElementById('equipo-dash-body')
+  if (!body) return
+  try {
+    const y = mesVer.getFullYear(), m = mesVer.getMonth()
+    const mesStr = y + '-' + String(m + 1).padStart(2, '0')
+    const primerDia = mesStr + '-01'
+    const ultDia = mesStr + '-' + String(new Date(y, m + 1, 0).getDate()).padStart(2, '0')
+    const hoyISO = hoyLocalISO()
+    const esMesActual = mesStr === hoyISO.substring(0, 7)
+    const corte = esMesActual ? hoyISO : ultDia   // horas DADAS: hasta hoy si es el mes en curso
+
+    const [tR, tpR, ferR, cerR, asisRows, sesRows] = await Promise.all([
+      supabase.from('turnos').select('id, dia'),
+      supabase.from('turno_profes').select('turno_id, nombre_profe'),
+      supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
+      supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
+      fetchTodo(() => supabase.from('asistencia').select('persona_id, fecha, turno_id').eq('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
+      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia))
+    ])
+    const diaPorTurno = {}
+    ;(tR.data || []).forEach(t => { diaPorTurno[t.id] = normTexto(t.dia) })
+    const esFeriado = new Set((ferR.data || []).map(f => f.fecha))
+    const cancelada = new Set((cerR.data || []).map(c => c.turno_id + '|' + c.fecha))
+    const diasMes = listaDiasISO(primerDia, ultDia)
+
+    const equipo = Object.keys(NOMBRES_RANKING).map(email => {
+      const alias = ALIAS_EQUIPO[email] || [normTexto(NOMBRES_RANKING[email])]
+      const misTurnos = []
+      ;(tpR.data || []).forEach(p => {
+        if (esTurnoDe(alias, p.nombre_profe) && diaPorTurno[p.turno_id]) {
+          misTurnos.push({ id: p.turno_id, dia: diaPorTurno[p.turno_id] })
+        }
+      })
+      const idsSet = new Set(misTurnos.map(t => t.id))
+      let hsDadas = 0, hsPrevistas = 0
+      diasMes.forEach(d => {
+        if (esFeriado.has(d.fecha)) return
+        misTurnos.forEach(t => {
+          if (t.dia !== d.dia || cancelada.has(t.id + '|' + d.fecha)) return
+          hsPrevistas++
+          if (d.fecha <= corte) hsDadas++
+        })
+      })
+      let presentes = 0
+      const personas = new Set()
+      ;(asisRows || []).forEach(a => {
+        if (!idsSet.has(a.turno_id)) return
+        presentes++
+        if (a.persona_id) personas.add(a.persona_id)
+      })
+      let sesCons = 0, sesBio = 0, sesMaso = 0
+      ;(sesRows || []).forEach(s => {
+        if (!esTurnoDe(alias, s.profesional)) return
+        if (s.turno_biolab_id) sesBio++
+        else if (s.turno_maso_id) sesMaso++
+        else sesCons++
+      })
+      return {
+        nombre: NOMBRES_RANKING[email], hsDadas, hsPrevistas, presentes,
+        personas: personas.size, sesCons, sesBio, sesMaso,
+        total: hsDadas + sesCons + sesBio + sesMaso
+      }
+    }).filter(p => p.total > 0 || p.hsPrevistas > 0).sort((a, b) => b.total - a.total)
+
+    if (!equipo.length) {
+      body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">📭</span>Sin actividad registrada en este mes.</div>`
+      return
+    }
+    const maxHs = Math.max(...equipo.map(p => p.hsDadas), 1)
+    const chip = (icono, v, titulo) => v > 0
+      ? `<span title="${titulo}" style="font-size:11.5px; background:rgba(100,116,139,0.1); border-radius:99px; padding:2px 8px; white-space:nowrap;">${icono} ${v}</span>`
+      : ''
+    const filas = equipo.map(p => {
+      const pct = Math.max(Math.round(p.hsDadas / maxHs * 100), p.hsDadas > 0 ? 4 : 0)
+      const previstaTxt = esMesActual && p.hsPrevistas > p.hsDadas
+        ? `<span style="color:var(--text-dim); font-weight:400;"> / ${p.hsPrevistas} previstas</span>` : ''
+      return `
+      <div style="padding:10px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:14px; font-weight:800; min-width:56px;">${p.nombre}</span>
+          <div style="flex:1; background:rgba(100,116,139,0.12); border-radius:99px; height:14px; overflow:hidden;">
+            <div style="width:${pct}%; height:100%; border-radius:99px; background:var(--turquoise);"></div>
+          </div>
+          <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; min-width:120px; text-align:right;">🕒 ${p.hsDadas} hs TF${previstaTxt}</span>
+        </div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; padding:6px 0 0 66px;">
+          ${chip('🙋', p.presentes, 'Alumnos presentes en sus clases')}
+          ${chip('🏋️', p.personas, 'Personas distintas en sus clases')}
+          ${chip('🩺', p.sesCons, 'Sesiones de consultorio')}
+          ${chip('🔬', p.sesBio, 'Evaluaciones BioLab')}
+          ${chip('💆', p.sesMaso, 'Sesiones de masoterapia')}
+        </div>
+      </div>`
+    }).join('')
+    body.innerHTML = `
+      <div style="display:flex; justify-content:flex-end; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:0 4px 4px;">
+        ${esMesActual ? 'Mes en curso · dadas hasta hoy' : 'Mes completo'}
+      </div>` + filas
+  } catch (e) {
+    console.warn('Equipo desempeño:', e.message)
+    body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">⚠️</span>No se pudo calcular. Recargá la página.</div>`
+  }
 }
 
 // ======================
