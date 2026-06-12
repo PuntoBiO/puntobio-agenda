@@ -1655,8 +1655,9 @@ const DIAS_SEM_NUM = {'Domingo':0,'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles
 const TIMERS_DESHACER = {}; // {turnoId: intervalId}
 
 // Devuelve ISO YYYY-MM-DD de la próxima vez que ese turno se dicta.
-// Si hoy es ese día y faltan más de 2 horas para la hora del turno -> hoy.
-// Si ya pasó la hora o quedan menos de 2hs -> la próxima semana.
+// Si hoy es ese día y la clase todavía NO empezó -> hoy (aunque falten menos
+// de 2 hs: se puede cancelar igual, solo que sin recuperatorio).
+// Si la clase de hoy ya empezó/pasó -> la próxima semana.
 function proximaFechaDelTurno(diaSemana, hora){
   const ahora = new Date();
   const targetDia = DIAS_SEM_NUM[diaSemana];
@@ -1666,7 +1667,7 @@ function proximaFechaDelTurno(diaSemana, hora){
     const [hh,mm] = String(hora||'00:00').split(':').map(Number);
     const horaTurno = new Date(ahora);
     horaTurno.setHours(hh||0, mm||0, 0, 0);
-    if(horaTurno - ahora > 2*3600*1000) return fechaToISO(ahora);
+    if(horaTurno - ahora > 0) return fechaToISO(ahora);
     const next = new Date(ahora); next.setDate(next.getDate()+7);
     return fechaToISO(next);
   }
@@ -1703,10 +1704,10 @@ function bloqueMisClases(turnos, asistencias){
   const faltasAvisadas = new Set();
   const faltasVacaciones = new Set();
   (asistencias||[]).forEach(a => {
-    if (a.estado === 'ausente-justificada' && a.fecha >= _hoyISO) {
+    if (a.fecha >= _hoyISO && (a.estado === 'ausente-justificada' || a.estado === 'ausente')) {
       const m = String(a.motivo||'').toLowerCase();
       if (m.includes('aviso del alumno')) faltasAvisadas.add(a.turno_id + '|' + a.fecha);
-      else if (m.includes('vacaciones')) faltasVacaciones.add(a.turno_id + '|' + a.fecha);
+      else if (a.estado === 'ausente-justificada' && m.includes('vacaciones')) faltasVacaciones.add(a.turno_id + '|' + a.fecha);
     }
   });
 
@@ -1745,7 +1746,7 @@ function bloqueMisClases(turnos, asistencias){
     ${rows}
     <div id="vacBloque"></div>
     <button class="btn-faltar" style="width:100%;margin-top:10px;justify-content:center;display:flex" onclick="pbVacacionesAbrir()">🏖️ Me voy de vacaciones</button>
-    <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Si avisás a último momento, esa clase se pierde.<br>¿Te vas unos días? Con <b>🏖️ Me voy de vacaciones</b> avisás todas las faltas del viaje de una sola vez.</div>
+    <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Con menos de 2 horas podés cancelarla igual, pero esa clase <b>no se recupera</b>.<br>¿Te vas unos días? Con <b>🏖️ Me voy de vacaciones</b> avisás todas las faltas del viaje de una sola vez.</div>
   </section>`;
 }
 
@@ -1779,7 +1780,7 @@ function bloqueClasesPuntuales(agregados){
   return `<section class="card reveal d2b">
     <h2><span class="dot"></span>Mis próximas clases puntuales</h2>
     ${rows}
-    <div class="nota">Estas son clases <b>sueltas o de recuperación</b> que te cargó el centro. Podés cancelarlas con al menos <b>2 horas de anticipación</b>. Si avisás más tarde, esa clase la perdés.</div>
+    <div class="nota">Estas son clases <b>sueltas o de recuperación</b> que te cargó el centro. Cancelalas con al menos <b>2 horas de anticipación</b>. Con menos de 2 horas podés cancelarlas igual, pero esa clase <b>se pierde</b>.</div>
   </section>`;
 }
 
@@ -1796,13 +1797,17 @@ window.cancelarPuntual = async function(agregadoId, fechaISO, hora, dia, servici
   const ahora = new Date();
   const horasFalta = (inicio - ahora) / 3600000;
 
-  if(horasFalta < 2){
-    alert('🕐 Llegaste tarde\n\nEl turno empieza en menos de 2 horas. Esta clase ya no se puede cancelar.\nSi no podés venir, avisanos por WhatsApp.');
+  if(horasFalta <= 0){
+    alert('🕐 La clase ya empezó o ya pasó.\n\nNo se puede cancelar desde acá. Si no pudiste venir, avisanos por WhatsApp.');
     return;
   }
 
   const etiquetaTipo = tipo === 'recuperatorio' ? 'recuperatorio' : 'clase suelta';
-  const msgConfirm = `¿Cancelar tu ${etiquetaTipo} del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?\n\nSe libera el lugar y la clase desaparece de tu agenda.`;
+  const msgConfirm = (horasFalta < 2)
+    ? `⚠️ Estás cancelando con menos de 2 horas de anticipación.\n\n` +
+      `Tu ${etiquetaTipo} del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio}) quedará cancelada, ` +
+      `pero esa clase se pierde: NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`
+    : `¿Cancelar tu ${etiquetaTipo} del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?\n\nSe libera el lugar y la clase desaparece de tu agenda.`;
   if(!confirm(msgConfirm)) return;
 
   btn.disabled = true;
@@ -1834,22 +1839,43 @@ window.cancelarPuntual = async function(agregadoId, fechaISO, hora, dia, servici
 window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
   const btn = document.getElementById('btn-'+turnoId);
   const slot = document.getElementById('falta-'+turnoId);
-  if(!confirm(`¿Avisar que vas a faltar al turno del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?`)) return;
+
+  // ¿Cuánto falta para la clase? (para el cartel: con menos de 2 hs se puede
+  // cancelar igual, pero la clase NO se recupera)
+  let dentroDePlazo = true;
+  try {
+    const [hh, mm] = String(hora||'00:00').split(':').map(Number);
+    const inicio = new Date(fechaISO + 'T00:00:00');
+    inicio.setHours(hh||0, mm||0, 0, 0);
+    dentroDePlazo = (inicio - new Date()) >= 2*3600*1000;
+  } catch(e) {}
+
+  const msgConfirm = dentroDePlazo
+    ? `¿Avisar que vas a faltar al turno del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio})?`
+    : `⚠️ Estás avisando con menos de 2 horas de anticipación.\n\n` +
+      `Tu clase del ${fmtFechaCorta(fechaISO)} (${dia} ${hora} · ${servicio}) quedará cancelada, ` +
+      `pero NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`;
+  if(!confirm(msgConfirm)) return;
 
   btn.disabled = true;
   btn.textContent = 'Avisando…';
 
   try {
-    const { error } = await sb.rpc('alumno_avisar_falta', {
+    const { data: resAviso, error } = await sb.rpc('alumno_avisar_falta', {
       p_turno_id: turnoId,
       p_fecha: fechaISO
     });
     if(error) throw error;
 
-    // Éxito: ocultar botón, mostrar aviso con deshacer + countdown
+    // Éxito: ocultar botón, mostrar aviso con deshacer + countdown.
+    // El mensaje depende de si la falta quedó recuperable o no.
+    const fueRecuperable = !(resAviso && resAviso.recuperable === false);
+    const lineaMsg = fueRecuperable
+      ? `🙌 ¡Gracias por avisar con anticipación! Falta avisada para <b>${fmtFechaCorta(fechaISO)}</b>. Vas a poder recuperar esta clase dentro de los próximos 60 días.`
+      : `⚠️ Tu clase del <b>${fmtFechaCorta(fechaISO)}</b> quedó cancelada, pero <b>no se va a poder recuperar</b> (avisaste con menos de 2 horas).`;
     btn.style.display = 'none';
     slot.innerHTML = `<div class="aviso-falta" id="aviso-${turnoId}">
-      <div>✓ Falta avisada para <b>${fmtFechaCorta(fechaISO)}</b>. Podés deshacer en <span class="cd" id="cd-${turnoId}">5:00</span></div>
+      <div>${lineaMsg} Podés deshacer en <span class="cd" id="cd-${turnoId}">5:00</span></div>
       <button class="deshacer" onclick="deshacerFalta(${turnoId},'${fechaISO}')">Deshacer</button>
     </div>`;
     iniciarCountdown(turnoId, fechaISO);
@@ -1858,7 +1884,7 @@ window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
     btn.textContent = '🚫 Avisar falta';
     const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
     let msg = 'No se pudo avisar tu falta.';
-    if(raw.includes('2 hora') || raw.includes('tarde') || raw.includes('horas antes')) msg = 'Llegaste tarde: el turno empieza en menos de 2 horas. Esta clase ya no se puede recuperar.';
+    if(raw.includes('empezó') || raw.includes('empezo') || raw.includes('ya pasó') || raw.includes('ya paso')) msg = 'La clase ya empezó o ya pasó: no se puede cancelar desde acá. Si no pudiste venir, avisanos por WhatsApp.';
     else if(raw.includes('plan')) msg = 'No tenés un plan TF activo. Escribinos para resolverlo.';
     else if(raw.includes('ya') && (raw.includes('avis') || raw.includes('exist'))) msg = 'Ya avisaste esta falta antes.';
     else if(raw.includes('turno') && raw.includes('tuy')) msg = 'Este turno no figura como tuyo. Hablá con el centro.';
