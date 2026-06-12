@@ -1596,6 +1596,16 @@ function buildNav() {
     </div>`)
   }
 
+  // Desempeño: lo ve TODO el equipo, pero cada uno solo su grupo (jornada 78):
+  // profes TF ven a todos los profes TF; kines ven a todos los kines; Male (híbrida)
+  // ve ambos; Vero ve maso; Lu y Jime entran por "Equipo" (Sistema) y ven todo.
+  if (!permisos.admin_total) {
+    items.push(`<div class="nav-item" onclick="irA('equipo')">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">Desempeño</span>
+    </div>`)
+  }
+
   // Mensajes del equipo: lo ve TODO el equipo (es_equipo = true en personas).
   // Es un muro común para que los profes y administración se comuniquen.
   // El badge rojo con el count de no-leídos lo agrega actualizarBadgeMensajes() después.
@@ -3222,6 +3232,18 @@ function renderAuditoria() {
 // Reemplaza el iframe de usuarios.html que duplicaba el sistema (jornada 78).
 // ======================
 let EQUIPO_MES_OFFSET = 0
+// Qué grupos de métricas puede ver el usuario actual (jornada 78):
+// admin (Lu/Jime) = todo · profes TF = grupo TF · kines = consultorio/espec/biolab
+// · maso = maso. Male (kine + profe TF) ve ambos grupos.
+function gruposVisiblesEquipo() {
+  const admin = !!(permisos && permisos.admin_total)
+  return {
+    tf: admin || !!(permisos && permisos.ve_terapia_fisica),
+    kine: admin || !!(permisos && (permisos.ve_consultorios || permisos.ve_biolab)),
+    maso: admin || !!(permisos && permisos.ve_masoterapia),
+    admin
+  }
+}
 function renderEquipo() {
   const contentEl = document.getElementById('content')
   contentEl.classList.remove('module-embed')
@@ -3455,19 +3477,20 @@ async function cargarEquipoDesempeno(mesVer) {
         <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:16px 4px 4px;">${titulo}</div>
         ${filas}`
     }
+    const G = gruposVisiblesEquipo()
     const bloquesAreas =
-      bloqueArea('🩺 Fisioterapia en consultorio (cons. 1 y 2 · rehab)', p => p.fisioCons, '#2563eb') +
-      bloqueArea('✨ Especialidades (osteo · suelo pélvico · punción · drenaje)', p => p.espec, '#7c3aed') +
-      bloqueArea('🔬 BioLab · evaluaciones', p => p.moplex + p.evalIng, '#0d9488',
-        p => chip('🧬', p.moplex, 'Evaluaciones MOPLEX') + chip('📋', p.evalIng, 'Evaluaciones de ingreso / deportistas')) +
-      bloqueArea('💆 Masoterapia', p => p.maso, '#db2777') +
-      bloqueArea('❔ Sesiones sin práctica identificada', p => p.otras, '#64748b')
+      (G.kine ? bloqueArea('🩺 Fisioterapia en consultorio (cons. 1 y 2 · rehab)', p => p.fisioCons, '#2563eb') : '') +
+      (G.kine ? bloqueArea('✨ Especialidades (osteo · suelo pélvico · punción · drenaje)', p => p.espec, '#7c3aed') : '') +
+      (G.kine ? bloqueArea('🔬 BioLab · evaluaciones', p => p.moplex + p.evalIng, '#0d9488',
+        p => chip('🧬', p.moplex, 'Evaluaciones MOPLEX') + chip('📋', p.evalIng, 'Evaluaciones de ingreso / deportistas')) : '') +
+      (G.maso ? bloqueArea('💆 Masoterapia', p => p.maso, '#db2777') : '') +
+      (G.admin ? bloqueArea('❔ Sesiones sin práctica identificada', p => p.otras, '#64748b') : '')
 
     body.innerHTML = `
       <div style="display:flex; justify-content:flex-end; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:0 4px;">
         ${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}
       </div>
-      ${tf.length ? `
+      ${(G.tf && tf.length) ? `
         <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:16px 4px 8px;">🏋️ Terapia Física · productividad (ordenado por ocupación)</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:12px; padding:0 4px;">${cardsTF}</div>` : ''}
       ${bloquesAreas}`
@@ -3525,18 +3548,24 @@ window.abrirDetalleProfe = function(email) {
       </div>
     </div>` : ''
 
-  // Personas distintas TOTALES del mes (unión de todas las áreas, sin repetir)
+  const G = gruposVisiblesEquipo()
+  // Personas distintas TOTALES del mes (solo de las áreas que este usuario puede ver)
+  const areasVisibles = []
+  if (G.tf) areasVisibles.push(s.tf)
+  if (G.kine) areasVisibles.push(s.fisioCons, s.espec, s.moplex, s.evalIng)
+  if (G.maso) areasVisibles.push(s.maso)
+  if (G.admin) areasVisibles.push(s.otras)
   const unionPersonas = new Set()
-  ;[s.tf, s.fisioCons, s.espec, s.moplex, s.evalIng, s.maso, s.otras].forEach(a => a.personas.forEach(p => unionPersonas.add(p)))
+  areasVisibles.forEach(a => a.personas.forEach(p => unionPersonas.add(p)))
 
-  // Semana a semana del mes (actividad total: alumnos TF + sesiones)
+  // Semana a semana del mes (actividad de las áreas visibles)
   const semanas = {}
   const sumarSemana = (fechas) => Object.keys(fechas).forEach(f => {
     const diaNum = Number(f.substring(8, 10))
     const w = Math.min(Math.floor((diaNum - 1) / 7) + 1, 5)
     semanas[w] = (semanas[w] || 0) + fechas[f]
   })
-  ;[s.tf, s.fisioCons, s.espec, s.moplex, s.evalIng, s.maso, s.otras].forEach(a => sumarSemana(a.fechas))
+  areasVisibles.forEach(a => sumarSemana(a.fechas))
   const filasSem = [1, 2, 3, 4, 5].filter(w => semanas[w]).map(w => {
     const desde = (w - 1) * 7 + 1
     const hasta = w === 5 ? 31 : w * 7
@@ -3566,16 +3595,16 @@ window.abrirDetalleProfe = function(email) {
         <button onclick="cerrarDetalleProfe()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center" onmouseover="this.style.background='#f5f7fa'" onmouseout="this.style.background='none'">×</button>
       </div>
       <div style="padding:18px 24px 24px;">
-        ${bloqueTF}
-        ${bloqueDetalle('🩺', 'Fisioterapia en consultorio', s.fisioCons)}
-        ${bloqueDetalle('✨', 'Especialidades', s.espec)}
-        ${bloqueDetalle('🧬', 'BioLab · MOPLEX', s.moplex)}
-        ${bloqueDetalle('📋', 'BioLab · Eval. ingreso / deportistas', s.evalIng)}
-        ${bloqueDetalle('💆', 'Masoterapia', s.maso)}
-        ${bloqueDetalle('❔', 'Sin práctica identificada', s.otras)}
+        ${G.tf ? bloqueTF : ''}
+        ${G.kine ? bloqueDetalle('🩺', 'Fisioterapia en consultorio', s.fisioCons) : ''}
+        ${G.kine ? bloqueDetalle('✨', 'Especialidades', s.espec) : ''}
+        ${G.kine ? bloqueDetalle('🧬', 'BioLab · MOPLEX', s.moplex) : ''}
+        ${G.kine ? bloqueDetalle('📋', 'BioLab · Eval. ingreso / deportistas', s.evalIng) : ''}
+        ${G.maso ? bloqueDetalle('💆', 'Masoterapia', s.maso) : ''}
+        ${G.admin ? bloqueDetalle('❔', 'Sin práctica identificada', s.otras) : ''}
         <div style="background:#e8f4fd; border-radius:12px; padding:12px 14px; display:flex; align-items:center; gap:10px; margin-bottom:14px;">
           <span style="font-size:22px;">🧑‍🤝‍🧑</span>
-          <div style="flex:1; font-size:13px; font-weight:600; color:#0c4a6e;">Personas distintas atendidas en el mes (todas las áreas, sin repetir)</div>
+          <div style="flex:1; font-size:13px; font-weight:600; color:#0c4a6e;">Personas distintas atendidas en el mes (sin repetir)</div>
           <span style="font-size:22px; font-weight:800; color:#0c4a6e;">${unionPersonas.size}</span>
         </div>
         ${filasSem ? `
