@@ -3273,6 +3273,8 @@ function renderEquipo() {
       es la capacidad dividida por la cantidad de profes: una clase de 12 con 2 profes da 6 de referencia a cada uno,
       pero los alumnos van al que los evolucionó). <b>Alumnos por hora</b> = atendidos ÷ horas dadas.
       Se descuentan feriados y clases canceladas por el centro.
+      <b>Coberturas pactadas</b> (cargadas en el módulo Feriados): ese día las clases del cubierto
+      se acreditan enteras al que cubre — horas y cupos — y al cubierto no le cuentan.
     </div>`
   cargarEquipoDesempeno(mesVer)
 }
@@ -3293,7 +3295,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const esMesActual = mesStr === hoyISO.substring(0, 7)
     const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, evoRows, sesRows, tratR, pracR, tbR] = await Promise.all([
+    const [tR, tpR, ferR, cerR, evoRows, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
       supabase.from('turnos').select('id, dia, capacidad'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
@@ -3302,7 +3304,8 @@ async function cargarEquipoDesempeno(mesVer) {
       fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('tratamientos').select('id, practica_codigo, persona_id')),
       supabase.from('practicas').select('codigo, area'),
-      supabase.from('turnos_biolab').select('id, practica').gte('fecha', primerDia).lte('fecha', ultDia)
+      supabase.from('turnos_biolab').select('id, practica').gte('fecha', primerDia).lte('fecha', ultDia),
+      supabase.from('feriados_cobertura').select('fecha, se_lo_toma, cubre').gte('fecha', primerDia).lte('fecha', ultDia)
     ])
 
     const turnosMap = {}
@@ -3325,6 +3328,18 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!e || !turnosMap[p.turno_id]) return
       if (!profesDeTurno[p.turno_id]) profesDeTurno[p.turno_id] = []
       if (!profesDeTurno[p.turno_id].includes(e)) profesDeTurno[p.turno_id].push(e)
+    })
+
+    // COBERTURAS PACTADAS (módulo Feriados): ese día, las clases del cubierto
+    // pasan ENTERAS al que cubre (horas + cupos). El cubierto no se perjudica
+    // y el cubridor recibe el crédito completo de lo que dio (jornada 78).
+    // Mapa: 'fecha|emailCubierto' -> emailCubridor
+    const coberturas = {}
+    ;(cobR.data || []).forEach(c => {
+      if (!c.fecha || !c.se_lo_toma || !c.cubre) return
+      const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], c.se_lo_toma))
+      const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre))
+      if (eDe && eA && eDe !== eA) coberturas[c.fecha + '|' + eDe] = eA
     })
 
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
@@ -3353,10 +3368,13 @@ async function cargarEquipoDesempeno(mesVer) {
         if (cancelada.has(tid + '|' + d.fecha)) return
         const profes = profesDeTurno[tid]
         profes.forEach(e => {
-          st[e].horasPrev++
+          // Si ese día este profe está cubierto por otro (módulo Feriados),
+          // la clase se le acredita ENTERA al cubridor.
+          const eFinal = coberturas[d.fecha + '|' + e] || e
+          st[eFinal].horasPrev++
           if (d.fecha <= corte) {
-            st[e].horas++
-            st[e].cuposEq += t.capacidad / profes.length
+            st[eFinal].horas++
+            st[eFinal].cuposEq += t.capacidad / profes.length
           }
         })
       })
