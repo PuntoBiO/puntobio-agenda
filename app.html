@@ -3260,6 +3260,7 @@ function renderEquipo() {
       <button onclick="equipoCambiarMes(-1)" style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;">←</button>
       <span style="font-weight:800; font-size:15px; text-transform:capitalize; min-width:160px; text-align:center;">${titulo}</span>
       <button onclick="equipoCambiarMes(1)" ${EQUIPO_MES_OFFSET >= 0 ? 'disabled style="opacity:0.35; border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; font-size:14px;"' : 'style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;"'}>→</button>
+      <button onclick="abrirReglasBono()" style="margin-left:auto; border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:6px 14px; cursor:pointer; font-size:13px; font-weight:700;">📖 Reglas del bono</button>
     </div>
     <div class="panel">
       <div class="panel-body" id="equipo-dash-body">
@@ -3429,6 +3430,64 @@ async function cargarEquipoDesempeno(mesVer) {
     EQUIPO_DETALLE.resumen = {}
     equipo.forEach(p => { EQUIPO_DETALLE.resumen[p.email] = p })
 
+    // ===== BONO DE DESEMPEÑO (jornada 78) =====
+    // Lu y Jime no cobran bono (dueñas): quedan fuera del resumen, no de las métricas.
+    const BONO_EXCLUIDOS = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
+    const bonoDe = ocup => ocup >= 80 ? { pct: 30, label: '30% · máximo', color: '#16a34a' }
+      : ocup >= 70 ? { pct: 20, label: '20% · pleno', color: '#0c7bb8' }
+      : ocup >= 60 ? { pct: 10, label: '10% · base', color: '#d97706' }
+      : { pct: 0, label: 'Sin bono', color: '#dc2626' }
+    const faltaPara = ocup => ocup >= 80 ? null : (ocup >= 70 ? 80 - ocup : (ocup >= 60 ? 70 - ocup : 60 - ocup))
+    const bonoLista = equipo.filter(p => (p.horas > 0 || p.horasPrev > 0) && !BONO_EXCLUIDOS.includes(p.email))
+    let liderAlxh = null
+    bonoLista.forEach(p => { if (p.horas > 0 && (!liderAlxh || p.alxh > liderAlxh.alxh)) liderAlxh = p })
+
+    let bonoHTML = ''
+    const miEmailEq = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+    if (G.admin && bonoLista.length) {
+      // RESUMEN PARA LU Y JIME: cómo viene cada profe para el bono
+      const filasBono = bonoLista.slice().sort((a, b) => b.ocup - a.ocup).map(p => {
+        const b = bonoDe(p.ocup)
+        const falta = faltaPara(p.ocup)
+        const lider = (liderAlxh && liderAlxh.email === p.email)
+          ? `<span style="font-size:11px; background:#fef3c7; color:#92400e; border-radius:99px; padding:2px 8px; font-weight:700;">⭐ líder alumnos/hora (+10%)</span>` : ''
+        return `
+        <div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:13.5px; font-weight:800; min-width:52px;">${p.nombre}</span>
+          <span style="font-size:13px; font-weight:800; min-width:44px; color:${b.color};">${p.ocup}%</span>
+          <span style="font-size:12.5px; font-weight:700; color:${b.color}; min-width:96px;">${b.label}</span>
+          <span style="font-size:11.5px; color:var(--text-dim); flex:1;">${falta !== null ? 'le faltan ' + falta + ' pts para el próximo escalón' : 'escalón máximo alcanzado'}</span>
+          ${lider}
+        </div>`
+      }).join('')
+      bonoHTML = `
+        <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:4px 4px 4px;">💰 Bono de desempeño · cómo vienen este mes${esMesActual ? ' (si cerrara hoy)' : ''}</div>
+        <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:6px 14px; margin:0 4px 6px;">${filasBono}
+          <div style="font-size:11px; color:var(--text-dim); padding:8px 4px 6px;">% sobre sueldo neto de bolsillo · falta sin cobertura registrada = bono del mes caído · cierre: último día 23:59 · pago: a partir del 15 del mes siguiente.</div>
+        </div>`
+    } else if (!G.admin) {
+      // TARJETA PERSONAL: cada profe ve SOLO su bono
+      const yo = bonoLista.find(p => p.email === miEmailEq)
+      if (yo) {
+        const b = bonoDe(yo.ocup)
+        const falta = faltaPara(yo.ocup)
+        const soyLider = liderAlxh && liderAlxh.email === yo.email
+        bonoHTML = `
+        <div style="background:#fff; border:2px solid ${b.color}; border-radius:14px; padding:14px 16px; margin:4px 4px 10px;">
+          <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <div>
+              <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">💰 Tu bono${esMesActual ? ' · si el mes cerrara hoy' : ' · ' + mesStr}</div>
+              <div style="font-size:24px; font-weight:800; color:${b.color}; line-height:1.2;">${b.label}</div>
+            </div>
+            <div style="flex:1; min-width:160px; font-size:12.5px; color:var(--text-dim);">
+              Tu ocupación: <b style="color:${b.color};">${yo.ocup}%</b>${falta !== null ? ' · te faltan <b>' + falta + ' puntos</b> para el próximo escalón. Llená tus clases y evolucioná a todos.' : ' · ¡escalón máximo, no aflojes!'}
+              ${soyLider ? '<br>⭐ <b>Vas liderando alumnos por hora: si terminás primero, sumás +10%.</b>' : ''}
+            </div>
+          </div>
+        </div>`
+      }
+    }
+
     // --- SECCIÓN 1: TF · tarjetas (clic = detalle) ---
     const tf = equipo.filter(p => p.horas > 0 || p.horasPrev > 0).sort((a, b) => b.ocup - a.ocup)
     const colorOcup = o => o >= 70 ? '#16a34a' : o >= 50 ? '#d97706' : '#dc2626'
@@ -3510,6 +3569,7 @@ async function cargarEquipoDesempeno(mesVer) {
       <div style="display:flex; justify-content:flex-end; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:0 4px;">
         ${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}
       </div>
+      ${bonoHTML}
       ${(G.tf && tf.length) ? `
         <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:16px 4px 8px;">🏋️ Terapia Física · productividad (ordenado por ocupación)</div>
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:12px; padding:0 4px;">${cardsTF}</div>` : ''}
@@ -3638,6 +3698,41 @@ window.abrirDetalleProfe = function(email) {
 window.cerrarDetalleProfe = function() {
   const o = document.getElementById('detalle-profe-overlay')
   if (o) o.remove()
+}
+
+// ======================
+// REGLAS DEL BONO DE DESEMPEÑO (modal leíble por todo el equipo)
+// ======================
+window.abrirReglasBono = function() {
+  const overlay = document.createElement('div')
+  overlay.id = 'reglas-bono-overlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;animation:fadeIn 0.2s'
+  const fila = (o, b, c) => `<tr><td style="padding:6px 10px;border:1px solid #d8e9f5;">${o}</td><td style="padding:6px 10px;border:1px solid #d8e9f5;font-weight:800;color:${c};">${b}</td></tr>`
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:600px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);animation:slideUp 0.3s">
+      <div style="padding:20px 24px;border-bottom:1px solid #eef0f3;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:#fff;border-radius:16px 16px 0 0;">
+        <h2 style="margin:0;font-size:18px;color:#0a0a0a">📖 Reglas del bono de desempeño</h2>
+        <button onclick="document.getElementById('reglas-bono-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center">×</button>
+      </div>
+      <div style="padding:18px 24px 24px;font-size:13.5px;line-height:1.65;color:#1f2937;">
+        <p style="margin:0 0 10px;"><b>1 · Qué se mide:</b> tu <b>ocupación del mes</b> (panel Desempeño). Alumno atendido = alumno que <b>vos evolucionaste con tu login</b>. <span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:5px;font-weight:700;">Lo que no está evolucionado, no existe.</span></p>
+        <p style="margin:0 0 6px;"><b>2 · Cuánto se cobra</b> (sobre tu sueldo neto de bolsillo, se cobra el escalón alcanzado):</p>
+        <table style="border-collapse:collapse;font-size:13px;margin:0 0 10px;">
+          ${fila('Menos de 60%', 'Sin bono', '#dc2626')}
+          ${fila('60% a 69%', '10% del sueldo', '#d97706')}
+          ${fila('70% a 79%', '20% del sueldo', '#0c7bb8')}
+          ${fila('80% o más', '30% del sueldo', '#16a34a')}
+        </table>
+        <p style="margin:0 0 10px;"><b>3 · Plus:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas).</p>
+        <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
+        <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona con su login y le suma todo a él; al cubierto ese día no le cuenta.</p>
+        <p style="margin:0 0 10px;"><b>6 · Faltas sin cobertura:</b> faltar a dar clase sin cobertura registrada (por el motivo que sea) hace <b>caer el bono del mes completo</b>.</p>
+        <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
+        <p style="margin:0;"><b>8 · Cierre y pago:</b> cierra el último día del mes a las 23:59 con el número de tu tarjeta. Se paga <b>a partir del 15 del mes siguiente</b>, por separado del sueldo. Vigente desde <b>junio 2026</b> (se paga desde julio).</p>
+      </div>
+    </div>`
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+  document.body.appendChild(overlay)
 }
 
 // ======================
