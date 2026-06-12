@@ -249,7 +249,7 @@
     const mesAnt = mesAnterior(mesActual);
     const [insR, pagR, tarR, sorR] = await Promise.all([
       supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
-      supa.from('pagos_tf').select('inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
+      supa.from('pagos_tf').select('id, fecha, inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
       supa.from('tarifario_tf').select('plan, actividad, valor_lista'),
       // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF en estos meses
       supa.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO').in('mes_descuento', [mesActual, mesAnt])
@@ -347,11 +347,24 @@
     const pagado = pagosMes.reduce((s, p) => s + Number(p.importe || 0), 0);
     const descuento = pagosMes.reduce((s, p) => s + Number(p.descuento_temporal || 0), 0);
     // ¿Hay algún pago marcado como parcial este mes?
-    const saldosParciales = pagosMes.map(saldoParcial).filter(s => s !== null);
-    if (saldosParciales.length > 0) {
-      // Pago parcial explícito: debe el saldo que se cargó al cobrar.
-      const debeParcial = saldosParciales.reduce((s, v) => s + v, 0);
-      return { pagado, descuento, cortesia: false, debe: Math.max(0, debeParcial) };
+    // El saldo que importa es el del ÚLTIMO parcial (foto de la deuda en ese momento),
+    // y se le restan los pagos que vinieron DESPUÉS (saldan total o parcialmente esa deuda).
+    // Así, si alguien pagó $60.000 (parcial, saldo=25000) y después abonó los $25.000
+    // restantes como cobro normal, la deuda queda en $0 y sale de morosos.
+    const conOrden = pagosMes.slice().sort((a, b) => {
+      const fa = a.fecha || '', fb = b.fecha || '';
+      if (fa !== fb) return fa < fb ? -1 : 1;
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+    let idxUltimoParcial = -1, saldoUltimoParcial = null;
+    conOrden.forEach((p, i) => {
+      const s = saldoParcial(p);
+      if (s !== null) { idxUltimoParcial = i; saldoUltimoParcial = s; }
+    });
+    if (idxUltimoParcial >= 0) {
+      const pagadoDespues = conOrden.slice(idxUltimoParcial + 1).reduce((s, p) => s + Number(p.importe || 0), 0);
+      const descDespues = conOrden.slice(idxUltimoParcial + 1).reduce((s, p) => s + Number(p.descuento_temporal || 0), 0);
+      return { pagado, descuento, cortesia: false, debe: Math.max(0, saldoUltimoParcial - pagadoDespues - descDespues) };
     }
     if (esMesAnterior) {
       // Mes pasado con pago NORMAL y sin marca de parcial => saldado (pagó lo de su plan de entonces).
