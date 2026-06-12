@@ -2364,11 +2364,9 @@ async function calcularHorasTF(misAlias) {
       }
     })
     if (!misTurnos.size) return null
-    const ids = Array.from(misTurnos.keys())
-    const [ferR, cerR, asisRows] = await Promise.all([
+    const [ferR, cerR] = await Promise.all([
       supabase.from('feriados').select('fecha').gte('fecha', R.desde).lte('fecha', R.hasta),
-      supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').in('turno_id', ids).gte('fecha', R.desde).lte('fecha', R.hasta),
-      fetchTodo(() => supabase.from('asistencia').select('persona_id, fecha, turno_id').eq('estado', 'presente').in('turno_id', ids).gte('fecha', R.desde).lte('fecha', R.hasta))
+      supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').in('turno_id', Array.from(misTurnos.keys())).gte('fecha', R.desde).lte('fecha', R.hasta)
     ])
     const esFeriado = new Set((ferR.data || []).map(f => f.fecha))
     const cancelada = new Set((cerR.data || []).map(c => c.turno_id + '|' + c.fecha))
@@ -2384,17 +2382,7 @@ async function calcularHorasTF(misAlias) {
         if (d.fecha.substring(0, 7) === R.mesActual) horas.mes++
       })
     })
-    const pres = { hoy: 0, sem: 0, mes: 0 }
-    const personas = new Set()
-    ;(asisRows || []).forEach(a => {
-      if (a.fecha === R.hoyISO) pres.hoy++
-      if (a.fecha >= R.lunesStr && a.fecha <= R.domingoStr) pres.sem++
-      if (a.fecha && a.fecha.substring(0, 7) === R.mesActual) {
-        pres.mes++
-        if (a.persona_id) personas.add(a.persona_id)
-      }
-    })
-    return { horas, pres, personasMes: personas.size }
+    return { horas }
   } catch (e) {
     console.warn('Horas TF:', e.message)
     return null
@@ -2512,15 +2500,10 @@ function gridMisNumeros(n, mostrar) {
   let visibles = candidatas.filter(c => (c.o.hoy + c.o.sem + c.o.mes) > 0)
   if (!visibles.length) visibles = candidatas
   let filas = visibles.map(c => filaG(c.icon, c.label, c.o)).join('')
-  // Horas de clase TF dadas (grilla turno_profes) + alumnos presentes en esas horas
+  // Horas de clase TF dadas (grilla turno_profes). Los alumnos atendidos
+  // salen de las evoluciones (fila "Alumnos evolucionados (TF)" de arriba).
   if (n.horasTF) {
     filas += filaG('🕒', 'Horas de clase TF dadas', n.horasTF.horas)
-    filas += filaG('🙋', 'Alumnos presentes en mis clases', n.horasTF.pres)
-    filas += `
-    <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
-      <span style="font-size:13px; flex:1">🏋️ Personas distintas en mis clases este mes</span>
-      <span style="font-size:14px; font-weight:800; font-variant-numeric:tabular-nums;">${n.horasTF.personasMes}</span>
-    </div>`
   }
   filas += `
     <div style="display:flex; align-items:center; gap:10px; padding:9px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
@@ -3262,10 +3245,10 @@ function renderEquipo() {
       </div>
     </div>
     <div style="font-size:11.5px; color:var(--text-dim); padding:10px 4px;">
-      📐 <b>Cómo se calcula:</b> en clases compartidas, los alumnos presentes y los cupos se reparten en partes iguales entre los profes
-      (ej: 12 cupos con 2 profes = 6 cupos cada uno). <b>Ocupación</b> = alumnos atendidos ÷ cupos que le tocaban.
-      <b>Alumnos por hora</b> = alumnos atendidos ÷ horas dadas. Se descuentan feriados y clases canceladas por el centro.
-      Todo sale de la asistencia real marcada en la agenda.
+      📐 <b>Cómo se calcula:</b> <b>Alumnos atendidos (TF)</b> = evoluciones escritas por cada profe con su login
+      (regla del centro: cada uno evoluciona a la gente que atendió). <b>Ocupación</b> = alumnos atendidos ÷ cupos que le tocaban
+      (en clases compartidas los cupos se reparten: 12 cupos con 2 profes = 6 cada uno). <b>Alumnos por hora</b> = atendidos ÷ horas dadas.
+      Se descuentan feriados y clases canceladas por el centro.
     </div>`
   cargarEquipoDesempeno(mesVer)
 }
@@ -3284,23 +3267,32 @@ async function cargarEquipoDesempeno(mesVer) {
     const ultDia = mesStr + '-' + String(new Date(y, m + 1, 0).getDate()).padStart(2, '0')
     const hoyISO = hoyLocalISO()
     const esMesActual = mesStr === hoyISO.substring(0, 7)
-    const corte = esMesActual ? hoyISO : ultDia   // métricas REALES: hasta hoy si es el mes en curso
+    const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, asisRows, sesRows] = await Promise.all([
+    const [tR, tpR, ferR, cerR, evoRows, sesRows, tratR, pracR, tbR] = await Promise.all([
       supabase.from('turnos').select('id, dia, capacidad'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
-      fetchTodo(() => supabase.from('asistencia').select('persona_id, fecha, turno_id').eq('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
-      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia))
+      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email').gte('fecha', primerDia).lte('fecha', ultDia)),
+      fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
+      fetchTodo(() => supabase.from('tratamientos').select('id, practica_codigo')),
+      supabase.from('practicas').select('codigo, area'),
+      supabase.from('turnos_biolab').select('id, practica').gte('fecha', primerDia).lte('fecha', ultDia)
     ])
 
     const turnosMap = {}
     ;(tR.data || []).forEach(t => { turnosMap[t.id] = { dia: normTexto(t.dia), capacidad: Number(t.capacidad) || 0 } })
     const esFeriado = new Set((ferR.data || []).map(f => f.fecha))
     const cancelada = new Set((cerR.data || []).map(c => c.turno_id + '|' + c.fecha))
+    const areaDeCodigo = {}
+    ;(pracR.data || []).forEach(p => { areaDeCodigo[normTexto(p.codigo)] = normTexto(p.area) })
+    const codigoDeTrat = {}
+    ;(tratR || []).forEach(t => { codigoDeTrat[t.id] = normTexto(t.practica_codigo) })
+    const practicaBiolab = {}
+    ;(tbR.data || []).forEach(t => { practicaBiolab[t.id] = normTexto(t.practica) })
 
-    // Profes por turno (emails) para repartir presentes y cupos en clases compartidas
+    // Profes por turno (emails) para repartir cupos en clases compartidas
     const emails = Object.keys(NOMBRES_RANKING)
     const aliasPorEmail = {}
     emails.forEach(e => { aliasPorEmail[e] = ALIAS_EQUIPO[e] || [normTexto(NOMBRES_RANKING[e])] })
@@ -3312,21 +3304,12 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!profesDeTurno[p.turno_id].includes(e)) profesDeTurno[p.turno_id].push(e)
     })
 
-    // Presentes por instancia de clase (turno + fecha) y personas por turno
-    const presInstancia = {}
-    const personasPorTurno = {}
-    ;(asisRows || []).forEach(a => {
-      const k = a.turno_id + '|' + a.fecha
-      presInstancia[k] = (presInstancia[k] || 0) + 1
-      if (a.persona_id) {
-        if (!personasPorTurno[a.turno_id]) personasPorTurno[a.turno_id] = new Set()
-        personasPorTurno[a.turno_id].add(a.persona_id)
-      }
-    })
-
-    // Recorrer cada clase REAL del mes y repartir entre los profes que la dan
+    // HORAS y CUPOS: por grilla (cupos repartidos entre profes que comparten clase)
     const st = {}
-    emails.forEach(e => { st[e] = { horas: 0, horasPrev: 0, alumnosEq: 0, cuposEq: 0, turnoIds: new Set(), sesCons: 0, sesBio: 0, sesMaso: 0 } })
+    emails.forEach(e => {
+      st[e] = { horas: 0, horasPrev: 0, cuposEq: 0, evol: 0, personas: new Set(),
+                fisioCons: 0, espec: 0, moplex: 0, evalIng: 0, maso: 0, otras: 0 }
+    })
     listaDiasISO(primerDia, ultDia).forEach(d => {
       if (esFeriado.has(d.fecha)) return
       Object.keys(profesDeTurno).forEach(tid => {
@@ -3334,47 +3317,65 @@ async function cargarEquipoDesempeno(mesVer) {
         if (!t || t.dia !== d.dia) return
         if (cancelada.has(tid + '|' + d.fecha)) return
         const profes = profesDeTurno[tid]
-        const n = profes.length
-        const pres = presInstancia[tid + '|' + d.fecha] || 0
         profes.forEach(e => {
           st[e].horasPrev++
           if (d.fecha <= corte) {
             st[e].horas++
-            st[e].alumnosEq += pres / n
-            st[e].cuposEq += t.capacidad / n
-            st[e].turnoIds.add(Number(tid))
+            st[e].cuposEq += t.capacidad / profes.length
           }
         })
       })
     })
-    // Sesiones de las otras áreas a nombre de cada uno
+
+    // ALUMNOS ATENDIDOS (TF): por EVOLUCIÓN. Cada profe evoluciona a quien atendió,
+    // con su propio login, así la atribución es exacta (regla del centro).
+    const emailAEquipo = {}
+    emails.forEach(e => { emailAEquipo[e.toLowerCase().trim()] = e })
+    ;(evoRows || []).forEach(ev => {
+      const e = emailAEquipo[String(ev.autor_email || '').toLowerCase().trim()]
+      if (!e || !ev.fecha || ev.fecha > corte) return
+      st[e].evol++
+      if (ev.persona_id) st[e].personas.add(ev.persona_id)
+    })
+
+    // SESIONES de las otras áreas, separadas por tipo real:
+    // 🩺 Fisio consultorio · ✨ Especialidades · 🧬 MOPLEX · 📋 Eval. ingreso/deportista · 💆 Maso
     ;(sesRows || []).forEach(s => {
       const e = emails.find(em => esTurnoDe(aliasPorEmail[em], s.profesional))
       if (!e) return
-      if (s.turno_biolab_id) st[e].sesBio++
-      else if (s.turno_maso_id) st[e].sesMaso++
-      else st[e].sesCons++
+      if (s.turno_maso_id) { st[e].maso++; return }
+      if (s.turno_biolab_id) {
+        const pr = practicaBiolab[s.turno_biolab_id] || ''
+        if (pr.includes('MOPLEX')) st[e].moplex++
+        else st[e].evalIng++
+        return
+      }
+      const cod = codigoDeTrat[s.tratamiento_id] || ''
+      const area = areaDeCodigo[cod] || ''
+      if (area === 'ESPECIALIDADES') st[e].espec++
+      else if (area === 'MASOTERAPIA') st[e].maso++
+      else if (area === 'BIOLAB') { if (cod.includes('MOPLEX')) st[e].moplex++; else st[e].evalIng++ }
+      else if (area === 'CONSULTORIOS') st[e].fisioCons++
+      else st[e].otras++
     })
 
     const equipo = emails.map(e => {
       const s = st[e]
-      const personas = new Set()
-      s.turnoIds.forEach(tid => { (personasPorTurno[tid] || new Set()).forEach(p => personas.add(p)) })
-      const alxh = s.horas > 0 ? s.alumnosEq / s.horas : 0
-      const ocup = s.cuposEq > 0 ? s.alumnosEq / s.cuposEq * 100 : 0
+      const alxh = s.horas > 0 ? s.evol / s.horas : 0
+      const ocup = s.cuposEq > 0 ? s.evol / s.cuposEq * 100 : 0
+      const ses = s.fisioCons + s.espec + s.moplex + s.evalIng + s.maso + s.otras
       return {
         nombre: NOMBRES_RANKING[e],
         horas: s.horas, horasPrev: s.horasPrev,
-        alumnos: Math.round(s.alumnosEq * 10) / 10,
+        evol: s.evol, personas: s.personas.size,
         alxh: Math.round(alxh * 10) / 10,
         ocup: Math.round(ocup),
-        personas: personas.size,
-        sesCons: s.sesCons, sesBio: s.sesBio, sesMaso: s.sesMaso,
-        ses: s.sesCons + s.sesBio + s.sesMaso
+        fisioCons: s.fisioCons, espec: s.espec, moplex: s.moplex,
+        evalIng: s.evalIng, maso: s.maso, otras: s.otras, ses
       }
     })
 
-    // --- SECCIÓN 1: TF · tarjetas de productividad ---
+    // --- SECCIÓN 1: TF · tarjetas de productividad (atendidos = evolucionados) ---
     const tf = equipo.filter(p => p.horas > 0 || p.horasPrev > 0).sort((a, b) => b.ocup - a.ocup)
     const colorOcup = o => o >= 70 ? '#16a34a' : o >= 50 ? '#d97706' : '#dc2626'
     const medalla = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : ''
@@ -3400,7 +3401,7 @@ async function cargarEquipoDesempeno(mesVer) {
             <div style="font-size:10.5px; color:var(--text-dim);">⚡ alumnos por hora</div>
           </div>
           <div style="background:#f5f7fa; border-radius:10px; padding:8px 10px;">
-            <div style="font-size:17px; font-weight:800; font-variant-numeric:tabular-nums;">${p.alumnos}</div>
+            <div style="font-size:17px; font-weight:800; font-variant-numeric:tabular-nums;">${p.evol}</div>
             <div style="font-size:10.5px; color:var(--text-dim);">🙋 alumnos atendidos</div>
           </div>
           <div style="background:#f5f7fa; border-radius:10px; padding:8px 10px;">
@@ -3414,7 +3415,7 @@ async function cargarEquipoDesempeno(mesVer) {
         </div>
       </div>`).join('')
 
-    // --- SECCIÓN 2: Consultorios · BioLab · Maso ---
+    // --- SECCIÓN 2: ÁREAS separadas por tipo de práctica ---
     const areas = equipo.filter(p => p.ses > 0).sort((a, b) => b.ses - a.ses)
     const maxSes = Math.max(...areas.map(p => p.ses), 1)
     const chip = (icono, v, titulo) => v > 0
@@ -3429,12 +3430,15 @@ async function cargarEquipoDesempeno(mesVer) {
           <div style="flex:1; background:rgba(100,116,139,0.12); border-radius:99px; height:14px; overflow:hidden;">
             <div style="width:${pct}%; height:100%; border-radius:99px; background:var(--blue, #3b82f6);"></div>
           </div>
-          <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; min-width:110px; text-align:right;">🩺 ${p.ses} sesiones</span>
+          <span style="font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; min-width:110px; text-align:right;">${p.ses} sesiones</span>
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap; padding:6px 0 0 66px;">
-          ${chip('🩺', p.sesCons, 'Sesiones de consultorio')}
-          ${chip('🔬', p.sesBio, 'Evaluaciones BioLab')}
-          ${chip('💆', p.sesMaso, 'Sesiones de masoterapia')}
+          ${chip('🩺', p.fisioCons, 'Fisioterapia en consultorio (cons. 1 y 2, rehab)')}
+          ${chip('✨', p.espec, 'Especialidades (osteo, suelo pélvico, punción, drenaje)')}
+          ${chip('🧬', p.moplex, 'Evaluaciones MOPLEX')}
+          ${chip('📋', p.evalIng, 'Evaluaciones de ingreso / deportistas')}
+          ${chip('💆', p.maso, 'Sesiones de masoterapia')}
+          ${chip('❔', p.otras, 'Sesiones sin práctica identificada')}
         </div>
       </div>`
     }).join('')
@@ -3448,7 +3452,7 @@ async function cargarEquipoDesempeno(mesVer) {
       </div>
       ${tf.length ? tituloSeccion('🏋️ Terapia Física · productividad (ordenado por ocupación)') + `
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:12px; padding:0 4px;">${cardsTF}</div>` : ''}
-      ${areas.length ? tituloSeccion('🩺 Consultorios · BioLab · Maso · sesiones') + filasAreas : ''}`
+      ${areas.length ? tituloSeccion('Áreas · 🩺 Fisio consultorio · ✨ Especialidades · 🧬 MOPLEX · 📋 Eval. ingreso · 💆 Maso') + filasAreas : ''}`
   } catch (e) {
     console.warn('Equipo desempeño:', e.message)
     body.innerHTML = `<div class="empty-state"><span class="empty-state-icon">⚠️</span>No se pudo calcular. Recargá la página.</div>`
