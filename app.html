@@ -3456,6 +3456,21 @@ async function cargarEquipoDesempeno(mesVer) {
         email: e, nombre: NOMBRES_RANKING[e],
         horas: s.horas, horasPrev: s.horasPrev,
         horasPorFecha: s.horasPorFecha, evolPorFecha: s.tf.fechas,
+        estadoPorFecha: (function(){
+          // Por cada fecha del mes en que este profe está como AUSENTE cubierto:
+          // marca quién lo cubre. cubreA tiene 'fecha|emailCubridor'->emailAusente
+          // y vacaCubre 'fecha|emailAusente'->emailCubridor.
+          const m = {}
+          Object.keys(cubreA).forEach(k => {
+            const [f, emCub] = k.split('|')
+            if (cubreA[k] === e) m[f] = { tipo: 'cubierto', por: NOMBRES_RANKING[emCub] || emCub }
+          })
+          Object.keys(vacaCubre).forEach(k => {
+            const [f, emAus] = k.split('|')
+            if (emAus === e) m[f] = { tipo: 'vacaciones' }
+          })
+          return m
+        })(),
         evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
@@ -3474,11 +3489,14 @@ async function cargarEquipoDesempeno(mesVer) {
     // Lu y Jime no cobran bono (dueñas): quedan fuera del resumen, no de las métricas.
     const BONO_EXCLUIDOS = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
     // Escalones con nombre (jornada 78): el camino a la excelencia
-    const bonoDe = ocup => ocup >= 80 ? { pct: 30, label: '🏆 Excelencia · 30%', color: '#16a34a' }
-      : ocup >= 70 ? { pct: 20, label: '🚀 Crecimiento · 20%', color: '#0c7bb8' }
-      : ocup >= 60 ? { pct: 10, label: '🤝 Compromiso · 10%', color: '#d97706' }
+    // MÉTRICA (jornada 78): promedio de alumnos por hora. NO depende de cuántas horas
+    // trabaje cada uno — pura productividad. Escalones: 4,0 / 4,5 / 5,0.
+    const bonoDe = aph => aph >= 5.0 ? { pct: 30, label: '🏆 Excelencia · 30%', color: '#16a34a' }
+      : aph >= 4.5 ? { pct: 20, label: '🚀 Crecimiento · 20%', color: '#0c7bb8' }
+      : aph >= 4.0 ? { pct: 10, label: '🤝 Compromiso · 10%', color: '#d97706' }
       : { pct: 0, label: 'En camino', color: '#dc2626' }
-    const faltaPara = ocup => ocup >= 80 ? null : (ocup >= 70 ? 80 - ocup : (ocup >= 60 ? 70 - ocup : 60 - ocup))
+    // Cuánto le falta de promedio por hora para el próximo escalón
+    const faltaPara = aph => aph >= 5.0 ? null : (aph >= 4.5 ? Math.round((5.0 - aph) * 10) / 10 : (aph >= 4.0 ? Math.round((4.5 - aph) * 10) / 10 : Math.round((4.0 - aph) * 10) / 10))
     const bonoLista = equipo.filter(p => (p.horas > 0 || p.horasPrev > 0) && !BONO_EXCLUIDOS.includes(p.email))
     let liderAlxh = null
     bonoLista.forEach(p => { if (p.horas > 0 && (!liderAlxh || p.alxh > liderAlxh.alxh)) liderAlxh = p })
@@ -3517,17 +3535,17 @@ async function cargarEquipoDesempeno(mesVer) {
     const miEmailEq = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
     if (G.admin && bonoLista.length) {
       // RESUMEN PARA LU Y JIME: cómo viene cada profe para el bono
-      const filasBono = bonoLista.slice().sort((a, b) => b.ocup - a.ocup).map(p => {
-        const b = bonoDe(p.ocup)
-        const falta = faltaPara(p.ocup)
+      const filasBono = bonoLista.slice().sort((a, b) => b.alxh - a.alxh).map(p => {
+        const b = bonoDe(p.alxh)
+        const falta = faltaPara(p.alxh)
         const lider = (liderAlxh && liderAlxh.email === p.email)
-          ? `<span style="font-size:11px; background:#fef3c7; color:#92400e; border-radius:99px; padding:2px 8px; font-weight:700;">⭐ líder alumnos/hora (+10%)</span>` : ''
+          ? `<span style="font-size:11px; background:#fef3c7; color:#92400e; border-radius:99px; padding:2px 8px; font-weight:700;">🌟 mejor promedio</span>` : ''
         return `
         <div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-bottom:1px solid rgba(0,0,0,0.05);">
           <span style="font-size:13.5px; font-weight:800; min-width:52px;">${p.nombre}</span>
-          <span style="font-size:13px; font-weight:800; min-width:44px; color:${b.color};">${p.ocup}%</span>
+          <span style="font-size:13px; font-weight:800; min-width:52px; color:${b.color};">${p.alxh}/h</span>
           <span style="font-size:12.5px; font-weight:700; color:${b.color}; min-width:96px;">${b.label}</span>
-          <span style="font-size:11.5px; color:var(--text-dim); flex:1;">${falta !== null ? 'le faltan ' + falta + ' pts para el próximo escalón' : 'escalón máximo alcanzado'}</span>
+          <span style="font-size:11.5px; color:var(--text-dim); flex:1;">${falta !== null ? 'le faltan ' + falta + ' alu/h para el próximo escalón' : 'escalón máximo alcanzado'}</span>
           ${lider}
         </div>`
       }).join('')
@@ -3535,24 +3553,24 @@ async function cargarEquipoDesempeno(mesVer) {
         <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 4px 4px;">
           <span style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">💰 Bono de desempeño · cómo vienen este mes${esMesActual ? ' (si cerrara hoy)' : ''}</span>
           <button onclick="abrirVacasProfes()" style="border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700;">🏖 Vacaciones de profes</button>
+          <button onclick="abrirReportesSala()" style="border:1px solid #d97706; color:#d97706; background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700; margin-left:6px;">🧹 Orden de sala</button>
         </div>
         <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:6px 14px; margin:0 4px 6px;">${filasBono}
-          <div style="font-size:11px; color:var(--text-dim); padding:8px 4px 6px;">% sobre sueldo neto de bolsillo · falta sin cobertura registrada = bono del mes caído · cierre: último día 23:59 · pago: a partir del 15 del mes siguiente.</div>
+          <div style="font-size:11px; color:var(--text-dim); padding:8px 4px 6px;">Promedio de alumnos por hora (no depende de cuántas horas trabaje) · % sobre sueldo neto de bolsillo · falta sin cobertura registrada = bono del mes caído · cierre: último día 23:59 · pago: a partir del 15 del mes siguiente.</div>
         </div>`
     } else if (!G.admin) {
       // TARJETA PERSONAL: cada profe ve SOLO su bono
       const yo = bonoLista.find(p => p.email === miEmailEq)
       if (yo) {
-        const b = bonoDe(yo.ocup)
-        const falta = faltaPara(yo.ocup)
+        const b = bonoDe(yo.alxh)
+        const falta = faltaPara(yo.alxh)
         const soyLider = liderAlxh && liderAlxh.email === yo.email
-        // Para el profe, tono de acompañamiento: nada de "llená tus clases"
         const esCero = b.pct === 0
         const colorCard = esCero ? '#d97706' : b.color
         const etiqueta = esCero ? 'En camino a Compromiso' : b.label
         const mensaje = falta !== null
-          ? `Tu ocupación: <b style="color:${colorCard};">${yo.ocup}%</b> · estás a <b>${falta} puntos</b> del ${esCero ? 'primer' : 'próximo'} escalón. Cada alumno evolucionado te acerca. 💪`
-          : `Tu ocupación: <b style="color:${colorCard};">${yo.ocup}%</b> · ¡escalón máximo! Tu trabajo se nota.`
+          ? `Tu promedio: <b style="color:${colorCard};">${yo.alxh}</b> alumnos por hora · estás a <b>${falta}</b> del ${esCero ? 'primer' : 'próximo'} escalón. Cada alumno que atendés bien te acerca. 💪`
+          : `Tu promedio: <b style="color:${colorCard};">${yo.alxh}</b> alumnos por hora · ¡escalón máximo! Tu trabajo se nota.`
         bonoHTML = `
         <div style="background:#fff; border:2px solid ${colorCard}; border-radius:14px; padding:14px 16px; margin:4px 4px 10px;">
           <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -3572,21 +3590,21 @@ async function cargarEquipoDesempeno(mesVer) {
     // --- SECCIÓN 1: TF · tarjetas (clic = detalle) ---
     // Admin (Lu/Jime) ve a todos. Cada profe ve SOLO su tarjeta: el bono es contra
     // umbrales fijos, no entre ellos — sin ranking público con nombres (jornada 78).
-    let tf = equipo.filter(p => p.horas > 0 || p.horasPrev > 0).sort((a, b) => b.ocup - a.ocup)
+    let tf = equipo.filter(p => p.horas > 0 || p.horasPrev > 0).sort((a, b) => b.alxh - a.alxh)
     let refsEquipoHTML = ''
     if (!G.admin) {
       const yo = tf.find(p => p.email === miEmailEq)
       // Referencias anónimas: promedio del grupo del bono y mejor alumnos/hora (sin nombres)
       if (yo && bonoLista.length > 1) {
-        const promOcup = Math.round(bonoLista.reduce((a, p) => a + p.ocup, 0) / bonoLista.length)
+        const promAph = Math.round(bonoLista.reduce((a, p) => a + p.alxh, 0) / bonoLista.length * 10) / 10
         const soyLiderRef = liderAlxh && liderAlxh.email === yo.email
         refsEquipoHTML = `
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin:0 4px 10px;">
           <div style="background:#f5f7fa; border-radius:10px; padding:8px 14px; font-size:12.5px;">
-            📊 Promedio del equipo: <b>${promOcup}%</b> de ocupación <span style="color:var(--text-dim)">(vos: ${yo.ocup}%)</span>
+            📊 Promedio del equipo: <b>${promAph}</b> alumnos/hora <span style="color:var(--text-dim)">(vos: ${yo.alxh})</span>
           </div>
           <div style="background:#f5f7fa; border-radius:10px; padding:8px 14px; font-size:12.5px;">
-            ⚡ Mejor alumnos/hora del mes: <b>${liderAlxh ? liderAlxh.alxh : '—'}</b> <span style="color:var(--text-dim)">(vos: ${yo.alxh})</span>${soyLiderRef ? ' ⭐ ¡sos vos!' : ''}
+            🌟 Mejor promedio del mes: <b>${liderAlxh ? liderAlxh.alxh : '—'}</b> <span style="color:var(--text-dim)">(vos: ${yo.alxh})</span>${soyLiderRef ? ' ⭐ ¡sos vos!' : ''}
           </div>
         </div>`
       }
@@ -3610,8 +3628,18 @@ async function cargarEquipoDesempeno(mesVer) {
           const ev = Math.round((yo.evolPorFecha[f] || 0) * 10) / 10
           const futuro = f > hoyISO
           const finde = dow >= 5
+          const estado = (yo.estadoPorFecha || {})[f]
           let fondo = '#f5f7fa', borde = 'transparent', cuerpo = ''
           if (esFeriado.has(f)) { fondo = '#eef0f3'; cuerpo = '<div style="font-size:10px;">🎉</div>' }
+          else if (estado && estado.tipo === 'vacaciones') {
+            fondo = '#fef3c7'; borde = '#f59e0b55'
+            cuerpo = '<div style="font-size:9px; color:#92400e; font-weight:700;">🏖 0</div>'
+          }
+          else if (estado && estado.tipo === 'cubierto') {
+            // ese día lo cubrió otro; si le tocó la mitad de alumnos (sala compartida) se ve en ev
+            fondo = '#ede9fe'; borde = '#a78bfa55'
+            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubrió ${estado.por}</div>${ev > 0 ? `<div style="font-size:9px; color:#6d28d9;">🙋${ev}</div>` : '<div style="font-size:9px; color:#6d28d9;">0</div>'}`
+          }
           else if (hs > 0) {
             fondo = '#e6f5fd'; borde = 'var(--turquoise)'
             cuerpo = `<div style="font-size:10px; font-weight:700; color:#0c7bb8;">${hs}h</div><div style="font-size:9.5px; color:var(--text-dim);">🙋${ev}</div>`
@@ -3628,6 +3656,7 @@ async function cargarEquipoDesempeno(mesVer) {
       }
     }
     const colorOcup = o => o >= 70 ? '#16a34a' : o >= 50 ? '#d97706' : '#dc2626'
+    const colorAph = a => a >= 5.0 ? '#16a34a' : a >= 4.0 ? '#d97706' : '#dc2626'
     const medalla = i => G.admin ? (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '') : ''
     const cardsTF = tf.map((p, i) => `
       <div onclick="abrirDetalleProfe('${p.email}')" style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,0.04); cursor:pointer; transition:transform 0.15s;" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
@@ -3638,18 +3667,14 @@ async function cargarEquipoDesempeno(mesVer) {
             <div style="font-size:11px; color:var(--text-dim);">${p.horas} hs dadas${esMesActual && p.horasPrev > p.horas ? ' · ' + p.horasPrev + ' previstas' : ''}</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-size:22px; font-weight:800; color:${colorOcup(p.ocup)}; line-height:1;">${p.ocup}%</div>
-            <div style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">ocupación</div>
+            <div style="font-size:22px; font-weight:800; color:${colorAph(p.alxh)}; line-height:1;">${p.alxh}</div>
+            <div style="font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">alu / hora</div>
           </div>
         </div>
         <div style="background:rgba(100,116,139,0.12); border-radius:99px; height:8px; overflow:hidden; margin-bottom:12px;">
-          <div style="width:${Math.min(p.ocup, 100)}%; height:100%; border-radius:99px; background:${colorOcup(p.ocup)};"></div>
+          <div style="width:${Math.min(p.alxh / 5 * 100, 100)}%; height:100%; border-radius:99px; background:${colorAph(p.alxh)};"></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-          <div style="background:#f5f7fa; border-radius:10px; padding:8px 10px;">
-            <div style="font-size:17px; font-weight:800; font-variant-numeric:tabular-nums;">${p.alxh}</div>
-            <div style="font-size:10.5px; color:var(--text-dim);">⚡ alumnos por hora</div>
-          </div>
           <div style="background:#f5f7fa; border-radius:10px; padding:8px 10px;">
             <div style="font-size:17px; font-weight:800; font-variant-numeric:tabular-nums;">${p.evol}</div>
             <div style="font-size:10.5px; color:var(--text-dim);">🙋 alumnos atendidos</div>
@@ -3839,6 +3864,67 @@ window.cerrarDetalleProfe = function() {
 }
 
 // ======================
+// ORDEN DE SALA (solo admin/secretarías): reportar día con sala fuera de lugar.
+// Un reporte en el mes hace caer el Bono de Equipo de los 3 profes de TF.
+// ======================
+window.abrirReportesSala = async function() {
+  const R = rangosCalendario()
+  let filas = ''
+  try {
+    const { data } = await supabase.from('reportes_sala').select('id, fecha, nota, autor')
+      .gte('fecha', R.primerDia).lte('fecha', R.ultDia).order('fecha', { ascending: false })
+    filas = (data || []).map(r => `
+      <div style="display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid rgba(0,0,0,0.05); font-size:13px;">
+        <span style="flex:1;">🧹 <b>${r.fecha}</b>${r.nota ? ' · ' + r.nota : ''}${r.autor ? ' <span style="color:var(--text-dim)">('+r.autor+')</span>' : ''}</span>
+        <button onclick="pbBorrarReporteSala(${r.id})" style="border:1px solid #16a34a55; color:#16a34a; background:#fff; border-radius:7px; padding:3px 10px; cursor:pointer; font-size:12px;">✓ resuelto</button>
+      </div>`).join('') || '<p style="font-size:13px; color:#16a34a;">✓ Sin reportes este mes — la sala viene impecable.</p>'
+  } catch (e) { filas = '<p style="font-size:13px; color:#dc2626;">No pude leer la tabla. ¿Corriste el SQL de reportes_sala?</p>' }
+  const overlay = document.createElement('div')
+  overlay.id = 'sala-overlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:540px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:18px 22px;border-bottom:1px solid #eef0f3;display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;font-size:17px;">🧹 Orden de sala</h2>
+        <button onclick="document.getElementById('sala-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;">×</button>
+      </div>
+      <div style="padding:16px 22px;">
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px;">Reportá un día en que la sala quedó fuera de lugar. <b>Un solo reporte en el mes hace caer el Bono de Equipo de los tres profes de TF</b> — trabajan en equipo, se cuidan entre todos.</div>
+        ${filas}
+        <div style="margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,0.07);">
+          <div style="font-size:13px; font-weight:700; margin-bottom:8px;">➕ Reportar día con sala fuera de lugar</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+            <label style="font-size:11.5px;">Fecha<br><input type="date" id="sala-fecha" style="padding:6px; border-radius:7px; border:1px solid #ccc;"></label>
+            <label style="font-size:11.5px; flex:1;">Qué pasó (opcional)<br><input type="text" id="sala-nota" placeholder="Ej: camillas sin ordenar, material tirado" style="padding:6px; border-radius:7px; border:1px solid #ccc; width:100%;"></label>
+            <button onclick="pbGuardarReporteSala()" style="border:none; background:#d97706; color:#fff; border-radius:8px; padding:8px 16px; cursor:pointer; font-weight:700; font-size:13px;">Reportar</button>
+          </div>
+          <div id="sala-status" style="font-size:12px; margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>`
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+  document.body.appendChild(overlay)
+}
+window.pbGuardarReporteSala = async function() {
+  const fecha = document.getElementById('sala-fecha').value
+  const nota = document.getElementById('sala-nota').value.trim() || null
+  const status = document.getElementById('sala-status')
+  if (!fecha) { status.innerHTML = '<span style="color:#dc2626;">Poné la fecha.</span>'; return }
+  status.innerHTML = 'Guardando…'
+  const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
+  const { error } = await supabase.from('reportes_sala').insert({ fecha, nota, autor })
+  if (error) { status.innerHTML = '<span style="color:#dc2626;">No se pudo: ' + (error.message || '') + '</span>'; return }
+  document.getElementById('sala-overlay').remove()
+  alert('Reporte cargado. El Bono de Equipo de este mes queda caído.')
+}
+window.pbBorrarReporteSala = async function(id) {
+  if (!confirm('¿Marcar como resuelto y borrar este reporte? (vuelve a habilitar el bono si no quedan otros)')) return
+  const { error } = await supabase.from('reportes_sala').delete().eq('id', id)
+  if (error) { alert('No se pudo: ' + (error.message || '')); return }
+  document.getElementById('sala-overlay').remove()
+}
+
+// ======================
 // VACACIONES DE PROFES (solo admin): registrar período y quién queda a cargo
 // ======================
 const PROFES_VACAS = ['Santi', 'Lean', 'Lauti', 'Male', 'Lu', 'Jime']
@@ -3921,21 +4007,22 @@ window.abrirReglasBono = function() {
         <button onclick="document.getElementById('reglas-bono-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center">×</button>
       </div>
       <div style="padding:18px 24px 24px;font-size:13.5px;line-height:1.65;color:#1f2937;">
-        <p style="margin:0 0 10px;"><b>1 · Qué se mide:</b> tu <b>ocupación del mes</b> (panel Desempeño). Alumno atendido = alumno que <b>vos evolucionaste con tu login</b> — la evolución es tu firma profesional. <span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:5px;font-weight:700;">Lo que no está evolucionado, no existe.</span> Una clase concurrida no se llena de casualidad: se llena cuando cada alumno está bien atendido y elige volver. Eso es lo que se reconoce.</p>
+        <p style="margin:0 0 10px;"><b>1 · Qué se mide:</b> tu <b>promedio de alumnos por hora</b> del mes (alumnos atendidos ÷ horas que diste). <b>No importa cuántas horas trabajes</b> — importa cuánta gente atendés bien en cada hora que estás. El que da 4 horas y el que da 50 se miden igual: por promedio. Alumno atendido = alumno que <b>vos evolucionaste con tu login</b>. <span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:5px;font-weight:700;">Lo que no está evolucionado, no existe.</span></p>
         <p style="margin:0 0 6px;"><b>2 · Los escalones</b> — el camino a la excelencia (porcentaje sobre tu sueldo neto de bolsillo, se reconoce el escalón alcanzado):</p>
         <table style="border-collapse:collapse;font-size:13px;margin:0 0 10px;">
-          ${fila('Menos de 60%', 'En camino · todavía sin reconocimiento', '#dc2626')}
-          ${fila('60% a 69%', '🤝 COMPROMISO · 10% del sueldo', '#d97706')}
-          ${fila('70% a 79%', '🚀 CRECIMIENTO · 20% del sueldo', '#0c7bb8')}
-          ${fila('80% o más', '🏆 EXCELENCIA · 30% del sueldo', '#16a34a')}
+          ${fila('Menos de 4,0 /h', 'En camino · todavía sin reconocimiento', '#dc2626')}
+          ${fila('4,0 a 4,4 /h', '🤝 COMPROMISO · 10% del sueldo', '#d97706')}
+          ${fila('4,5 a 4,9 /h', '🚀 CRECIMIENTO · 20% del sueldo', '#0c7bb8')}
+          ${fila('5,0 /h o más', '🏆 EXCELENCIA · 30% del sueldo', '#16a34a')}
         </table>
-        <p style="margin:0 0 10px;"><b>3 · Plus Dedicación:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas). Acá no importa cuántas horas trabajás: importa cuánta gente acompañás bien en cada una.</p>
+        <p style="margin:0 0 10px;"><b>3 · 🌟 Bono Estrella:</b> el profe que <b>más mejoró su promedio</b> respecto al mes anterior suma un <b>10% extra</b>. No es para el que mejor está, es para el que más se esforzó — el que más remó desde donde venía. Le da chance a todos, sin importar el punto de partida. (Arranca en julio: junio es el mes base. Condición: 70% de horas dadas.)</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
         <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona a todos con su propio login, y los alumnos de ese día se reparten <b>mitad y mitad</b> entre los dos. Las horas y cupos de cada uno quedan igual: nadie pierde por tomarse el día. <b>Ojo:</b> esto vale SOLO en días de cobertura — en clases normales cada alumno es 100% de quien lo evolucionó.</p>
-        <p style="margin:0 0 10px;"><b>5b · Vacaciones:</b> se registran en el sistema con quién queda a cargo. Al que se va, esos días <b>no le cuentan para nada</b> — su mes se mide sobre los días trabajados. Cada clase y cada alumno de esos días pasan <b>completos</b> al compañero que queda a cargo: cubrir vacaciones hace crecer tu mes. Las clases nunca se suspenden por vacaciones del equipo.</p>
+        <p style="margin:0 0 10px;"><b>5b · Vacaciones:</b> se registran en el sistema con quién queda a cargo. Al que se va, esos días <b>no le cuentan</b> — su mes se mide sobre los días trabajados. El que cubre las vacaciones de un compañero: (1) los alumnos que atienda esos días <b>le suman a su propio promedio</b>, y (2) cobra un <b>Bono de Compensación del 20% de su sueldo</b> por cubrir todo lo agendado de ese profe y ayudar al centro a mantener los cupos activos. Las clases nunca se suspenden por vacaciones del equipo.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa. El espacio también es parte del compromiso: <b>la sala se entrega ordenada y en condiciones</b> al cierre de cada turno — las observaciones registradas por orden de sala afectan el escalón del mes.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
-        <p style="margin:0;"><b>8 · Cierre y pago:</b> cierra el último día del mes a las 23:59 con el número de tu tarjeta. Se paga <b>a partir del 15 del mes siguiente</b>, por separado del sueldo. Vigente desde <b>junio 2026</b> (se paga desde julio).</p>
+        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000 repartidos entre los tres profes de TF</b> ($50.000 cada uno) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Se cuidan entre todos. (Arranca en agosto; julio es prueba sin plata.)</p>
+        <p style="margin:0;"><b>9 · Cierre y pago:</b> cierra el último día del mes a las 23:59 con el número de tu tarjeta. Se paga <b>a partir del 15 del mes siguiente</b>, por separado del sueldo. Vigente desde <b>junio 2026</b> (se paga desde julio).</p>
       </div>
     </div>`
   overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
