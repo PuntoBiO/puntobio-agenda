@@ -2670,6 +2670,45 @@ window.toggleTurnoWiz = (turnoId) => {
   renderTurnosWiz();
 };
 
+// --- Helpers para detectar fechas completas con recuperos ------------------
+// Día (texto) -> índice 0=domingo ... 6=sábado
+function diaIndexDom(diaTxt) {
+  const x = String(diaTxt || '').trim().toLowerCase();
+  const m = { domingo:0, lunes:1, martes:2, 'miércoles':3, miercoles:3,
+              jueves:4, viernes:5, 'sábado':6, sabado:6 };
+  return (x in m) ? m[x] : -1;
+}
+// Fecha local -> 'YYYY-MM-DD' (sin corrimiento por zona horaria)
+function isoLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+// Revisa los próximos 30 días de cada turno elegido y devuelve las fechas que
+// ya quedan completas con recuperos/sueltas. Usa la MISMA función que el
+// candado (fn_presentes_dia) para que no haya diferencias de criterio.
+async function detectarFechasCompletas(turnoIds, fechaDesde) {
+  const conflictos = [];
+  const hoyIso = HOY.toISOString().split('T')[0];
+  const inicioIso = (fechaDesde && fechaDesde > hoyIso) ? fechaDesde : hoyIso;
+  const inicioD = new Date(inicioIso + 'T00:00:00');
+  const finD = new Date(HOY.getFullYear(), HOY.getMonth(), HOY.getDate() + 30);
+  for (const turnoId of turnoIds) {
+    const t = wizTurnosCache.find(x => x.id === turnoId);
+    if (!t || !t.capacidad) continue;
+    const idxDia = diaIndexDom(t.dia);
+    if (idxDia < 0) continue;
+    for (let d = new Date(inicioD); d <= finD; d.setDate(d.getDate() + 1)) {
+      if (d.getDay() !== idxDia) continue;
+      const fechaIso = isoLocal(d);
+      const { data, error } = await sb.rpc('fn_presentes_dia', { p_turno_id: turnoId, p_fecha: fechaIso });
+      if (error) throw error;
+      if ((data || 0) >= t.capacidad) {
+        conflictos.push({ turnoId, dia: t.dia, hora: t.hora, servicio: normServicio(t.servicio), fecha: fechaIso });
+      }
+    }
+  }
+  return conflictos;
+}
+
 async function guardarTurnosWiz() {
   if (wizTurnosSel.size === 0) return; // opcional, no hace nada
   const personaId = alumnoActivo.persona.id;
@@ -2680,6 +2719,51 @@ async function guardarTurnosWiz() {
   // Antes de insertar, traer los registros que ya existan para esa persona en esos turnos
   // (activos o inactivos) — si existen los REACTIVAMOS en vez de duplicarlos.
   const turnoIds = [...wizTurnosSel];
+
+  // --- Detectar fechas completas con recuperos (próximos 30 días) ----------
+  // Si alguna fecha de un turno elegido ya está completa con recuperos, le
+  // preguntamos a Lu si la anota igual marcando esos días como falta avisada.
+  let fechasFaltaAvisada = [];
+  try {
+    const conflictos = await detectarFechasCompletas(turnoIds, fechaDesde);
+    if (conflictos.length) {
+      const det = conflictos
+        .sort((a, b) => a.fecha.localeCompare(b.fecha))
+        .map(c => `   • ${fmtFechaArg(c.fecha)} — ${c.servicio} ${c.dia} ${c.hora} hs`)
+        .join('\n');
+      const ok = confirm(
+        `Estas clases ya están COMPLETAS con recuperos ya anotados:\n\n${det}\n\n` +
+        `¿La anoto igual como fija?\n` +
+        `Esos días le quedan como FALTA AVISADA con recuperatorio ` +
+        `(los recuperos ya anotados conservan su lugar).`
+      );
+      if (!ok) { toast('Cancelado: no se anotaron los turnos.', true); return; }
+      fechasFaltaAvisada = conflictos;
+    }
+  } catch (e) {
+    // Si la detección falla (p.ej. permisos), seguimos: el candado avisará igual.
+    console.warn('Detección de fechas completas:', e.message);
+  }
+
+  // Pre-marcar las faltas avisadas ANTES de anotar el fijo, así el candado
+  // las ve y deja pasar esos días (no se cuenta como un lugar más).
+  for (const c of fechasFaltaAvisada) {
+    const { data: yaFalta } = await sb.from('asistencia')
+      .select('id')
+      .eq('turno_id', c.turnoId).eq('persona_id', personaId).eq('fecha', c.fecha)
+      .maybeSingle();
+    if (!yaFalta) {
+      const { error: errFalta } = await sb.from('asistencia').insert({
+        turno_id: c.turnoId,
+        persona_id: personaId,
+        fecha: c.fecha,
+        estado: 'ausente-justificada',
+        motivo: 'Alta/reingreso: clase completa con recuperos ya anotados — recupera aparte'
+      });
+      if (errFalta) throw errFalta;
+    }
+  }
+
   const { data: existentes, error: errSel } = await sb.from('turno_alumnos')
     .select('id, turno_id')
     .eq('persona_id', personaId)
@@ -2712,7 +2796,10 @@ async function guardarTurnosWiz() {
     if (errIns) throw errIns;
   }
 
-  toast(`✓ ${turnoIds.length} turno(s) fijo(s) desde ${fmtFechaArg(fechaDesde)}`);
+  const extra = fechasFaltaAvisada.length
+    ? ` · ${fechasFaltaAvisada.length} día(s) como falta avisada con recupero`
+    : '';
+  toast(`✓ ${turnoIds.length} turno(s) fijo(s) desde ${fmtFechaArg(fechaDesde)}${extra}`);
 }
 
 // Devuelve los turnos seleccionados como objetos {dia, hora, servicio}, ordenados
