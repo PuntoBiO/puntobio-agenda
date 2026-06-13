@@ -3266,7 +3266,7 @@ async function renderGrilla() {
     // Traer la grilla: dos consultas separadas y cruzar por turno_id
     // (mismo patrón que usa el panel Desempeño, evita depender del join embebido)
     const [resTurnos, resProfes] = await Promise.all([
-      supabase.from('turnos').select('id, dia, hora'),
+      supabase.from('turnos').select('id, dia, hora, servicio'),
       supabase.from('turno_profes').select('turno_id, nombre_profe')
     ])
     if (resTurnos.error) throw resTurnos.error
@@ -3293,52 +3293,63 @@ async function renderGrilla() {
     const HORAS = ['07:00','08:00','09:00','10:00','11:00','12:00','15:00','16:00','17:00','18:00','19:00','20:00']
     const normDia = (d) => { const x=(d||'').toLowerCase(); if(x.includes('lun'))return'Lunes'; if(x.includes('mar'))return'Martes'; if(x.includes('mié')||x.includes('mie'))return'Miércoles'; if(x.includes('jue'))return'Jueves'; if(x.includes('vie'))return'Viernes'; return d }
     const normHora = (h) => (h || '').toString().slice(0,5)
+    const normSala = (s) => {
+      const x = (s || '').toLowerCase()
+      if (x.includes('entren')) return 'Entrenamiento'
+      if (x.includes('kine') || x.includes('filax')) return 'Kinefilaxia'
+      return s ? s : 'Sin sala'
+    }
 
-    // celda[dia][hora] = Set de profes
-    const celda = {}
-    DIAS.forEach(d => { celda[d] = {}; HORAS.forEach(h => celda[d][h] = new Set()) })
+    // celdaSala[sala][dia][hora] = Set de profes  (separado POR SALA: no se mezclan)
+    const celdaSala = {}
     let totalProf = {}
     ;(tp || []).forEach(r => {
       const prof = norm(r.nombre_profe)
       const dia = normDia(r.turnos?.dia)
       const hora = normHora(r.turnos?.hora)
-      if (celda[dia] && celda[dia][hora] !== undefined) {
-        celda[dia][hora].add(prof)
-        totalProf[prof] = (totalProf[prof] || 0) + 1
-      }
+      const sala = normSala(r.turnos?.servicio)
+      if (!DIAS.includes(dia) || !HORAS.includes(hora)) return
+      if (!celdaSala[sala]) { celdaSala[sala] = {}; DIAS.forEach(d => { celdaSala[sala][d] = {}; HORAS.forEach(h => celdaSala[sala][d][h] = new Set()) }) }
+      celdaSala[sala][dia][hora].add(prof)
+      totalProf[prof] = (totalProf[prof] || 0) + 1
     })
 
-    // Colores por profe (consistentes)
     const COLOR = { 'Santi':'#16a34a','Lean':'#dc2626','Lauti':'#d97706','Male':'#7c3aed','Lu':'#0c7bb8','Jime':'#0891b2' }
     const chip = (p) => `<span style="display:inline-block; background:${(COLOR[p]||'#64748b')}1a; color:${COLOR[p]||'#64748b'}; border-radius:6px; padding:1px 7px; font-size:11.5px; font-weight:700; margin:1px 2px;">${p}</span>`
 
-    // Resumen de horas por profe (chips arriba)
     const resumen = Object.keys(totalProf).sort((a,b)=>totalProf[b]-totalProf[a])
       .map(p => `<span style="display:inline-block; background:${(COLOR[p]||'#64748b')}14; color:${COLOR[p]||'#64748b'}; border-radius:99px; padding:4px 12px; font-size:12.5px; font-weight:700; margin:2px 3px;">${p} · ${totalProf[p]}h/sem</span>`).join('')
 
-    // Tabla
-    const thead = `<tr><th style="text-align:left; padding:8px 10px; font-size:12px; color:var(--text-dim);">Hora</th>${DIAS.map(d=>`<th style="padding:8px 6px; font-size:12.5px; text-align:center;">${d}</th>`).join('')}</tr>`
-    const filas = HORAS.map(h => {
-      // omitir filas totalmente vacías
-      const algo = DIAS.some(d => celda[d][h].size > 0)
-      if (!algo) return ''
-      const tds = DIAS.map(d => {
-        const set = celda[d][h]
-        if (set.size === 0) return `<td style="text-align:center; color:#cbd5e1; padding:6px 4px;">—</td>`
-        const compartida = set.size > 1
-        return `<td style="text-align:center; padding:5px 4px; ${compartida ? 'background:#fff7ed;' : ''}">${Array.from(set).map(chip).join('')}</td>`
+    // Una tabla POR SALA. Compartida = 2+ profes en la MISMA sala/día/hora.
+    const ICONO_SALA = { 'Entrenamiento':'🏋️', 'Kinefilaxia':'🤸', 'Sin sala':'📍' }
+    const ordenSalas = Object.keys(celdaSala).sort((a,b) => (a==='Entrenamiento'?0:1)-(b==='Entrenamiento'?0:1))
+    const tablaDe = (sala) => {
+      const celda = celdaSala[sala]
+      const thead = `<tr><th style="text-align:left; padding:8px 10px; font-size:12px; color:var(--text-dim);">Hora</th>${DIAS.map(d=>`<th style="padding:8px 6px; font-size:12.5px; text-align:center;">${d}</th>`).join('')}</tr>`
+      const filas = HORAS.map(h => {
+        const algo = DIAS.some(d => celda[d][h].size > 0)
+        if (!algo) return ''
+        const tds = DIAS.map(d => {
+          const set = celda[d][h]
+          if (set.size === 0) return `<td style="text-align:center; color:#cbd5e1; padding:6px 4px;">—</td>`
+          const compartida = set.size > 1
+          return `<td style="text-align:center; padding:5px 4px; ${compartida ? 'background:#fff7ed;' : ''}">${Array.from(set).map(chip).join('')}</td>`
+        }).join('')
+        return `<tr style="border-top:1px solid rgba(0,0,0,0.05);"><td style="padding:6px 10px; font-weight:700; font-size:12.5px; color:#0c7bb8;">${h}</td>${tds}</tr>`
       }).join('')
-      return `<tr style="border-top:1px solid rgba(0,0,0,0.05);"><td style="padding:6px 10px; font-weight:700; font-size:12.5px; color:#0c7bb8;">${h}</td>${tds}</tr>`
-    }).join('')
+      return `
+        <div style="font-size:13px; font-weight:800; color:var(--text-strong); margin:16px 4px 6px;">${ICONO_SALA[sala]||'📍'} ${sala}</div>
+        <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:10px; overflow-x:auto;">
+          <table style="width:100%; border-collapse:collapse; min-width:560px;">${thead}${filas}</table>
+        </div>`
+    }
 
     cont.innerHTML = `
-      <div style="margin:0 4px 14px;">${resumen}</div>
-      <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:10px; overflow-x:auto;">
-        <table style="width:100%; border-collapse:collapse; min-width:560px;">${thead}${filas}</table>
-      </div>
+      <div style="margin:0 4px 8px;">${resumen}</div>
+      ${ordenSalas.map(tablaDe).join('')}
       <div style="font-size:11.5px; color:var(--text-dim); padding:12px 4px;">
-        🟧 Las celdas con fondo naranja son <b>salas compartidas</b> (dos profes en el mismo turno). El guioncito (—) es turno sin profe o clase cerrada.
-        Esta grilla sale directo de los turnos cargados en el sistema; para cambiarla, editá los turnos en <b>Gestión de Turnos</b> (solo Lu y Jime).
+        Cada tabla es una <b>sala</b>. 🟧 Las celdas naranjas son <b>turnos compartidos dentro de esa misma sala</b> (dos profes juntos). El guioncito (—) es turno sin profe o clase cerrada.
+        Esta grilla sale directo de los turnos cargados; para cambiarla, editá los turnos en <b>Gestión de Turnos</b> (solo Lu y Jime).
       </div>`
   } catch (e) {
     cont.innerHTML = `<div class="empty-state"><span class="empty-state-icon">⚠️</span>No pude cargar la grilla: ${e.message || e}</div>`
