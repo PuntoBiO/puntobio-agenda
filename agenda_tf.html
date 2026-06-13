@@ -1425,6 +1425,8 @@ async function cargarDatos() {
     await cerrarClasesViejasAuto();   // respaldo: cierra clases de días pasados sin cerrar
     renderDiasTabs();
     renderTurnos();
+    // En background: cargar pendientes del mes (no bloquea la UI inicial)
+    setTimeout(() => { cargarPendientesMes(); }, 100);
   } catch(err) {
     console.error('Error cargando datos:', err);
     document.getElementById('turnos-grid').innerHTML = 
@@ -1673,18 +1675,25 @@ function renderResumen() {
 
   // === CÁLCULO SEMANAL DE PENDIENTES DE EVOLUCIÓN ===
   // Recorremos los 5 días (Lunes a Viernes) de la semana visible.
-  // Para cada día: filtrar feriado, clase cerrada, y armar pendientes.
+  // REGLA: solo contamos pendientes de DÍAS YA PASADOS o de HOY si la clase
+  // ya está cerrada. Días futuros y clases en curso NO se cuentan (no es razonable
+  // marcar como "pendiente" algo que todavía no sucedió).
   const lunes = getLunes(offsetSemana);
+  const hoyIso_ = hoyIso();
   let pendientesTotal = 0;
   const diasConPendientes = []; // [{ dia, fechaIso, fechaLabel, esHoy, turnos:[{turno,pendientes}] }]
   DIAS.forEach((diaNombre, idx) => {
     const fObj = new Date(lunes); fObj.setDate(lunes.getDate() + idx);
     const fechaIso = `${fObj.getFullYear()}-${String(fObj.getMonth()+1).padStart(2,'0')}-${String(fObj.getDate()).padStart(2,'0')}`;
-    if (feriadoDe(fechaIso)) return; // feriado: no aplica
+    if (fechaIso > hoyIso_) return;     // días futuros: no aplica
+    if (feriadoDe(fechaIso)) return;    // feriado: no aplica
+    const esHoyDia = (fechaIso === hoyIso_);
     // Filtrar turnos de ESTE día (respetando el filtro Todos/Entrenamiento/Kinefilaxia)
     const turnosDia = HORARIOS.filter(t => {
       if (t.dia !== diaNombre) return false;
       if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
+      // Si es HOY, solo contar turnos cuya clase ya está cerrada
+      if (esHoyDia && !claseEstaCerrada(t.id, fechaIso)) return false;
       return true;
     });
     const turnosConPendientes = [];
@@ -1709,7 +1718,6 @@ function renderResumen() {
       }
     });
     if (turnosConPendientes.length > 0) {
-      const esHoyDia = esHoy(fObj);
       const fechaLabel = `${fObj.getDate()}/${fObj.getMonth()+1}`;
       diasConPendientes.push({ dia: diaNombre, fechaIso, fechaLabel, esHoy: esHoyDia, turnos: turnosConPendientes });
     }
@@ -1717,7 +1725,7 @@ function renderResumen() {
   // Guardar el detalle para el popup
   window._evoPendientesDetalle = diasConPendientes;
 
-  // Card de falta evolución (de la semana entera)
+  // Card de falta evolución (de la semana visible — solo días pasados + hoy con clase cerrada)
   let cardFaltaEvo;
   if (pendientesTotal > 0) {
     cardFaltaEvo = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo()">
@@ -1732,12 +1740,35 @@ function renderResumen() {
     </div>`;
   }
 
+  // Card mensual (se completa después cuando termine cargarDatosMes)
+  const mesData = window._pendientesMesCache;
+  let cardFaltaEvoMes;
+  if (mesData == null) {
+    cardFaltaEvoMes = `<div class="resumen-card falta-evo" style="opacity:.6;cursor:default" id="card-mes-evo">
+      <div class="resumen-num">…</div>
+      <div class="resumen-label">📅 Falta evolucionar · mes</div>
+      <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;">Cargando…</div>
+    </div>`;
+  } else if (mesData.total > 0) {
+    cardFaltaEvoMes = `<div class="resumen-card falta-evo" onclick="mostrarPendientesMes()" id="card-mes-evo">
+      <div class="resumen-num">${mesData.total}</div>
+      <div class="resumen-label">📅 Falta evolucionar · mes</div>
+      <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;text-decoration:underline;">Ver detalle →</div>
+    </div>`;
+  } else {
+    cardFaltaEvoMes = `<div class="resumen-card falta-evo ok" id="card-mes-evo">
+      <div class="resumen-num">✓</div>
+      <div class="resumen-label">Mes evolucionado</div>
+    </div>`;
+  }
+
   document.getElementById('resumen-top').innerHTML = `
     <div class="resumen-card"><div class="resumen-num">${turnos.length}</div><div class="resumen-label">Turnos del día</div></div>
     <div class="resumen-card destacado"><div class="resumen-num">${totalOcup}</div><div class="resumen-label">Alumnos anotados</div></div>
     <div class="resumen-card"><div class="resumen-num">${totalCap-totalPresentes}</div><div class="resumen-label">Lugares libres</div></div>
     <div class="resumen-card"><div class="resumen-num">${pct}%</div><div class="resumen-label">Ocupación</div></div>
     ${cardFaltaEvo}
+    ${cardFaltaEvoMes}
   `;
 }
 
@@ -1797,6 +1828,181 @@ window.cerrarPendientesEvo = function() {
   const o = document.getElementById('pop-evo-overlay');
   if (o) o.remove();
 };
+
+// === PANEL MENSUAL DE PENDIENTES DE EVOLUCIÓN ===
+// Carga lazy: se llama después del load inicial para no demorar la apertura.
+// Trae datos del mes en curso (día 1 hasta hoy) y calcula los pendientes con
+// la misma regla que el panel semanal (solo cuenta clases ya cerradas/días pasados).
+window._pendientesMesCache = null; // null = no cargado todavía
+async function cargarPendientesMes() {
+  try {
+    const hoy = hoyIso();
+    const mesIso = hoy.substring(0, 7); // 'YYYY-MM'
+    const año = parseInt(mesIso.split('-')[0], 10);
+    const mes = parseInt(mesIso.split('-')[1], 10);
+    const dia1 = `${mesIso}-01`;
+
+    const [asis, evo, agr, cer] = await Promise.all([
+      supabaseQuery('asistencia', `?select=turno_id,fecha,persona_id,estado&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('evoluciones_tf', `?select=turno_id,fecha,persona_id&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`)
+    ]);
+
+    const asisM = {};
+    (asis || []).forEach(f => asisM[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado);
+    const evoM = {};
+    (evo || []).forEach(f => evoM[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = true);
+    const agrM = {};
+    (agr || []).forEach(f => {
+      const k = `${f.turno_id}-${f.fecha}`;
+      if (!agrM[k]) agrM[k] = [];
+      agrM[k].push({ id: String(f.persona_id), tipo: f.tipo });
+    });
+    const cerM = new Map();
+    (cer || []).forEach(f => cerM.set(`${f.turno_id}-${f.fecha}`, { tipo: f.tipo, motivo: f.motivo }));
+
+    // Cargar nombres de personas que no están en cache local
+    const idsP = new Set();
+    (asis || []).forEach(f => idsP.add(f.persona_id));
+    (evo || []).forEach(f => idsP.add(f.persona_id));
+    (agr || []).forEach(f => idsP.add(f.persona_id));
+    const nombres = {};
+    const faltan = [...idsP].filter(id => {
+      const n = nombrePersona(id);
+      if (n && n !== String(id)) { nombres[id] = n; return false; }
+      return true;
+    });
+    if (faltan.length) {
+      try {
+        const pers = await supabaseQuery('personas', `?select=id,nombre&id=in.(${faltan.join(',')})&limit=2000`);
+        (pers || []).forEach(p => nombres[p.id] = p.nombre);
+      } catch (e) {}
+    }
+
+    // Calcular pendientes día por día desde día 1 hasta hoy
+    const diasPendientes = [];
+    let total = 0;
+    for (let d = 1; d <= 31; d++) {
+      const fObj = new Date(año, mes - 1, d);
+      if (fObj.getMonth() !== mes - 1) break;
+      const fechaIso = `${año}-${String(mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if (fechaIso > hoy) break;
+      if (feriadoDe(fechaIso)) continue;
+      // Mapa JS Date.getDay(): 0=Domingo, 1=Lunes... 6=Sábado
+      const dow = fObj.getDay();
+      if (dow === 0 || dow === 6) continue; // sin clases en fin de semana
+      const diaNombre = DIAS[dow - 1];
+      const esHoyDia = (fechaIso === hoy);
+
+      const turnosPendientes = [];
+      HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
+        // Si es hoy, solo contar turnos con clase cerrada
+        if (esHoyDia && !cerM.has(`${t.id}-${fechaIso}`)) return;
+        // Cierre por centro: no genera pendientes
+        const cInfo = cerM.get(`${t.id}-${fechaIso}`);
+        if (cInfo && cInfo.tipo === 'centro') return;
+
+        const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, fechaIso);
+        const agregadosKey = agrM[`${t.id}-${fechaIso}`] || [];
+        const idsFijos = new Set(fijos.map(a => String(a.id)));
+        const todos = [
+          ...fijos,
+          ...agregadosKey.filter(a => !idsFijos.has(String(a.id)))
+            .map(a => ({ id: a.id, nombre: nombres[a.id] || nombrePersona(a.id) }))
+        ];
+
+        const pendientes = [];
+        todos.forEach(a => {
+          const est = asisM[`${t.id}-${fechaIso}-${a.id}`];
+          const esAusente = (est === 'ausente' || est === 'ausente-justificada');
+          if (esAusente) return;
+          if (!evoM[`${t.id}-${fechaIso}-${a.id}`]) {
+            pendientes.push({ id: a.id, nombre: a.nombre || nombres[a.id] || ('#' + a.id) });
+          }
+        });
+        if (pendientes.length > 0) {
+          turnosPendientes.push({ turno: t, pendientes, cerrada: cerM.has(`${t.id}-${fechaIso}`) });
+          total += pendientes.length;
+        }
+      });
+
+      if (turnosPendientes.length > 0) {
+        diasPendientes.push({
+          fechaIso, diaNombre,
+          fechaLabel: `${d}/${mes}`,
+          turnos: turnosPendientes
+        });
+      }
+    }
+
+    window._pendientesMesCache = { total, dias: diasPendientes, mesIso };
+    renderResumen();
+  } catch (e) {
+    console.warn('No se pudo cargar pendientes del mes', e);
+    window._pendientesMesCache = { total: 0, dias: [], mesIso: '' };
+    renderResumen();
+  }
+}
+
+window.mostrarPendientesMes = function() {
+  const cache = window._pendientesMesCache;
+  if (!cache || !cache.dias.length) return;
+  const mesLabel = (() => {
+    const [a, m] = cache.mesIso.split('-');
+    const meses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    return `${meses[parseInt(m,10)-1]} ${a}`;
+  })();
+
+  const htmlDias = cache.dias.map(d => {
+    const totalDia = d.turnos.reduce((s, x) => s + x.pendientes.length, 0);
+    const htmlTurnos = d.turnos.map(({ turno, pendientes, cerrada }) => {
+      const chip = turno.servicio === 'Entrenamiento'
+        ? `<span class="pop-evo-chip ent">🏋️ Entrenamiento</span>`
+        : `<span class="pop-evo-chip kine">🤸 Kinefilaxia</span>`;
+      const chipCerrada = cerrada
+        ? `<span style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;font-size:9px;font-weight:700;padding:2px 7px;border-radius:99px;letter-spacing:.04em">🔒 CERRADA</span>`
+        : '';
+      const alumnos = pendientes.map(p => `<span class="pop-evo-alumno">${(p.nombre||'').replace(/</g,'&lt;')}</span>`).join('');
+      return `
+        <div class="pop-evo-turno">
+          <div class="pop-evo-turno-head">
+            <strong>${turno.hora}</strong> ${chip} ${chipCerrada}
+            <span style="color:var(--texto-suave); font-size:12px; margin-left:auto;">${pendientes.length} pendiente${pendientes.length!==1?'s':''}</span>
+          </div>
+          <div class="pop-evo-alumnos">${alumnos}</div>
+        </div>`;
+    }).join('');
+    return `
+      <div style="margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700;color:#0f172a;margin:8px 2px 6px;padding-bottom:4px;border-bottom:1px solid #e5e7eb">
+          ${d.diaNombre} ${d.fechaLabel}
+          <span style="color:#a16207;font-size:12px;font-weight:600;margin-left:auto">${totalDia} pendiente${totalDia!==1?'s':''}</span>
+        </div>
+        ${htmlTurnos}
+      </div>`;
+  }).join('');
+
+  const overlay = document.createElement('div');
+  overlay.className = 'pop-evo-overlay';
+  overlay.id = 'pop-evo-mes-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) cerrarPendientesMes(); };
+  overlay.innerHTML = `
+    <div class="pop-evo-modal">
+      <div class="pop-evo-head">
+        <h3>📅 ${mesLabel} · ${cache.total} alumno${cache.total!==1?'s':''} sin evolucionar</h3>
+        <button onclick="cerrarPendientesMes()" title="Cerrar">✕</button>
+      </div>
+      <div class="pop-evo-body">${htmlDias}</div>
+    </div>`;
+  document.body.appendChild(overlay);
+};
+
+window.cerrarPendientesMes = function() {
+  const o = document.getElementById('pop-evo-mes-overlay');
+  if (o) o.remove();
+};
+
 // Pinta la franja FIJA con el día y la fecha (siempre visible al scrollear, solo en Vista Día)
 function renderDiaSticky() {
   const cont = document.getElementById('dia-sticky');
