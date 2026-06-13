@@ -1847,13 +1847,11 @@ async function cargarPendientesMes() {
     const pisoSistema = '2026-06-01';
     const desde = dia1 < pisoSistema ? pisoSistema : dia1;
 
-    const [asis, evo, agr, cer, fijosRaw] = await Promise.all([
+    const [asis, evo, agr, cer] = await Promise.all([
       supabaseQuery('asistencia', `?select=turno_id,fecha,persona_id,estado&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
       supabaseQuery('evoluciones_tf', `?select=turno_id,fecha,persona_id&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
       supabaseQuery('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
-      // Fijos ACTIVOS con su fecha_desde — misma fuente que el SQL diagnóstico
-      supabaseQuery('turno_alumnos', `?select=turno_id,persona_id,fecha_desde&activo=eq.true&limit=10000`)
+      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`)
     ]);
 
     const asisM = {};
@@ -1864,25 +1862,18 @@ async function cargarPendientesMes() {
     (agr || []).forEach(f => {
       const k = `${f.turno_id}-${f.fecha}`;
       if (!agrM[k]) agrM[k] = [];
-      agrM[k].push({ id: String(f.persona_id), tipo: f.tipo });
+      agrM[k].push({ id: String(f.persona_id), nombre: nombrePersona(f.persona_id), tipo: f.tipo });
     });
     // SOLO clases cerradas cuentan (igual que el panel semanal y el SQL).
     // Cierre por centro no genera pendientes.
     const cerM = new Map();
     (cer || []).forEach(f => cerM.set(`${f.turno_id}-${f.fecha}`, { tipo: f.tipo, motivo: f.motivo }));
-    // Fijos por turno: { turno_id -> [{persona_id, fecha_desde}] }
-    const fijosPorTurno = {};
-    (fijosRaw || []).forEach(f => {
-      if (!fijosPorTurno[f.turno_id]) fijosPorTurno[f.turno_id] = [];
-      fijosPorTurno[f.turno_id].push({ id: String(f.persona_id), fecha_desde: f.fecha_desde || null });
-    });
 
     // Cargar nombres de personas que no están en cache local
     const idsP = new Set();
     (asis || []).forEach(f => idsP.add(f.persona_id));
     (evo || []).forEach(f => idsP.add(f.persona_id));
     (agr || []).forEach(f => idsP.add(f.persona_id));
-    (fijosRaw || []).forEach(f => idsP.add(f.persona_id));
     const nombres = {};
     const faltan = [...idsP].filter(id => {
       const n = nombrePersona(id);
@@ -1896,7 +1887,9 @@ async function cargarPendientesMes() {
       } catch (e) {}
     }
 
-    // Calcular pendientes día por día desde 'desde' hasta hoy
+    // Calcular pendientes día por día desde 'desde' hasta hoy.
+    // USA LA MISMA LÓGICA QUE EL PANEL SEMANAL: getAlumnos() → fijosVigentes()
+    // (misma fuente ALUMNOS_POR_TURNO) + agregados, solo clases cerradas.
     const diasPendientes = [];
     let total = 0;
     for (let d = 1; d <= 31; d++) {
@@ -1913,17 +1906,18 @@ async function cargarPendientesMes() {
 
       const turnosPendientes = [];
       HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
-        // SOLO clases YA CERRADAS cuentan como pendientes (días pasados y hoy igual).
+        // SOLO clases YA CERRADAS cuentan como pendientes (mismo criterio que el semanal).
         const cInfo = cerM.get(`${t.id}-${fechaIso}`);
         if (!cInfo) return;                    // clase no cerrada → no cuenta
         if (cInfo.tipo === 'centro') return;   // cerrada por el centro → no cuenta
 
-        // Fijos vigentes EN ESA FECHA según turno_alumnos (no los de hoy)
-        const fijos = (fijosPorTurno[t.id] || []).filter(a => !a.fecha_desde || a.fecha_desde <= fechaIso);
+        // MISMA fuente de alumnos que el semanal: fijos vigentes (ALUMNOS_POR_TURNO)
+        // filtrados por fecha + agregados puntuales de esa fecha.
+        const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, fechaIso);
         const agregadosKey = agrM[`${t.id}-${fechaIso}`] || [];
         const idsFijos = new Set(fijos.map(a => String(a.id)));
         const todos = [
-          ...fijos,
+          ...fijos.map(a => ({ id: String(a.id), nombre: a.nombre })),
           ...agregadosKey.filter(a => !idsFijos.has(String(a.id)))
         ];
 
@@ -1933,7 +1927,7 @@ async function cargarPendientesMes() {
           const esAusente = (est === 'ausente' || est === 'ausente-justificada');
           if (esAusente) return;
           if (!evoM[`${t.id}-${fechaIso}-${a.id}`]) {
-            pendientes.push({ id: a.id, nombre: nombres[a.id] || nombrePersona(a.id) || ('#' + a.id) });
+            pendientes.push({ id: a.id, nombre: a.nombre || nombres[a.id] || nombrePersona(a.id) || ('#' + a.id) });
           }
         });
         if (pendientes.length > 0) {
