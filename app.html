@@ -3279,6 +3279,8 @@ function renderEquipo() {
       <b>Coberturas pactadas</b> (cargadas en el módulo Feriados): el que cubre evoluciona con su login,
       y los alumnos de ese día se reparten mitad y mitad con el compañero ausente; horas y cupos de cada uno
       no cambian. En días normales NO hay reparto: cada alumno es de quien lo evolucionó.
+      <b>Vacaciones de profes</b> (registradas en el sistema): al ausente esos días no le cuentan;
+      las clases y alumnos pasan completos al que queda a cargo.
       El programa reconoce el <b>camino a la excelencia</b>: calidad de atención y seguimiento de cada alumno —
       nunca cantidad por la cantidad misma.
     </div>`
@@ -3301,13 +3303,14 @@ async function cargarEquipoDesempeno(mesVer) {
     const esMesActual = mesStr === hoyISO.substring(0, 7)
     const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, evoRows, presRows, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
+    const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
       supabase.from('turnos').select('id, dia, capacidad, cupo_bono'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
       fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('asistencia').select('fecha, persona_id').ilike('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
+      supabase.from('vacaciones_profes').select('profe, cubre, desde, hasta').lte('desde', ultDia).gte('hasta', primerDia),
       fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('tratamientos').select('id, practica_codigo, persona_id')),
       supabase.from('practicas').select('codigo, area'),
@@ -3337,6 +3340,20 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!profesDeTurno[p.turno_id].includes(e)) profesDeTurno[p.turno_id].push(e)
     })
 
+    // VACACIONES DE PROFES (jornada 78): al que se va, esos días no le cuentan
+    // para nada; cada clase y cada alumno pasan COMPLETOS al que queda a cargo.
+    // Mapa: 'fecha|emailAusente' -> emailCubridor
+    const vacaCubre = {}
+    ;((vacR && vacR.data) || []).forEach(v => {
+      if (!v.desde || !v.hasta || !v.profe || !v.cubre) return
+      const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], v.profe))
+      const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], v.cubre))
+      if (!eDe || !eA || eDe === eA) return
+      const ini = v.desde < primerDia ? primerDia : v.desde
+      const fin = v.hasta > ultDia ? ultDia : v.hasta
+      listaDiasISO(ini, fin).forEach(d => { vacaCubre[d.fecha + '|' + eDe] = eA })
+    })
+
     // COBERTURAS PACTADAS (módulo Feriados) — regla acordada (jornada 78):
     // ese día las HORAS y CUPOS de cada uno quedan como están en la grilla
     // (el ausente no se perjudica), y los ALUMNOS EVOLUCIONADOS por el cubridor
@@ -3348,6 +3365,7 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!c.fecha || !c.se_lo_toma || !c.cubre) return
       const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], c.se_lo_toma))
       const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre))
+      if (vacaCubre[c.fecha + '|' + eDe]) return // ese día rige la regla de vacaciones, no el 50/50
       if (eDe && eA && eDe !== eA) cubreA[c.fecha + '|' + eA] = eDe
     })
 
@@ -3377,14 +3395,16 @@ async function cargarEquipoDesempeno(mesVer) {
         if (cancelada.has(tid + '|' + d.fecha)) return
         const profes = profesDeTurno[tid]
         profes.forEach(e => {
-          st[e].horasPrev++
+          // VACACIONES: la parte del ausente pasa entera (horas + cupos) al que queda a cargo
+          const destino = vacaCubre[d.fecha + '|' + e] || e
+          st[destino].horasPrev++
           if (d.fecha <= corte) {
-            st[e].horas++
-            st[e].horasPorFecha[d.fecha] = (st[e].horasPorFecha[d.fecha] || 0) + 1
+            st[destino].horas++
+            st[destino].horasPorFecha[d.fecha] = (st[destino].horasPorFecha[d.fecha] || 0) + 1
             // Cupo de referencia del bono: en turnos de baja demanda el centro fija
             // un cupo_bono realista; si no está definido, vale la capacidad normal.
             const cupoRef = (t.cupo_bono !== null && t.cupo_bono !== undefined) ? t.cupo_bono : t.capacidad
-            st[e].cuposEq += cupoRef / profes.length
+            st[destino].cuposEq += cupoRef / profes.length
           }
         })
       })
@@ -3512,7 +3532,10 @@ async function cargarEquipoDesempeno(mesVer) {
         </div>`
       }).join('')
       bonoHTML = `
-        <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:4px 4px 4px;">💰 Bono de desempeño · cómo vienen este mes${esMesActual ? ' (si cerrara hoy)' : ''}</div>
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 4px 4px;">
+          <span style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">💰 Bono de desempeño · cómo vienen este mes${esMesActual ? ' (si cerrara hoy)' : ''}</span>
+          <button onclick="abrirVacasProfes()" style="border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700;">🏖 Vacaciones de profes</button>
+        </div>
         <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:6px 14px; margin:0 4px 6px;">${filasBono}
           <div style="font-size:11px; color:var(--text-dim); padding:8px 4px 6px;">% sobre sueldo neto de bolsillo · falta sin cobertura registrada = bono del mes caído · cierre: último día 23:59 · pago: a partir del 15 del mes siguiente.</div>
         </div>`
@@ -3816,6 +3839,74 @@ window.cerrarDetalleProfe = function() {
 }
 
 // ======================
+// VACACIONES DE PROFES (solo admin): registrar período y quién queda a cargo
+// ======================
+const PROFES_VACAS = ['Santi', 'Lean', 'Lauti', 'Male', 'Lu', 'Jime']
+window.abrirVacasProfes = async function() {
+  let filas = ''
+  try {
+    const { data } = await supabase.from('vacaciones_profes').select('id, profe, cubre, desde, hasta').order('desde', { ascending: false }).limit(25)
+    filas = (data || []).map(v => `
+      <div style="display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid rgba(0,0,0,0.05); font-size:13px;">
+        <span style="flex:1;">🏖 <b>${v.profe}</b> del ${v.desde} al ${v.hasta} · queda a cargo <b>${v.cubre}</b></span>
+        <button onclick="pbBorrarVaca(${v.id})" style="border:1px solid #dc262655; color:#dc2626; background:#fff; border-radius:7px; padding:3px 10px; cursor:pointer; font-size:12px;">🗑</button>
+      </div>`).join('') || '<p style="font-size:13px; color:var(--text-dim);">Sin vacaciones cargadas.</p>'
+  } catch (e) { filas = '<p style="font-size:13px; color:#dc2626;">No pude leer la tabla. ¿Corriste el SQL de vacaciones_profes?</p>' }
+  const ops = PROFES_VACAS.map(n => `<option value="${n}">${n}</option>`).join('')
+  const overlay = document.createElement('div')
+  overlay.id = 'vacas-overlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:560px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:18px 22px;border-bottom:1px solid #eef0f3;display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;font-size:17px;">🏖 Vacaciones de profes</h2>
+        <button onclick="document.getElementById('vacas-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;">×</button>
+      </div>
+      <div style="padding:16px 22px;">
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px;">Al que se va, esos días no le cuentan para nada. Cada clase y cada alumno pasan <b>completos</b> al que queda a cargo: su mes crece.</div>
+        ${filas}
+        <div style="margin-top:14px; padding-top:12px; border-top:1px solid rgba(0,0,0,0.07);">
+          <div style="font-size:13px; font-weight:700; margin-bottom:8px;">➕ Cargar vacaciones</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+            <label style="font-size:11.5px;">Se va<br><select id="vaca-profe" style="padding:6px; border-radius:7px; border:1px solid #ccc;">${ops}</select></label>
+            <label style="font-size:11.5px;">Queda a cargo<br><select id="vaca-cubre" style="padding:6px; border-radius:7px; border:1px solid #ccc;">${ops}</select></label>
+            <label style="font-size:11.5px;">Desde<br><input type="date" id="vaca-desde" style="padding:6px; border-radius:7px; border:1px solid #ccc;"></label>
+            <label style="font-size:11.5px;">Hasta<br><input type="date" id="vaca-hasta" style="padding:6px; border-radius:7px; border:1px solid #ccc;"></label>
+            <button onclick="pbGuardarVaca()" style="border:none; background:var(--turquoise); color:#fff; border-radius:8px; padding:8px 16px; cursor:pointer; font-weight:700; font-size:13px;">Guardar</button>
+          </div>
+          <div id="vaca-status" style="font-size:12px; margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>`
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+  document.body.appendChild(overlay)
+}
+
+window.pbGuardarVaca = async function() {
+  const profe = document.getElementById('vaca-profe').value
+  const cubre = document.getElementById('vaca-cubre').value
+  const desde = document.getElementById('vaca-desde').value
+  const hasta = document.getElementById('vaca-hasta').value
+  const status = document.getElementById('vaca-status')
+  if (!desde || !hasta) { status.innerHTML = '<span style="color:#dc2626;">Completá las dos fechas.</span>'; return }
+  if (hasta < desde) { status.innerHTML = '<span style="color:#dc2626;">La fecha "hasta" es anterior a "desde".</span>'; return }
+  if (profe === cubre) { status.innerHTML = '<span style="color:#dc2626;">El que se va y el que cubre no pueden ser la misma persona.</span>'; return }
+  status.innerHTML = 'Guardando…'
+  const { error } = await supabase.from('vacaciones_profes').insert({ profe, cubre, desde, hasta })
+  if (error) { status.innerHTML = '<span style="color:#dc2626;">No se pudo guardar: ' + (error.message || '') + '</span>'; return }
+  document.getElementById('vacas-overlay').remove()
+  cargarEquipoDesempeno()
+}
+
+window.pbBorrarVaca = async function(id) {
+  if (!confirm('¿Borrar este registro de vacaciones?')) return
+  const { error } = await supabase.from('vacaciones_profes').delete().eq('id', id)
+  if (error) { alert('No se pudo borrar: ' + (error.message || '')); return }
+  document.getElementById('vacas-overlay').remove()
+  cargarEquipoDesempeno()
+}
+
+// ======================
 // REGLAS DEL BONO DE DESEMPEÑO (modal leíble por todo el equipo)
 // ======================
 window.abrirReglasBono = function() {
@@ -3841,6 +3932,7 @@ window.abrirReglasBono = function() {
         <p style="margin:0 0 10px;"><b>3 · Plus Dedicación:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas). Acá no importa cuántas horas trabajás: importa cuánta gente acompañás bien en cada una.</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
         <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona a todos con su propio login, y los alumnos de ese día se reparten <b>mitad y mitad</b> entre los dos. Las horas y cupos de cada uno quedan igual: nadie pierde por tomarse el día. <b>Ojo:</b> esto vale SOLO en días de cobertura — en clases normales cada alumno es 100% de quien lo evolucionó.</p>
+        <p style="margin:0 0 10px;"><b>5b · Vacaciones:</b> se registran en el sistema con quién queda a cargo. Al que se va, esos días <b>no le cuentan para nada</b> — su mes se mide sobre los días trabajados. Cada clase y cada alumno de esos días pasan <b>completos</b> al compañero que queda a cargo: cubrir vacaciones hace crecer tu mes. Las clases nunca se suspenden por vacaciones del equipo.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
         <p style="margin:0;"><b>8 · Cierre y pago:</b> cierra el último día del mes a las 23:59 con el número de tu tarjeta. Se paga <b>a partir del 15 del mes siguiente</b>, por separado del sueldo. Vigente desde <b>junio 2026</b> (se paga desde julio).</p>
