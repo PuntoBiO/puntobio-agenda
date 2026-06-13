@@ -1675,16 +1675,18 @@ function renderResumen() {
 
   // === CÁLCULO SEMANAL DE PENDIENTES DE EVOLUCIÓN ===
   // Recorremos los 5 días (Lunes a Viernes) de la semana visible.
-  // REGLA: solo contamos pendientes de DÍAS YA PASADOS o de HOY si la clase
-  // ya está cerrada. Días futuros y clases en curso NO se cuentan (no es razonable
-  // marcar como "pendiente" algo que todavía no sucedió).
+  // REGLA: solo contamos pendientes de clases YA CERRADAS (manual o auto).
+  // Clases en curso, días futuros y feriados NO se cuentan. El sistema arrancó
+  // en junio 2026, así que nunca se cuentan pendientes anteriores a esa fecha.
   const lunes = getLunes(offsetSemana);
   const hoyIso_ = hoyIso();
+  const pisoSistema = '2026-06-01';
   let pendientesTotal = 0;
   const diasConPendientes = []; // [{ dia, fechaIso, fechaLabel, esHoy, turnos:[{turno,pendientes}] }]
   DIAS.forEach((diaNombre, idx) => {
     const fObj = new Date(lunes); fObj.setDate(lunes.getDate() + idx);
     const fechaIso = `${fObj.getFullYear()}-${String(fObj.getMonth()+1).padStart(2,'0')}-${String(fObj.getDate()).padStart(2,'0')}`;
+    if (fechaIso < pisoSistema) return; // antes del arranque del sistema: no aplica
     if (fechaIso > hoyIso_) return;     // días futuros: no aplica
     if (feriadoDe(fechaIso)) return;    // feriado: no aplica
     const esHoyDia = (fechaIso === hoyIso_);
@@ -1692,13 +1694,13 @@ function renderResumen() {
     const turnosDia = HORARIOS.filter(t => {
       if (t.dia !== diaNombre) return false;
       if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
-      // Si es HOY, solo contar turnos cuya clase ya está cerrada
-      if (esHoyDia && !claseEstaCerrada(t.id, fechaIso)) return false;
+      // Solo turnos cuya clase YA está cerrada cuentan como pendientes
+      if (!claseEstaCerrada(t.id, fechaIso)) return false;
       return true;
     });
     const turnosConPendientes = [];
     turnosDia.forEach(t => {
-      const cerrada = claseEstaCerrada(t.id, fechaIso);
+      const cerrada = true; // ya filtramos solo cerradas arriba
       // Si la clase fue CERRADA POR EL CENTRO (decisión nuestra), ese día el turno no
       // existe: no genera pendientes de evolución para nadie (no figura "sin evolucionar").
       if (cierreCentroDe(t.id, fechaIso)) return;
@@ -1841,12 +1843,17 @@ async function cargarPendientesMes() {
     const año = parseInt(mesIso.split('-')[0], 10);
     const mes = parseInt(mesIso.split('-')[1], 10);
     const dia1 = `${mesIso}-01`;
+    // El sistema arrancó en junio 2026: nunca contar pendientes anteriores.
+    const pisoSistema = '2026-06-01';
+    const desde = dia1 < pisoSistema ? pisoSistema : dia1;
 
-    const [asis, evo, agr, cer] = await Promise.all([
-      supabaseQuery('asistencia', `?select=turno_id,fecha,persona_id,estado&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('evoluciones_tf', `?select=turno_id,fecha,persona_id&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${dia1}&fecha=lte.${hoy}&limit=10000`)
+    const [asis, evo, agr, cer, fijosRaw] = await Promise.all([
+      supabaseQuery('asistencia', `?select=turno_id,fecha,persona_id,estado&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('evoluciones_tf', `?select=turno_id,fecha,persona_id&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
+      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
+      // Fijos ACTIVOS con su fecha_desde — misma fuente que el SQL diagnóstico
+      supabaseQuery('turno_alumnos', `?select=turno_id,persona_id,fecha_desde&activo=eq.true&limit=10000`)
     ]);
 
     const asisM = {};
@@ -1859,14 +1866,23 @@ async function cargarPendientesMes() {
       if (!agrM[k]) agrM[k] = [];
       agrM[k].push({ id: String(f.persona_id), tipo: f.tipo });
     });
+    // SOLO clases cerradas cuentan (igual que el panel semanal y el SQL).
+    // Cierre por centro no genera pendientes.
     const cerM = new Map();
     (cer || []).forEach(f => cerM.set(`${f.turno_id}-${f.fecha}`, { tipo: f.tipo, motivo: f.motivo }));
+    // Fijos por turno: { turno_id -> [{persona_id, fecha_desde}] }
+    const fijosPorTurno = {};
+    (fijosRaw || []).forEach(f => {
+      if (!fijosPorTurno[f.turno_id]) fijosPorTurno[f.turno_id] = [];
+      fijosPorTurno[f.turno_id].push({ id: String(f.persona_id), fecha_desde: f.fecha_desde || null });
+    });
 
     // Cargar nombres de personas que no están en cache local
     const idsP = new Set();
     (asis || []).forEach(f => idsP.add(f.persona_id));
     (evo || []).forEach(f => idsP.add(f.persona_id));
     (agr || []).forEach(f => idsP.add(f.persona_id));
+    (fijosRaw || []).forEach(f => idsP.add(f.persona_id));
     const nombres = {};
     const faltan = [...idsP].filter(id => {
       const n = nombrePersona(id);
@@ -1880,36 +1896,35 @@ async function cargarPendientesMes() {
       } catch (e) {}
     }
 
-    // Calcular pendientes día por día desde día 1 hasta hoy
+    // Calcular pendientes día por día desde 'desde' hasta hoy
     const diasPendientes = [];
     let total = 0;
     for (let d = 1; d <= 31; d++) {
       const fObj = new Date(año, mes - 1, d);
       if (fObj.getMonth() !== mes - 1) break;
       const fechaIso = `${año}-${String(mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if (fechaIso < desde) continue;     // nunca antes del piso del sistema
       if (fechaIso > hoy) break;
       if (feriadoDe(fechaIso)) continue;
       // Mapa JS Date.getDay(): 0=Domingo, 1=Lunes... 6=Sábado
       const dow = fObj.getDay();
       if (dow === 0 || dow === 6) continue; // sin clases en fin de semana
       const diaNombre = DIAS[dow - 1];
-      const esHoyDia = (fechaIso === hoy);
 
       const turnosPendientes = [];
       HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
-        // Si es hoy, solo contar turnos con clase cerrada
-        if (esHoyDia && !cerM.has(`${t.id}-${fechaIso}`)) return;
-        // Cierre por centro: no genera pendientes
+        // SOLO clases YA CERRADAS cuentan como pendientes (días pasados y hoy igual).
         const cInfo = cerM.get(`${t.id}-${fechaIso}`);
-        if (cInfo && cInfo.tipo === 'centro') return;
+        if (!cInfo) return;                    // clase no cerrada → no cuenta
+        if (cInfo.tipo === 'centro') return;   // cerrada por el centro → no cuenta
 
-        const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, fechaIso);
+        // Fijos vigentes EN ESA FECHA según turno_alumnos (no los de hoy)
+        const fijos = (fijosPorTurno[t.id] || []).filter(a => !a.fecha_desde || a.fecha_desde <= fechaIso);
         const agregadosKey = agrM[`${t.id}-${fechaIso}`] || [];
         const idsFijos = new Set(fijos.map(a => String(a.id)));
         const todos = [
           ...fijos,
           ...agregadosKey.filter(a => !idsFijos.has(String(a.id)))
-            .map(a => ({ id: a.id, nombre: nombres[a.id] || nombrePersona(a.id) }))
         ];
 
         const pendientes = [];
@@ -1918,11 +1933,11 @@ async function cargarPendientesMes() {
           const esAusente = (est === 'ausente' || est === 'ausente-justificada');
           if (esAusente) return;
           if (!evoM[`${t.id}-${fechaIso}-${a.id}`]) {
-            pendientes.push({ id: a.id, nombre: a.nombre || nombres[a.id] || ('#' + a.id) });
+            pendientes.push({ id: a.id, nombre: nombres[a.id] || nombrePersona(a.id) || ('#' + a.id) });
           }
         });
         if (pendientes.length > 0) {
-          turnosPendientes.push({ turno: t, pendientes, cerrada: cerM.has(`${t.id}-${fechaIso}`) });
+          turnosPendientes.push({ turno: t, pendientes, cerrada: true });
           total += pendientes.length;
         }
       });
