@@ -3260,7 +3260,7 @@ function renderEquipo() {
       <button onclick="equipoCambiarMes(-1)" style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;">←</button>
       <span style="font-weight:800; font-size:15px; text-transform:capitalize; min-width:160px; text-align:center;">${titulo}</span>
       <button onclick="equipoCambiarMes(1)" ${EQUIPO_MES_OFFSET >= 0 ? 'disabled style="opacity:0.35; border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; font-size:14px;"' : 'style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;"'}>→</button>
-      <button onclick="abrirReglasBono()" style="margin-left:auto; border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:6px 14px; cursor:pointer; font-size:13px; font-weight:700;">📖 Reglas del bono</button>
+      <button onclick="abrirReglasBono()" style="margin-left:auto; border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:6px 14px; cursor:pointer; font-size:13px; font-weight:700;">📖 Programa de Incentivos</button>
     </div>
     <div class="panel">
       <div class="panel-body" id="equipo-dash-body">
@@ -3274,9 +3274,13 @@ function renderEquipo() {
       es la capacidad dividida por la cantidad de profes: una clase de 12 con 2 profes da 6 de referencia a cada uno,
       pero los alumnos van al que los evolucionó). <b>Alumnos por hora</b> = atendidos ÷ horas dadas.
       Se descuentan feriados y clases canceladas por el centro.
+      En turnos de baja demanda el centro fija un <b>cupo de referencia</b> menor a la capacidad física,
+      para que la vara sea realista en todos los horarios.
       <b>Coberturas pactadas</b> (cargadas en el módulo Feriados): el que cubre evoluciona con su login,
       y los alumnos de ese día se reparten mitad y mitad con el compañero ausente; horas y cupos de cada uno
       no cambian. En días normales NO hay reparto: cada alumno es de quien lo evolucionó.
+      El programa reconoce el <b>camino a la excelencia</b>: calidad de atención y seguimiento de cada alumno —
+      nunca cantidad por la cantidad misma.
     </div>`
   cargarEquipoDesempeno(mesVer)
 }
@@ -3297,12 +3301,13 @@ async function cargarEquipoDesempeno(mesVer) {
     const esMesActual = mesStr === hoyISO.substring(0, 7)
     const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, evoRows, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
-      supabase.from('turnos').select('id, dia, capacidad'),
+    const [tR, tpR, ferR, cerR, evoRows, presRows, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
+      supabase.from('turnos').select('id, dia, capacidad, cupo_bono'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
       fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email').gte('fecha', primerDia).lte('fecha', ultDia)),
+      fetchTodo(() => supabase.from('asistencia').select('fecha, persona_id').ilike('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('tratamientos').select('id, practica_codigo, persona_id')),
       supabase.from('practicas').select('codigo, area'),
@@ -3351,7 +3356,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const st = {}
     emails.forEach(e => {
       st[e] = {
-        horas: 0, horasPrev: 0, cuposEq: 0,
+        horas: 0, horasPrev: 0, cuposEq: 0, horasPorFecha: {},
         tf: { n: 0, personas: new Set(), fechas: {} },
         fisioCons: nuevaArea(), espec: nuevaArea(), moplex: nuevaArea(),
         evalIng: nuevaArea(), maso: nuevaArea(), otras: nuevaArea()
@@ -3375,7 +3380,11 @@ async function cargarEquipoDesempeno(mesVer) {
           st[e].horasPrev++
           if (d.fecha <= corte) {
             st[e].horas++
-            st[e].cuposEq += t.capacidad / profes.length
+            st[e].horasPorFecha[d.fecha] = (st[e].horasPorFecha[d.fecha] || 0) + 1
+            // Cupo de referencia del bono: en turnos de baja demanda el centro fija
+            // un cupo_bono realista; si no está definido, vale la capacidad normal.
+            const cupoRef = (t.cupo_bono !== null && t.cupo_bono !== undefined) ? t.cupo_bono : t.capacidad
+            st[e].cuposEq += cupoRef / profes.length
           }
         })
       })
@@ -3428,6 +3437,7 @@ async function cargarEquipoDesempeno(mesVer) {
       return {
         email: e, nombre: NOMBRES_RANKING[e],
         horas: s.horas, horasPrev: s.horasPrev,
+        horasPorFecha: s.horasPorFecha, evolPorFecha: s.tf.fechas,
         evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
@@ -3445,14 +3455,43 @@ async function cargarEquipoDesempeno(mesVer) {
     const G = gruposVisiblesEquipo()
     // Lu y Jime no cobran bono (dueñas): quedan fuera del resumen, no de las métricas.
     const BONO_EXCLUIDOS = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
-    const bonoDe = ocup => ocup >= 80 ? { pct: 30, label: '30% · máximo', color: '#16a34a' }
-      : ocup >= 70 ? { pct: 20, label: '20% · pleno', color: '#0c7bb8' }
-      : ocup >= 60 ? { pct: 10, label: '10% · base', color: '#d97706' }
-      : { pct: 0, label: 'Sin bono', color: '#dc2626' }
+    // Escalones con nombre (jornada 78): el camino a la excelencia
+    const bonoDe = ocup => ocup >= 80 ? { pct: 30, label: '🏆 Excelencia · 30%', color: '#16a34a' }
+      : ocup >= 70 ? { pct: 20, label: '🚀 Crecimiento · 20%', color: '#0c7bb8' }
+      : ocup >= 60 ? { pct: 10, label: '🤝 Compromiso · 10%', color: '#d97706' }
+      : { pct: 0, label: 'En camino', color: '#dc2626' }
     const faltaPara = ocup => ocup >= 80 ? null : (ocup >= 70 ? 80 - ocup : (ocup >= 60 ? 70 - ocup : 60 - ocup))
     const bonoLista = equipo.filter(p => (p.horas > 0 || p.horasPrev > 0) && !BONO_EXCLUIDOS.includes(p.email))
     let liderAlxh = null
     bonoLista.forEach(p => { if (p.horas > 0 && (!liderAlxh || p.alxh > liderAlxh.alxh)) liderAlxh = p })
+
+    // AUDITORÍA (solo admin): evoluciones del mes sin presente registrado ese día.
+    // No acusa: marca casos para revisar (puede ser asistencia sin marcar o evolución de día equivocado).
+    let auditHTML = ''
+    if (G.admin) {
+      const setPres = new Set((presRows || []).map(a => a.fecha + '|' + a.persona_id))
+      const sospechosas = (evoRows || []).filter(ev =>
+        ev.fecha && ev.fecha <= corte && ev.persona_id && !setPres.has(ev.fecha + '|' + ev.persona_id))
+      if (sospechosas.length) {
+        let nombrePersona = {}
+        try {
+          const ids = [...new Set(sospechosas.map(s => s.persona_id))].slice(0, 200)
+          const pR = await supabase.from('personas').select('id, nombre').in('id', ids)
+          ;(pR.data || []).forEach(p => { nombrePersona[p.id] = p.nombre })
+        } catch (e) { /* sin nombres, mostramos igual */ }
+        const filas = sospechosas.slice(0, 30).map(s => {
+          const profe = NOMBRES_RANKING[String(s.autor_email || '').toLowerCase().trim()] || s.autor_email
+          return `<div style="font-size:12px; padding:3px 0;">📅 ${s.fecha} · <b>${profe}</b> evolucionó a <b>${nombrePersona[s.persona_id] || ('persona #' + s.persona_id)}</b> sin presente registrado ese día</div>`
+        }).join('')
+        auditHTML = `
+        <div style="background:#fffbeb; border:1px solid #f59e0b55; border-radius:14px; padding:12px 16px; margin:0 4px 10px;">
+          <div style="font-size:12.5px; font-weight:800; color:#92400e; margin-bottom:6px;">🔍 Auditoría · ${sospechosas.length} ${sospechosas.length === 1 ? 'evolución' : 'evoluciones'} sin presente registrado este mes — para revisar</div>
+          ${filas}
+          ${sospechosas.length > 30 ? `<div style="font-size:11.5px; color:#92400e; padding-top:4px;">… y ${sospechosas.length - 30} más.</div>` : ''}
+          <div style="font-size:11px; color:#92400e; padding-top:6px;">Puede ser un presente sin marcar en la agenda o una evolución con fecha equivocada. Revisar antes del cierre del mes.</div>
+        </div>`
+      }
+    }
 
     let bonoHTML = ''
     const miEmailEq = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
@@ -3487,7 +3526,7 @@ async function cargarEquipoDesempeno(mesVer) {
         // Para el profe, tono de acompañamiento: nada de "llená tus clases"
         const esCero = b.pct === 0
         const colorCard = esCero ? '#d97706' : b.color
-        const etiqueta = esCero ? 'En camino al primer escalón' : b.label
+        const etiqueta = esCero ? 'En camino a Compromiso' : b.label
         const mensaje = falta !== null
           ? `Tu ocupación: <b style="color:${colorCard};">${yo.ocup}%</b> · estás a <b>${falta} puntos</b> del ${esCero ? 'primer' : 'próximo'} escalón. Cada alumno evolucionado te acerca. 💪`
           : `Tu ocupación: <b style="color:${colorCard};">${yo.ocup}%</b> · ¡escalón máximo! Tu trabajo se nota.`
@@ -3529,6 +3568,41 @@ async function cargarEquipoDesempeno(mesVer) {
         </div>`
       }
       tf = yo ? [yo] : []
+
+      // CALENDARIO DE PRESENTISMO (jornada 78): el mes del profe día por día,
+      // con horas de clase dadas y alumnos atendidos — como un registro de presente.
+      if (yo) {
+        const [anioC, mesC] = primerDia.split('-').map(Number)
+        const ultDiaNum = Number(ultDia.split('-')[2])
+        const hoyISO = new Date().toISOString().slice(0, 10)
+        const DIAS_SEM = ['L', 'M', 'X', 'J', 'V', 'S', 'D']
+        let celdas = ''
+        // Relleno hasta el día de la semana del 1° (lunes = 0)
+        const primerDow = (new Date(anioC, mesC - 1, 1).getDay() + 6) % 7
+        for (let i = 0; i < primerDow; i++) celdas += '<div></div>'
+        for (let nd = 1; nd <= ultDiaNum; nd++) {
+          const f = `${anioC}-${String(mesC).padStart(2,'0')}-${String(nd).padStart(2,'0')}`
+          const dow = (new Date(anioC, mesC - 1, nd).getDay() + 6) % 7
+          const hs = yo.horasPorFecha[f] || 0
+          const ev = Math.round((yo.evolPorFecha[f] || 0) * 10) / 10
+          const futuro = f > hoyISO
+          const finde = dow >= 5
+          let fondo = '#f5f7fa', borde = 'transparent', cuerpo = ''
+          if (esFeriado.has(f)) { fondo = '#eef0f3'; cuerpo = '<div style="font-size:10px;">🎉</div>' }
+          else if (hs > 0) {
+            fondo = '#e6f5fd'; borde = 'var(--turquoise)'
+            cuerpo = `<div style="font-size:10px; font-weight:700; color:#0c7bb8;">${hs}h</div><div style="font-size:9.5px; color:var(--text-dim);">🙋${ev}</div>`
+          }
+          celdas += `<div style="background:${fondo}; border:1px solid ${borde}; border-radius:8px; min-height:44px; padding:3px 4px; ${futuro || finde ? 'opacity:0.45;' : ''}">
+            <div style="font-size:9.5px; color:var(--text-dim);">${nd}</div>${cuerpo}</div>`
+        }
+        refsEquipoHTML += `
+        <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:12px 14px; margin:0 4px 10px;">
+          <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:8px;">📅 Tu mes, día por día · horas dadas y alumnos atendidos</div>
+          <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px; font-size:10px; color:var(--text-dim); text-align:center; margin-bottom:4px;">${DIAS_SEM.map(x => `<div>${x}</div>`).join('')}</div>
+          <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;">${celdas}</div>
+        </div>`
+      }
     }
     const colorOcup = o => o >= 70 ? '#16a34a' : o >= 50 ? '#d97706' : '#dc2626'
     const medalla = i => G.admin ? (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '') : ''
@@ -3609,6 +3683,7 @@ async function cargarEquipoDesempeno(mesVer) {
         ${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}
       </div>
       ${bonoHTML}
+      ${auditHTML}
       ${typeof refsEquipoHTML !== 'undefined' ? refsEquipoHTML : ''}
       ${(G.tf && tf.length) ? `
         <div style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:16px 4px 8px;">🏋️ Terapia Física · productividad (ordenado por ocupación)</div>
@@ -3755,15 +3830,15 @@ window.abrirReglasBono = function() {
         <button onclick="document.getElementById('reglas-bono-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center">×</button>
       </div>
       <div style="padding:18px 24px 24px;font-size:13.5px;line-height:1.65;color:#1f2937;">
-        <p style="margin:0 0 10px;"><b>1 · Qué se mide:</b> tu <b>ocupación del mes</b> (panel Desempeño). Alumno atendido = alumno que <b>vos evolucionaste con tu login</b>. <span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:5px;font-weight:700;">Lo que no está evolucionado, no existe.</span></p>
-        <p style="margin:0 0 6px;"><b>2 · Cuánto se cobra</b> (sobre tu sueldo neto de bolsillo, se cobra el escalón alcanzado):</p>
+        <p style="margin:0 0 10px;"><b>1 · Qué se mide:</b> tu <b>ocupación del mes</b> (panel Desempeño). Alumno atendido = alumno que <b>vos evolucionaste con tu login</b> — la evolución es tu firma profesional. <span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:5px;font-weight:700;">Lo que no está evolucionado, no existe.</span> Una clase concurrida no se llena de casualidad: se llena cuando cada alumno está bien atendido y elige volver. Eso es lo que se reconoce.</p>
+        <p style="margin:0 0 6px;"><b>2 · Los escalones</b> — el camino a la excelencia (porcentaje sobre tu sueldo neto de bolsillo, se reconoce el escalón alcanzado):</p>
         <table style="border-collapse:collapse;font-size:13px;margin:0 0 10px;">
-          ${fila('Menos de 60%', 'Sin bono', '#dc2626')}
-          ${fila('60% a 69%', '10% del sueldo', '#d97706')}
-          ${fila('70% a 79%', '20% del sueldo', '#0c7bb8')}
-          ${fila('80% o más', '30% del sueldo', '#16a34a')}
+          ${fila('Menos de 60%', 'En camino · todavía sin reconocimiento', '#dc2626')}
+          ${fila('60% a 69%', '🤝 COMPROMISO · 10% del sueldo', '#d97706')}
+          ${fila('70% a 79%', '🚀 CRECIMIENTO · 20% del sueldo', '#0c7bb8')}
+          ${fila('80% o más', '🏆 EXCELENCIA · 30% del sueldo', '#16a34a')}
         </table>
-        <p style="margin:0 0 10px;"><b>3 · Plus:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas).</p>
+        <p style="margin:0 0 10px;"><b>3 · Plus Dedicación:</b> el mejor <b>alumnos por hora</b> del mes suma un <b>10% extra</b> (uno solo lo gana; debe haber dado al menos el 70% de sus horas previstas). Acá no importa cuántas horas trabajás: importa cuánta gente acompañás bien en cada una.</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
         <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona a todos con su propio login, y los alumnos de ese día se reparten <b>mitad y mitad</b> entre los dos. Las horas y cupos de cada uno quedan igual: nadie pierde por tomarse el día. <b>Ojo:</b> esto vale SOLO en días de cobertura — en clases normales cada alumno es 100% de quien lo evolucionó.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa.</p>
