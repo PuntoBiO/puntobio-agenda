@@ -881,6 +881,28 @@
     </div>
   </div>
 </div>
+<!-- REVISAR PENDIENTES AL CERRAR (regla Lu: sin evolución → preguntar vino/ausente) -->
+<div class="justif-overlay" id="rev-pend-overlay">
+  <div class="justif-modal" style="max-width:520px">
+    <div class="justif-header">
+      <div class="justif-titulo">⚠️ Falta evolución</div>
+      <div class="justif-nombre" id="rev-pend-titulo"></div>
+    </div>
+    <div class="justif-body" style="max-height:55vh;overflow-y:auto">
+      <div style="font-size:13px;color:var(--texto-suave);margin-bottom:14px;line-height:1.4">
+        Antes de cerrar la clase, decime de cada alumno sin evolución:
+        <b style="color:var(--texto)">¿vino o está ausente?</b>
+        <br><span style="font-size:12px">El ausente sin aviso previo queda como ausente sin justificar (no recupera).</span>
+      </div>
+      <div id="rev-pend-lista"></div>
+    </div>
+    <div class="justif-footer">
+      <button class="btn-modal" onclick="cancelarRevisarPendientes()">Cancelar</button>
+      <button class="btn-modal primario" id="rev-pend-aplicar" onclick="aplicarRevisarYCerrar()" disabled>Aplicar y cerrar</button>
+    </div>
+  </div>
+</div>
+
 <!-- HISTÓRICO DEL ALUMNO -->
 <div class="hist-overlay" id="hist-overlay" onclick="if(event.target===this)cerrarHistorico()">
   <div class="hist-modal">
@@ -2415,6 +2437,8 @@ async function cargarClasesCerradas() {
 // RESPALDO del cierre automático (por si el cron de Supabase fallara un día).
 // Al abrir la agenda, cierra las clases de DÍAS YA PASADOS (anteriores a hoy)
 // de la semana visible que quedaron sin cerrar. No toca el día de hoy ni futuros.
+// REGLA PuntoBiO: antes de cerrar, los alumnos sin asistencia ni evolución
+// se marcan como AUSENTE sin justificar ("Sin asistencia registrada al cerrar la clase").
 async function cerrarClasesViejasAuto() {
   try {
     const hoy = hoyIso();
@@ -2428,24 +2452,58 @@ async function cerrarClasesViejasAuto() {
       if (feriadoDe(fIso)) return;             // los feriados no se cierran (no hubo clase)
       HORARIOS.filter(t => t.dia === dia).forEach(t => {
         if (!CLASES_CERRADAS.has(`${t.id}-${fIso}`)) {
-          aCerrar.push({ turno_id: t.id, fecha: fIso });
+          aCerrar.push({ turno: t, fecha: fIso });
         }
       });
     });
     if (!aCerrar.length) return;
     for (const c of aCerrar) {
       try {
+        // PASO 1 (regla PuntoBiO): marcar ausentes a los sin marca/sin evolución
+        await marcarPendientesComoAusentes(c.turno, c.fecha);
+        // PASO 2: registrar el cierre
         await supabaseInsert('clases_cerradas', {
-          turno_id: c.turno_id,
+          turno_id: c.turno.id,
           fecha: c.fecha,
           tipo: 'auto',
           cerrada_por_nombre: 'Cierre automático',
           cerrada_por_email: 'sistema@puntobio'
         });
-        CLASES_CERRADAS.set(`${c.turno_id}-${c.fecha}`, { tipo: 'auto', motivo: null });
+        CLASES_CERRADAS.set(`${c.turno.id}-${c.fecha}`, { tipo: 'auto', motivo: null });
       } catch (e) { /* si ya existía u otro error, seguimos */ }
     }
   } catch (e) { console.warn('No se pudo cerrar clases viejas automáticamente', e); }
+}
+
+// Marca como AUSENTE SIN JUSTIFICAR a los alumnos del turno+fecha que no tienen
+// ni asistencia ni evolución cargada. Es la regla PuntoBiO al cerrar la clase.
+async function marcarPendientesComoAusentes(t, fecha) {
+  const alumnos = getAlumnos(t, fecha);
+  if (!alumnos.length) return;
+  let asistenciaIds = new Set();
+  try {
+    const filas = await supabaseQuery('asistencia',
+      `?select=persona_id&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => asistenciaIds.add(Number(f.persona_id)));
+  } catch (e) { console.warn('No se pudo leer asistencia', e); return; }
+  let evoIds = new Set();
+  try {
+    const filas = await supabaseQuery('evoluciones_tf',
+      `?select=persona_id&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => evoIds.add(Number(f.persona_id)));
+  } catch (e) { console.warn('No se pudo leer evoluciones', e); }
+  for (const a of alumnos) {
+    const pid = Number(a.id);
+    if (asistenciaIds.has(pid)) continue;  // ya tiene asistencia marcada
+    if (evoIds.has(pid)) continue;          // tiene evolución → fue
+    try {
+      await supabaseInsertReturn('asistencia', {
+        turno_id: t.id, persona_id: pid, fecha,
+        estado: 'ausente',
+        motivo: 'Sin asistencia registrada al cerrar la clase'
+      });
+    } catch (e) { /* sigue, no romper el cierre */ }
+  }
 }
 
 // Evoluciones cargadas, por alumno: clave "turnoId-fecha-personaId" -> true.
@@ -3052,11 +3110,29 @@ window.evoAplicarLote = async () => {
   renderModalBody(t.dia, t.hora, t.servicio);
 };
 
-// Cerrar la clase (marcarla como finalizada)
+// Cerrar la clase (marcarla como finalizada).
+// REGLA PuntoBiO: si hay alumnos sin evolución y sin asistencia marcada, primero
+// preguntamos uno por uno "¿vino o ausente?" antes de cerrar.
 window.cerrarClase = async () => {
   const t = evoTurnoActual;
   if (!t) return;
   const fecha = fechaRealDiaActivo();
+  const alumnos = getAlumnos(t, fecha);
+  // Pendientes = sin asistencia marcada Y sin evolución cargada
+  const pendientes = alumnos.filter(a => {
+    const key = `${fecha}-${t.hora}-${t.servicio}-${a.id}`;
+    const est = asistenciaEstados[key];
+    const tieneEvo = !!EVO_ALUMNO[`${t.id}-${fecha}-${a.id}`];
+    return !est && !tieneEvo;
+  });
+  if (pendientes.length > 0) {
+    abrirModalRevisarPendientes(t, fecha, pendientes);
+    return;
+  }
+  await cerrarClaseFinal(t, fecha);
+};
+
+async function cerrarClaseFinal(t, fecha) {
   const btn = document.getElementById('cerrar-clase-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Cerrando...'; }
   try {
@@ -3070,10 +3146,92 @@ window.cerrarClase = async () => {
     CLASES_CERRADAS.set(`${t.id}-${fecha}`, { tipo: 'finalizada', motivo: null });
     toast('✓ Clase cerrada');
     renderModalBody(t.dia, t.hora, t.servicio);
-    renderTurnos(); // refrescar los ✓/✗ de la grilla
+    renderTurnos();
   } catch (e) {
     toast('No se pudo cerrar la clase: ' + e.message, 'err');
     if (btn) { btn.disabled = false; btn.textContent = '🔒 Cerrar clase'; }
+  }
+}
+
+// === MODAL DE REVISAR PENDIENTES AL CERRAR ===
+let _revPendCtx = null; // { t, fecha, pendientes:[{id,nombre}], elecciones:{id->'presente'|'ausente'} }
+
+function abrirModalRevisarPendientes(t, fecha, pendientes) {
+  _revPendCtx = { t, fecha, pendientes, elecciones: {} };
+  document.getElementById('rev-pend-titulo').textContent =
+    `${t.servicio} · ${t.hora} · ${t.dia}`;
+  const cont = document.getElementById('rev-pend-lista');
+  cont.innerHTML = pendientes.map(p => `
+    <div class="rev-pend-item" data-pid="${p.id}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1.5px solid var(--gris-borde);border-radius:10px;margin-bottom:8px;background:#fff">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:700;color:var(--texto);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(p.nombre||'').replace(/</g,'&lt;')}</div>
+        <div style="font-size:11px;color:var(--texto-suave)">#${p.id}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button type="button" class="rev-pend-btn" data-eleg="presente"
+          onclick="setRevPend(${p.id},'presente')"
+          style="border:1.5px solid #16a34a;background:#fff;color:#16a34a;border-radius:8px;padding:7px 12px;font-size:12.5px;font-weight:700;cursor:pointer">✓ Vino</button>
+        <button type="button" class="rev-pend-btn" data-eleg="ausente"
+          onclick="setRevPend(${p.id},'ausente')"
+          style="border:1.5px solid #dc2626;background:#fff;color:#dc2626;border-radius:8px;padding:7px 12px;font-size:12.5px;font-weight:700;cursor:pointer">✗ Ausente</button>
+      </div>
+    </div>`).join('');
+  document.getElementById('rev-pend-aplicar').disabled = true;
+  document.getElementById('rev-pend-overlay').classList.add('activo');
+}
+
+window.setRevPend = function(pid, eleccion) {
+  if (!_revPendCtx) return;
+  _revPendCtx.elecciones[pid] = eleccion;
+  // Pintar el item con la elección activa
+  const item = document.querySelector(`.rev-pend-item[data-pid="${pid}"]`);
+  if (item) {
+    item.style.background = eleccion === 'presente' ? '#f0fdf4' : '#fef2f2';
+    item.style.borderColor = eleccion === 'presente' ? '#16a34a' : '#dc2626';
+    item.querySelectorAll('.rev-pend-btn').forEach(b => {
+      const esta = b.getAttribute('data-eleg');
+      const activo = esta === eleccion;
+      if (esta === 'presente') {
+        b.style.background = activo ? '#16a34a' : '#fff';
+        b.style.color = activo ? '#fff' : '#16a34a';
+      } else {
+        b.style.background = activo ? '#dc2626' : '#fff';
+        b.style.color = activo ? '#fff' : '#dc2626';
+      }
+    });
+  }
+  // Habilitar Aplicar solo si TODOS están marcados
+  const todos = _revPendCtx.pendientes.every(p => _revPendCtx.elecciones[p.id]);
+  document.getElementById('rev-pend-aplicar').disabled = !todos;
+};
+
+window.cancelarRevisarPendientes = function() {
+  document.getElementById('rev-pend-overlay').classList.remove('activo');
+  _revPendCtx = null;
+};
+
+window.aplicarRevisarYCerrar = async function() {
+  if (!_revPendCtx) return;
+  const { t, fecha, pendientes, elecciones } = _revPendCtx;
+  const btn = document.getElementById('rev-pend-aplicar');
+  btn.disabled = true; btn.textContent = 'Aplicando...';
+  try {
+    for (const p of pendientes) {
+      const e = elecciones[p.id];
+      if (e === 'presente') {
+        await guardarAsistencia(t, p.id, 'presente');
+      } else if (e === 'ausente') {
+        // Ausente SIN JUSTIFICAR (regla Lu: si no avisó previo, no recupera).
+        // Si más adelante hubo aviso/agregado en otro turno, el motivo viejo se respeta.
+        await guardarAsistencia(t, p.id, 'ausente', 'Sin asistencia registrada al cerrar la clase');
+      }
+    }
+    document.getElementById('rev-pend-overlay').classList.remove('activo');
+    _revPendCtx = null;
+    await cerrarClaseFinal(t, fecha);
+  } catch (err) {
+    toast('No se pudo aplicar: ' + (err.message || err), 'err');
+    btn.disabled = false; btn.textContent = 'Aplicar y cerrar';
   }
 };
 
@@ -4370,11 +4528,9 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   }
   // Marcar en la grilla que este alumno ya tiene evolución (turno+fecha+persona)
   EVO_ALUMNO[`${t.id}-${fecha}-${personaId}`] = true;
-  // Marcar presente automáticamente si estaba sin marcar (cargó evolución = vino)
-  const key = `${fecha}-${t.hora}-${t.servicio}-${personaId}`;
-  if ((asistenciaEstados[key] || 'reservado') === 'reservado') {
-    await guardarAsistencia(t, personaId, 'presente');
-  }
+  // REGLA PuntoBiO: la evolución NO marca presente automáticamente.
+  // La asistencia es independiente. Si no está evolucionado, no es presente.
+  // Al cerrar la clase, los sin evolución se preguntan uno por uno: ¿vino o ausente?
 }
 
 // BORRAR la evolución de hoy de un alumno. SOLO Lu. Borra de la base la fila
