@@ -3302,11 +3302,11 @@ async function cargarEquipoDesempeno(mesVer) {
     const corte = esMesActual ? hoyISO : ultDia
 
     const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR] = await Promise.all([
-      supabase.from('turnos').select('id, dia, capacidad, cupo_bono'),
+      supabase.from('turnos').select('id, dia, hora, capacidad, cupo_bono'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
-      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email').gte('fecha', primerDia).lte('fecha', ultDia)),
+      fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email, turno_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('asistencia').select('fecha, persona_id').ilike('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
       supabase.from('vacaciones_profes').select('profe, cubre, desde, hasta').lte('desde', ultDia).gte('hasta', primerDia),
       fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
@@ -3499,14 +3499,16 @@ async function cargarEquipoDesempeno(mesVer) {
         } catch (e) { /* sin nombres, mostramos igual */ }
         const filas = sospechosas.slice(0, 30).map(s => {
           const profe = NOMBRES_RANKING[String(s.autor_email || '').toLowerCase().trim()] || s.autor_email
-          return `<div style="font-size:12px; padding:3px 0;">📅 ${s.fecha} · <b>${profe}</b> evolucionó a <b>${nombrePersona[s.persona_id] || ('persona #' + s.persona_id)}</b> sin presente registrado ese día</div>`
+          const t = s.turno_id ? turnosMap[s.turno_id] : null
+          const claseTxt = t ? ` · clase ${t.dia} ${String(t.hora || '').slice(0, 5)}` : ''
+          return `<div style="font-size:12px; padding:3px 0;">📅 ${s.fecha}${claseTxt} · <b>${profe}</b> evolucionó a <b>${nombrePersona[s.persona_id] || ('persona #' + s.persona_id)}</b> sin presente registrado</div>`
         }).join('')
         auditHTML = `
         <div style="background:#fffbeb; border:1px solid #f59e0b55; border-radius:14px; padding:12px 16px; margin:0 4px 10px;">
           <div style="font-size:12.5px; font-weight:800; color:#92400e; margin-bottom:6px;">🔍 Auditoría · ${sospechosas.length} ${sospechosas.length === 1 ? 'evolución' : 'evoluciones'} sin presente registrado este mes — para revisar</div>
           ${filas}
           ${sospechosas.length > 30 ? `<div style="font-size:11.5px; color:#92400e; padding-top:4px;">… y ${sospechosas.length - 30} más.</div>` : ''}
-          <div style="font-size:11px; color:#92400e; padding-top:6px;">Puede ser un presente sin marcar en la agenda o una evolución con fecha equivocada. Revisar antes del cierre del mes.</div>
+          <div style="font-size:11px; color:#92400e; padding-top:6px;">Con el trigger "evolución = presente" activo, estos casos se corrigen solos al evolucionar; los viejos se arreglan con el SQL de corrección. Revisar antes del cierre del mes.</div>
         </div>`
       }
     }
