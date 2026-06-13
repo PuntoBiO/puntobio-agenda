@@ -1574,10 +1574,10 @@ async function cargarAgregadosSemana() {
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const lunesIso = fmt(lunes), viernesIso = fmt(viernes);
     // 1) Traer los agregados SIN join a personas (el join personas() daba error 400
-    //    por falta de relación FK declarada). Una sola condición de fecha (gte).
+    //    por falta de relación FK declarada). Filtros gte + lte al servidor + limit.
     const filas = await supabaseQuery('turno_agregados',
-      `?select=id,turno_id,persona_id,fecha,tipo,agregado_por&fecha=gte.${lunesIso}`);
-    const dentro = (filas || []).filter(a => a.fecha <= viernesIso);
+      `?select=id,turno_id,persona_id,fecha,tipo,agregado_por&fecha=gte.${lunesIso}&fecha=lte.${viernesIso}&limit=5000`);
+    const dentro = (filas || []);
     if (dentro.length === 0) return;
     // 2) Traer los datos de esas personas en una consulta aparte (sin join).
     const ids = [...new Set(dentro.map(a => a.persona_id))].filter(Boolean);
@@ -2512,18 +2512,17 @@ let EVO_ALUMNO = {};
 async function cargarEvosPorTurno() {
   EVO_ALUMNO = {};
   try {
-    // IMPORTANTE: traer SOLO las evoluciones de la semana visible.
-    // Sin filtro, Supabase corta en 1000 filas y las evoluciones recientes
-    // quedaban afuera → la agenda mostraba "FALTA EVOLUCIÓN" aunque ya estaban cargadas.
+    // IMPORTANTE: filtrar gte Y lte al lado del servidor (más limit alto), sino
+    // Supabase corta en 1000 filas y las evoluciones recientes quedan afuera →
+    // la agenda muestra "FALTA EVOLUCIÓN" aunque ya estén cargadas.
     const lunes = getLunes(offsetSemana);
     const viernes = new Date(lunes);
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const viernesIso = fmt(viernes);
     const filas = await supabaseQuery('evoluciones_tf',
-      `?select=turno_id,fecha,persona_id&fecha=gte.${fmt(lunes)}`);
+      `?select=turno_id,fecha,persona_id&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
     (filas || []).forEach(f => {
-      if (f.fecha > viernesIso) return;   // descartar lo que pasa del viernes
       EVO_ALUMNO[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = true;
     });
   } catch (e) { EVO_ALUMNO = {}; console.warn('No se pudo cargar evoluciones por turno', e); }
@@ -2567,11 +2566,12 @@ async function cargarAsistenciaSemana() {
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const viernesIso = fmt(viernes);
-    // Una sola condición de fecha (gte) en la URL; el tope se filtra en JS.
+    // IMPORTANTE: filtrar lte al lado del servidor además del gte, sino Supabase
+    // corta en 1000 filas y las asistencias de la semana se pierden → el panel
+    // "Faltan evolucionar" cuenta a ausentes como pendientes.
     const filas = await supabaseQuery('asistencia',
-      `?select=turno_id,fecha,persona_id,estado&fecha=gte.${fmt(lunes)}`);
+      `?select=turno_id,fecha,persona_id,estado&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
     (filas || []).forEach(f => {
-      if (f.fecha > viernesIso) return;   // descartar lo que pasa del viernes
       ASISTENCIA_SEMANA[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado;
     });
   } catch (e) { ASISTENCIA_SEMANA = {}; console.warn('No se pudo cargar asistencia de la semana', e); }
