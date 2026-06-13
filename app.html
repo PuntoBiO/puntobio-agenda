@@ -1606,6 +1606,13 @@ function buildNav() {
     </div>`)
   }
 
+  // Grilla del equipo (jornada 78): horarios de todos, visible para todo el equipo de TF
+  // y administración. Editable solo por Lu/Jime (a través de Gestión de Turnos).
+  items.push(`<div class="nav-item" onclick="irA('grilla')">
+    <span class="nav-icon">📋</span>
+    <span class="nav-label">Grilla del equipo</span>
+  </div>`)
+
   // Mensajes del equipo: lo ve TODO el equipo (es_equipo = true en personas).
   // Es un muro común para que los profes y administración se comuniquen.
   // El badge rojo con el count de no-leídos lo agrega actualizarBadgeMensajes() después.
@@ -1819,6 +1826,7 @@ window.irA = function(modulo) {
   else if (modulo === 'agenda') renderAgenda()
   else if (modulo === 'auditoria') renderAuditoria()
   else if (modulo === 'equipo') renderEquipo()
+  else if (modulo === 'grilla') renderGrilla()
   else if (modulo === 'gestion-turnos') renderGestionTurnos()
   else if (modulo === 'gestion-cupo') renderGestionCupo()
   else if (modulo === 'agenda-biolab') renderAgendaBiolab()
@@ -3242,6 +3250,101 @@ function gruposVisiblesEquipo() {
     admin
   }
 }
+async function renderGrilla() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  contentEl.innerHTML = `
+    <div class="hero">
+      <div class="hero-tag">Equipo</div>
+      <h1>📋 Grilla del equipo</h1>
+      <p class="hero-sub">Horarios de cada profe, día por día. Quién está y con quién comparte sala.</p>
+    </div>
+    <div id="grilla-cont"><div class="empty-state"><span class="empty-state-icon">⏳</span>Cargando grilla…</div></div>`
+
+  const cont = document.getElementById('grilla-cont')
+  try {
+    // Traer la grilla: dos consultas separadas y cruzar por turno_id
+    // (mismo patrón que usa el panel Desempeño, evita depender del join embebido)
+    const [resTurnos, resProfes] = await Promise.all([
+      supabase.from('turnos').select('id, dia, hora'),
+      supabase.from('turno_profes').select('turno_id, nombre_profe')
+    ])
+    if (resTurnos.error) throw resTurnos.error
+    if (resProfes.error) throw resProfes.error
+    const turnoById = {}
+    ;(resTurnos.data || []).forEach(t => { turnoById[t.id] = t })
+    const tp = (resProfes.data || []).map(r => ({
+      nombre_profe: r.nombre_profe,
+      turnos: turnoById[r.turno_id] || null
+    })).filter(r => r.turnos)
+
+    // Normalizar nombres a etiqueta corta (igual criterio que el ranking)
+    const norm = (n) => {
+      const u = (n || '').toUpperCase()
+      if (u.includes('SANTI')) return 'Santi'
+      if (u.includes('LEAN') || u.includes('LEANDRO')) return 'Lean'
+      if (u.includes('LAUT')) return 'Lauti'
+      if (u.includes('MALE') || u.includes('MAGDA')) return 'Male'
+      if (u.includes('JIME')) return 'Jime'
+      if (u.includes('LUCIANA') || u === 'LU') return 'Lu'
+      return (n || '').split(' ')[0]
+    }
+    const DIAS = ['Lunes','Martes','Miércoles','Jueves','Viernes']
+    const HORAS = ['07:00','08:00','09:00','10:00','11:00','12:00','15:00','16:00','17:00','18:00','19:00','20:00']
+    const normDia = (d) => { const x=(d||'').toLowerCase(); if(x.includes('lun'))return'Lunes'; if(x.includes('mar'))return'Martes'; if(x.includes('mié')||x.includes('mie'))return'Miércoles'; if(x.includes('jue'))return'Jueves'; if(x.includes('vie'))return'Viernes'; return d }
+    const normHora = (h) => (h || '').toString().slice(0,5)
+
+    // celda[dia][hora] = Set de profes
+    const celda = {}
+    DIAS.forEach(d => { celda[d] = {}; HORAS.forEach(h => celda[d][h] = new Set()) })
+    let totalProf = {}
+    ;(tp || []).forEach(r => {
+      const prof = norm(r.nombre_profe)
+      const dia = normDia(r.turnos?.dia)
+      const hora = normHora(r.turnos?.hora)
+      if (celda[dia] && celda[dia][hora] !== undefined) {
+        celda[dia][hora].add(prof)
+        totalProf[prof] = (totalProf[prof] || 0) + 1
+      }
+    })
+
+    // Colores por profe (consistentes)
+    const COLOR = { 'Santi':'#16a34a','Lean':'#dc2626','Lauti':'#d97706','Male':'#7c3aed','Lu':'#0c7bb8','Jime':'#0891b2' }
+    const chip = (p) => `<span style="display:inline-block; background:${(COLOR[p]||'#64748b')}1a; color:${COLOR[p]||'#64748b'}; border-radius:6px; padding:1px 7px; font-size:11.5px; font-weight:700; margin:1px 2px;">${p}</span>`
+
+    // Resumen de horas por profe (chips arriba)
+    const resumen = Object.keys(totalProf).sort((a,b)=>totalProf[b]-totalProf[a])
+      .map(p => `<span style="display:inline-block; background:${(COLOR[p]||'#64748b')}14; color:${COLOR[p]||'#64748b'}; border-radius:99px; padding:4px 12px; font-size:12.5px; font-weight:700; margin:2px 3px;">${p} · ${totalProf[p]}h/sem</span>`).join('')
+
+    // Tabla
+    const thead = `<tr><th style="text-align:left; padding:8px 10px; font-size:12px; color:var(--text-dim);">Hora</th>${DIAS.map(d=>`<th style="padding:8px 6px; font-size:12.5px; text-align:center;">${d}</th>`).join('')}</tr>`
+    const filas = HORAS.map(h => {
+      // omitir filas totalmente vacías
+      const algo = DIAS.some(d => celda[d][h].size > 0)
+      if (!algo) return ''
+      const tds = DIAS.map(d => {
+        const set = celda[d][h]
+        if (set.size === 0) return `<td style="text-align:center; color:#cbd5e1; padding:6px 4px;">—</td>`
+        const compartida = set.size > 1
+        return `<td style="text-align:center; padding:5px 4px; ${compartida ? 'background:#fff7ed;' : ''}">${Array.from(set).map(chip).join('')}</td>`
+      }).join('')
+      return `<tr style="border-top:1px solid rgba(0,0,0,0.05);"><td style="padding:6px 10px; font-weight:700; font-size:12.5px; color:#0c7bb8;">${h}</td>${tds}</tr>`
+    }).join('')
+
+    cont.innerHTML = `
+      <div style="margin:0 4px 14px;">${resumen}</div>
+      <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:10px; overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; min-width:560px;">${thead}${filas}</table>
+      </div>
+      <div style="font-size:11.5px; color:var(--text-dim); padding:12px 4px;">
+        🟧 Las celdas con fondo naranja son <b>salas compartidas</b> (dos profes en el mismo turno). El guioncito (—) es turno sin profe o clase cerrada.
+        Esta grilla sale directo de los turnos cargados en el sistema; para cambiarla, editá los turnos en <b>Gestión de Turnos</b> (solo Lu y Jime).
+      </div>`
+  } catch (e) {
+    cont.innerHTML = `<div class="empty-state"><span class="empty-state-icon">⚠️</span>No pude cargar la grilla: ${e.message || e}</div>`
+  }
+}
+
 function renderEquipo() {
   const contentEl = document.getElementById('content')
   contentEl.classList.remove('module-embed')
@@ -4155,6 +4258,7 @@ function renderPlaceholder(modulo) {
     'masoterapia': { icon: '💆', titulo: 'Masoterapia', desc: 'Agenda de Vero, liquidación, turnos.' },
     'caja-diaria': { icon: '💵', titulo: 'Caja diaria', desc: 'Cobros del día, cierre de caja, arqueo. Gestión operativa de ingresos.' },
     'equipo': { icon: '👨‍⚕️', titulo: 'Equipo', desc: 'Gestión de los 10 miembros del equipo, sus permisos y horarios.' },
+    'grilla': { icon: '📋', titulo: 'Grilla del equipo', desc: 'Horarios de todos los profes, día por día. Quién está y con quién comparte sala.' },
     'liquidaciones': { icon: '💰', titulo: 'Liquidaciones', desc: 'Liquidación mensual por profesional con cruces entre profes.' },
     'pagos-obras-sociales': { icon: '💳', titulo: 'Pagos Obras Sociales', desc: 'Carga de pagos recibidos de obras sociales.' },
     'reportes': { icon: '📊', titulo: 'Reportes', desc: 'Métricas, ocupación, retención, productividad.' },
