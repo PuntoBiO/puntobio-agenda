@@ -1668,6 +1668,9 @@ function renderResumen() {
     const turnosConPendientes = [];
     turnosDia.forEach(t => {
       const cerrada = claseEstaCerrada(t.id, fechaIso);
+      // Si la clase fue CERRADA POR EL CENTRO (decisión nuestra), ese día el turno no
+      // existe: no genera pendientes de evolución para nadie (no figura "sin evolucionar").
+      if (cierreCentroDe(t.id, fechaIso)) return;
       const alumnos = getAlumnos(t, fechaIso);
       const pendientes = [];
       alumnos.forEach(a => {
@@ -2104,6 +2107,17 @@ const EMAILS_CANCELAN_CLASE = [
   'alejandraperna@gmail.com',    // Ale (Maria Alejandra Perna)
   'paukappes@gmail.com'          // Paula (Paula Kappes)
 ];
+// Quién puede marcar/revertir FALTA DEL PROFE (Lu, Jime, Pau, Ale)
+const EMAILS_FALTA_PROFE = [
+  'liclucianavelaz@gmail.com',
+  'jimenahllorente@gmail.com',
+  'paukappes@gmail.com',
+  'alejandraperna@gmail.com'
+];
+function puedeMarcarFaltaProfe() {
+  const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
+  return EMAILS_FALTA_PROFE.map(x => x.toLowerCase()).includes(e);
+}
 function puedeCancelarClase() {
   const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
   return EMAILS_CANCELAN_CLASE.map(x => x.toLowerCase()).includes(e);
@@ -3123,7 +3137,139 @@ window.cancelarClaseCentro = async () => {
   }
 };
 
-// ===== Histórico del alumno (línea de tiempo de evoluciones) =====
+// =============================================
+// FALTA DEL PROFE (Lu/Jime/Pau/Ale): el profe no fue (enfermo, etc.).
+// El ausente PIERDE el bono del mes. Se pueden cargar varios cubridores
+// por franja horaria (mañana uno, tarde otro). Cada cubridor suma a su
+// promedio los alumnos que atienda en su franja, y cobra 5% por día (tope 15%).
+// =============================================
+const PROFES_FALTA = ['Santi', 'Lautaro', 'Lean', 'Male', 'Lu', 'Jime'];
+
+window.abrirFaltaProfe = async function() {
+  const t = evoTurnoActual;
+  if (!t) return;
+  const fecha = fechaRealDiaActivo();
+  // ¿Ya hay una falta cargada para esta fecha? (la falta es del día, no del turno puntual)
+  let faltaExistente = null;
+  try {
+    const ex = await supabaseQuery('faltas_profe', `?select=id,profe_ausente,motivo&fecha=eq.${fecha}&limit=1`);
+    if (ex && ex.length) faltaExistente = ex[0];
+  } catch (e) {}
+
+  const opsProfe = (sel) => PROFES_FALTA.map(p => `<option value="${p}" ${sel===p?'selected':''}>${p}</option>`).join('');
+  const overlay = document.createElement('div');
+  overlay.id = 'falta-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:99999;padding:20px;';
+
+  let cobsHtml = '';
+  if (faltaExistente) {
+    // Ya existe: mostramos quién faltó y sus coberturas, con opción de revertir
+    let cobs = [];
+    try { cobs = await supabaseQuery('faltas_profe_cobertura', `?select=id,cubridor,hora_desde,hora_hasta&falta_id=eq.${faltaExistente.id}&order=hora_desde`) || []; } catch(e){}
+    const filasCob = cobs.map(c => `<div style="display:flex;align-items:center;gap:8px;font-size:13px;padding:5px 0;border-bottom:1px solid #eee;">
+        <span style="flex:1;">🔄 <b>${c.cubridor}</b> cubrió de ${(c.hora_desde||'').slice(0,5)} a ${(c.hora_hasta||'').slice(0,5)}</span>
+      </div>`).join('') || '<div style="font-size:13px;color:#9a3412;">Sin cubridor: la clase queda cerrada y los alumnos recuperan sin gastar cupo.</div>';
+    cobsHtml = `
+      <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;padding:12px;margin-bottom:12px;">
+        <div style="font-size:14px;font-weight:800;color:#b91c1c;margin-bottom:4px;">🤒 ${faltaExistente.profe_ausente} faltó este día</div>
+        <div style="font-size:12px;color:#9a3412;margin-bottom:8px;">${faltaExistente.motivo||''} · pierde el bono del mes</div>
+        ${filasCob}
+      </div>
+      <button onclick="revertirFaltaProfe(${faltaExistente.id})" style="border:1px solid #16a34a;color:#16a34a;background:#fff;border-radius:8px;padding:8px 14px;cursor:pointer;font-weight:700;font-size:13px;">↩️ Revertir falta (fue un error)</button>`;
+  }
+
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:540px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:16px 20px;border-bottom:1px solid #eef0f3;display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;font-size:16px;">🤒 Falta del profe · ${fecha}</h2>
+        <button onclick="document.getElementById('falta-overlay').remove()" style="background:none;border:none;font-size:24px;cursor:pointer;color:#999;">×</button>
+      </div>
+      <div style="padding:16px 20px;">
+        <div style="font-size:12px;color:#555;margin-bottom:12px;">El profe que faltó <b>pierde el bono del mes</b>. Si lo cubrió otro, esos alumnos le suman al promedio del cubridor (que cobra 5% por día, tope 15%). Si nadie cubre, la clase se cierra y los alumnos recuperan sin gastar cupo.</div>
+        ${cobsHtml}
+        ${faltaExistente ? '' : `
+        <label style="font-size:12px;font-weight:700;">¿Quién faltó?<br>
+          <select id="falta-profe" style="padding:7px;border-radius:7px;border:1px solid #ccc;margin-top:4px;">${opsProfe()}</select>
+        </label>
+        <label style="font-size:12px;font-weight:700;display:block;margin-top:10px;">Motivo (opcional)<br>
+          <input id="falta-motivo" placeholder="Ej: enfermo, asunto familiar" style="padding:7px;border-radius:7px;border:1px solid #ccc;width:100%;margin-top:4px;box-sizing:border-box;">
+        </label>
+        <div style="font-size:13px;font-weight:800;margin:16px 0 6px;">🔄 ¿Quién lo cubre? (podés agregar varios por franja)</div>
+        <div id="falta-cubridores"></div>
+        <button onclick="agregarFranjaCobertura()" style="border:1px dashed #94a3b8;color:#475569;background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12.5px;margin-top:6px;">+ Agregar cubridor / franja</button>
+        <div style="margin-top:16px;display:flex;gap:8px;">
+          <button onclick="guardarFaltaProfe()" style="border:none;background:#b91c1c;color:#fff;border-radius:8px;padding:9px 18px;cursor:pointer;font-weight:700;font-size:13px;">Guardar falta</button>
+          <span id="falta-status" style="font-size:12px;align-self:center;"></span>
+        </div>`}
+      </div>
+    </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  if (!faltaExistente) agregarFranjaCobertura(); // arranca con una franja vacía
+};
+
+window.agregarFranjaCobertura = function() {
+  const cont = document.getElementById('falta-cubridores');
+  if (!cont) return;
+  const opsProfe = PROFES_FALTA.map(p => `<option value="${p}">${p}</option>`).join('');
+  const div = document.createElement('div');
+  div.className = 'falta-franja';
+  div.style.cssText = 'display:flex;gap:6px;align-items:end;margin-bottom:6px;flex-wrap:wrap;';
+  div.innerHTML = `
+    <label style="font-size:11px;">Cubre<br><select class="fc-cubridor" style="padding:6px;border-radius:6px;border:1px solid #ccc;">${opsProfe}</select></label>
+    <label style="font-size:11px;">Desde<br><input type="time" class="fc-desde" value="07:00" style="padding:6px;border-radius:6px;border:1px solid #ccc;"></label>
+    <label style="font-size:11px;">Hasta<br><input type="time" class="fc-hasta" value="11:00" style="padding:6px;border-radius:6px;border:1px solid #ccc;"></label>
+    <button onclick="this.parentNode.remove()" style="border:none;background:#fee2e2;color:#b91c1c;border-radius:6px;padding:6px 9px;cursor:pointer;font-size:13px;">🗑</button>`;
+  cont.appendChild(div);
+};
+
+window.guardarFaltaProfe = async function() {
+  const fecha = fechaRealDiaActivo();
+  const profe = document.getElementById('falta-profe').value;
+  const motivo = (document.getElementById('falta-motivo').value || '').trim() || null;
+  const status = document.getElementById('falta-status');
+  // Recolectar franjas de cobertura
+  const franjas = [];
+  document.querySelectorAll('#falta-cubridores .falta-franja').forEach(f => {
+    const cub = f.querySelector('.fc-cubridor').value;
+    const desde = f.querySelector('.fc-desde').value;
+    const hasta = f.querySelector('.fc-hasta').value;
+    if (cub && desde && hasta) franjas.push({ cubridor: cub, hora_desde: desde, hora_hasta: hasta });
+  });
+  // Validaciones
+  for (const fr of franjas) {
+    if (fr.cubridor === profe) { status.innerHTML = '<span style="color:#b91c1c;">El cubridor no puede ser el mismo que faltó.</span>'; return; }
+    if (fr.hora_hasta <= fr.hora_desde) { status.innerHTML = '<span style="color:#b91c1c;">Revisá las horas: "hasta" debe ser mayor que "desde".</span>'; return; }
+  }
+  status.textContent = 'Guardando…';
+  try {
+    const falta = await supabaseInsertReturn('faltas_profe', {
+      profe_ausente: profe, fecha, motivo,
+      marcada_por: USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null
+    });
+    const faltaId = Array.isArray(falta) ? falta[0]?.id : falta?.id;
+    for (const fr of franjas) {
+      await supabaseInsert('faltas_profe_cobertura', { falta_id: faltaId, ...fr });
+    }
+    document.getElementById('falta-overlay').remove();
+    toast('🤒 Falta cargada. ' + (franjas.length ? franjas.length + ' cubridor(es) registrado(s).' : 'Sin cubridor: la clase queda cerrada.'));
+  } catch (e) {
+    status.innerHTML = '<span style="color:#b91c1c;">No se pudo guardar: ' + (e.message || '') + '</span>';
+  }
+};
+
+window.revertirFaltaProfe = async function(id) {
+  if (!puedeMarcarFaltaProfe()) { toast('No tenés permiso para revertir faltas.', 'err'); return; }
+  if (!confirm('¿Revertir esta falta? El profe recupera su día y se borran las coberturas cargadas.')) return;
+  try {
+    await supabaseDelete('faltas_profe', `id=eq.${id}`); // CASCADE borra las coberturas
+    document.getElementById('falta-overlay').remove();
+    toast('↩️ Falta revertida.');
+  } catch (e) {
+    toast('No se pudo revertir: ' + (e.message || ''), 'err');
+  }
+};
+
 window.abrirHistorico = async (personaId, nombre) => {
   document.getElementById('hist-nombre').textContent = nombre || `#${personaId}`;
   document.getElementById('hist-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--celeste)">⟳ Cargando histórico...</div>';
@@ -4575,12 +4721,14 @@ function renderPanelEvo() {
         <div class="cierre-msg">✅ <b>Clase lista para cerrar</b> — todos cargados</div>
         <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar clase</button>
         ${puedeCancelarClase() ? `<button class="cierre-reabrir" style="border-color:#fca5a5;color:#b91c1c" onclick="cancelarClaseCentro()">🚫 Cancelar (centro)</button>` : ''}
+        ${puedeMarcarFaltaProfe() ? `<button class="cierre-reabrir" style="border-color:#fca5a5;color:#9a3412" onclick="abrirFaltaProfe()">🤒 Falta del profe</button>` : ''}
       </div>`;
   } else {
     bloqueCierre = `<div class="cierre-box pendiente">
         <div class="cierre-msg">⏳ Faltan alumnos por cargar (evolución o ausencia) para poder cerrar</div>
         <button id="cerrar-clase-btn" class="cierre-cerrar" onclick="cerrarClase()">🔒 Cerrar igual</button>
         ${puedeCancelarClase() ? `<button class="cierre-reabrir" style="border-color:#fca5a5;color:#b91c1c" onclick="cancelarClaseCentro()">🚫 Cancelar (centro)</button>` : ''}
+        ${puedeMarcarFaltaProfe() ? `<button class="cierre-reabrir" style="border-color:#fca5a5;color:#9a3412" onclick="abrirFaltaProfe()">🤒 Falta del profe</button>` : ''}
       </div>`;
   }
   cont.innerHTML = `
