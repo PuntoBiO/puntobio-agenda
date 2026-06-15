@@ -3233,6 +3233,7 @@ function renderCajasHistoricas() {
 // =============================================
 const PROFES_BONO_TF = ['Santi', 'Lean', 'Lautaro', 'Male']
 let CALC_MES_OFFSET = 0  // 0 = mes actual
+let CALC_AJUSTES = {}    // ajustes manuales del mes: 'profe|tipo' -> bool
 
 function renderCalculadorBonos() {
   const contentEl = document.getElementById('content')
@@ -3287,43 +3288,63 @@ async function cargarCalculadorBonos(mesVer) {
     const { data: sueldos } = await supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
     const sueldoDe = {}
     ;(sueldos || []).forEach(s => { sueldoDe[s.profe] = Number(s.sueldo_bolsillo) || 0 })
+    // Ajustes manuales (vacaciones, estrella, sala) guardados de este mes
+    const { data: ajustes } = await supabase.from('bonos_ajustes_tf').select('profe, tipo, activo').eq('mes', mesStr)
+    CALC_AJUSTES = {}
+    ;(ajustes || []).forEach(a => { CALC_AJUSTES[(a.profe || '') + '|' + a.tipo] = !!a.activo })
     const datoDe = nombre => datos.find(d => (d.nombre || '').toLowerCase() === nombre.toLowerCase()
       || (nombre === 'Lautaro' && (d.nombre || '').toLowerCase() === 'lauti'))
     let filas = ''
     PROFES_BONO_TF.forEach(profe => {
-      const d = datoDe(profe) || { alxh: 0, bonoCaido: false, diasCubiertos: 0, bonoCobertura: 0 }
+      const d = datoDe(profe) || { alxh: 0, bonoCaido: false, diasCubiertos: 0, bonoCobertura: 0, cubrioVacaciones: false }
       const sueldo = sueldoDe[profe] || 0
       filas += filaCalc(profe, d, sueldo, mesStr)
     })
+    const salaOk = CALC_AJUSTES['|sala_ok'] === true
     body.innerHTML = `
       <div style="overflow-x:auto;">
-      <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:720px;">
+      <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:860px;">
         <thead>
           <tr style="background:#f1f5f9; text-align:left;">
-            <th style="padding:10px 8px;">Profe</th>
-            <th style="padding:10px 8px;">Promedio</th>
-            <th style="padding:10px 8px;">Escalón</th>
-            <th style="padding:10px 8px; min-width:140px;">Sueldo bolsillo</th>
-            <th style="padding:10px 8px;">Bono base</th>
-            <th style="padding:10px 8px;">Cobertura</th>
-            <th style="padding:10px 8px; text-align:right;">TOTAL a pagar</th>
+            <th style="padding:9px 7px;">Profe</th>
+            <th style="padding:9px 7px;">Prom.</th>
+            <th style="padding:9px 7px;">Escalón base</th>
+            <th style="padding:9px 7px; min-width:130px;">Sueldo bolsillo</th>
+            <th style="padding:9px 7px; text-align:center;">🤒 Cobertura</th>
+            <th style="padding:9px 7px; text-align:center;">🏖 Vacac.<br>20%</th>
+            <th style="padding:9px 7px; text-align:center;">🌟 Estrella<br>10%</th>
+            <th style="padding:9px 7px; text-align:right;">TOTAL</th>
           </tr>
         </thead>
         <tbody id="calc-tbody">${filas}</tbody>
         <tfoot>
           <tr style="border-top:2px solid #cbd5e1; font-weight:800;">
-            <td colspan="6" style="padding:12px 8px; text-align:right;">TOTAL bonos del mes (4 profes):</td>
-            <td style="padding:12px 8px; text-align:right; color:#16a34a; font-size:15px;" id="calc-total-general">$0</td>
+            <td colspan="7" style="padding:11px 7px; text-align:right;">TOTAL bonos por desempeño (4 profes):</td>
+            <td style="padding:11px 7px; text-align:right; color:#16a34a; font-size:15px;" id="calc-total-general">$0</td>
           </tr>
         </tfoot>
       </table>
       </div>
-      <div style="margin-top:14px; padding:12px 14px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; font-size:12.5px; color:#9a3412;">
-        🤝 <b>Aparte de esta tabla:</b> el <b>Bono de Equipo por orden de sala</b> son $150.000 fijos repartidos entre Santi, Lautaro y Lean ($50.000 c/u), si la sala se mantuvo impecable. Ese no depende del promedio — lo sumás por afuera. Arranca en agosto.
+      <div style="margin-top:16px; padding:14px 16px; background:#fff7ed; border:1px solid #fed7aa; border-radius:12px;">
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:13.5px; color:#9a3412;">
+            <input type="checkbox" id="calc-sala-ok" ${salaOk ? 'checked' : ''} onchange="toggleSalaOk('${mesStr}', this.checked)" style="width:17px; height:17px; cursor:pointer;">
+            🤝 La sala estuvo impecable este mes
+          </label>
+          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> ($50.000 c/u) entre <b>Santi, Lautaro y Lean</b>.</span>
+        </div>
+        <div id="calc-sala-detalle" style="margin-top:8px; font-size:13px; color:#9a3412; ${salaOk ? '' : 'display:none;'}">
+          ✅ Santi: <b>$50.000</b> · Lautaro: <b>$50.000</b> · Lean: <b>$50.000</b>
+        </div>
+        <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Arranca en agosto.</div>
+      </div>
+      <div style="margin-top:14px; padding:12px 16px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <span style="font-weight:800; font-size:14.5px; color:#1e40af;">💰 GRAN TOTAL del mes (desempeño + sala):</span>
+        <span style="font-weight:800; font-size:18px; color:#1e40af;" id="calc-gran-total">$0</span>
       </div>`
     recalcularTotalGeneral()
   } catch (e) {
-    body.innerHTML = `<div class="empty-state">No se pudo cargar: ${e.message || ''}<br><span style="font-size:12px;">¿Corriste el SQL de la tabla sueldos_profes_tf?</span></div>`
+    body.innerHTML = `<div class="empty-state">No se pudo cargar: ${e.message || ''}<br><span style="font-size:12px;">¿Corriste el SQL de las tablas sueldos_profes_tf y bonos_ajustes_tf?</span></div>`
   }
 }
 
@@ -3335,30 +3356,45 @@ function filaCalc(profe, d, sueldo, mesStr) {
     : { label: 'Sin bono', pct: 0, color: '#94a3b8' }
   const pctCob = Math.min((d.diasCubiertos || 0) * 5, 15)
   const caido = !!d.bonoCaido
+  // Vacaciones y estrella: el sistema sugiere (detecta), pero el check manda.
+  // Si hay ajuste manual guardado, usa ese; si no, usa lo que detectó el sistema.
+  const vacKey = profe + '|vacaciones', estKey = profe + '|estrella'
+  const vacAuto = !!d.cubrioVacaciones
+  const vacOn = (vacKey in CALC_AJUSTES) ? CALC_AJUSTES[vacKey] : vacAuto
+  const estOn = (estKey in CALC_AJUSTES) ? CALC_AJUSTES[estKey] : false
   return `
     <tr data-profe="${profe}" data-pct="${esc.pct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" style="border-bottom:1px solid #eef0f3;">
-      <td style="padding:10px 8px; font-weight:700;">${profe}</td>
-      <td style="padding:10px 8px; font-weight:700; color:${esc.color};">${alxh}/h</td>
-      <td style="padding:10px 8px;">${caido ? '<span style="color:#dc2626; font-weight:700;">🤒 Bono caído</span>' : `<span style="color:${esc.color};">${esc.label} · ${esc.pct}%</span>`}</td>
-      <td style="padding:10px 8px;">
+      <td style="padding:9px 7px; font-weight:700;">${profe}</td>
+      <td style="padding:9px 7px; font-weight:700; color:${esc.color};">${alxh}</td>
+      <td style="padding:9px 7px; font-size:12px;">${caido ? '<span style="color:#dc2626; font-weight:700;">🤒 Caído</span>' : `<span style="color:${esc.color};">${esc.label}<br>${esc.pct}%</span>`}</td>
+      <td style="padding:9px 7px;">
         <input type="number" value="${sueldo || ''}" placeholder="0" onchange="guardarSueldo('${profe}','${mesStr}',this.value)" oninput="recalcularFila(this.closest('tr'))"
-          style="width:130px; padding:6px 8px; border:1px solid #cbd5e1; border-radius:7px; font-size:13px;">
+          style="width:120px; padding:6px 8px; border:1px solid #cbd5e1; border-radius:7px; font-size:13px;">
       </td>
-      <td style="padding:10px 8px; font-weight:700;" class="calc-base">$0</td>
-      <td style="padding:10px 8px; color:#15803d;" class="calc-cob">${pctCob > 0 ? '+' + pctCob + '%' : '—'}</td>
-      <td style="padding:10px 8px; text-align:right; font-weight:800; font-size:14px;" class="calc-total">$0</td>
+      <td style="padding:9px 7px; text-align:center; color:#15803d; font-size:12px;">${pctCob > 0 ? '+' + pctCob + '%' : '—'}</td>
+      <td style="padding:9px 7px; text-align:center;">
+        <input type="checkbox" class="chk-vac" ${vacOn ? 'checked' : ''} onchange="toggleAjuste('${profe}','vacaciones','${mesStr}',this.checked); recalcularFila(this.closest('tr'))" style="width:16px; height:16px; cursor:pointer;" title="${vacAuto ? 'El sistema detectó que cubrió vacaciones' : ''}">
+        ${vacAuto ? '<div style="font-size:9px; color:#16a34a;">detectado</div>' : ''}
+      </td>
+      <td style="padding:9px 7px; text-align:center;">
+        <input type="checkbox" class="chk-est" ${estOn ? 'checked' : ''} onchange="toggleAjuste('${profe}','estrella','${mesStr}',this.checked); recalcularFila(this.closest('tr'))" style="width:16px; height:16px; cursor:pointer;">
+      </td>
+      <td style="padding:9px 7px; text-align:right; font-weight:800; font-size:14px;" class="calc-total">$0</td>
     </tr>`
 }
 
 window.recalcularFila = function(tr) {
-  const sueldo = Number(tr.querySelector('input').value) || 0
+  const sueldo = Number(tr.querySelector('input[type=number]').value) || 0
   const pct = Number(tr.dataset.pct) || 0
   const pctCob = Number(tr.dataset.pctcob) || 0
   const caido = tr.dataset.caido === '1'
-  const base = caido ? 0 : sueldo * pct / 100
+  const vac = tr.querySelector('.chk-vac').checked ? 20 : 0
+  const est = tr.querySelector('.chk-est').checked ? 10 : 0
+  // Si el bono base está caído por falta, no cobra base ni premios de desempeño;
+  // pero la cobertura por haber cubierto a otro sí se respeta (se la ganó trabajando).
+  const base = caido ? 0 : sueldo * (pct + vac + est) / 100
   const cob = sueldo * pctCob / 100
   const total = base + cob
-  tr.querySelector('.calc-base').textContent = caido ? '—' : ('$' + Math.round(base).toLocaleString('es-AR'))
   tr.querySelector('.calc-total').textContent = '$' + Math.round(total).toLocaleString('es-AR')
   recalcularTotalGeneral()
 }
@@ -3366,14 +3402,21 @@ window.recalcularFila = function(tr) {
 function recalcularTotalGeneral() {
   let total = 0
   document.querySelectorAll('#calc-tbody tr').forEach(tr => {
-    const sueldo = Number(tr.querySelector('input').value) || 0
+    const sueldo = Number(tr.querySelector('input[type=number]').value) || 0
     const pct = Number(tr.dataset.pct) || 0
     const pctCob = Number(tr.dataset.pctcob) || 0
     const caido = tr.dataset.caido === '1'
-    total += (caido ? 0 : sueldo * pct / 100) + sueldo * pctCob / 100
+    const vac = tr.querySelector('.chk-vac').checked ? 20 : 0
+    const est = tr.querySelector('.chk-est').checked ? 10 : 0
+    total += (caido ? 0 : sueldo * (pct + vac + est) / 100) + sueldo * pctCob / 100
   })
   const el = document.getElementById('calc-total-general')
   if (el) el.textContent = '$' + Math.round(total).toLocaleString('es-AR')
+  // Gran total = desempeño + sala
+  const salaOk = document.getElementById('calc-sala-ok')
+  const sala = (salaOk && salaOk.checked) ? 150000 : 0
+  const gt = document.getElementById('calc-gran-total')
+  if (gt) gt.textContent = '$' + Math.round(total + sala).toLocaleString('es-AR')
 }
 
 window.guardarSueldo = async function(profe, mes, valor) {
@@ -3381,6 +3424,28 @@ window.guardarSueldo = async function(profe, mes, valor) {
   try {
     await supabase.from('sueldos_profes_tf').upsert({ profe, mes, sueldo_bolsillo: sueldo, actualizado_en: new Date().toISOString() }, { onConflict: 'profe,mes' })
     notifCalc(`💾 Sueldo de ${profe} guardado`)
+  } catch (e) {
+    notifCalc('⚠️ No se pudo guardar: ' + (e.message || ''), true)
+  }
+}
+
+window.toggleAjuste = async function(profe, tipo, mes, activo) {
+  CALC_AJUSTES[profe + '|' + tipo] = activo
+  try {
+    await supabase.from('bonos_ajustes_tf').upsert({ mes, profe, tipo, activo, actualizado_en: new Date().toISOString() }, { onConflict: 'mes,profe,tipo' })
+  } catch (e) {
+    notifCalc('⚠️ No se pudo guardar el ajuste: ' + (e.message || ''), true)
+  }
+}
+
+window.toggleSalaOk = async function(mes, activo) {
+  CALC_AJUSTES['|sala_ok'] = activo
+  const det = document.getElementById('calc-sala-detalle')
+  if (det) det.style.display = activo ? '' : 'none'
+  recalcularTotalGeneral()
+  try {
+    await supabase.from('bonos_ajustes_tf').upsert({ mes, profe: null, tipo: 'sala_ok', activo, actualizado_en: new Date().toISOString() }, { onConflict: 'mes,profe,tipo' })
+    notifCalc(activo ? '🤝 Bono de sala activado' : 'Bono de sala desactivado')
   } catch (e) {
     notifCalc('⚠️ No se pudo guardar: ' + (e.message || ''), true)
   }
@@ -3881,9 +3946,13 @@ async function cargarEquipoDesempeno(mesVer) {
     let liderAlxh = null
     bonoLista.forEach(p => { if (p.horas > 0 && (!liderAlxh || p.alxh > liderAlxh.alxh)) liderAlxh = p })
     // Exponer los datos del bono para el Calculador de Bonos TF (mismo motor → nunca discrepa).
+    // ¿Este profe cubrió vacaciones de alguien este mes? (para el bono del 20%)
+    const cubrioVacasSet = new Set()
+    Object.keys(vacaCubre).forEach(k => { cubrioVacasSet.add(vacaCubre[k]) })
     window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
       nombre: p.nombre, email: p.email, alxh: p.alxh,
-      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0
+      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0,
+      cubrioVacaciones: cubrioVacasSet.has(p.email)
     })) }
 
     // AUDITORÍA (solo admin): evoluciones del mes sin presente registrado ese día.
