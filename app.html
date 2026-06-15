@@ -1745,6 +1745,11 @@ function buildNav() {
         <div class="nav-item" onclick="irA('cuentas-pagar')">
           <span class="nav-icon">💸</span>
           <span class="nav-label">Cuentas a Pagar</span>
+        </div>
+        <div class="nav-item" onclick="irA('calculador-bonos')">
+          <span class="nav-icon">🧮</span>
+          <span class="nav-label">Bonos TF</span>
+          ${window.badgeNuevo('2026-06-15')}
         </div>`)
       }
     }
@@ -1846,6 +1851,7 @@ window.irA = function(modulo) {
   else if (modulo === 'pagos-obras-sociales') renderPagosObrasSociales()
   else if (modulo === 'cajas-historicas') renderCajasHistoricas()
   else if (modulo === 'cuentas-pagar') renderCuentasPagar()
+  else if (modulo === 'calculador-bonos') renderCalculadorBonos()
   else if (modulo === 'feriados') renderFeriados()
   else if (modulo === 'cumpleanos') renderCumpleanos()
   else renderPlaceholder(modulo)
@@ -3220,6 +3226,183 @@ function renderCajasHistoricas() {
 // MODULO: CUENTAS A PAGAR
 // (gastos del centro cargados a mano; SOLO Lu y Jime, igual que Cajas Históricas)
 // ======================
+// =============================================
+// CALCULADOR DE BONOS TF (solo Lu y Jime)
+// Cargás el sueldo de bolsillo de cada profe (cambia mes a mes) y calcula el bono
+// según su promedio real de alumnos/hora del mes (mismo motor que el panel Desempeño).
+// =============================================
+const PROFES_BONO_TF = ['Santi', 'Lean', 'Lautaro', 'Male']
+let CALC_MES_OFFSET = 0  // 0 = mes actual
+
+function renderCalculadorBonos() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  const EMAILS_OK = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  if (!EMAILS_OK.includes(miEmail)) {
+    contentEl.innerHTML = `<div class="hero"><h1>🧮 Bonos TF</h1></div>
+      <div class="panel"><div class="panel-body"><div class="empty-state">Esta sección es solo para Lu y Jime.</div></div></div>`
+    return
+  }
+  const base = new Date()
+  const mesVer = new Date(base.getFullYear(), base.getMonth() + CALC_MES_OFFSET, 1)
+  const titulo = mesVer.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+  contentEl.innerHTML = `
+    <div class="hero">
+      <div class="hero-tag">Administración</div>
+      <h1>🧮 Calculador de Bonos TF</h1>
+      <p class="hero-sub">Cargá el sueldo de cada profe y calculá cuánto pagarle de bono este mes</p>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; margin:6px 0 14px;">
+      <button onclick="calcCambiarMes(-1)" style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;">←</button>
+      <span style="font-weight:800; font-size:15px; text-transform:capitalize; min-width:160px; text-align:center;">${titulo}</span>
+      <button onclick="calcCambiarMes(1)" ${CALC_MES_OFFSET >= 0 ? 'disabled style="opacity:0.35; border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; font-size:14px;"' : 'style="border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;"'}>→</button>
+    </div>
+    <div class="panel">
+      <div class="panel-body" id="calc-body">
+        <div class="empty-state"><span class="empty-state-icon">⏳</span>Cargando promedios y sueldos…</div>
+      </div>
+    </div>
+    <div style="font-size:11.5px; color:var(--text-dim); padding:10px 4px;">
+      🧮 El <b>promedio de alumnos/hora</b> se toma del sistema (mismo dato que el panel Desempeño). Vos solo cargás el <b>sueldo de bolsillo</b> de cada uno (cambia mes a mes). El bono se calcula automático: <b>10%</b> (4,0–4,4) · <b>20%</b> (4,5–4,9) · <b>30%</b> (5,0+). Se suma la cobertura por cubrir faltas (5%/día, tope 15%). Si el profe faltó sin cobertura, el bono base no aplica ese mes.
+    </div>`
+  cargarCalculadorBonos(mesVer)
+}
+
+window.calcCambiarMes = function(delta) {
+  if (CALC_MES_OFFSET + delta > 0) return
+  CALC_MES_OFFSET += delta
+  renderCalculadorBonos()
+}
+
+async function cargarCalculadorBonos(mesVer) {
+  const body = document.getElementById('calc-body')
+  if (!body) return
+  const mesStr = mesVer.getFullYear() + '-' + String(mesVer.getMonth() + 1).padStart(2, '0')
+  try {
+    if (!window.BONO_DATOS_MES || window.BONO_DATOS_MES.mesStr !== mesStr) {
+      await cargarEquipoDesempeno(mesVer)
+    }
+    const datos = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
+    const { data: sueldos } = await supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
+    const sueldoDe = {}
+    ;(sueldos || []).forEach(s => { sueldoDe[s.profe] = Number(s.sueldo_bolsillo) || 0 })
+    const datoDe = nombre => datos.find(d => (d.nombre || '').toLowerCase() === nombre.toLowerCase()
+      || (nombre === 'Lautaro' && (d.nombre || '').toLowerCase() === 'lauti'))
+    let filas = ''
+    PROFES_BONO_TF.forEach(profe => {
+      const d = datoDe(profe) || { alxh: 0, bonoCaido: false, diasCubiertos: 0, bonoCobertura: 0 }
+      const sueldo = sueldoDe[profe] || 0
+      filas += filaCalc(profe, d, sueldo, mesStr)
+    })
+    body.innerHTML = `
+      <div style="overflow-x:auto;">
+      <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:720px;">
+        <thead>
+          <tr style="background:#f1f5f9; text-align:left;">
+            <th style="padding:10px 8px;">Profe</th>
+            <th style="padding:10px 8px;">Promedio</th>
+            <th style="padding:10px 8px;">Escalón</th>
+            <th style="padding:10px 8px; min-width:140px;">Sueldo bolsillo</th>
+            <th style="padding:10px 8px;">Bono base</th>
+            <th style="padding:10px 8px;">Cobertura</th>
+            <th style="padding:10px 8px; text-align:right;">TOTAL a pagar</th>
+          </tr>
+        </thead>
+        <tbody id="calc-tbody">${filas}</tbody>
+        <tfoot>
+          <tr style="border-top:2px solid #cbd5e1; font-weight:800;">
+            <td colspan="6" style="padding:12px 8px; text-align:right;">TOTAL bonos del mes (4 profes):</td>
+            <td style="padding:12px 8px; text-align:right; color:#16a34a; font-size:15px;" id="calc-total-general">$0</td>
+          </tr>
+        </tfoot>
+      </table>
+      </div>
+      <div style="margin-top:14px; padding:12px 14px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; font-size:12.5px; color:#9a3412;">
+        🤝 <b>Aparte de esta tabla:</b> el <b>Bono de Equipo por orden de sala</b> son $150.000 fijos repartidos entre Santi, Lautaro y Lean ($50.000 c/u), si la sala se mantuvo impecable. Ese no depende del promedio — lo sumás por afuera. Arranca en agosto.
+      </div>`
+    recalcularTotalGeneral()
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state">No se pudo cargar: ${e.message || ''}<br><span style="font-size:12px;">¿Corriste el SQL de la tabla sueldos_profes_tf?</span></div>`
+  }
+}
+
+function filaCalc(profe, d, sueldo, mesStr) {
+  const alxh = d.alxh || 0
+  const esc = alxh >= 5 ? { label: '🏆 Excelencia', pct: 30, color: '#16a34a' }
+    : alxh >= 4.5 ? { label: '🚀 Crecimiento', pct: 20, color: '#0c7bb8' }
+    : alxh >= 4 ? { label: '🤝 Compromiso', pct: 10, color: '#d97706' }
+    : { label: 'Sin bono', pct: 0, color: '#94a3b8' }
+  const pctCob = Math.min((d.diasCubiertos || 0) * 5, 15)
+  const caido = !!d.bonoCaido
+  return `
+    <tr data-profe="${profe}" data-pct="${esc.pct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" style="border-bottom:1px solid #eef0f3;">
+      <td style="padding:10px 8px; font-weight:700;">${profe}</td>
+      <td style="padding:10px 8px; font-weight:700; color:${esc.color};">${alxh}/h</td>
+      <td style="padding:10px 8px;">${caido ? '<span style="color:#dc2626; font-weight:700;">🤒 Bono caído</span>' : `<span style="color:${esc.color};">${esc.label} · ${esc.pct}%</span>`}</td>
+      <td style="padding:10px 8px;">
+        <input type="number" value="${sueldo || ''}" placeholder="0" onchange="guardarSueldo('${profe}','${mesStr}',this.value)" oninput="recalcularFila(this.closest('tr'))"
+          style="width:130px; padding:6px 8px; border:1px solid #cbd5e1; border-radius:7px; font-size:13px;">
+      </td>
+      <td style="padding:10px 8px; font-weight:700;" class="calc-base">$0</td>
+      <td style="padding:10px 8px; color:#15803d;" class="calc-cob">${pctCob > 0 ? '+' + pctCob + '%' : '—'}</td>
+      <td style="padding:10px 8px; text-align:right; font-weight:800; font-size:14px;" class="calc-total">$0</td>
+    </tr>`
+}
+
+window.recalcularFila = function(tr) {
+  const sueldo = Number(tr.querySelector('input').value) || 0
+  const pct = Number(tr.dataset.pct) || 0
+  const pctCob = Number(tr.dataset.pctcob) || 0
+  const caido = tr.dataset.caido === '1'
+  const base = caido ? 0 : sueldo * pct / 100
+  const cob = sueldo * pctCob / 100
+  const total = base + cob
+  tr.querySelector('.calc-base').textContent = caido ? '—' : ('$' + Math.round(base).toLocaleString('es-AR'))
+  tr.querySelector('.calc-total').textContent = '$' + Math.round(total).toLocaleString('es-AR')
+  recalcularTotalGeneral()
+}
+
+function recalcularTotalGeneral() {
+  let total = 0
+  document.querySelectorAll('#calc-tbody tr').forEach(tr => {
+    const sueldo = Number(tr.querySelector('input').value) || 0
+    const pct = Number(tr.dataset.pct) || 0
+    const pctCob = Number(tr.dataset.pctcob) || 0
+    const caido = tr.dataset.caido === '1'
+    total += (caido ? 0 : sueldo * pct / 100) + sueldo * pctCob / 100
+  })
+  const el = document.getElementById('calc-total-general')
+  if (el) el.textContent = '$' + Math.round(total).toLocaleString('es-AR')
+}
+
+window.guardarSueldo = async function(profe, mes, valor) {
+  const sueldo = Number(valor) || 0
+  try {
+    await supabase.from('sueldos_profes_tf').upsert({ profe, mes, sueldo_bolsillo: sueldo, actualizado_en: new Date().toISOString() }, { onConflict: 'profe,mes' })
+    notifCalc(`💾 Sueldo de ${profe} guardado`)
+  } catch (e) {
+    notifCalc('⚠️ No se pudo guardar: ' + (e.message || ''), true)
+  }
+}
+
+// Mini-notificación flotante (sin alert molesto)
+function notifCalc(msg, esError) {
+  let n = document.getElementById('calc-notif')
+  if (!n) {
+    n = document.createElement('div')
+    n.id = 'calc-notif'
+    n.style.cssText = 'position:fixed; bottom:24px; left:50%; transform:translateX(-50%); padding:10px 18px; border-radius:10px; font-size:13px; font-weight:700; z-index:99999; box-shadow:0 8px 24px rgba(0,0,0,0.18); transition:opacity .3s;'
+    document.body.appendChild(n)
+  }
+  n.style.background = esError ? '#fee2e2' : '#dcfce7'
+  n.style.color = esError ? '#991b1b' : '#14532d'
+  n.textContent = msg
+  n.style.opacity = '1'
+  clearTimeout(window._calcNotifT)
+  window._calcNotifT = setTimeout(() => { n.style.opacity = '0' }, 2200)
+}
+
 function renderCuentasPagar() {
   // Doble seguridad: solo Lu y Jime pueden ver este módulo
   const EMAILS_CUENTAS_PAGAR = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
@@ -3697,6 +3880,11 @@ async function cargarEquipoDesempeno(mesVer) {
     const bonoLista = equipo.filter(p => (p.horas > 0 || p.horasPrev > 0) && !BONO_EXCLUIDOS.includes(p.email))
     let liderAlxh = null
     bonoLista.forEach(p => { if (p.horas > 0 && (!liderAlxh || p.alxh > liderAlxh.alxh)) liderAlxh = p })
+    // Exponer los datos del bono para el Calculador de Bonos TF (mismo motor → nunca discrepa).
+    window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
+      nombre: p.nombre, email: p.email, alxh: p.alxh,
+      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0
+    })) }
 
     // AUDITORÍA (solo admin): evoluciones del mes sin presente registrado ese día.
     // No acusa: marca casos para revisar (puede ser asistencia sin marcar o evolución de día equivocado).
@@ -4382,6 +4570,7 @@ function renderPlaceholder(modulo) {
     'reportes': { icon: '📊', titulo: 'Reportes', desc: 'Métricas, ocupación, retención, productividad.' },
     'cajas-historicas': { icon: '📚', titulo: 'Cajas Históricas', desc: 'Control mensual de todos los cobros de todas las áreas.' },
     'cuentas-pagar': { icon: '💸', titulo: 'Cuentas a Pagar', desc: 'Gastos del centro: sueldos, alquiler, impuestos, servicios.' },
+    'calculador-bonos': { icon: '🧮', titulo: 'Bonos TF', desc: 'Calculá el bono de cada profe según su promedio y sueldo.' },
     'mi-perfil': { icon: '👤', titulo: 'Mi perfil', desc: 'Editar tus datos personales y cambiar clave.' }
   }
 
