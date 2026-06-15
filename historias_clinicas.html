@@ -621,11 +621,33 @@ textarea.form-input { resize: vertical; min-height: 44px; }
     <div class="modal-body" id="modalBody">—</div>
     <div class="modal-footer">
       <div id="modalReviewStatus" style="font-size:13px; color:var(--gris-texto);"></div>
-      <div style="display:flex; gap:8px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" onclick="closeModal()">Cerrar</button>
+        <button class="btn" id="btnFusionarHC" onclick="abrirFusionModal()" style="display:none; background:#ede9fe; color:#6d28d9; border-color:#c4b5fd;">🔀 Fusionar HC</button>
         <button class="btn" id="btnEditarForm" onclick="abrirFormularioPaciente()" style="display:none;">✍️ Cargar/editar formulario</button>
         <button class="btn" id="btnGenerarPDF" onclick="abrirSelectorPDF()" style="background:#1e9fe0; color:#fff; border-color:#1e9fe0;">📄 Generar PDF</button>
         <button class="btn btn-success" id="btnMarcarRevisada" onclick="marcarRevisada()">✓ Marcar como revisada</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL Fusionar HC -->
+<div class="modal-overlay" id="modalFusion">
+  <div class="modal" style="max-width: 900px;">
+    <div class="modal-header" style="background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);">
+      <div>
+        <h2>🔀 Fusionar Historias Clínicas</h2>
+        <div class="meta" id="fusionMetaNombre">—</div>
+      </div>
+      <button class="modal-close" onclick="closeFusionModal()">×</button>
+    </div>
+    <div class="modal-body" id="fusionBody">—</div>
+    <div class="modal-footer">
+      <div style="font-size:12px; color:var(--gris-texto);">Esta acción se puede deshacer desde Supabase.</div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" onclick="closeFusionModal()">Cancelar</button>
+        <button class="btn" id="btnConfirmarFusion" onclick="ejecutarFusion()" disabled style="background:#7c3aed; color:#fff; border-color:#7c3aed;">🔀 Fusionar</button>
       </div>
     </div>
   </div>
@@ -786,9 +808,12 @@ async function loadAllData() {
     if (pErr) throw pErr;
     allPersonas = personas || [];
 
-    // 2) Todas las HCs ordenadas por completado_en DESC
+    // 2) Todas las HCs ordenadas por completado_en DESC.
+    // Las HC fusionadas (fusionada_en NOT NULL) quedan archivadas y NO aparecen
+    // en las listas ni cuentan en los chips. Siguen en la base sin borrarse.
     const { data: hcs, error: hcErr } = await sb
       .from('historias_clinicas').select('*')
+      .is('fusionada_en', null)
       .order('completado_en', { ascending: false });
     if (hcErr) throw hcErr;
     allHCs = hcs || [];
@@ -1428,6 +1453,14 @@ function openHC(hcId) {
   // Mostrar el botón "Cargar/editar formulario" solo a los kinesiólogos
   const btnForm = document.getElementById('btnEditarForm');
   if (btnForm) btnForm.style.display = puedeIniciarEval() ? 'inline-block' : 'none';
+
+  // Mostrar el botón "Fusionar HC" solo cuando esta persona tiene 2+ HC vivas
+  // y el usuario es kinesiólogo (puede editar). No aparece para profes solo-lectura.
+  const btnFus = document.getElementById('btnFusionarHC');
+  if (btnFus) {
+    const otrasVivas = allHCs.filter(h => h.persona_id === hc.persona_id && h.id !== hc.id);
+    btnFus.style.display = (puedeIniciarEval() && otrasVivas.length > 0) ? 'inline-block' : 'none';
+  }
 }
 
 /* =============================================================
@@ -3909,6 +3942,229 @@ function mostrarCargandoPDF(texto) {
 function ocultarCargandoPDF() {
   const el = document.getElementById('pdfCargando');
   if (el) el.remove();
+}
+
+/* =============================================================
+   FUSIÓN DE HC
+   Permite unir varias HC de una misma persona en una sola,
+   sin borrar nada. La HC perdedora queda archivada (fusionada_en
+   != null) y no aparece más en las listas; sus observaciones y
+   adjuntos se mueven a la ganadora, y los campos vacíos de la
+   ganadora se rellenan con los de la perdedora (sin pisar).
+   La acción se puede deshacer desde Supabase llamando a
+   deshacer_fusion_hc(perdedora_id, email).
+============================================================= */
+
+let fusionGanadoraId = null;
+let fusionPerdedoraId = null;
+
+function abrirFusionModal() {
+  if (!currentHCId) return;
+  if (!puedeIniciarEval()) {
+    alert('Solo los kinesiólogos pueden fusionar historias clínicas.');
+    return;
+  }
+  const hcActual = allHCs.find(h => h.id === currentHCId);
+  if (!hcActual) return;
+
+  const otras = allHCs.filter(h => h.persona_id === hcActual.persona_id && h.id !== hcActual.id);
+  if (!otras.length) {
+    alert('Esta persona no tiene otras HC para fusionar.');
+    return;
+  }
+
+  const persona = allPersonas.find(p => p.id === hcActual.persona_id);
+  document.getElementById('fusionMetaNombre').textContent =
+    `${persona ? upperName(persona.nombre) : '—'} · DNI ${hcActual.dni || '—'} · ${otras.length + 1} historias clínicas vivas`;
+
+  // Por defecto: la HC actual queda como ganadora (la que la usuaria está mirando)
+  // y la primera "otra" como perdedora. La usuaria puede invertir con un click.
+  fusionGanadoraId = hcActual.id;
+  fusionPerdedoraId = otras[0].id;
+
+  renderFusionBody();
+  document.getElementById('modalFusion').classList.add('show');
+}
+
+function closeFusionModal() {
+  document.getElementById('modalFusion').classList.remove('show');
+  fusionGanadoraId = null;
+  fusionPerdedoraId = null;
+}
+
+function renderFusionBody() {
+  const hcActual = allHCs.find(h => h.id === currentHCId);
+  if (!hcActual) return;
+
+  // Candidatos: TODAS las HC vivas de esta persona (incluida la actual)
+  const candidatos = allHCs
+    .filter(h => h.persona_id === hcActual.persona_id)
+    .sort((a, b) => new Date(b.completado_en) - new Date(a.completado_en));
+
+  // Conteos asíncronos para mostrar obs y adj de cada candidato
+  // (lo dejamos como render rápido y completamos los conteos después)
+  const cardHTML = (h) => {
+    const esGan = h.id === fusionGanadoraId;
+    const esPerd = h.id === fusionPerdedoraId;
+    const tag = esGan
+      ? '<span style="background:#16a34a;color:#fff;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700;">✓ GANADORA</span>'
+      : esPerd
+        ? '<span style="background:#dc2626;color:#fff;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:700;">🗂 SE ARCHIVA</span>'
+        : '<span style="background:#e5e7eb;color:#374151;font-size:11px;padding:2px 8px;border-radius:10px;">(no participa)</span>';
+    const origen = h.origen === 'profesional'
+      ? '🩺 Profesional'
+      : h.origen === 'form_publico' ? '📝 Form. público' : (h.origen || '—');
+    const motivo = (h.motivo_consulta || '').trim();
+    const motivoPrev = motivo ? motivo.substring(0, 90) + (motivo.length > 90 ? '…' : '') : '<em style="color:#888;">sin motivo cargado</em>';
+    const revStatus = h.revisada_en
+      ? `<span style="color:#16a34a;">✓ Revisada ${formatDate(h.revisada_en)}</span>`
+      : '<span style="color:#b91c1c;">🆕 Sin revisar</span>';
+    return `
+      <div class="fusion-card" data-hc-id="${h.id}" style="
+        border: 2px solid ${esGan ? '#16a34a' : esPerd ? '#dc2626' : '#e5e7eb'};
+        background: ${esGan ? '#f0fdf4' : esPerd ? '#fef2f2' : '#fff'};
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 10px;
+        cursor: pointer;
+        transition: all 0.15s;
+      " onclick="elegirCandidatoFusion(${h.id})">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+          <strong style="font-size:14px;">HC #${h.id} · ${origen}</strong>
+          ${tag}
+        </div>
+        <div style="font-size:12px; color:#555; margin-top:4px;">
+          Cargada ${formatDate(h.completado_en)} · ${revStatus}
+        </div>
+        <div style="font-size:13px; margin-top:8px; color:#111;">
+          <strong>Motivo:</strong> ${motivoPrev}
+        </div>
+        <div style="font-size:12px; color:#555; margin-top:6px;" id="fusionCounts-${h.id}">
+          Contando observaciones y adjuntos…
+        </div>
+      </div>
+    `;
+  };
+
+  document.getElementById('fusionBody').innerHTML = `
+    <div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:8px; padding:12px; margin-bottom:14px; font-size:13px; color:#78350f;">
+      <strong>⚠️ Cómo funciona la fusión:</strong><br>
+      • La HC <strong>ganadora</strong> queda como única HC visible de este paciente.<br>
+      • Las observaciones, notas y adjuntos de la HC que se archiva <strong>se mueven a la ganadora</strong>.<br>
+      • Los campos vacíos de la ganadora se rellenan con los datos de la archivada (no se pisa nada).<br>
+      • La HC archivada NO se borra: se puede recuperar desde Supabase si algo sale mal.
+    </div>
+
+    <div style="display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap;">
+      <strong style="font-size:13px;">Elegir cuál queda:</strong>
+      <button class="btn btn-sm" onclick="invertirFusion()" style="background:#fff; border:1px solid #6d28d9; color:#6d28d9;">⇅ Invertir ganadora ↔ archivada</button>
+    </div>
+
+    ${candidatos.map(cardHTML).join('')}
+
+    ${candidatos.length > 2 ? `
+      <div style="background:#e0f2fe; border:1px solid #0284c7; border-radius:8px; padding:10px; margin-top:10px; font-size:12px; color:#075985;">
+        💡 Tip: Hay más de 2 HC. Hacé click en una tarjeta para marcarla como "se archiva", y repetí la fusión hasta que quede una sola.
+      </div>
+    ` : ''}
+  `;
+
+  // Habilitar/deshabilitar botón de confirmar
+  document.getElementById('btnConfirmarFusion').disabled =
+    !fusionGanadoraId || !fusionPerdedoraId || fusionGanadoraId === fusionPerdedoraId;
+
+  // Cargar conteos async
+  candidatos.forEach(async h => {
+    try {
+      const [{ count: nObs }, { count: nAdj }] = await Promise.all([
+        sb.from('hc_observaciones').select('id', { count: 'exact', head: true }).eq('historia_id', h.id),
+        sb.from('hc_adjuntos').select('id', { count: 'exact', head: true }).eq('historia_id', h.id)
+      ]);
+      const el = document.getElementById('fusionCounts-' + h.id);
+      if (el) {
+        el.innerHTML = `📝 ${nObs || 0} observ./notas · 📎 ${nAdj || 0} adjuntos`;
+      }
+    } catch (e) {
+      const el = document.getElementById('fusionCounts-' + h.id);
+      if (el) el.textContent = '(error al contar)';
+    }
+  });
+}
+
+function elegirCandidatoFusion(hcId) {
+  // Click en una tarjeta: la marca como "se archiva" (perdedora).
+  // Si era la ganadora, lo invertimos. Si era "no participa", la pone como
+  // perdedora dejando intacta la ganadora.
+  if (hcId === fusionGanadoraId) {
+    // Estaba marcada como ganadora → invertir
+    const oldPerd = fusionPerdedoraId;
+    fusionPerdedoraId = fusionGanadoraId;
+    fusionGanadoraId = oldPerd;
+  } else {
+    fusionPerdedoraId = hcId;
+  }
+  renderFusionBody();
+}
+
+function invertirFusion() {
+  const g = fusionGanadoraId;
+  fusionGanadoraId = fusionPerdedoraId;
+  fusionPerdedoraId = g;
+  renderFusionBody();
+}
+
+async function ejecutarFusion() {
+  if (!fusionGanadoraId || !fusionPerdedoraId || fusionGanadoraId === fusionPerdedoraId) {
+    alert('Hay que elegir una HC ganadora y una HC a archivar (distintas).');
+    return;
+  }
+
+  const ganadora = allHCs.find(h => h.id === fusionGanadoraId);
+  const perdedora = allHCs.find(h => h.id === fusionPerdedoraId);
+  if (!ganadora || !perdedora) { alert('Faltan datos de las HC.'); return; }
+
+  const persona = allPersonas.find(p => p.id === ganadora.persona_id);
+  const nombre = persona ? upperName(persona.nombre) : '(paciente)';
+
+  const ok = confirm(
+    `¿Confirmás fusionar?\n\n` +
+    `Paciente: ${nombre}\n` +
+    `✓ Queda visible: HC #${ganadora.id} (${ganadora.origen || '—'}, ${formatDate(ganadora.completado_en)})\n` +
+    `🗂 Se archiva: HC #${perdedora.id} (${perdedora.origen || '—'}, ${formatDate(perdedora.completado_en)})\n\n` +
+    `Sus observaciones y adjuntos se MUEVEN a la HC ganadora.\n` +
+    `Los campos vacíos de la ganadora se completan con los de la archivada.\n` +
+    `La HC archivada NO se borra: se puede deshacer desde Supabase.`
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById('btnConfirmarFusion');
+  btn.disabled = true;
+  btn.textContent = 'Fusionando…';
+
+  try {
+    const { data, error } = await sb.rpc('fusionar_hc', {
+      p_ganadora_id: fusionGanadoraId,
+      p_perdedora_id: fusionPerdedoraId,
+      p_email: usuarioActual?.email || null,
+      p_nombre: usuarioActual?.nombre || null
+    });
+    if (error) throw error;
+
+    showToast(`✓ Fusión completada: ${data?.observaciones_movidas || 0} obs y ${data?.adjuntos_movidos || 0} adjuntos movidos`);
+
+    closeFusionModal();
+    closeModal();
+
+    // Recargar datos
+    await loadAllData();
+    renderStats();
+    renderTab();
+  } catch (e) {
+    console.error('Error en fusión:', e);
+    alert('No se pudo completar la fusión:\n\n' + (e.message || e));
+    btn.disabled = false;
+    btn.textContent = '🔀 Fusionar';
+  }
 }
 </script>
 </body>
