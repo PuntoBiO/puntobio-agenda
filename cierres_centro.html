@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cierres del centro · PuntoBiO</title>
+<style>
+  :root{ --azul:#1e9fe0; --negro:#111; --panel:#1a1a1a; --linea:#2a2a2a; --texto:#f1f1f1; --tenue:#9aa3ad; --rojo:#e5484d; --verde:#23a55a; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--negro); color:var(--texto); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; padding:20px; }
+  .wrap{ max-width:560px; margin:0 auto; }
+  .marca{ text-align:center; margin-bottom:20px; }
+  .marca .logo{ font-size:26px; font-weight:800; letter-spacing:-.5px; }
+  .marca .logo span{ color:var(--azul); }
+  .marca .sub{ font-size:11px; letter-spacing:3px; color:var(--tenue); margin-top:2px; }
+  h1{ font-size:18px; margin:0 0 4px; }
+  .desc{ font-size:13px; color:var(--tenue); line-height:1.5; margin:0 0 18px; }
+  .card{ background:var(--panel); border:1px solid var(--linea); border-radius:14px; padding:18px; margin-bottom:16px; }
+  label{ display:block; font-size:12px; color:var(--tenue); text-transform:uppercase; letter-spacing:.5px; margin:0 0 6px; }
+  input[type=date], input[type=text], textarea{ width:100%; background:#0f0f0f; border:1.5px solid var(--linea); border-radius:10px; padding:12px; color:var(--texto); font-size:15px; font-family:inherit; margin-bottom:14px; }
+  textarea{ resize:vertical; min-height:80px; line-height:1.5; }
+  input:focus, textarea:focus{ outline:none; border-color:var(--azul); }
+  button{ font-family:inherit; font-weight:700; border:none; border-radius:10px; cursor:pointer; transition:filter .15s; }
+  .btn-crear{ width:100%; background:var(--azul); color:#fff; padding:13px; font-size:15px; }
+  .btn-crear:hover{ filter:brightness(1.08); }
+  .btn-crear:disabled{ opacity:.5; cursor:not-allowed; }
+  .lista-tit{ font-size:13px; color:var(--tenue); text-transform:uppercase; letter-spacing:.5px; margin:0 0 10px; }
+  .cierre{ display:flex; align-items:center; justify-content:space-between; gap:10px; background:#0f0f0f; border:1px solid var(--linea); border-radius:10px; padding:12px 14px; margin-bottom:8px; }
+  .cierre .info b{ font-size:14px; }
+  .cierre .info small{ display:block; color:var(--tenue); font-size:12px; margin-top:2px; }
+  .btn-del{ background:transparent; color:var(--rojo); border:1.5px solid var(--rojo); padding:8px 12px; font-size:13px; flex-shrink:0; }
+  .btn-del:hover{ background:var(--rojo); color:#fff; }
+  .vacio{ color:var(--tenue); font-size:13px; text-align:center; padding:14px; }
+  .msg{ border-radius:10px; padding:11px 14px; font-size:13.5px; line-height:1.5; margin-bottom:14px; display:none; }
+  .msg.ok{ background:rgba(35,165,90,.12); border:1px solid var(--verde); color:#7ee2a8; display:block; }
+  .msg.err{ background:rgba(229,72,77,.12); border:1px solid var(--rojo); color:#f7a9ab; display:block; }
+  .bloqueo{ text-align:center; padding:40px 20px; color:var(--tenue); }
+  .bloqueo a{ color:var(--azul); }
+  .nota{ font-size:12px; color:var(--tenue); line-height:1.55; margin-top:4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="marca">
+    <div class="logo">Punto<span>BiO</span></div>
+    <div class="sub">ECOSISTEMA PUNTOBIO</div>
+  </div>
+
+  <div id="app" style="display:none;">
+    <h1>Cierres del centro</h1>
+    <p class="desc">Cargá un día en que el centro va a estar cerrado (por reformas, capacitación, etc.). El sistema avisa solo: les muestra el cartel en Mi Espacio, manda el mail 2 días antes a los que tienen clase fija ese día, y les habilita recuperar sin gastar cupo.</p>
+
+    <div class="card">
+      <div id="msg" class="msg"></div>
+      <label for="fecha">Fecha del cierre</label>
+      <input type="date" id="fecha">
+      <label for="motivo">Mensaje para los alumnos</label>
+      <textarea id="motivo" placeholder="Ej: El centro estará cerrado por reformas. ¡Disculpá las molestias!" maxlength="280"></textarea>
+      <p class="nota">Este es el texto exacto que van a ver los alumnos en el cartel de Mi Espacio y en el mail. Escribilo como querés que lo lean.</p>
+      <button class="btn-crear" id="btnCrear">Cargar cierre</button>
+    </div>
+
+    <div class="card">
+      <div class="lista-tit">Cierres próximos</div>
+      <div id="lista"><div class="vacio">Cargando…</div></div>
+    </div>
+  </div>
+
+  <div id="bloqueo" class="bloqueo" style="display:none;"></div>
+</div>
+
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { lock: (name, acquireTimeout, fn) => fn() },
+  global: { fetch: (url, opts = {}) => fetch(url, { ...opts, cache: 'no-store' }) }
+});
+
+// Solo administradoras pueden cargar cierres
+const ADMINS = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com'];
+
+const $ = (id) => document.getElementById(id);
+const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const DIAS  = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+
+function hoyISO(){
+  return new Intl.DateTimeFormat('en-CA', { timeZone:'America/Argentina/Cordoba', year:'numeric', month:'2-digit', day:'2-digit' }).format(new Date());
+}
+function fechaLinda(iso){
+  const [y,m,d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m-1, d));
+  return `${DIAS[dt.getUTCDay()]} ${d} de ${MESES[m-1]}`;
+}
+function mostrarMsg(texto, tipo){
+  const el = $('msg');
+  el.textContent = texto;
+  el.className = 'msg ' + tipo;
+  if (tipo === 'ok') setTimeout(() => { el.className = 'msg'; }, 4000);
+}
+function bloquear(html){
+  $('app').style.display = 'none';
+  const b = $('bloqueo');
+  b.innerHTML = html;
+  b.style.display = 'block';
+}
+
+async function cargarLista(){
+  const cont = $('lista');
+  try{
+    const { data, error } = await sb.from('feriados')
+      .select('fecha, motivo')
+      .eq('tipo', 'centro')
+      .gte('fecha', hoyISO())
+      .order('fecha', { ascending: true });
+    if (error) throw error;
+    if (!data || !data.length){
+      cont.innerHTML = '<div class="vacio">No hay cierres cargados.</div>';
+      return;
+    }
+    cont.innerHTML = data.map(c => `
+      <div class="cierre">
+        <div class="info">
+          <b>${fechaLinda(c.fecha)}</b>
+          <small>${(c.motivo || '').replace(/</g,'&lt;')}</small>
+        </div>
+        <button class="btn-del" data-fecha="${c.fecha}">Eliminar</button>
+      </div>`).join('');
+    cont.querySelectorAll('.btn-del').forEach(btn => {
+      btn.addEventListener('click', () => eliminar(btn.dataset.fecha));
+    });
+  }catch(e){
+    cont.innerHTML = '<div class="vacio">No se pudo cargar la lista.</div>';
+  }
+}
+
+async function crear(){
+  const fecha = $('fecha').value;
+  const motivo = $('motivo').value.trim();
+  if (!fecha){ mostrarMsg('Elegí una fecha.', 'err'); return; }
+  if (!motivo){ mostrarMsg('Escribí el mensaje para los alumnos.', 'err'); return; }
+  if (fecha < hoyISO()){ mostrarMsg('La fecha ya pasó.', 'err'); return; }
+  const btn = $('btnCrear');
+  btn.disabled = true; btn.textContent = 'Cargando…';
+  try{
+    const { error } = await sb.rpc('crear_cierre_centro', { p_fecha: fecha, p_motivo: motivo });
+    if (error) throw error;
+    mostrarMsg('✅ Cierre cargado. El sistema ya avisa solo.', 'ok');
+    $('motivo').value = '';
+    await cargarLista();
+  }catch(e){
+    mostrarMsg('No se pudo cargar: ' + (e.message || e), 'err');
+  }finally{
+    btn.disabled = false; btn.textContent = 'Cargar cierre';
+  }
+}
+
+async function eliminar(fecha){
+  if (!confirm('¿Eliminar el cierre del ' + fechaLinda(fecha) + '?')) return;
+  try{
+    const { error } = await sb.rpc('eliminar_cierre_centro', { p_fecha: fecha });
+    if (error) throw error;
+    mostrarMsg('Cierre eliminado.', 'ok');
+    await cargarLista();
+  }catch(e){
+    mostrarMsg('No se pudo eliminar: ' + (e.message || e), 'err');
+  }
+}
+
+(async function init(){
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session){
+    bloquear('Iniciá sesión primero en <a href="https://www.puntobio.com.ar/login.html">login.html</a> y volvé a entrar acá.');
+    return;
+  }
+  const email = (session.user && session.user.email || '').toLowerCase();
+  if (!ADMINS.includes(email)){
+    bloquear('Acceso restringido. Esta pantalla es solo para administración.');
+    return;
+  }
+  $('app').style.display = 'block';
+  $('btnCrear').addEventListener('click', crear);
+  await cargarLista();
+})();
+</script>
+</body>
+</html>

@@ -5358,6 +5358,98 @@ window.pbVacacionesCancelar = async function(vacId){
     alert('No se pudo cancelar:\n\n' + (e.message || e));
   }
 };
+
+// ============================================================
+//  AVISO DE FERIADO / CIERRE DEL CENTRO (modal con Aceptar)
+//  Aparece los días previos: desde el LUNES de esa semana hasta el día del aviso.
+//  Si cae lunes, arranca el VIERNES anterior. Se muestra una sola vez (localStorage).
+//  - Feriado nacional (tipo distinto de 'centro'): texto fijo.
+//  - Cierre del centro (tipo = 'centro'): muestra EL TEXTO que carga administración.
+// ============================================================
+(async function avisoFeriadoCentroCerrado(){
+  try{
+    if (typeof sb === 'undefined' || !sb) return;
+    const { data:{ session } } = await sb.auth.getSession();
+    if (!session) return;                                  // solo con sesión iniciada
+    const hoy = (typeof hoyISO === 'function') ? hoyISO() : new Date().toISOString().slice(0,10);
+    const { data: fers } = await sb.from('feriados').select('fecha, motivo, tipo');
+    if (!fers || !fers.length) return;
+
+    const DIAS = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+    const addDias = (iso, n) => {
+      const d = new Date(iso + 'T00:00:00');
+      d.setDate(d.getDate() + n);
+      const off = d.getTimezoneOffset();
+      return new Date(d - off*60000).toISOString().slice(0,10);
+    };
+    // Desde cuándo se muestra el aviso de cada fecha
+    const ventanaDesde = (iso) => {
+      const dow = new Date(iso + 'T00:00:00').getDay(); // 0=Dom ... 6=Sab
+      let atras;
+      if (dow === 1) atras = 3;        // lunes → arranca el viernes anterior
+      else if (dow === 0) atras = 2;   // domingo (raro) → arranca el viernes
+      else atras = dow - 1;            // arranca el lunes de esa semana
+      return addDias(iso, -atras);
+    };
+
+    // Primera fecha cuya ventana incluye hoy y que el alumno todavía no aceptó
+    const prox = (fers || [])
+      .filter(f => f && f.fecha)
+      .sort((a,b) => (a.fecha < b.fecha ? -1 : 1))
+      .find(f => {
+        const desde = ventanaDesde(f.fecha);
+        if (!(hoy >= desde && hoy <= f.fecha)) return false;
+        let visto = false;
+        try { visto = !!localStorage.getItem('pb_feriado_aviso_' + f.fecha); } catch(_){}
+        return !visto;
+      });
+    if (!prox) return;
+
+    const d = new Date(prox.fecha + 'T00:00:00');
+    const diaSemana = DIAS[d.getDay()];
+    const fechaTxt = (typeof fmtFecha === 'function') ? fmtFecha(prox.fecha) : prox.fecha;
+    const esCentro = (prox.tipo || '').toLowerCase() === 'centro';
+    const texto = (prox.motivo && String(prox.motivo).trim()) ? String(prox.motivo).trim() : '';
+    const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    let titulo, cuerpo;
+    if (esCentro) {
+      // CIERRE DEL CENTRO → mostramos tal cual el texto que cargó administración
+      titulo = '📅 Aviso importante';
+      cuerpo = 'El <b>' + diaSemana + ' ' + fechaTxt + '</b>:<br>' +
+               (texto ? esc(texto) : 'El centro permanecerá cerrado ese día.');
+    } else {
+      // FERIADO NACIONAL → texto fijo
+      titulo = '📅 Aviso de feriado';
+      cuerpo = 'El <b>' + diaSemana + ' ' + fechaTxt + '</b> es feriado' +
+               (texto ? ' (' + esc(texto) + ')' : '') + '.<br>' +
+               'El centro <b>permanecerá cerrado</b> ese día.';
+    }
+
+    const ov = document.createElement('div');
+    ov.className = 'pb-modal-overlay open';
+    ov.innerHTML =
+      '<div class="pb-modal" role="dialog" aria-modal="true">' +
+        '<h3>' + titulo + '</h3>' +
+        '<div class="pb-modal-sub">' +
+          cuerpo +
+          '<br><br>Si tenés clase fija ese día, vas a poder recuperarla sin gastar cupo desde tu agenda. 🙌' +
+        '</div>' +
+        '<div class="pb-modal-acciones">' +
+          '<button class="pb-modal-btn confirm" id="btnAceptarFeriadoAviso">Aceptar</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(ov);
+
+    ov.querySelector('#btnAceptarFeriadoAviso').addEventListener('click', () => {
+      try { localStorage.setItem('pb_feriado_aviso_' + prox.fecha, '1'); } catch(_){}
+      ov.remove();
+    });
+  }catch(e){
+    console.warn('No se pudo mostrar el aviso', e);
+  }
+})();
+
 </script>
 
 <!-- ============================================================ -->
