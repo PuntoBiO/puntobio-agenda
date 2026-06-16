@@ -1443,17 +1443,35 @@ async function guardarTurnoNuevo(){
   const dur = duracionMin(practica, profesional);
   const horaFin = minH(hMin(horaInicio) + dur);
 
-  // Validar conflictos
+  // Validar conflictos.
+  // BioLab es UN espacio físico: en una misma hora hay UN solo profesional activo.
+  // - Una EVALUACIÓN / SARKMED ocupa toda la franja en forma EXCLUSIVA: no convive con
+  //   nada, ni siquiera con un turno de OTRO profesional.
+  // - MOPLEX solo convive con MOPLEX del MISMO profesional (la grilla dividida del
+  //   casillero asume un único profe por hora).
+  const ES_EVAL = p => ['EVALUACION_INGRESO','EVALUACION_DEPORTISTA','SARKMED'].includes(p);
+  const nombreProf = c => CODE_TO_NOMBRE[c] || c;
   const turnosDia = turnosSemana.filter(t => t.fecha === slotActual.fecha && t.estado !== 'CANCELADO');
   for(const t of turnosDia){
-    if(t.profesional !== profesional) continue;
     const seSuperpone = hMin(horaInicio) < hMin(t.hora_fin) && hMin(horaFin) > hMin(t.hora_inicio);
     if(!seSuperpone) continue;
-    if(['EVALUACION_INGRESO','EVALUACION_DEPORTISTA','SARKMED'].includes(practica)){
-      alertaEl.innerHTML='<div class="err-box">Esa franja ya tiene un turno del mismo profesional.</div>'; return;
+
+    // Si lo que YA hay en la franja es una evaluación, la hora es exclusiva (cualquier profe).
+    if(ES_EVAL(t.practica)){
+      const deOtro = t.profesional !== profesional ? ' de ' + nombreProf(t.profesional) : '';
+      alertaEl.innerHTML = `<div class="err-box">La franja está bloqueada por una evaluación${deOtro}. La evaluación ocupa toda la hora.</div>`;
+      return;
     }
-    if(['EVALUACION_INGRESO','EVALUACION_DEPORTISTA','SARKMED'].includes(t.practica)){
-      alertaEl.innerHTML='<div class="err-box">La franja está bloqueada por una evaluación.</div>'; return;
+    // Si lo que estoy cargando es una evaluación, no puede entrar sobre nada ya cargado.
+    if(ES_EVAL(practica)){
+      const dueno = t.profesional !== profesional ? ' de ' + nombreProf(t.profesional) : ' del mismo profesional';
+      alertaEl.innerHTML = `<div class="err-box">Esa franja ya tiene un turno${dueno}. No se puede cargar una evaluación encima.</div>`;
+      return;
+    }
+    // Acá ambos son MOPLEX. No se pueden mezclar dos profesionales en la misma hora.
+    if(t.profesional !== profesional){
+      alertaEl.innerHTML = `<div class="err-box">En esa hora ya hay MOPLEX de ${nombreProf(t.profesional)}. En BioLab no se pueden mezclar dos profesionales en la misma hora.</div>`;
+      return;
     }
     if(t.hora_inicio === horaInicio){
       alertaEl.innerHTML='<div class="err-box">Ese horario exacto ya está ocupado.</div>'; return;
