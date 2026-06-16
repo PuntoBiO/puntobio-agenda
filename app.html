@@ -1787,10 +1787,6 @@ function buildNav() {
         <span class="nav-icon">🚫</span>
         <span class="nav-label">Gestión de Turnos</span>
       </div>
-      <div class="nav-item" onclick="irA('cierres-centro')">
-        <span class="nav-icon">📅</span>
-        <span class="nav-label">Cierres del centro</span>
-      </div>
       <div class="nav-item" onclick="irA('equipo')">
         <span class="nav-icon">👨‍⚕️</span>
         <span class="nav-label">Equipo</span>
@@ -1858,7 +1854,6 @@ window.irA = function(modulo) {
   else if (modulo === 'calculador-bonos') renderCalculadorBonos()
   else if (modulo === 'feriados') renderFeriados()
   else if (modulo === 'cumpleanos') renderCumpleanos()
-  else if (modulo === 'cierres-centro') renderCierresCentro()
   else renderPlaceholder(modulo)
 }
 
@@ -2907,14 +2902,6 @@ function renderFeriados() {
   `
 }
 
-function renderCierresCentro() {
-  const contentEl = document.getElementById('content')
-  contentEl.classList.add('module-embed')
-  contentEl.innerHTML = `
-    <iframe src="cierres_centro.html" class="module-iframe-tab" title="Cierres del centro"></iframe>
-  `
-}
-
 // ======================
 // MODULO: CUMPLEAÑOS (saludo por WhatsApp manual + mail automático diario)
 // ======================
@@ -3351,11 +3338,15 @@ async function cargarCalculadorBonos(mesVer) {
         </div>
         <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Arranca en agosto.</div>
       </div>
+      <div id="calc-evidencias-sala" style="margin-top:14px; padding:14px 16px; background:#fef2f2; border:1px solid #fecaca; border-radius:12px;">
+        <div class="empty-state" style="padding:10px; font-size:13px;">⏳ Cargando evidencias de sala…</div>
+      </div>
       <div style="margin-top:14px; padding:12px 16px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
         <span style="font-weight:800; font-size:14.5px; color:#1e40af;">💰 GRAN TOTAL del mes (desempeño + sala):</span>
         <span style="font-weight:800; font-size:18px; color:#1e40af;" id="calc-gran-total">$0</span>
       </div>`
     recalcularTotalGeneral()
+    cargarEvidenciasSala(mesStr)
   } catch (e) {
     body.innerHTML = `<div class="empty-state">No se pudo cargar: ${e.message || ''}<br><span style="font-size:12px;">¿Corriste el SQL de las tablas sueldos_profes_tf y bonos_ajustes_tf?</span></div>`
   }
@@ -4410,6 +4401,125 @@ window.pbBorrarReporteSala = async function(id) {
   const { error } = await supabase.from('reportes_sala').delete().eq('id', id)
   if (error) { alert('No se pudo: ' + (error.message || '')); return }
   document.getElementById('sala-overlay').remove()
+}
+
+// ======================
+// EVIDENCIAS DE SALA DESORDENADA (apartado dentro del Calculador de Bonos TF, solo admin)
+// Adjuntar foto/archivo con fecha. Candado de visibilidad: los profes NO ven nada hasta
+// que se marque visible_profes Y exista su panel (pendiente). Bucket público 'evidencias-sala'.
+// ======================
+const EVID_SALA_BUCKET = 'evidencias-sala'
+let EVID_SALA_MES = null
+
+function _rangoMesEvid(mesStr) {
+  const [y, m] = mesStr.split('-').map(Number)
+  const ini = `${mesStr}-01`
+  const next = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`
+  return { ini, next }
+}
+
+async function cargarEvidenciasSala(mesStr) {
+  const cont = document.getElementById('calc-evidencias-sala')
+  if (!cont) return
+  EVID_SALA_MES = mesStr
+  let filas = ''
+  try {
+    const { ini, next } = _rangoMesEvid(mesStr)
+    const { data, error } = await supabase.from('reportes_sala')
+      .select('id, fecha, nota, autor, archivo_url, archivo_path, visible_profes')
+      .gte('fecha', ini).lt('fecha', next).order('fecha', { ascending: false })
+    if (error) throw error
+    filas = (data || []).map(r => {
+      const verBtn = r.archivo_url
+        ? `<a href="${r.archivo_url}" target="_blank" rel="noopener" style="border:1px solid #1e9fe0; color:#1e9fe0; background:#fff; border-radius:7px; padding:3px 10px; text-decoration:none; font-size:12px; white-space:nowrap;">📎 Ver</a>`
+        : '<span style="font-size:11px; color:var(--text-faint);">sin archivo</span>'
+      return `
+      <div style="display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid rgba(0,0,0,0.06); font-size:13px; flex-wrap:wrap;">
+        <span style="flex:1; min-width:160px;">🧹 <b>${r.fecha}</b>${r.nota ? ' · ' + r.nota : ''}${r.autor ? ' <span style="color:var(--text-dim)">(' + r.autor + ')</span>' : ''}</span>
+        ${verBtn}
+        <label style="display:flex; align-items:center; gap:5px; font-size:11.5px; cursor:pointer; color:#0f172a; white-space:nowrap;" title="Si lo marcás, el profe lo verá cuando se habilite su panel">
+          <input type="checkbox" ${r.visible_profes ? 'checked' : ''} onchange="toggleVisibleProfe(${r.id}, this.checked)" style="width:15px; height:15px; cursor:pointer;">
+          👁 Visible
+        </label>
+        <button onclick="borrarEvidenciaSala(${r.id}, ${r.archivo_path ? `'${r.archivo_path}'` : 'null'})" style="border:1px solid #dc262655; color:#dc2626; background:#fff; border-radius:7px; padding:3px 9px; cursor:pointer; font-size:12px;">🗑</button>
+      </div>`
+    }).join('') || '<p style="font-size:13px; color:#16a34a; margin:0;">✓ Sin evidencias este mes — la sala viene impecable.</p>'
+  } catch (e) {
+    filas = '<p style="font-size:13px; color:#dc2626; margin:0;">No pude leer las evidencias. ¿Corriste el SQL nuevo de reportes_sala + el bucket de Storage?</p>'
+  }
+  cont.innerHTML = `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+      <span style="font-size:15px;">📎</span>
+      <h3 style="margin:0; font-size:14.5px; color:#991b1b;">Evidencia de sala desordenada</h3>
+    </div>
+    <div style="font-size:12px; color:#b91c1c; margin-bottom:10px;">Adjuntá la foto/archivo del día que la sala quedó fuera de lugar. Si cargás algo acá, acordate de <b>destildar "La sala estuvo impecable"</b> arriba.</div>
+    ${filas}
+    <div style="margin-top:12px; padding-top:11px; border-top:1px dashed rgba(0,0,0,0.12);">
+      <div style="font-size:13px; font-weight:700; margin-bottom:8px; color:#991b1b;">➕ Cargar nueva evidencia</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
+        <label style="font-size:11.5px;">Fecha<br><input type="date" id="evid-sala-fecha" style="padding:6px; border-radius:7px; border:1px solid #ccc;"></label>
+        <label style="font-size:11.5px; flex:1; min-width:160px;">Qué pasó (opcional)<br><input type="text" id="evid-sala-nota" placeholder="Ej: camillas sin ordenar, material tirado" style="padding:6px; border-radius:7px; border:1px solid #ccc; width:100%;"></label>
+        <label style="font-size:11.5px;">Archivo (foto / PDF)<br><input type="file" id="evid-sala-file" accept="image/*,application/pdf" style="font-size:12px;"></label>
+        <button id="evid-sala-btn" onclick="subirEvidenciaSala()" style="border:none; background:#dc2626; color:#fff; border-radius:8px; padding:8px 16px; cursor:pointer; font-weight:700; font-size:13px;">Subir</button>
+      </div>
+      <div id="evid-sala-status" style="font-size:12px; margin-top:8px;"></div>
+    </div>
+    <div style="margin-top:11px; padding:8px 11px; background:#fff; border:1px solid #fecaca; border-radius:9px; font-size:11.5px; color:#7f1d1d;">
+      🔒 <b>Los profes todavía no ven nada de esto.</b> Cuando habilites el panel para ellos, van a ver únicamente las evidencias que marques como <b>👁 Visible</b>.
+    </div>`
+}
+
+window.subirEvidenciaSala = async function() {
+  const fecha = document.getElementById('evid-sala-fecha').value
+  const nota = document.getElementById('evid-sala-nota').value.trim() || null
+  const fileInput = document.getElementById('evid-sala-file')
+  const file = fileInput && fileInput.files && fileInput.files[0]
+  const status = document.getElementById('evid-sala-status')
+  const btn = document.getElementById('evid-sala-btn')
+  if (!fecha) { status.innerHTML = '<span style="color:#dc2626;">Poné la fecha.</span>'; return }
+  if (!file) { status.innerHTML = '<span style="color:#dc2626;">Adjuntá la foto o el archivo.</span>'; return }
+  if (file.size > 15 * 1024 * 1024) { status.innerHTML = '<span style="color:#dc2626;">El archivo es muy grande (máx. 15 MB).</span>'; return }
+  if (btn) btn.disabled = true
+  status.innerHTML = 'Subiendo…'
+  try {
+    const limpio = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const ruta = `${EVID_SALA_MES}/${Date.now()}_${limpio}`
+    const up = await supabase.storage.from(EVID_SALA_BUCKET).upload(ruta, file, { upsert: false })
+    if (up.error) throw up.error
+    const pub = supabase.storage.from(EVID_SALA_BUCKET).getPublicUrl(ruta)
+    const archivo_url = pub.data.publicUrl
+    const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
+    const ins = await supabase.from('reportes_sala').insert({ fecha, nota, autor, archivo_url, archivo_path: ruta, visible_profes: false })
+    if (ins.error) throw ins.error
+    status.innerHTML = '<span style="color:#16a34a;">✓ Evidencia cargada.</span>'
+    cargarEvidenciasSala(EVID_SALA_MES)
+  } catch (e) {
+    if (btn) btn.disabled = false
+    status.innerHTML = '<span style="color:#dc2626;">No se pudo: ' + (e.message || '') + '</span>'
+  }
+}
+
+window.toggleVisibleProfe = async function(id, visible) {
+  try {
+    const { error } = await supabase.from('reportes_sala').update({ visible_profes: visible }).eq('id', id)
+    if (error) throw error
+    notifCalc(visible ? '👁 Quedará visible para los profes cuando se habilite su panel' : 'Oculto para los profes')
+  } catch (e) {
+    notifCalc('⚠️ No se pudo guardar: ' + (e.message || ''), true)
+    cargarEvidenciasSala(EVID_SALA_MES)
+  }
+}
+
+window.borrarEvidenciaSala = async function(id, path) {
+  if (!confirm('¿Borrar esta evidencia? (se elimina el archivo y el registro)')) return
+  try {
+    if (path) { await supabase.storage.from(EVID_SALA_BUCKET).remove([path]) }
+    const { error } = await supabase.from('reportes_sala').delete().eq('id', id)
+    if (error) throw error
+    cargarEvidenciasSala(EVID_SALA_MES)
+  } catch (e) {
+    alert('No se pudo: ' + (e.message || ''))
+  }
 }
 
 // ======================
