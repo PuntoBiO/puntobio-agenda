@@ -1530,6 +1530,15 @@ async function cargarEspacio(per){
     misAnotaciones: new Map(
       (misAgregadosRes.data || []).map(r => [r.turno_id + '|' + r.fecha, r.tipo])
     ),
+    // Mis ausencias en turnos FIJOS ese día (avisé falta o me cambié de área).
+    // La base ya guarda esto en `asistencia` (estado 'ausente' / 'ausente-justificada').
+    // Lo usamos para "apagar" mi clase fija en la agenda y no mostrarla como activa.
+    // Clave "turno_id|fecha" → { estado, motivo }.
+    misAusenciasFijas: new Map(
+      (asis.data || [])
+        .filter(r => r.estado === 'ausente' || r.estado === 'ausente-justificada')
+        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '' }])
+    ),
     // Info de cupo de clases sueltas (se completa después con RPC)
     cupoSueltas: null,
   };
@@ -1853,6 +1862,82 @@ window.cancelarPuntual = async function(agregadoId, fechaISO, hora, dia, servici
   }
 };
 
+// Re-lee de la base los datos que la agenda necesita y la vuelve a dibujar,
+// SIN recargar toda la página (no toca el panel "Mis clases" ni su "Deshacer").
+// Se usa después de avisar/deshacer una falta para que aparezca o desaparezca
+// "Programar acá" sin tener que actualizar a mano.
+window.refrescarDatosAgenda = async function(){
+  try {
+    const data = window._agendaData;
+    if (!data || !data.personaId) return;
+    const pid = data.personaId;
+
+    // Mismo rango de 10 días hábiles que usa la carga inicial
+    const _hoyD = new Date();
+    const _diasHab = [];
+    {
+      const d = new Date(_hoyD); d.setHours(0,0,0,0);
+      while (_diasHab.length < DIAS_HABILES_VISTA){
+        const dow = d.getDay();
+        if (dow >= 1 && dow <= 5){
+          const o = d.getTimezoneOffset();
+          _diasHab.push(new Date(d - o*60000).toISOString().slice(0,10));
+        }
+        d.setDate(d.getDate() + 1);
+      }
+    }
+    const _desdeISO = _diasHab[0];
+    const _hastaISO = _diasHab[_diasHab.length - 1];
+
+    const [recus, asisR, agregR, cuposR] = await Promise.all([
+      sb.from('recuperatorios_tf').select('*').eq('persona_id', pid).order('fecha_ausencia', {ascending:false}),
+      sb.from('asistencia').select('*').eq('persona_id', pid),
+      sb.from('turno_agregados').select('id, turno_id, fecha, tipo').eq('persona_id', pid).gte('fecha', _desdeISO).lte('fecha', _hastaISO),
+      sb.rpc('alumno_agenda_cupos', { p_desde: _desdeISO, p_hasta: _hastaISO }),
+    ]);
+
+    // Recuperatorios pendientes (mismo filtro de 60 días que la carga inicial)
+    data.recuperatoriosPendientes = (recus.data || []).filter(r => {
+      if (r.estado !== 'pendiente') return false;
+      if (r.fecha_recupero) return false;
+      const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
+      return new Date(r.fecha_ausencia) >= hace60;
+    });
+
+    // Cupos globales (fijos / agregados / ausentes)
+    const cupos = (cuposR && cuposR.data) || { fijos:{}, agregados:{}, ausentes:{} };
+    const fijosPorTurno = {};
+    Object.entries(cupos.fijos || {}).forEach(([k,v]) => { fijosPorTurno[parseInt(k,10)] = v; });
+    data.fijosPorTurno = fijosPorTurno;
+    data.agregadosPorClave = cupos.agregados || {};
+    data.ausentesPorClave  = cupos.ausentes  || {};
+
+    // Mis anotaciones (cambio_area / suelta / recuperatorio)
+    data.misAnotaciones = new Map((agregR.data || []).map(r => [r.turno_id + '|' + r.fecha, r.tipo]));
+    data.misCambiosArea = new Set((agregR.data || []).filter(r => r.tipo === 'cambio_area').map(r => r.turno_id + '|' + r.fecha));
+
+    // Mis ausencias en clases fijas (para apagar la clase ese día)
+    window._asistenciasAlumno = asisR.data || [];
+    data.misAusenciasFijas = new Map(
+      (asisR.data || [])
+        .filter(r => r.estado === 'ausente' || r.estado === 'ausente-justificada')
+        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '' }])
+    );
+
+    // Cupo de sueltas (no bloqueante)
+    try { const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas'); data.cupoSueltas = cs || null; } catch(e) {}
+
+    // Redibujar el día que está viendo
+    const cont = document.getElementById('agenda-lista');
+    const fechaSel = (cont && cont.dataset) ? cont.dataset.fechaActual : null;
+    if (fechaSel && typeof renderAgendaDia === 'function') renderAgendaDia(fechaSel);
+    else if (typeof _renderAgendaInicial === 'function') _renderAgendaInicial();
+  } catch(e){
+    // Si el refresco falla, no rompemos nada: el alumno puede recargar a mano (como antes).
+    console.warn('No se pudo refrescar la agenda', e);
+  }
+};
+
 window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
   const btn = document.getElementById('btn-'+turnoId);
   const slot = document.getElementById('falta-'+turnoId);
@@ -1896,6 +1981,8 @@ window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
       <button class="deshacer" onclick="deshacerFalta(${turnoId},'${fechaISO}')">Deshacer</button>
     </div>`;
     iniciarCountdown(turnoId, fechaISO);
+    // Refrescar la agenda para que aparezca "Programar acá" sin recargar a mano.
+    refrescarDatosAgenda();
   } catch(e){
     btn.disabled = false;
     btn.textContent = '🚫 Avisar falta';
@@ -1953,6 +2040,8 @@ window.deshacerFalta = async function(turnoId, fechaISO){
     const btn = document.getElementById('btn-'+turnoId);
     if(slot) slot.innerHTML = '';
     if(btn){ btn.style.display = ''; btn.disabled = false; btn.textContent = '🚫 Avisar falta'; }
+    // Refrescar la agenda: el crédito de recuperatorio ya no está → se oculta "Programar acá".
+    refrescarDatosAgenda();
   } catch(e){
     const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
     if(raw.includes('lugar_ocupado')){
@@ -2182,6 +2271,11 @@ function renderAgendaDia(fechaISO){
       // SELF-SERVICE · botones condicionales
       let botonesHtml = '';
       const esMiTurnoFijo = data.misTurnosIds && data.misTurnosIds.has(t.id);
+      // ¿Me ausenté de MI clase fija ese día? (avisé falta o me cambié de área).
+      // Si es así, la mostramos "apagada" y sin botón, no como clase activa.
+      const miAusenciaFija = (esMiTurnoFijo && data.misAusenciasFijas)
+        ? data.misAusenciasFijas.get(t.id + '|' + fechaISO) : null;
+      const meCambieDeAca = !!(miAusenciaFija && /cambio de [aá]rea/i.test(miAusenciaFija.motivo));
       const hayCupo = (cap > 0) && (efectivos < cap);
       const haceFalta2h = (() => {
         try {
@@ -2205,7 +2299,7 @@ function renderAgendaDia(fechaISO){
       const diasFaltan = Math.round((fechaD - hoyD) / 86400000);
 
       // BOTÓN CAMBIAR DE ÁREA · solo si es mi turno fijo + hasta 10 min antes + no bloqueado
-      if (esMiTurnoFijo && haceFalta10m && !estaBloqueado) {
+      if (esMiTurnoFijo && haceFalta10m && !estaBloqueado && !miAusenciaFija) {
         // Hay alternativa? buscamos otro turno del MISMO HORARIO con cupo + actividad
         const alternativas = (data.turnos || []).filter(otro => {
           if (otro.id === t.id) return false;
@@ -2270,10 +2364,17 @@ function renderAgendaDia(fechaISO){
         botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbAbrirRevertir(${t.id}, '${fechaISO}')">↩️ Revertir</button>`;
       }
 
-      // Etiqueta "MI CLASE" si es turno fijo del alumno
-      const miClaseTag = esMiTurnoFijo
-        ? `<span style="display:inline-block;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">MI CLASE</span>`
-        : '';
+      // Etiqueta del turno fijo del alumno.
+      // Si ese día me ausenté (avisé falta / me cambié de área), la mostramos en
+      // gris ("apagada") en vez de "MI CLASE", para que no parezca clase activa.
+      let miClaseTag = '';
+      if (esMiTurnoFijo) {
+        const _tagGris = (txt) => `<span style="display:inline-block;background:#e2e8f0;color:#475569;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">${txt}</span>`;
+        if (meCambieDeAca)            miClaseTag = _tagGris('↪️ TE CAMBIASTE');
+        else if (miAusenciaFija && miAusenciaFija.estado === 'ausente-justificada') miClaseTag = _tagGris('🚫 FALTA AVISADA');
+        else if (miAusenciaFija)      miClaseTag = _tagGris('🚫 FALTASTE');
+        else miClaseTag = `<span style="display:inline-block;background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;margin-left:6px">MI CLASE</span>`;
+      }
       // Etiqueta según tipo de anotación del alumno en este turno
       let cambioTag = '';
       if (miTipoAnot === 'cambio_area') {
@@ -2295,7 +2396,8 @@ function renderAgendaDia(fechaISO){
         else textoCupo = `${libres} lugares`;
       }
 
-      filas += `<div class="ag-turno" ${bloqCls}>
+      const _filaStyle = (!estaBloqueado && miAusenciaFija) ? 'style="opacity:0.55"' : bloqCls;
+      filas += `<div class="ag-turno" ${_filaStyle}>
         <div class="ag-turno-info">
           <span class="ag-dot ${dot}"></span>
           <div style="display:flex;flex-direction:column;min-width:0">
