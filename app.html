@@ -3344,6 +3344,10 @@ async function cargarCalculadorBonos(mesVer) {
       <div style="margin-top:14px; padding:12px 16px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
         <span style="font-weight:800; font-size:14.5px; color:#1e40af;">💰 GRAN TOTAL del mes (desempeño + sala):</span>
         <span style="font-weight:800; font-size:18px; color:#1e40af;" id="calc-gran-total">$0</span>
+      </div>
+      <div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <button onclick="abrirCierreBonos()" style="border:none; background:#1e9fe0; color:#fff; border-radius:10px; padding:10px 18px; cursor:pointer; font-weight:800; font-size:13.5px; box-shadow:0 4px 14px rgba(30,159,224,0.25);">📋 Ver cierre / enviar por WhatsApp</button>
+        <span style="font-size:11.5px; color:var(--text-dim);">Revisás el detalle, lo copiás para WhatsApp y, si está ok, lo cerrás al histórico.</span>
       </div>`
     recalcularTotalGeneral()
     cargarEvidenciasSala(mesStr)
@@ -4519,6 +4523,209 @@ window.borrarEvidenciaSala = async function(id, path) {
     cargarEvidenciasSala(EVID_SALA_MES)
   } catch (e) {
     alert('No se pudo: ' + (e.message || ''))
+  }
+}
+
+// ======================
+// CIERRE DE BONOS TF: toma la simulación que está en pantalla (sueldos + tildes + sala),
+// arma un texto para WhatsApp y lo guarda en histórico (tabla bonos_cierres_tf). Solo admin.
+// ======================
+function _fmt$(n) { return '$' + Math.round(Number(n) || 0).toLocaleString('es-AR') }
+
+function _tituloMesCierre(mesStr) {
+  if (!mesStr) return ''
+  const [y, m] = mesStr.split('-').map(Number)
+  const t = new Date(y, m - 1, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+  return t.charAt(0).toUpperCase() + t.slice(1)
+}
+
+function recopilarCierreBonos() {
+  const mesStr = EVID_SALA_MES || (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr) || ''
+  const profes = []
+  let totalDesempeno = 0
+  document.querySelectorAll('#calc-tbody tr').forEach(tr => {
+    const profe = tr.dataset.profe
+    const prom = tr.children[1] ? tr.children[1].textContent.trim() : ''
+    const pct = Number(tr.dataset.pct) || 0
+    const pctCob = Number(tr.dataset.pctcob) || 0
+    const caido = tr.dataset.caido === '1'
+    const sueldo = Number(tr.querySelector('input[type=number]').value) || 0
+    const vacOn = tr.querySelector('.chk-vac').checked
+    const estOn = tr.querySelector('.chk-est').checked
+    const base = caido ? 0 : sueldo * (pct + (vacOn ? 20 : 0) + (estOn ? 10 : 0)) / 100
+    const cob = sueldo * pctCob / 100
+    const total = base + cob
+    totalDesempeno += total
+    const escLabel = caido ? 'Caído (faltó sin cobertura)'
+      : pct >= 30 ? 'Excelencia (30%)'
+      : pct >= 20 ? 'Crecimiento (20%)'
+      : pct >= 10 ? 'Compromiso (10%)'
+      : 'Sin bono (0%)'
+    profes.push({ profe, prom, pct, pctCob, caido, sueldo, vacOn, estOn, total, escLabel })
+  })
+  const salaChk = document.getElementById('calc-sala-ok')
+  const salaOk = !!(salaChk && salaChk.checked)
+  const salaMonto = salaOk ? 150000 : 0
+  return { mesStr, profes, totalDesempeno, salaOk, salaMonto, granTotal: totalDesempeno + salaMonto }
+}
+
+function textoWhatsappCierre(c) {
+  const L = []
+  L.push(`🧮 *BONOS TF · ${_tituloMesCierre(c.mesStr)}*`)
+  L.push('')
+  c.profes.forEach(p => {
+    L.push(`👤 *${p.profe}* — ${_fmt$(p.total)}`)
+    L.push(`   Promedio ${p.prom} · ${p.escLabel}`)
+    const extras = []
+    if (p.pctCob > 0) extras.push(`Cobertura +${p.pctCob}%`)
+    if (p.vacOn) extras.push('Vacaciones +20%')
+    if (p.estOn) extras.push('Estrella +10%')
+    if (extras.length) L.push(`   ${extras.join(' · ')}`)
+    L.push(`   Sueldo base: ${_fmt$(p.sueldo)}`)
+  })
+  L.push('')
+  L.push(`🤝 Bono de sala: ${c.salaOk ? _fmt$(c.salaMonto) + ' ($50.000 c/u: Santi, Lautaro, Lean)' : 'no aplica este mes'}`)
+  L.push('')
+  L.push(`💰 *GRAN TOTAL: ${_fmt$(c.granTotal)}*`)
+  const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
+  L.push('')
+  L.push(`Cerrado el ${new Date().toLocaleDateString('es-AR')}${autor ? ' por ' + autor : ''}`)
+  return L.join('\n')
+}
+
+window.abrirCierreBonos = async function() {
+  const c = recopilarCierreBonos()
+  const texto = textoWhatsappCierre(c)
+  window._CIERRE_ACTUAL = Object.assign({}, c, { texto })
+  const filas = c.profes.map(p => `
+    <tr style="border-bottom:1px solid #eef0f3;">
+      <td style="padding:7px 6px; font-weight:700;">${p.profe}</td>
+      <td style="padding:7px 6px;">${p.prom}</td>
+      <td style="padding:7px 6px; font-size:12px;">${p.escLabel}${p.pctCob > 0 ? ' · cob +' + p.pctCob + '%' : ''}${p.vacOn ? ' · 🏖' : ''}${p.estOn ? ' · 🌟' : ''}</td>
+      <td style="padding:7px 6px; text-align:right;">${_fmt$(p.sueldo)}</td>
+      <td style="padding:7px 6px; text-align:right; font-weight:800;">${_fmt$(p.total)}</td>
+    </tr>`).join('')
+  const textoEsc = texto.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  const overlay = document.createElement('div')
+  overlay.id = 'cierre-overlay'
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:flex-start;justify-content:center;z-index:9999;padding:24px 16px;overflow-y:auto;'
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:660px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:18px 22px;border-bottom:1px solid #eef0f3;display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="margin:0;font-size:17px;">📋 Cierre de Bonos TF · ${_tituloMesCierre(c.mesStr)}</h2>
+        <button onclick="document.getElementById('cierre-overlay').remove()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;">×</button>
+      </div>
+      <div style="padding:16px 22px;">
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px;">Esta es la simulación de cómo está cargado ahora mismo. Revisala, copiala para WhatsApp y, si está ok, cerrá el mes al histórico.</div>
+        <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:480px;">
+          <thead><tr style="background:#f1f5f9; text-align:left;">
+            <th style="padding:7px 6px;">Profe</th><th style="padding:7px 6px;">Prom.</th><th style="padding:7px 6px;">Detalle</th><th style="padding:7px 6px; text-align:right;">Sueldo</th><th style="padding:7px 6px; text-align:right;">Bono</th>
+          </tr></thead>
+          <tbody>${filas}</tbody>
+        </table>
+        </div>
+        <div style="margin-top:10px; padding:10px 12px; background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; font-size:13px; color:#9a3412;">🤝 Sala: ${c.salaOk ? _fmt$(c.salaMonto) + ' ($50.000 c/u)' : 'no aplica este mes'}</div>
+        <div style="margin-top:8px; padding:12px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:10px; display:flex; justify-content:space-between; font-weight:800; color:#1e40af;"><span>💰 GRAN TOTAL</span><span>${_fmt$(c.granTotal)}</span></div>
+        <div style="margin-top:14px;">
+          <div style="font-size:12px; font-weight:700; margin-bottom:6px;">📲 Texto para WhatsApp</div>
+          <textarea id="cierre-wa-texto" readonly style="width:100%; height:170px; font-size:12px; padding:10px; border:1px solid #cbd5e1; border-radius:10px; font-family:inherit; resize:vertical;">${textoEsc}</textarea>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+            <button onclick="copiarWhatsappCierre()" style="border:none; background:#16a34a; color:#fff; border-radius:8px; padding:9px 16px; cursor:pointer; font-weight:700; font-size:13px;">📋 Copiar texto</button>
+            <button onclick="abrirWhatsappCierre()" style="border:none; background:#25D366; color:#fff; border-radius:8px; padding:9px 16px; cursor:pointer; font-weight:700; font-size:13px;">💬 Abrir en WhatsApp</button>
+            <button onclick="guardarCierreBonos()" id="cierre-guardar-btn" style="border:none; background:#1e9fe0; color:#fff; border-radius:8px; padding:9px 16px; cursor:pointer; font-weight:800; font-size:13px;">🔒 Cerrar mes y guardar en histórico</button>
+          </div>
+          <div id="cierre-status" style="font-size:12px; margin-top:8px;"></div>
+        </div>
+        <div style="margin-top:18px; padding-top:14px; border-top:1px solid #eef0f3;">
+          <div style="font-size:13px; font-weight:700; margin-bottom:8px;">🗂 Cierres guardados</div>
+          <div id="cierre-historial"><p style="font-size:12px; color:var(--text-dim);">Cargando histórico…</p></div>
+        </div>
+      </div>
+    </div>`
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+  document.body.appendChild(overlay)
+  cargarHistorialCierres()
+}
+
+window.copiarWhatsappCierre = async function() {
+  const ta = document.getElementById('cierre-wa-texto')
+  const status = document.getElementById('cierre-status')
+  try {
+    await navigator.clipboard.writeText(ta.value)
+    if (status) status.innerHTML = '<span style="color:#16a34a;">✓ Copiado. Pegalo en WhatsApp.</span>'
+  } catch (e) {
+    ta.focus(); ta.select()
+    if (status) status.innerHTML = '<span style="color:#9a3412;">Te seleccioné el texto: copialo con Cmd/Ctrl+C.</span>'
+  }
+}
+
+window.abrirWhatsappCierre = function() {
+  const ta = document.getElementById('cierre-wa-texto')
+  window.open('https://wa.me/?text=' + encodeURIComponent(ta.value), '_blank')
+}
+
+window.guardarCierreBonos = async function() {
+  const c = window._CIERRE_ACTUAL
+  const status = document.getElementById('cierre-status')
+  const btn = document.getElementById('cierre-guardar-btn')
+  if (!c || !c.mesStr) { if (status) status.innerHTML = '<span style="color:#dc2626;">No pude leer el mes.</span>'; return }
+  if (!confirm('¿Cerrar ' + _tituloMesCierre(c.mesStr) + ' y guardarlo en el histórico? Si ya estaba cerrado, se reemplaza por esta versión.')) return
+  if (btn) btn.disabled = true
+  if (status) status.innerHTML = 'Guardando…'
+  const cerrado_por = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
+  try {
+    const { error } = await supabase.from('bonos_cierres_tf').upsert({
+      mes: c.mesStr,
+      detalle: c.profes,
+      total_desempeno: Math.round(c.totalDesempeno),
+      sala_ok: c.salaOk,
+      sala_monto: c.salaMonto,
+      gran_total: Math.round(c.granTotal),
+      texto_whatsapp: c.texto,
+      cerrado_por,
+      cerrado_en: new Date().toISOString()
+    }, { onConflict: 'mes' })
+    if (error) throw error
+    if (status) status.innerHTML = '<span style="color:#16a34a;">✓ Mes cerrado y guardado en histórico.</span>'
+    cargarHistorialCierres()
+  } catch (e) {
+    if (btn) btn.disabled = false
+    if (status) status.innerHTML = '<span style="color:#dc2626;">No se pudo: ' + (e.message || '') + '</span>'
+  }
+}
+
+async function cargarHistorialCierres() {
+  const cont = document.getElementById('cierre-historial')
+  if (!cont) return
+  try {
+    const { data, error } = await supabase.from('bonos_cierres_tf')
+      .select('mes, gran_total, cerrado_por, cerrado_en, texto_whatsapp')
+      .order('mes', { ascending: false }).limit(24)
+    if (error) throw error
+    if (!data || !data.length) { cont.innerHTML = '<p style="font-size:12px; color:var(--text-dim);">Todavía no hay cierres guardados.</p>'; return }
+    cont.innerHTML = data.map(h => {
+      const f = h.cerrado_en ? new Date(h.cerrado_en).toLocaleDateString('es-AR') : ''
+      return `
+      <div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(0,0,0,0.05); font-size:13px; flex-wrap:wrap;">
+        <span style="flex:1; min-width:150px;">🗓 <b>${_tituloMesCierre(h.mes)}</b> · ${_fmt$(h.gran_total)} <span style="color:var(--text-dim); font-size:11.5px;">(${f}${h.cerrado_por ? ' · ' + h.cerrado_por : ''})</span></span>
+        <button onclick="copiarHistorialCierre(this)" data-txt="${encodeURIComponent(h.texto_whatsapp || '')}" style="border:1px solid #16a34a; color:#16a34a; background:#fff; border-radius:7px; padding:3px 10px; cursor:pointer; font-size:12px;">📋 Copiar</button>
+      </div>`
+    }).join('')
+  } catch (e) {
+    cont.innerHTML = '<p style="font-size:12px; color:#dc2626;">No pude leer el histórico. ¿Corriste el SQL de bonos_cierres_tf?</p>'
+  }
+}
+
+window.copiarHistorialCierre = async function(btn) {
+  const txt = decodeURIComponent(btn.dataset.txt || '')
+  try {
+    await navigator.clipboard.writeText(txt)
+    const orig = btn.textContent
+    btn.textContent = '✓ Copiado'
+    setTimeout(() => { btn.textContent = orig }, 1500)
+  } catch (e) {
+    window.open('https://wa.me/?text=' + encodeURIComponent(txt), '_blank')
   }
 }
 
