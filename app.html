@@ -3234,6 +3234,7 @@ function renderCajasHistoricas() {
 const PROFES_BONO_TF = ['Santi', 'Lean', 'Lautaro', 'Male']
 let CALC_MES_OFFSET = 0  // 0 = mes actual
 let CALC_AJUSTES = {}    // ajustes manuales del mes: 'profe|tipo' -> bool
+let CALC_ESCALON = {}    // override manual del escalón por profe: 'profe' -> 0|10|20|30 (null = automático)
 
 function renderCalculadorBonos() {
   const contentEl = document.getElementById('content')
@@ -3288,10 +3289,14 @@ async function cargarCalculadorBonos(mesVer) {
     const { data: sueldos } = await supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
     const sueldoDe = {}
     ;(sueldos || []).forEach(s => { sueldoDe[s.profe] = Number(s.sueldo_bolsillo) || 0 })
-    // Ajustes manuales (vacaciones, estrella, sala) guardados de este mes
-    const { data: ajustes } = await supabase.from('bonos_ajustes_tf').select('profe, tipo, activo').eq('mes', mesStr)
+    // Ajustes manuales (vacaciones, estrella, sala, escalón) guardados de este mes
+    const { data: ajustes } = await supabase.from('bonos_ajustes_tf').select('*').eq('mes', mesStr)
     CALC_AJUSTES = {}
-    ;(ajustes || []).forEach(a => { CALC_AJUSTES[(a.profe || '') + '|' + a.tipo] = !!a.activo })
+    CALC_ESCALON = {}
+    ;(ajustes || []).forEach(a => {
+      CALC_AJUSTES[(a.profe || '') + '|' + a.tipo] = !!a.activo
+      if (a.tipo === 'escalon' && a.activo && a.valor != null) CALC_ESCALON[a.profe] = Number(a.valor)
+    })
     const datoDe = nombre => datos.find(d => (d.nombre || '').toLowerCase() === nombre.toLowerCase()
       || (nombre === 'Lautaro' && (d.nombre || '').toLowerCase() === 'lauti'))
     let filas = ''
@@ -3356,25 +3361,44 @@ async function cargarCalculadorBonos(mesVer) {
   }
 }
 
+function _escInfo(pct) {
+  return pct >= 30 ? { label: '🏆 Excelencia', color: '#16a34a' }
+    : pct >= 20 ? { label: '🚀 Crecimiento', color: '#0c7bb8' }
+    : pct >= 10 ? { label: '🤝 Compromiso', color: '#d97706' }
+    : { label: 'Sin bono', color: '#94a3b8' }
+}
+
 function filaCalc(profe, d, sueldo, mesStr) {
   const alxh = d.alxh || 0
-  const esc = alxh >= 5 ? { label: '🏆 Excelencia', pct: 30, color: '#16a34a' }
-    : alxh >= 4.5 ? { label: '🚀 Crecimiento', pct: 20, color: '#0c7bb8' }
-    : alxh >= 4 ? { label: '🤝 Compromiso', pct: 10, color: '#d97706' }
-    : { label: 'Sin bono', pct: 0, color: '#94a3b8' }
+  // Escalón automático (por promedio). Por ahora se puede pisar a mano para simular.
+  const autoPct = alxh >= 5 ? 30 : alxh >= 4.5 ? 20 : alxh >= 4 ? 10 : 0
+  const escOverride = (profe in CALC_ESCALON) ? CALC_ESCALON[profe] : null
+  const pctEf = (escOverride != null) ? escOverride : autoPct
+  const escSel = (escOverride != null) ? String(escOverride) : 'auto'
+  const info = _escInfo(pctEf)
+  const manualTag = (escOverride != null) ? ' <span style="color:#9333ea; font-weight:600;">(manual)</span>' : ''
   const pctCob = Math.min((d.diasCubiertos || 0) * 5, 15)
   const caido = !!d.bonoCaido
   // Vacaciones y estrella: el sistema sugiere (detecta), pero el check manda.
-  // Si hay ajuste manual guardado, usa ese; si no, usa lo que detectó el sistema.
   const vacKey = profe + '|vacaciones', estKey = profe + '|estrella'
   const vacAuto = !!d.cubrioVacaciones
   const vacOn = (vacKey in CALC_AJUSTES) ? CALC_AJUSTES[vacKey] : vacAuto
   const estOn = (estKey in CALC_AJUSTES) ? CALC_AJUSTES[estKey] : false
+  const escCell = caido
+    ? '<span style="color:#dc2626; font-weight:700;">🤒 Caído</span>'
+    : `<select onchange="setEscalon('${profe}','${mesStr}', this.value, this)" style="font-size:11.5px; padding:3px 6px; border:1px solid #cbd5e1; border-radius:6px; max-width:155px; cursor:pointer;">
+         <option value="auto" ${escSel === 'auto' ? 'selected' : ''}>Auto (${autoPct}%)</option>
+         <option value="0" ${escSel === '0' ? 'selected' : ''}>Sin bono · 0%</option>
+         <option value="10" ${escSel === '10' ? 'selected' : ''}>🤝 Compromiso · 10%</option>
+         <option value="20" ${escSel === '20' ? 'selected' : ''}>🚀 Crecimiento · 20%</option>
+         <option value="30" ${escSel === '30' ? 'selected' : ''}>🏆 Excelencia · 30%</option>
+       </select>
+       <div class="esc-label" style="margin-top:3px; font-weight:700; color:${info.color};">${info.label} · ${pctEf}%${manualTag}</div>`
   return `
-    <tr data-profe="${profe}" data-pct="${esc.pct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" style="border-bottom:1px solid #eef0f3;">
+    <tr data-profe="${profe}" data-pct="${pctEf}" data-pctauto="${autoPct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" style="border-bottom:1px solid #eef0f3;">
       <td style="padding:9px 7px; font-weight:700;">${profe}</td>
-      <td style="padding:9px 7px; font-weight:700; color:${esc.color};">${alxh}</td>
-      <td style="padding:9px 7px; font-size:12px;">${caido ? '<span style="color:#dc2626; font-weight:700;">🤒 Caído</span>' : `<span style="color:${esc.color};">${esc.label}<br>${esc.pct}%</span>`}</td>
+      <td style="padding:9px 7px; font-weight:700; color:${info.color};">${alxh}</td>
+      <td style="padding:9px 7px; font-size:12px;">${escCell}</td>
       <td style="padding:9px 7px;">
         <input type="number" value="${sueldo || ''}" placeholder="0" onchange="guardarSueldo('${profe}','${mesStr}',this.value)" oninput="recalcularFila(this.closest('tr'))"
           style="width:120px; padding:6px 8px; border:1px solid #cbd5e1; border-radius:7px; font-size:13px;">
@@ -3389,6 +3413,32 @@ function filaCalc(profe, d, sueldo, mesStr) {
       </td>
       <td style="padding:9px 7px; text-align:right; font-weight:800; font-size:14px;" class="calc-total">$0</td>
     </tr>`
+}
+
+window.setEscalon = async function(profe, mes, value, sel) {
+  const tr = sel.closest('tr')
+  const autoPct = Number(tr.dataset.pctauto) || 0
+  const pctEf = (value === 'auto') ? autoPct : Number(value)
+  tr.dataset.pct = pctEf
+  CALC_ESCALON[profe] = (value === 'auto') ? null : pctEf
+  const info = _escInfo(pctEf)
+  const lbl = sel.parentElement.querySelector('.esc-label')
+  if (lbl) {
+    lbl.style.color = info.color
+    lbl.innerHTML = info.label + ' · ' + pctEf + '%' + (value === 'auto' ? '' : ' <span style="color:#9333ea; font-weight:600;">(manual)</span>')
+  }
+  recalcularFila(tr)
+  try {
+    await supabase.from('bonos_ajustes_tf').upsert({
+      mes, profe, tipo: 'escalon',
+      activo: value !== 'auto',
+      valor: value === 'auto' ? null : pctEf,
+      actualizado_en: new Date().toISOString()
+    }, { onConflict: 'mes,profe,tipo' })
+    notifCalc(value === 'auto' ? `Escalón de ${profe}: automático` : `Escalón de ${profe}: ${pctEf}% (manual)`)
+  } catch (e) {
+    notifCalc('⚠️ No se pudo guardar el escalón: ' + (e.message || ''), true)
+  }
 }
 
 window.recalcularFila = function(tr) {
