@@ -277,6 +277,7 @@ let equipo = [];         // lista de personas del equipo (para el dropdown de de
 let filtroDestId = '';   // filtro de bandeja (para admin: ver solo conversación con X)
 let ADMINS_IDS = new Set(); // ids de personas con admin_total — sus mensajes se ven en rojo
 let adjuntosPorMsj = {}; // { mensaje_id: [{...adjunto}] }
+let lecturasPorMsj = {}; // { mensaje_id: Set(persona_id) } — quién leyó MIS mensajes
 let archivosNuevos = []; // archivos pendientes para adjuntar al próximo mensaje
 let urlsAdjuntoCache = {}; // cache de URLs firmadas por storage_path
 // Grabación de audio
@@ -506,6 +507,10 @@ function renderShell() {
       .mail-chevron { flex:0 0 auto; font-size:12px; color:#cbd5e1; transition:transform .15s; }
       .mail-item.abierto .mail-chevron { transform:rotate(90deg); }
       .chip-nivel { font-size:9.5px; font-weight:800; padding:2px 7px; border-radius:5px; letter-spacing:.3px; white-space:nowrap; flex:0 0 auto; }
+      .chip-leido { font-size:10.5px; font-weight:700; padding:1px 7px; border-radius:999px; white-space:nowrap; }
+      .chip-leido.ok { background:#dcfce7; color:#15803d; }
+      .chip-leido.parcial { background:#fef9c3; color:#a16207; }
+      .chip-leido.pend { background:#f1f5f9; color:#94a3b8; }
       .mail-body { display:none; padding:0 16px 14px 18px; }
       .mail-item.abierto .mail-body { display:block; }
       .mail-acciones { display:flex; gap:6px; margin-top:12px; }
@@ -800,6 +805,7 @@ async function cargarMensajes() {
     ADMINS_IDS = new Set((admRes.data || []).map(r => r.persona_id));
     // Adjuntos de los mensajes
     adjuntosPorMsj = {};
+    lecturasPorMsj = {};
     if (mensajes.length) {
       const ids = mensajes.map(m => m.id);
       const { data: adj } = await sb.from('mensajes_adjuntos').select('*').in('mensaje_id', ids);
@@ -807,6 +813,18 @@ async function cargarMensajes() {
         if (!adjuntosPorMsj[a.mensaje_id]) adjuntosPorMsj[a.mensaje_id] = [];
         adjuntosPorMsj[a.mensaje_id].push(a);
       });
+      // Confirmaciones de lectura de MIS mensajes (para mostrar "✓ Leído")
+      const misIds = mensajes.filter(m => m.autor_persona_id === yo.id).map(m => m.id);
+      if (misIds.length) {
+        try {
+          const { data: lec } = await sb.from('mensajes_lecturas')
+            .select('mensaje_id, persona_id').in('mensaje_id', misIds);
+          (lec || []).forEach(r => {
+            if (!lecturasPorMsj[r.mensaje_id]) lecturasPorMsj[r.mensaje_id] = new Set();
+            lecturasPorMsj[r.mensaje_id].add(r.persona_id);
+          });
+        } catch (e) { /* sin permiso de ver lecturas: se muestra sin confirmación */ }
+      }
     }
     pintarMensajes();
     marcarTodosLeidosSilenciosamente();
@@ -874,6 +892,43 @@ function nombreDePersonaId(pid) {
   return p ? nombreCorto(p, [yo].concat(equipo)) : '—';
 }
 
+// Calcula la confirmación de lectura de un correo MÍO.
+// Devuelve { chip, porDest } — porDest es un Map destinatario_id -> leído(bool)
+function estadoLectura(h) {
+  // General: cuento cuántas personas (≠ yo) lo leyeron
+  if (h.esGeneral) {
+    const set = lecturasPorMsj[h.rep.id] || new Set();
+    let n = 0; set.forEach(pid => { if (pid !== yo.id) n++; });
+    const chip = n > 0
+      ? `<span class="chip-leido ok">👁 ${n} leyeron</span>`
+      : `<span class="chip-leido pend">○ Sin leer</span>`;
+    return { chip, porDest: new Map() };
+  }
+  // Dirigido (a una o varias personas): leído = el DESTINATARIO de cada copia lo leyó
+  const porDest = new Map();
+  let leidos = 0;
+  for (let i = 0; i < h.ids.length; i++) {
+    const id = h.ids[i];
+    const dest = h.dests[i];
+    if (dest == null) continue;
+    const ok = !!(lecturasPorMsj[id] && lecturasPorMsj[id].has(dest));
+    porDest.set(dest, ok);
+    if (ok) leidos++;
+  }
+  const total = porDest.size;
+  let chip;
+  if (total <= 1) {
+    chip = leidos >= 1
+      ? `<span class="chip-leido ok">✓ Leído</span>`
+      : `<span class="chip-leido pend">○ Sin leer</span>`;
+  } else if (leidos >= total) {
+    chip = `<span class="chip-leido ok">✓ Leído por todos</span>`;
+  } else {
+    chip = `<span class="chip-leido ${leidos>0?'parcial':'pend'}">✓ ${leidos}/${total} leyeron</span>`;
+  }
+  return { chip, porDest };
+}
+
 // Renderiza un HILO (uno o varios mensajes del mismo envío) como una sola tarjeta tipo correo.
 function renderHilo(h) {
   const m = h.rep;                          // mensaje representante
@@ -886,14 +941,25 @@ function renderHilo(h) {
   const autorEsAdmin = ADMINS_IDS.has(m.autor_persona_id);          // Lu / Jime
   const autorEsVocera = !autorEsAdmin && VOCERA_IDS.has(m.autor_persona_id); // Paula
 
-  // Línea "Para:" (solo se ve al abrir el correo)
+  // Confirmación de lectura (solo en mis mensajes)
+  const lect = esMio ? estadoLectura(h) : null;
+
+  // Línea "Para:" (solo se ve al abrir el correo). Marca ✓/○ por destinatario si es mío.
   let paraLinea;
   if (h.esGeneral) {
     paraLinea = `<span class="lbl">Para:</span><span class="dest" style="background:#fef3c7;border-color:#fcd34d;color:#92400e">📢 Todo el equipo</span>`;
   } else {
     const nombres = h.dests
       .filter((v, i, a) => a.indexOf(v) === i)        // únicos
-      .map(d => `<span class="dest">${escapeHtml(nombreDePersonaId(d))}</span>`)
+      .map(d => {
+        let mark = '';
+        if (lect && lect.porDest.has(d)) {
+          mark = lect.porDest.get(d)
+            ? ' <span style="color:#16a34a;font-weight:800" title="Leído">✓</span>'
+            : ' <span style="color:#cbd5e1" title="Sin leer">○</span>';
+        }
+        return `<span class="dest">${escapeHtml(nombreDePersonaId(d))}${mark}</span>`;
+      })
       .join('');
     paraLinea = `<span class="lbl">Para:</span>${nombres}`;
   }
@@ -921,7 +987,8 @@ function renderHilo(h) {
   const nDest = new Set(h.dests.filter(d => d != null)).size;
   const meta = [
     nAdj ? `📎${nAdj > 1 ? ' ' + nAdj : ''}` : '',
-    h.esGeneral ? '📢' : (nDest > 1 ? '👥 ' + nDest : '')
+    h.esGeneral ? '📢' : (nDest > 1 ? '👥 ' + nDest : ''),
+    lect ? lect.chip : ''
   ].filter(Boolean).join('  ');
 
   const leidoCls = sinLeer ? 'no-leido' : 'leido';
