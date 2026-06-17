@@ -55,8 +55,10 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 let accesos = [];
 let nombrePorPersona = {};   // persona_id -> nombre (pacientes)
 let equipo = [];             // {id, nombre, email}
+let hcPorPersona = {};       // persona_id -> {persona_id, dni, total, ultima}
 let filtroTexto = '';
 let filtroAccion = 'todas';
+let soloSinVer = false;
 let dias = 30;
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -101,8 +103,27 @@ async function recargar() {
   if (error) { mostrarSinAcceso('Solo las administradoras pueden ver la bitácora.\n(' + error.message + ')'); return; }
   accesos = data || [];
 
-  // Nombres de pacientes
-  const ids = [...new Set(accesos.map(a => a.persona_id).filter(x => x != null))];
+  // Cargar TODAS las HC (para listar incluso las que nadie abrió)
+  let hcRows = [];
+  try {
+    const r = await sb.from('historias_clinicas').select('persona_id, dni, completado_en');
+    hcRows = r.data || [];
+  } catch (e) { hcRows = []; }
+  hcPorPersona = {};
+  hcRows.forEach(h => {
+    if (h.persona_id == null) return;
+    if (!hcPorPersona[h.persona_id]) hcPorPersona[h.persona_id] = { persona_id: h.persona_id, dni: h.dni || null, total: 0, ultima: null };
+    const g = hcPorPersona[h.persona_id];
+    g.total++;
+    if (!g.dni && h.dni) g.dni = h.dni;
+    if (!g.ultima || (h.completado_en && h.completado_en > g.ultima)) g.ultima = h.completado_en;
+  });
+
+  // Nombres de pacientes (unión: los que tienen accesos + los que tienen HC)
+  const ids = [...new Set([
+    ...accesos.map(a => a.persona_id),
+    ...Object.keys(hcPorPersona).map(Number)
+  ].filter(x => x != null))];
   nombrePorPersona = {};
   if (ids.length) {
     try {
@@ -120,6 +141,7 @@ function mostrarSinAcceso(msg) {
 
 function render() {
   const cont = document.getElementById('contenido');
+  const t = norm(filtroTexto);
 
   // --- Resumen por profesional ---
   const porProfe = {};   // email -> {nombre, hc, pdf, ult}
@@ -129,13 +151,10 @@ function render() {
     if (a.accion === 'abrir_pdf') porProfe[k].pdf++; else porProfe[k].hc++;
     if (!porProfe[k].ult || a.creado_en > porProfe[k].ult) porProfe[k].ult = a.creado_en;
   });
-
-  // Sumar miembros del equipo que NO aparecen (nunca abrieron)
   equipo.forEach(p => {
     const k = norm(p.email);
     if (k && !porProfe[k]) porProfe[k] = { nombre: p.nombre, email: p.email, hc:0, pdf:0, ult:null, sinActividad:true };
   });
-
   const filasProfe = Object.values(porProfe).sort((a,b) => {
     if (!a.ult && b.ult) return 1;
     if (a.ult && !b.ult) return -1;
@@ -146,9 +165,52 @@ function render() {
   const totalHC = accesos.filter(a => a.accion !== 'abrir_pdf').length;
   const totalPDF = accesos.filter(a => a.accion === 'abrir_pdf').length;
   const profesActivos = filasProfe.filter(f => f.ult).length;
+  const sinActividad = filasProfe.filter(f => f.sinActividad);
 
-  // --- Actividad reciente (con filtros) ---
-  const t = norm(filtroTexto);
+  // --- Quién vio cada paciente (a partir de los accesos) ---
+  const viewersPorPac = {}; // persona_id -> { key -> {nombre, hc, pdf, ult} }
+  accesos.forEach(a => {
+    if (a.persona_id == null) return;
+    if (!viewersPorPac[a.persona_id]) viewersPorPac[a.persona_id] = {};
+    const m = viewersPorPac[a.persona_id];
+    const k = norm(a.visor_email) || (a.visor_nombre || '—');
+    if (!m[k]) m[k] = { nombre: a.visor_nombre || a.visor_email || '—', hc:0, pdf:0, ult:null };
+    if (a.accion === 'abrir_pdf') m[k].pdf++; else m[k].hc++;
+    if (!m[k].ult || a.creado_en > m[k].ult) m[k].ult = a.creado_en;
+  });
+
+  // --- Filas por historia clínica (todas las HC, vistas o no) ---
+  let filasHC = Object.values(hcPorPersona).map(g => {
+    const vs = Object.values(viewersPorPac[g.persona_id] || {});
+    let ult = null;
+    vs.forEach(v => { if (v.ult && (!ult || v.ult > ult)) ult = v.ult; });
+    return {
+      persona_id: g.persona_id,
+      nombre: nombrePac(g.persona_id),
+      dni: g.dni,
+      total: g.total,
+      viewers: vs.sort((a,b) => (b.ult||'') < (a.ult||'') ? -1 : 1),
+      ultVista: ult
+    };
+  });
+  // Filtros del listado de HC
+  filasHC = filasHC.filter(f => {
+    if (soloSinVer && f.viewers.length) return false;
+    if (!t) return true;
+    if (norm(f.nombre).includes(t) || norm(f.dni).includes(t)) return true;
+    return f.viewers.some(v => norm(v.nombre).includes(t));
+  });
+  // Orden: las que nadie vio primero; luego por última visualización más reciente
+  filasHC.sort((a,b) => {
+    const av = a.viewers.length>0, bv = b.viewers.length>0;
+    if (av !== bv) return av ? 1 : -1;
+    if (a.ultVista && b.ultVista) return a.ultVista < b.ultVista ? 1 : -1;
+    return norm(a.nombre) < norm(b.nombre) ? -1 : 1;
+  });
+  const totalHCpac = Object.keys(hcPorPersona).length;
+  const sinVer = Object.values(hcPorPersona).filter(g => !(viewersPorPac[g.persona_id] && Object.keys(viewersPorPac[g.persona_id]).length)).length;
+
+  // --- Actividad reciente ---
   const recientes = accesos.filter(a => {
     if (filtroAccion === 'hc' && a.accion === 'abrir_pdf') return false;
     if (filtroAccion === 'pdf' && a.accion !== 'abrir_pdf') return false;
@@ -156,18 +218,50 @@ function render() {
     return norm(a.visor_nombre).includes(t) || norm(nombrePac(a.persona_id)).includes(t) || norm(a.adjunto_nombre).includes(t);
   }).slice(0, 400);
 
-  const sinActividad = filasProfe.filter(f => f.sinActividad);
-
+  // ===== HTML =====
   let html = `
     <div class="kpis">
+      <div class="kpi"><div class="n">${totalHCpac}</div><div class="l">Historias clínicas (pacientes)</div></div>
+      <div class="kpi"><div class="n" style="color:${sinVer?'#dc2626':'#16a34a'}">${sinVer}</div><div class="l">HC que NADIE vio</div></div>
       <div class="kpi"><div class="n">${totalHC}</div><div class="l">Aperturas de HC (${dias>0?'últimos '+dias+' días':'histórico'})</div></div>
       <div class="kpi"><div class="n">${totalPDF}</div><div class="l">PDF / evaluaciones abiertos</div></div>
-      <div class="kpi"><div class="n">${profesActivos}</div><div class="l">Personas que abrieron algo</div></div>
     </div>`;
 
   if (sinActividad.length) {
-    html += `<div class="alerta">⚠️ <strong>Sin actividad en este período:</strong> ${sinActividad.map(f => esc(f.nombre)).join(', ')}.</div>`;
+    html += `<div class="alerta">⚠️ <strong>Del equipo, no abrió ninguna HC en este período:</strong> ${sinActividad.map(f => esc(f.nombre)).join(', ')}.</div>`;
   }
+
+  // Filtros (arriba, aplican a todo)
+  html += `<div class="controls">
+      <input id="fTexto" placeholder="Buscar paciente, DNI o profe…" value="${esc(filtroTexto)}">
+      <select id="fDias">
+        <option value="7">Últimos 7 días</option>
+        <option value="30">Últimos 30 días</option>
+        <option value="60">Últimos 60 días</option>
+        <option value="0">Todo el historial</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--gris);cursor:pointer">
+        <input type="checkbox" id="fSinVer" ${soloSinVer?'checked':''}> Solo las que nadie vio
+      </label>
+    </div>`;
+
+  // TABLA PRINCIPAL: Por historia clínica → quién la vio
+  html += `<div class="card"><h2>🩺 Historias clínicas · quién las vio (${filasHC.length})</h2>
+    <table><thead><tr>
+      <th>Paciente</th><th class="opt">DNI</th><th>Vista por</th><th class="opt">Última vez</th>
+    </tr></thead><tbody>
+    ${filasHC.length ? filasHC.map(f => {
+      const chips = f.viewers.length
+        ? f.viewers.map(v => `<span class="pill ok" style="margin:2px 3px 2px 0;display:inline-block">${esc(v.nombre)}${v.hc>1?' ·'+v.hc+'×':''}${v.pdf?' 📄':''}</span>`).join('')
+        : '<span class="pill cero">Todavía nadie la vio</span>';
+      return `<tr>
+        <td><strong>${esc(f.nombre)}</strong>${f.total>1?` <span class="muted">(${f.total} HC)</span>`:''}</td>
+        <td class="opt muted">${esc(f.dni || '—')}</td>
+        <td>${chips}</td>
+        <td class="opt muted">${f.ultVista ? fmt(f.ultVista) : '—'}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">No hay HC para mostrar con ese filtro.</td></tr>'}
+    </tbody></table></div>`;
 
   // Tabla por profesional
   html += `<div class="card"><h2>📊 Por persona del equipo</h2>
@@ -182,22 +276,7 @@ function render() {
     </tr>`).join('')}
     </tbody></table></div>`;
 
-  // Controles + actividad reciente
-  html += `<div class="controls">
-      <input id="fTexto" placeholder="Buscar por profe, paciente o archivo…" value="${esc(filtroTexto)}">
-      <select id="fAccion">
-        <option value="todas">Todo</option>
-        <option value="hc">Solo aperturas de HC</option>
-        <option value="pdf">Solo PDF</option>
-      </select>
-      <select id="fDias">
-        <option value="7">Últimos 7 días</option>
-        <option value="30">Últimos 30 días</option>
-        <option value="60">Últimos 60 días</option>
-        <option value="0">Todo el historial</option>
-      </select>
-    </div>`;
-
+  // Actividad reciente
   html += `<div class="card"><h2>🕑 Actividad reciente (${recientes.length})</h2>
     <table><thead><tr>
       <th>Cuándo</th><th>Quién</th><th>Acción</th><th>Paciente</th><th class="opt">Archivo</th><th class="opt">Desde</th>
@@ -216,12 +295,12 @@ function render() {
 
   // Reenganchar controles
   const fT = document.getElementById('fTexto');
-  const fA = document.getElementById('fAccion');
   const fD = document.getElementById('fDias');
-  fA.value = filtroAccion; fD.value = String(dias);
+  const fS = document.getElementById('fSinVer');
+  fD.value = String(dias);
   fT.oninput = () => { filtroTexto = fT.value; const pos = fT.selectionStart; render(); const n = document.getElementById('fTexto'); n.focus(); n.setSelectionRange(pos,pos); };
-  fA.onchange = () => { filtroAccion = fA.value; render(); };
   fD.onchange = () => { dias = parseInt(fD.value); recargar(); };
+  fS.onchange = () => { soloSinVer = fS.checked; render(); };
 }
 
 document.addEventListener('DOMContentLoaded', cargar);
