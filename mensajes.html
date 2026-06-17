@@ -289,6 +289,23 @@ let LIMITE_CHARS = 10000; // antes 2000 — Lu pidió subirlo
 let modoDest = 'uno';
 let destinatariosMulti = new Set(); // ids elegidos en modo 'varios'
 
+// ===== JERARQUÍA / GRUPO =====
+// Nivel 1 (suma importancia): admin_total -> Lu y Jime  (ya viene de ADMINS_IDS, rojo "IMPORTANTE")
+// Nivel 2 (vocería): Paula  -> ámbar "VOCERÍA"
+// Nivel 3: resto del equipo
+let VOCERA_IDS = new Set();   // ids de las voceras (Paula)
+let GRUPO_IDS = [];           // ids del preset "Equipo TF" (Paula + profes), excluyéndome a mí
+const EMAILS_VOCERA = ['paukappes@gmail.com'];
+const EMAILS_GRUPO  = [
+  'paukappes@gmail.com',           // Paula (vocera)
+  'santiagoferreira1999@gmail.com',// Santi
+  'leacrespin97@gmail.com',        // Lean
+  'leut.molina@gmail.com',         // Lautaro
+  'loz.magdalena@gmail.com'        // Male
+];
+// Mapa id -> [ids hermanos del mismo envío] (para editar/borrar todo un lote junto)
+let idToLote = {};
+
 // ============= INICIO =============
 async function init() {
   const { data: { session } } = await sb.auth.getSession();
@@ -345,6 +362,42 @@ async function init() {
       });
   } catch (e) { equipo = []; }
 
+  // ===== Resolver VOCERA (Paula) y GRUPO (Equipo TF) por email, con fallback por nombre =====
+  try {
+    // Base de nombres (siempre disponible)
+    let personasBase = [];
+    try {
+      const { data } = await sb.from('personas').select('id, nombre').eq('es_equipo', true);
+      personasBase = data || [];
+    } catch (e) { personasBase = []; }
+    // Emails (la columna podría no existir en algún esquema viejo)
+    let idsPorEmail = {};
+    try {
+      const { data } = await sb.from('personas').select('id, email').eq('es_equipo', true);
+      (data || []).forEach(p => { if (p.email) idsPorEmail[String(p.email).toLowerCase().trim()] = p.id; });
+    } catch (e) { idsPorEmail = {}; }
+
+    const normNom = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+    const idPorPrimerNombre = (pref) => {
+      const hit = personasBase.find(p => normNom(p.nombre).split(' ')[0] === pref);
+      return hit ? hit.id : null;
+    };
+
+    // Vocera = Paula
+    EMAILS_VOCERA.forEach(e => { if (idsPorEmail[e]) VOCERA_IDS.add(idsPorEmail[e]); });
+    if (!VOCERA_IDS.size) { const id = idPorPrimerNombre('paula'); if (id) VOCERA_IDS.add(id); }
+
+    // Grupo "Equipo TF"
+    const setG = new Set();
+    EMAILS_GRUPO.forEach(e => { if (idsPorEmail[e]) setG.add(idsPorEmail[e]); });
+    if (!setG.size) {
+      ['paula', 'santiago', 'leandro', 'lautaro', 'magdalena', 'male', 'lean'].forEach(pref => {
+        const id = idPorPrimerNombre(pref); if (id) setG.add(id);
+      });
+    }
+    GRUPO_IDS = equipo.filter(p => setG.has(p.id)).map(p => p.id); // solo los que no soy yo
+  } catch (e) { /* sin vocera/grupo: la pantalla funciona igual */ }
+
   renderShell();
   await cargarMensajes();
 }
@@ -397,8 +450,12 @@ function renderShell() {
     destinatariosBox = `
       <div>
         <div style="font-size:12px;font-weight:700;color:var(--gris-texto);margin-bottom:6px">Elegí a quién mandarle (${destinatariosMulti.size} elegido${destinatariosMulti.size===1?'':'s'}):</div>
+        ${GRUPO_IDS.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button type="button" class="modo-btn" onclick="seleccionarGrupo()" style="background:#ecfdf5;border-color:#34d399;color:#047857">👥 Equipo TF (Paula + profes)</button>
+          ${destinatariosMulti.size ? `<button type="button" class="modo-btn" onclick="limpiarSeleccion()" style="background:#fff;border-color:#e0e0e0;color:#64748b">✕ Limpiar</button>` : ''}
+        </div>` : ''}
         <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">${chks}</div>
-        <div style="font-size:11px;color:var(--gris-texto)">Cada destinatario va a recibir el mensaje por separado.</div>
+        <div style="font-size:11px;color:var(--gris-texto)">Se manda una sola vez y queda agrupado: en la bandeja se ve como un correo con todos los destinatarios juntos.${esAdmin?'' : ' Jime y Lu lo ven igual porque supervisan todo.'}</div>
       </div>`;
   } else { // 'todos'
     destinatariosBox = `
@@ -425,6 +482,16 @@ function renderShell() {
       .icon-btn.rec { background:#dc2626; color:#fff; border-color:#dc2626; animation: pulse-rec 1.2s infinite }
       .icon-btn.rec:hover { background:#b91c1c; color:#fff }
       @keyframes pulse-rec { 0%,100%{opacity:1} 50%{opacity:.7} }
+      /* ===== Look de correo ===== */
+      .msj-para { font-size:12px; color:var(--gris-texto); margin:2px 0 0 40px; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+      .msj-para .lbl { font-weight:700; color:#94a3b8; }
+      .msj-para .dest { background:#eef2f7; border:1px solid #dbe3ea; color:#334155; font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
+      .msj-sep { height:1px; background:var(--gris-borde); margin:10px 0; }
+      .msj-cuerpo { font-size:14px; line-height:1.55; color:var(--negro); white-space:pre-wrap; word-break:break-word; }
+      .adj-titulo { font-size:11.5px; font-weight:800; color:#64748b; letter-spacing:.3px; margin:12px 0 2px; text-transform:uppercase; }
+      /* Vocería (nivel 2) */
+      .chip-voceria { background:#d97706; color:#fff; font-size:10px; font-weight:800; padding:2px 8px; border-radius:5px; margin-left:5px; letter-spacing:.3px; }
+      .banda { position:absolute; left:0; top:0; bottom:0; width:5px; border-radius:12px 0 0 12px; }
     </style>
     <div class="header">
       <div>
@@ -500,6 +567,31 @@ window.toggleDestMulti = function(pid) {
   pintarArchivosNuevos();
   pintarMensajes();
 };
+
+// Preset: selecciona de un saque al Equipo TF (Paula + profes)
+window.seleccionarGrupo = function() {
+  modoDest = 'varios';
+  GRUPO_IDS.forEach(id => destinatariosMulti.add(id));
+  _refrescarCaja();
+};
+window.limpiarSeleccion = function() {
+  destinatariosMulti.clear();
+  _refrescarCaja();
+};
+// Helper para re-pintar la caja conservando texto y archivos
+function _refrescarCaja() {
+  const txt = document.getElementById('nuevoMsj')?.value || '';
+  const archActuales = [...archivosNuevos];
+  renderShell();
+  const ta = document.getElementById('nuevoMsj');
+  if (ta) {
+    ta.value = txt;
+    document.getElementById('contador').textContent = `${txt.length.toLocaleString('es-AR')} / ${LIMITE_CHARS.toLocaleString('es-AR')}`;
+  }
+  archivosNuevos = archActuales;
+  pintarArchivosNuevos();
+  pintarMensajes();
+}
 
 // ====== ARCHIVOS Y GRABACIÓN ======
 window.agregarArchivos = function(files) {
@@ -720,9 +812,34 @@ function pintarMensajes() {
     cont.innerHTML = `<div class="empty-state"><span class="emoji">📭</span>${txt}</div>`;
     return;
   }
-  cont.innerHTML = lista.map(m => renderMensaje(m)).join('');
+  const hilos = agruparHilos(lista);
+  cont.innerHTML = hilos.map(h => renderHilo(h)).join('');
   // Después del HTML, traer las URLs firmadas para imágenes/audios/videos
   _hidratarAdjuntos();
+}
+
+// Agrupa los mensajes de un mismo envío múltiple en un solo "hilo" (= una tarjeta de correo).
+// Clave: lote_id si existe; si no (mensajes viejos), autor + contenido + minuto.
+function agruparHilos(lista) {
+  idToLote = {};
+  const orden = [];      // claves en orden de aparición (lista ya viene desc por fecha)
+  const porClave = {};
+  for (const m of lista) {
+    const minuto = String(m.creado_en || '').slice(0, 16); // YYYY-MM-DDTHH:MM
+    const clave = m.lote_id
+      ? 'L:' + m.lote_id
+      : `H:${m.autor_persona_id}|${m.destinatario_persona_id == null ? 'TODOS' : 'X'}|${m.contenido}|${minuto}`;
+    if (!porClave[clave]) {
+      porClave[clave] = { rep: m, ids: [], dests: [], esGeneral: m.destinatario_persona_id == null };
+      orden.push(clave);
+    }
+    const h = porClave[clave];
+    h.ids.push(m.id);
+    h.dests.push(m.destinatario_persona_id);
+  }
+  // Mapear cada id -> ids hermanos (para editar/borrar el lote completo)
+  Object.values(porClave).forEach(h => { h.ids.forEach(id => { idToLote[id] = h.ids; }); });
+  return orden.map(k => porClave[k]);
 }
 
 function nombreDePersonaId(pid) {
@@ -732,39 +849,53 @@ function nombreDePersonaId(pid) {
   return p ? nombreCorto(p, [yo].concat(equipo)) : '—';
 }
 
-function renderMensaje(m) {
+// Renderiza un HILO (uno o varios mensajes del mismo envío) como una sola tarjeta tipo correo.
+function renderHilo(h) {
+  const m = h.rep;                          // mensaje representante
   const esMio = m.autor_persona_id === yo.id;
   const puedeEditar = esMio;
   const puedeBorrar = esMio || esAdmin;
-  const sinLeer = !leidasPorMi.has(m.id) && !esMio;
+  // Sin leer = alguno de los del lote me corresponde y no lo leí
+  const sinLeer = h.ids.some(id => !leidasPorMi.has(id)) && !esMio;
   const ini = inicialesDe(m.autor_nombre || 'Equipo');
-  const esGeneral = m.destinatario_persona_id == null;
-  const autorEsAdmin = ADMINS_IDS.has(m.autor_persona_id);
-  // Texto "para X"
-  const paraTxt = esGeneral
-    ? '<span style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:5px">📢 Todo el equipo</span>'
-    : `<span style="background:#dbeafe;color:#1e40af;border:1px solid #93c5fd;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:5px">→ ${escapeHtml(nombreDePersonaId(m.destinatario_persona_id))}</span>`;
-  // Estilos especiales si el autor es ADMIN (mensajes importantes en rojo)
-  const estilosAdmin = autorEsAdmin ? {
-    borderColor: '#dc2626',
-    bg: sinLeer ? 'linear-gradient(90deg,#fee2e2 0%,#fff 12%)' : '#fff',
-    avatarBg: '#dc2626',
-    nombreColor: '#b91c1c',
-    chipImportante: '<span style="background:#dc2626;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;margin-left:5px;letter-spacing:.3px">⚡ IMPORTANTE</span>',
-    extraStyle: 'border-width:2px;border-left-width:5px;box-shadow:0 2px 8px rgba(220,38,38,.12)'
-  } : null;
-  const sinLeerCls = (sinLeer && !autorEsAdmin) ? 'sin-leer' : '';
-  const inlineStyle = autorEsAdmin
-    ? `border-color:${estilosAdmin.borderColor};background:${estilosAdmin.bg};${estilosAdmin.extraStyle}`
-    : '';
-  const avatarStyle = autorEsAdmin ? `background:${estilosAdmin.avatarBg}` : '';
-  const nombreStyle = autorEsAdmin ? `color:${estilosAdmin.nombreColor}` : '';
-  return `<div class="msj ${sinLeerCls}" id="msj-${m.id}" style="${inlineStyle}">
+  const autorEsAdmin = ADMINS_IDS.has(m.autor_persona_id);          // Lu / Jime
+  const autorEsVocera = !autorEsAdmin && VOCERA_IDS.has(m.autor_persona_id); // Paula
+
+  // Línea "Para:" — un solo correo con todos los destinatarios juntos
+  let paraLinea;
+  if (h.esGeneral) {
+    paraLinea = `<span class="lbl">Para:</span><span class="dest" style="background:#fef3c7;border-color:#fcd34d;color:#92400e">📢 Todo el equipo</span>`;
+  } else {
+    const nombres = h.dests
+      .filter((v, i, a) => a.indexOf(v) === i)        // únicos
+      .map(d => `<span class="dest">${escapeHtml(nombreDePersonaId(d))}</span>`)
+      .join('');
+    paraLinea = `<span class="lbl">Para:</span>${nombres}`;
+  }
+
+  // Jerarquía visual
+  let bandaColor = '#cbd5e1', avatarBg = 'var(--celeste)', nombreColor = 'var(--negro)';
+  let chip = '', cuerpoStyle = '', cardExtra = '', cardCls = '';
+  if (autorEsAdmin) {
+    bandaColor = '#dc2626'; avatarBg = '#dc2626'; nombreColor = '#b91c1c';
+    chip = '<span style="background:#dc2626;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:5px;margin-left:5px;letter-spacing:.3px">⚡ IMPORTANTE</span>';
+    cuerpoStyle = 'color:#7f1d1d;font-weight:500';
+    cardExtra = 'border-color:#dc2626;box-shadow:0 2px 8px rgba(220,38,38,.12)';
+  } else if (autorEsVocera) {
+    bandaColor = '#d97706'; avatarBg = '#d97706'; nombreColor = '#b45309';
+    chip = '<span class="chip-voceria">🎤 VOCERÍA</span>';
+    cardExtra = 'border-color:#f59e0b;box-shadow:0 2px 8px rgba(217,119,6,.10)';
+  } else if (sinLeer) {
+    cardCls = 'sin-leer';
+  }
+
+  return `<div class="msj ${cardCls}" id="msj-${m.id}" style="position:relative;${cardExtra}">
+    <div class="banda" style="background:${bandaColor}"></div>
     <div class="msj-head">
       <div class="msj-autor">
-        <div class="msj-avatar" style="${avatarStyle}">${ini}</div>
+        <div class="msj-avatar" style="background:${avatarBg}">${ini}</div>
         <div>
-          <div class="msj-nombre" style="${nombreStyle}">${escapeHtml(m.autor_nombre || 'Equipo')}${esMio ? ' <span style="color:#94a3b8;font-weight:500;font-size:11.5px">(vos)</span>' : ''} ${paraTxt}${autorEsAdmin ? estilosAdmin.chipImportante : ''}</div>
+          <div class="msj-nombre" style="color:${nombreColor}">${escapeHtml(m.autor_nombre || 'Equipo')}${esMio ? ' <span style="color:#94a3b8;font-weight:500;font-size:11.5px">(vos)</span>' : ''}${chip}</div>
           <div class="msj-fecha">${formatearFecha(m.creado_en)}${m.editado_en ? '<span class="editado">· editado</span>' : ''}</div>
         </div>
       </div>
@@ -773,9 +904,18 @@ function renderMensaje(m) {
         ${puedeBorrar ? `<button class="mini-btn peligro" onclick="borrar(${m.id})" title="Borrar">🗑️</button>` : ''}
       </div>
     </div>
-    <div class="msj-contenido" id="msj-cont-${m.id}" style="${autorEsAdmin?'color:#7f1d1d;font-weight:500':''}">${linkify(escapeHtml(m.contenido))}</div>
-    ${renderAdjuntosMsj(m.id)}
+    <div class="msj-para">${paraLinea}</div>
+    <div class="msj-sep"></div>
+    <div class="msj-contenido msj-cuerpo" id="msj-cont-${m.id}" style="${cuerpoStyle}">${linkify(escapeHtml(m.contenido))}</div>
+    ${renderAdjuntosConTitulo(m.id)}
   </div>`;
+}
+
+// Envuelve los adjuntos con un titulito "Archivos adjuntos" (look de correo)
+function renderAdjuntosConTitulo(mensajeId) {
+  const adjs = adjuntosPorMsj[mensajeId] || [];
+  if (!adjs.length) return '';
+  return `<div class="adj-titulo">📎 Archivos adjuntos</div>${renderAdjuntosMsj(mensajeId)}`;
 }
 
 // Renderiza la lista de adjuntos del mensaje, con preview en línea para audio/video/imagen
@@ -821,6 +961,16 @@ async function _hidratarAdjuntos() {
 }
 
 // ============= ENVIAR =============
+// Inserta un mensaje; si la columna lote_id todavía no existe en la BD, reintenta sin ella.
+async function insertMensajeSeguro(payload) {
+  let res = await sb.from('mensajes_equipo').insert(payload).select('id').single();
+  if (res.error && 'lote_id' in payload && /lote_id|column/i.test(res.error.message || '')) {
+    const sin = { ...payload }; delete sin.lote_id;
+    res = await sb.from('mensajes_equipo').insert(sin).select('id').single();
+  }
+  return res;
+}
+
 async function enviar() {
   const ta = document.getElementById('nuevoMsj');
   const txt = ta.value.trim();
@@ -845,17 +995,24 @@ async function enviar() {
   btn.disabled = true;
   btn.textContent = tieneAdjuntos ? 'Subiendo…' : 'Enviando…';
 
+  // Si va a más de una persona, todos comparten un mismo lote para verse agrupados como un solo correo
+  const loteId = (modoDest !== 'todos' && destinatarios.length > 1)
+    ? ((crypto && crypto.randomUUID) ? crypto.randomUUID() : ('lote_' + Date.now() + '_' + Math.random().toString(36).slice(2)))
+    : null;
+
   try {
     let enviadosOK = 0;
     for (const destId of destinatarios) {
       // 1) Crear el mensaje
-      const { data: nuevo, error } = await sb.from('mensajes_equipo').insert({
+      const payload = {
         autor_persona_id: yo.id,
         autor_nombre: yo.nombre,
         destinatario_persona_id: destId,
         contenido: txt || '(adjunto)',
         enviado_desde: 'equipo',
-      }).select('id').single();
+      };
+      if (loteId) payload.lote_id = loteId;
+      const { data: nuevo, error } = await insertMensajeSeguro(payload);
       if (error) throw error;
       // 2) Subir adjuntos al mensaje (a cada uno por separado para que cada destinatario los vea)
       if (tieneAdjuntos) {
@@ -907,12 +1064,13 @@ window.guardarEdit = async function(id) {
   if (!ta) return;
   const txt = ta.value.trim();
   if (!txt) { mostrarToast('No puede quedar vacío'); return; }
+  const ids = idToLote[id] || [id];   // edita todo el lote (todos los destinatarios)
   try {
     const { error } = await sb.from('mensajes_equipo')
       .update({ contenido: txt, editado_en: new Date().toISOString() })
-      .eq('id', id);
+      .in('id', ids);
     if (error) throw error;
-    mostrarToast('✓ Editado');
+    mostrarToast(ids.length > 1 ? `✓ Editado para ${ids.length} destinatarios` : '✓ Editado');
     await cargarMensajes();
   } catch (e) {
     mostrarToast('Error: ' + e.message);
@@ -921,9 +1079,13 @@ window.guardarEdit = async function(id) {
 
 // ============= BORRAR =============
 window.borrar = async function(id) {
-  if (!confirm('¿Borrar este mensaje? Esta acción no se puede deshacer.')) return;
+  const ids = idToLote[id] || [id];   // borra todo el lote (todos los destinatarios)
+  const msg = ids.length > 1
+    ? `¿Borrar este correo para los ${ids.length} destinatarios? Esta acción no se puede deshacer.`
+    : '¿Borrar este mensaje? Esta acción no se puede deshacer.';
+  if (!confirm(msg)) return;
   try {
-    const { error } = await sb.from('mensajes_equipo').delete().eq('id', id);
+    const { error } = await sb.from('mensajes_equipo').delete().in('id', ids);
     if (error) throw error;
     mostrarToast('✓ Borrado');
     await cargarMensajes();
