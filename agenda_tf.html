@@ -1666,8 +1666,9 @@ function renderResumen() {
   const totalPresentes = turnos.reduce((s,t)=>{
     const fecha = fechaDelDia(t.dia);
     const presentes = getAlumnos(t, fecha).filter(a => {
-      const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
-      return est !== 'ausente' && est !== 'ausente-justificada';
+      const key = `${t.id}-${fecha}-${a.id}`;
+      const est = ASISTENCIA_SEMANA[key];
+      return !_liberaLugarTF(key, est);  // recién avisado (5 min) sigue ocupando
     }).length;
     return s + presentes;
   },0);
@@ -2773,8 +2774,10 @@ function feriadoDe(fecha) {
 // Asistencia (presente/ausente) de la semana visible, para calcular "lugares del día".
 // Clave: `${turno_id}-${fecha}-${persona_id}` -> estado
 let ASISTENCIA_SEMANA = {};
+let ASISTENCIA_AVISADO = {};   // key → avisado_en (para el congelado de 5 min)
 async function cargarAsistenciaSemana() {
   ASISTENCIA_SEMANA = {};
+  ASISTENCIA_AVISADO = {};
   try {
     const lunes = getLunes(offsetSemana);
     const viernes = new Date(lunes);
@@ -2785,19 +2788,37 @@ async function cargarAsistenciaSemana() {
     // corta en 1000 filas y las asistencias de la semana se pierden → el panel
     // "Faltan evolucionar" cuenta a ausentes como pendientes.
     const filas = await supabaseQuery('asistencia',
-      `?select=turno_id,fecha,persona_id,estado&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
+      `?select=turno_id,fecha,persona_id,estado,avisado_en&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
     (filas || []).forEach(f => {
-      ASISTENCIA_SEMANA[`${f.turno_id}-${f.fecha}-${f.persona_id}`] = f.estado;
+      const k = `${f.turno_id}-${f.fecha}-${f.persona_id}`;
+      ASISTENCIA_SEMANA[k] = f.estado;
+      if (f.avisado_en) ASISTENCIA_AVISADO[k] = f.avisado_en;
     });
-  } catch (e) { ASISTENCIA_SEMANA = {}; console.warn('No se pudo cargar asistencia de la semana', e); }
+  } catch (e) { ASISTENCIA_SEMANA = {}; ASISTENCIA_AVISADO = {}; console.warn('No se pudo cargar asistencia de la semana', e); }
+}
+
+// CONGELADO 5 MIN (igual que Mi Espacio): una falta avisada hace menos de 5
+// minutos todavía NO libera el lugar del lado del staff (le damos al alumno la
+// chance de revertir). Pasados los 5 min, el lugar queda libre como siempre.
+// Las ausencias cargadas por el staff (sin avisado_en) liberan al instante.
+function _recienAvisadoTF(key){
+  const av = ASISTENCIA_AVISADO[key];
+  if(!av) return false;
+  try { return (Date.now() - new Date(av).getTime()) < 5*60*1000; }
+  catch(e){ return false; }
+}
+function _liberaLugarTF(key, est){
+  const esAus = (est === 'ausente' || est === 'ausente-justificada');
+  return esAus && !_recienAvisadoTF(key);
 }
 // ¿Cuántos alumnos FIJOS de un turno están ausentes en una fecha? (para el lugar del día)
 function ausentesDelDia(t, fecha) {
   const fijos = fijosVigentes(`${t.dia}-${t.hora}-${t.servicio}`, fecha);
   let n = 0;
   fijos.forEach(a => {
-    const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
-    if (est === 'ausente' || est === 'ausente-justificada') n++;
+    const key = `${t.id}-${fecha}-${a.id}`;
+    const est = ASISTENCIA_SEMANA[key];
+    if (_liberaLugarTF(key, est)) n++;
   });
   return n;
 }
@@ -2811,8 +2832,9 @@ function lugarParaVolver(t, fecha, personaId) {
   let vienen = 0;
   alumnos.forEach(a => {
     if (String(a.id) === String(personaId)) return;       // él no cuenta (estaba ausente)
-    const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
-    if (est === 'ausente' || est === 'ausente-justificada') return;  // ausentes liberan lugar
+    const key = `${t.id}-${fecha}-${a.id}`;
+    const est = ASISTENCIA_SEMANA[key];
+    if (_liberaLugarTF(key, est)) return;  // ausentes firmes liberan lugar; recién avisados (5 min) NO
     vienen++;
   });
   return { puede: (vienen + 1) <= t.capacidad, vienen, capacidad: t.capacidad };
@@ -2850,8 +2872,9 @@ function estadoEvoClase(t, fecha) {
   const alumnos = getAlumnos(t);            // anotados (fijos + agregados del día)
   let presentes = 0, ausentes = 0, evolucionados = 0;
   alumnos.forEach(a => {
-    const est = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${a.id}`];
-    const esAusente = (est === 'ausente' || est === 'ausente-justificada');
+    const key = `${t.id}-${fecha}-${a.id}`;
+    const est = ASISTENCIA_SEMANA[key];
+    const esAusente = _liberaLugarTF(key, est);  // recién avisado (5 min) NO cuenta como ausente
     if (esAusente) { ausentes++; return; }
     // Presente (o sin marcar todavía, lo contamos como presente esperado)
     presentes++;
