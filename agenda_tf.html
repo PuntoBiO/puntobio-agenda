@@ -2454,6 +2454,56 @@ async function cargarDolorReciente(t) {
   } catch (e) { console.warn('No se pudo cargar dolor reciente (alumno)', e); }
 }
 
+// Avisos del alumno cargados en Mi Espacio en los ÚLTIMOS 7 DÍAS:
+//   🏆 devolución de un evento deportivo (relato_post en competencias_eventos)
+//   💪 "cómo se viene sintiendo" (entradas en bitacora_fatiga)
+// Se muestran como chip al lado del nombre durante 7 días y desaparecen solos.
+// No dependen de "quién lo vio": le aparecen a todos los profes del turno.
+let DEVO_COMPE_RECIENTE = new Set();   // persona_id (string)
+let DEVO_COMPE_DETALLE  = {};          // persona_id -> { nombre, cuando }
+let BITACORA_RECIENTE   = new Set();   // persona_id (string)
+let BITACORA_DETALLE    = {};          // persona_id -> { dias }
+
+async function cargarAvisosAlumno(t) {
+  DEVO_COMPE_RECIENTE = new Set();
+  DEVO_COMPE_DETALLE  = {};
+  BITACORA_RECIENTE   = new Set();
+  BITACORA_DETALLE    = {};
+  const alumnos = getAlumnos(t);
+  if (!alumnos.length) return;
+  const hace7 = new Date();
+  hace7.setDate(hace7.getDate() - 7);
+  const desde7 = `${hace7.getFullYear()}-${String(hace7.getMonth()+1).padStart(2,'0')}-${String(hace7.getDate()).padStart(2,'0')}`;
+  const ids = alumnos.map(a => a.id).join(',');
+
+  // 🏆 Devolución post evento deportivo (relato_post_en en los últimos 7 días)
+  try {
+    const filas = await supabaseQuery('competencias_eventos',
+      `?select=persona_id,nombre,relato_post_en&relato_post_en=gte.${desde7}&persona_id=in.(${ids})`);
+    (filas || []).forEach(f => {
+      const pid = String(f.persona_id);
+      DEVO_COMPE_RECIENTE.add(pid);
+      const prev = DEVO_COMPE_DETALLE[pid];
+      if (!prev || (f.relato_post_en && f.relato_post_en > prev.cuando)) {
+        DEVO_COMPE_DETALLE[pid] = { nombre: f.nombre || 'un evento', cuando: f.relato_post_en };
+      }
+    });
+  } catch (e) { console.warn('No se pudieron cargar devoluciones de eventos', e); }
+
+  // 💪 "Cómo se viene sintiendo" (entradas de bitacora_fatiga de los últimos 7 días)
+  try {
+    const filas = await supabaseQuery('bitacora_fatiga',
+      `?select=persona_id,fecha&fecha=gte.${desde7}&persona_id=in.(${ids})`);
+    const conteo = {};
+    (filas || []).forEach(f => {
+      const pid = String(f.persona_id);
+      BITACORA_RECIENTE.add(pid);
+      conteo[pid] = (conteo[pid] || 0) + 1;
+    });
+    Object.keys(conteo).forEach(pid => { BITACORA_DETALLE[pid] = { dias: conteo[pid] }; });
+  } catch (e) { console.warn('No se pudo cargar bitácora reciente', e); }
+}
+
 // Mapa de mensajes sin leer enviados POR un alumno del turno AL profe logueado.
 // Estructura: { persona_id_alumno (string): [{id, contenido, creado_en}, ...] }
 let MENSAJES_PENDIENTES_TURNO = {};
@@ -4916,6 +4966,15 @@ function renderModalBody(dia, hora, servicio) {
           const chipMsj = msjsPend.length
             ? `<span onclick="event.stopPropagation();verMensajeDeAlumno(${a.id})" style="display:inline-block;background:#facc15;color:#713f12;font-size:10px;font-weight:800;padding:2px 7px;border-radius:5px;margin-right:5px;cursor:pointer" title="Te mandó ${msjsPend.length > 1 ? msjsPend.length + ' mensajes' : 'un mensaje'}">💬 ${msjsPend.length > 1 ? msjsPend.length : ''}</span>`
             : '';
+          // 🏆 El alumno dejó devolución de un evento deportivo (últimos 7 días)
+          const _detDevo = DEVO_COMPE_DETALLE[String(a.id)];
+          const chipDevoCompe = DEVO_COMPE_RECIENTE.has(String(a.id))
+            ? `<span style="display:inline-block;background:#dbeafe;color:#1e3a8a;font-size:10px;font-weight:800;padding:2px 7px;border-radius:5px;margin-right:5px" title="Dejó su devolución de ${String(_detDevo && _detDevo.nombre || 'un evento').replace(/"/g,'&quot;')} en Mi Espacio (últimos 7 días)">🏆</span>`
+            : '';
+          // 💪 El alumno cargó "cómo se viene sintiendo" (últimos 7 días)
+          const chipBitaReciente = BITACORA_RECIENTE.has(String(a.id))
+            ? `<span style="display:inline-block;background:#ede9fe;color:#5b21b6;font-size:10px;font-weight:800;padding:2px 7px;border-radius:5px;margin-right:5px" title="Cargó cómo se viene sintiendo en Mi Espacio (últimos 7 días)">💪</span>`
+            : '';
           let alertaDolor = '';
           if (tuvoDolor) {
             const det = DOLOR_DETALLE[String(a.id)] || { origenes: new Set() };
@@ -4992,7 +5051,7 @@ function renderModalBody(dia, hora, servicio) {
             <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
             <div id="ag-avatar-${a.id}" style="width:32px;height:32px;border-radius:50%;background:var(--celeste);color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;overflow:hidden;flex-shrink:0;margin-right:8px">${inicialesDe(a.nombre)}</div>
             <div style="flex:1; min-width:0">
-              <div class="alumno-nombre">${alertaDolor}${chipMsj}${a.nombre}${etiquetaNuevo}</div>
+              <div class="alumno-nombre">${alertaDolor}${chipMsj}${chipDevoCompe}${chipBitaReciente}${a.nombre}${etiquetaNuevo}</div>
               <div class="alumno-id">#${a.id}${_cierreCentro?' · <span style="color:#b91c1c;font-size:11px;font-weight:700">🚫 clase cancelada</span>':est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''} ${_cierreCentro?'':chipEvo}</div>
               ${(etiquetaAgregado || etiquetaOrigenME || etiquetaPendienteFijo) ? `<div>${etiquetaAgregado}${etiquetaOrigenME}${etiquetaPendienteFijo}</div>` : ''}
               ${motivo ? `<div style="font-size:11px;color:var(--texto-suave);margin-top:2px">${motivo}</div>` : ''}
@@ -5199,7 +5258,8 @@ async function abrirModal(dia, hora, servicio) {
     cargarAsistenciaTurno(t),
     cargarEvolucionesTurno(t),
     cargarDolorReciente(t),
-    cargarMensajesPendientes(t)
+    cargarMensajesPendientes(t),
+    cargarAvisosAlumno(t)
   ];
   if (!MODULOS_TF.length) tareas.push(cargarModulosTF());
   if (!NOTAS_PRED.length) tareas.push(cargarNotasPred());
