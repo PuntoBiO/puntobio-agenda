@@ -60,6 +60,7 @@ let filtroTexto = '';
 let filtroAccion = 'todas';
 let soloSinVer = false;
 let dias = 30;
+let diasHC = 30;   // antigüedad máxima de las HC que se listan (por fecha de carga)
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmt(iso){
@@ -179,7 +180,13 @@ function render() {
     if (!m[k].ult || a.creado_en > m[k].ult) m[k].ult = a.creado_en;
   });
 
-  // --- Filas por historia clínica (todas las HC, vistas o no) ---
+  // --- Filas por historia clínica: SOLO las cargadas recientemente ---
+  // (las viejas no sirven: no hay historial de quién las vio antes).
+  let cutoffHC = null;
+  if (diasHC > 0) {
+    const d = new Date(); d.setDate(d.getDate() - diasHC);
+    cutoffHC = d.toISOString();
+  }
   let filasHC = Object.values(hcPorPersona).map(g => {
     const vs = Object.values(viewersPorPac[g.persona_id] || {});
     let ult = null;
@@ -189,26 +196,29 @@ function render() {
       nombre: nombrePac(g.persona_id),
       dni: g.dni,
       total: g.total,
+      cargada: g.ultima,              // fecha en que se cargó la HC
       viewers: vs.sort((a,b) => (b.ult||'') < (a.ult||'') ? -1 : 1),
       ultVista: ult
     };
   });
-  // Filtros del listado de HC
+  // Solo HC cargadas dentro de la ventana elegida
+  if (cutoffHC) filasHC = filasHC.filter(f => f.cargada && f.cargada >= cutoffHC);
+  // Filtros del listado
   filasHC = filasHC.filter(f => {
     if (soloSinVer && f.viewers.length) return false;
     if (!t) return true;
     if (norm(f.nombre).includes(t) || norm(f.dni).includes(t)) return true;
     return f.viewers.some(v => norm(v.nombre).includes(t));
   });
-  // Orden: las que nadie vio primero; luego por última visualización más reciente
-  filasHC.sort((a,b) => {
-    const av = a.viewers.length>0, bv = b.viewers.length>0;
-    if (av !== bv) return av ? 1 : -1;
-    if (a.ultVista && b.ultVista) return a.ultVista < b.ultVista ? 1 : -1;
-    return norm(a.nombre) < norm(b.nombre) ? -1 : 1;
-  });
-  const totalHCpac = Object.keys(hcPorPersona).length;
-  const sinVer = Object.values(hcPorPersona).filter(g => !(viewersPorPac[g.persona_id] && Object.keys(viewersPorPac[g.persona_id]).length)).length;
+  // Orden: la más recientemente cargada arriba
+  filasHC.sort((a,b) => (b.cargada || '') < (a.cargada || '') ? -1 : 1);
+
+  // KPIs sobre el conjunto reciente (lo que de verdad importa seguir)
+  const recientesHC = cutoffHC
+    ? Object.values(hcPorPersona).filter(g => g.ultima && g.ultima >= cutoffHC)
+    : Object.values(hcPorPersona);
+  const totalHCpac = recientesHC.length;
+  const sinVer = recientesHC.filter(g => !(viewersPorPac[g.persona_id] && Object.keys(viewersPorPac[g.persona_id]).length)).length;
 
   // --- Actividad reciente ---
   const recientes = accesos.filter(a => {
@@ -221,8 +231,8 @@ function render() {
   // ===== HTML =====
   let html = `
     <div class="kpis">
-      <div class="kpi"><div class="n">${totalHCpac}</div><div class="l">Historias clínicas (pacientes)</div></div>
-      <div class="kpi"><div class="n" style="color:${sinVer?'#dc2626':'#16a34a'}">${sinVer}</div><div class="l">HC que NADIE vio</div></div>
+      <div class="kpi"><div class="n">${totalHCpac}</div><div class="l">HC cargadas ${diasHC>0?'(últimos '+diasHC+' días)':'(todas)'}</div></div>
+      <div class="kpi"><div class="n" style="color:${sinVer?'#dc2626':'#16a34a'}">${sinVer}</div><div class="l">De esas, sin ver todavía</div></div>
       <div class="kpi"><div class="n">${totalHC}</div><div class="l">Aperturas de HC (${dias>0?'últimos '+dias+' días':'histórico'})</div></div>
       <div class="kpi"><div class="n">${totalPDF}</div><div class="l">PDF / evaluaciones abiertos</div></div>
     </div>`;
@@ -234,11 +244,17 @@ function render() {
   // Filtros (arriba, aplican a todo)
   html += `<div class="controls">
       <input id="fTexto" placeholder="Buscar paciente, DNI o profe…" value="${esc(filtroTexto)}">
+      <select id="fDiasHC">
+        <option value="30">HC cargadas: últimos 30 días</option>
+        <option value="60">HC cargadas: últimos 60 días</option>
+        <option value="90">HC cargadas: últimos 90 días</option>
+        <option value="0">HC cargadas: todas</option>
+      </select>
       <select id="fDias">
-        <option value="7">Últimos 7 días</option>
-        <option value="30">Últimos 30 días</option>
-        <option value="60">Últimos 60 días</option>
-        <option value="0">Todo el historial</option>
+        <option value="7">Ver accesos: últimos 7 días</option>
+        <option value="30">Ver accesos: últimos 30 días</option>
+        <option value="60">Ver accesos: últimos 60 días</option>
+        <option value="0">Ver accesos: todo</option>
       </select>
       <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--gris);cursor:pointer">
         <input type="checkbox" id="fSinVer" ${soloSinVer?'checked':''}> Solo las que nadie vio
@@ -248,19 +264,19 @@ function render() {
   // TABLA PRINCIPAL: Por historia clínica → quién la vio
   html += `<div class="card"><h2>🩺 Historias clínicas · quién las vio (${filasHC.length})</h2>
     <table><thead><tr>
-      <th>Paciente</th><th class="opt">DNI</th><th>Vista por</th><th class="opt">Última vez</th>
+      <th>Paciente</th><th class="opt">Cargada</th><th>Vista por</th><th class="opt">Última vez</th>
     </tr></thead><tbody>
     ${filasHC.length ? filasHC.map(f => {
       const chips = f.viewers.length
         ? f.viewers.map(v => `<span class="pill ok" style="margin:2px 3px 2px 0;display:inline-block">${esc(v.nombre)}${v.hc>1?' ·'+v.hc+'×':''}${v.pdf?' 📄':''}</span>`).join('')
         : '<span class="pill cero">Todavía nadie la vio</span>';
       return `<tr>
-        <td><strong>${esc(f.nombre)}</strong>${f.total>1?` <span class="muted">(${f.total} HC)</span>`:''}</td>
-        <td class="opt muted">${esc(f.dni || '—')}</td>
+        <td><strong>${esc(f.nombre)}</strong>${f.total>1?` <span class="muted">(${f.total} HC)</span>`:''}${f.dni?`<div class="muted" style="font-size:11px">DNI ${esc(f.dni)}</div>`:''}</td>
+        <td class="opt muted">${f.cargada ? fmt(f.cargada) : '—'}</td>
         <td>${chips}</td>
         <td class="opt muted">${f.ultVista ? fmt(f.ultVista) : '—'}</td>
       </tr>`;
-    }).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">No hay HC para mostrar con ese filtro.</td></tr>'}
+    }).join('') : '<tr><td colspan="4" class="muted" style="text-align:center;padding:24px">No hay HC recientes con ese filtro.</td></tr>'}
     </tbody></table></div>`;
 
   // Tabla por profesional
@@ -296,10 +312,13 @@ function render() {
   // Reenganchar controles
   const fT = document.getElementById('fTexto');
   const fD = document.getElementById('fDias');
+  const fDH = document.getElementById('fDiasHC');
   const fS = document.getElementById('fSinVer');
   fD.value = String(dias);
+  fDH.value = String(diasHC);
   fT.oninput = () => { filtroTexto = fT.value; const pos = fT.selectionStart; render(); const n = document.getElementById('fTexto'); n.focus(); n.setSelectionRange(pos,pos); };
   fD.onchange = () => { dias = parseInt(fD.value); recargar(); };
+  fDH.onchange = () => { diasHC = parseInt(fDH.value); render(); };
   fS.onchange = () => { soloSinVer = fS.checked; render(); };
 }
 
