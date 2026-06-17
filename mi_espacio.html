@@ -445,6 +445,8 @@
 .ag-btn-verde:hover { background: #16a34a; color: #fff; }
 .ag-btn-naranja { border-color: #ea580c; color: #ea580c; background: rgba(234,88,12,0.08); }
 .ag-btn-naranja:hover { background: #ea580c; color: #fff; }
+.ag-btn-rojo { border-color: #dc2626; color: #dc2626; background: rgba(220,38,38,0.08); }
+.ag-btn-rojo:hover { background: #dc2626; color: #fff; }
 
 /* BADGE "NUEVO" · dura 10 días desde la fecha definida en FEATURES_NUEVAS (al final del JS) */
 .badge-nuevo{
@@ -1537,7 +1539,7 @@ async function cargarEspacio(per){
     misAusenciasFijas: new Map(
       (asis.data || [])
         .filter(r => r.estado === 'ausente' || r.estado === 'ausente-justificada')
-        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '' }])
+        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '', avisado_en: r.avisado_en || null }])
     ),
     // Info de cupo de clases sueltas (se completa después con RPC)
     cupoSueltas: null,
@@ -1725,51 +1727,19 @@ function bloqueMisClases(turnos, asistencias){
   // Ordenar por día y hora
   turnos.sort((a,b)=> (ORDEN_DIAS[a.dia]||99) - (ORDEN_DIAS[b.dia]||99) || (a.hora||'').localeCompare(b.hora||''));
 
-  // Set de faltas avisadas para "turnoId|fechaISO" (solo futuras, motivo del alumno)
-  const _hoyISO = hoyISO();
-  const faltasAvisadas = new Set();
-  const faltasVacaciones = new Set();
-  (asistencias||[]).forEach(a => {
-    if (a.fecha >= _hoyISO && (a.estado === 'ausente-justificada' || a.estado === 'ausente')) {
-      const m = String(a.motivo||'').toLowerCase();
-      if (m.includes('aviso del alumno')) faltasAvisadas.add(a.turno_id + '|' + a.fecha);
-      else if (a.estado === 'ausente-justificada' && m.includes('vacaciones')) faltasVacaciones.add(a.turno_id + '|' + a.fecha);
-    }
-  });
-
-  let rows='';
-  turnos.forEach(t=>{
-    const proxISO = proximaFechaDelTurno(t.dia, t.hora);
-    const proxLegible = fmtFechaCorta(proxISO);
-    const dia = esc(t.dia||'');
-    const hora = esc(t.hora||'');
-    const serv = esc(t.servicio||'');
-    const yaAvisada = faltasAvisadas.has(t.id + '|' + proxISO);
-    const enVacaciones = faltasVacaciones.has(t.id + '|' + proxISO);
-    const accionHTML = enVacaciones
-      ? `<div class="aviso-falta firme" style="grid-column: 1 / -1; margin-top: 8px;">
-          <div>🏖️ Estás de vacaciones ese día: la falta ya quedó avisada para <b>${proxLegible}</b></div>
-        </div>`
-      : yaAvisada
-      ? `<div class="aviso-falta firme" style="grid-column: 1 / -1; margin-top: 8px;">
-          <div>✓ Falta avisada para <b>${proxLegible}</b></div>
-          <button class="deshacer" onclick="deshacerFalta(${t.id},'${proxISO}')">Deshacer</button>
-        </div>`
-      : `<button class="btn-faltar" id="btn-${t.id}" onclick="avisarFalta(${t.id},'${dia}','${hora}','${serv}','${proxISO}')">🚫 Avisar falta</button>
-        <div class="falta-slot" id="falta-${t.id}"></div>`;
-    rows += `<div class="clase-fija">
-      <div class="cf-info">
-        <div class="cf-dia">${dia} · ${hora}</div>
-        <div class="cf-sub">${serv}${profesDeTurnoTxt(t.id) ? ' · 🏋️ Con ' + esc(profesDeTurnoTxt(t.id)) : ''} · Próxima: ${proxLegible}</div>
-      </div>
-      ${accionHTML}
-    </div>`;
-  });
+  // El detalle por fecha de cada falta vive ahora en el SELECTOR (modal):
+  // el alumno elige qué clase cancelar (esta semana, la que viene, etc.).
+  // Acá solo guardamos los turnos fijos y armamos las filas con el botón
+  // que abre ese selector. La función pbBuildMisClasesRows() arma el HTML
+  // y se puede volver a llamar para refrescar sin recargar la página.
+  window._misTurnosFijos = turnos;
+  if (asistencias && asistencias.length) window._asistenciasAlumno = asistencias;
+  const rows = pbBuildMisClasesRows();
 
   setTimeout(() => { if (window.pbVacacionesRefrescar) window.pbVacacionesRefrescar(); }, 80);
   return `<section class="card reveal d2b">
     <h2><span class="dot"></span>Mis clases fijas</h2>
-    ${rows}
+    <div id="misClasesRows">${rows}</div>
     <div id="vacBloque"></div>
     <button class="btn-faltar" style="width:100%;margin-top:10px;justify-content:center;display:flex" onclick="pbVacacionesAbrir()">🏖️ Me voy de vacaciones</button>
     <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Con menos de 2 horas podés cancelarla igual, pero esa clase <b>no se recupera</b>.<br>¿Te vas unos días? Con <b>🏖️ Me voy de vacaciones</b> avisás todas las faltas del viaje de una sola vez.</div>
@@ -1921,7 +1891,7 @@ window.refrescarDatosAgenda = async function(){
     data.misAusenciasFijas = new Map(
       (asisR.data || [])
         .filter(r => r.estado === 'ausente' || r.estado === 'ausente-justificada')
-        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '' }])
+        .map(r => [r.turno_id + '|' + r.fecha, { estado: r.estado, motivo: r.motivo || '', avisado_en: r.avisado_en || null }])
     );
 
     // Cupo de sueltas (no bloqueante)
@@ -2057,6 +2027,252 @@ window.deshacerFalta = async function(turnoId, fechaISO){
 };
 
 // ============================================================
+//  SELECTOR DE FECHA · Avisar falta eligiendo qué clase cancelar
+//  (esta semana, la que viene, etc.). El motor (alumno_avisar_falta)
+//  ya acepta cualquier fecha; acá está la UI.
+// ============================================================
+
+// Próximas N fechas de una clase fija (mismo día de semana). Incluye HOY
+// solo si la clase todavía no empezó. No toca fines de semana porque la
+// clase fija ya cae en un día puntual.
+function pbProximasFechasTurno(diaSemana, hora, n){
+  const targetDia = DIAS_SEM_NUM[diaSemana];
+  const out = [];
+  if (targetDia == null) return out;
+  const ahora = new Date();
+  let d = new Date(ahora); d.setHours(0,0,0,0);
+  let guard = 0;
+  while (out.length < (n||6) && guard < 120){
+    guard++;
+    if (d.getDay() === targetDia){
+      const esHoy = (d.toDateString() === ahora.toDateString());
+      let incluir = true;
+      if (esHoy){
+        const [hh,mm] = String(hora||'00:00').split(':').map(Number);
+        const ht = new Date(d); ht.setHours(hh||0, mm||0, 0, 0);
+        incluir = (ht - ahora > 0); // si ya empezó/pasó, no la ofrecemos
+      }
+      if (incluir) out.push(fechaToISO(d));
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+// Etiqueta amistosa de cercanía (por semana calendario lunes-domingo)
+function pbEtiquetaSemana(iso){
+  const f = new Date(iso+'T00:00:00'); f.setHours(0,0,0,0);
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  const lunesDe = (d)=>{ const x=new Date(d); const dow=(x.getDay()+6)%7; x.setDate(x.getDate()-dow); x.setHours(0,0,0,0); return x; };
+  const difSem = Math.round((lunesDe(f) - lunesDe(hoy))/(7*86400000));
+  if (difSem <= 0) return 'esta semana';
+  if (difSem === 1) return 'la semana que viene';
+  return 'en ' + difSem + ' semanas';
+}
+
+// Estado de una fecha puntual de esa clase, leyendo las asistencias del alumno
+function pbEstadoFaltaFecha(turnoId, fecha){
+  const asis = window._asistenciasAlumno || [];
+  const row = asis.find(a => a.turno_id === turnoId && a.fecha === fecha);
+  if (!row) return { tipo: 'disponible' };
+  const m = String(row.motivo||'').toLowerCase();
+  if (row.estado === 'presente') return { tipo: 'presente' };
+  if ((row.estado === 'ausente-justificada' || row.estado === 'ausente') && m.includes('aviso del alumno'))
+    return { tipo: 'avisada' };
+  if (row.estado === 'ausente-justificada' && m.includes('vacacion'))
+    return { tipo: 'vacaciones' };
+  if (row.estado === 'ausente' || row.estado === 'ausente-justificada')
+    return { tipo: 'otra-ausencia' }; // ausencia cargada por el centro
+  return { tipo: 'disponible' };
+}
+
+// Arma el cuerpo del modal (la lista de fechas con su acción)
+function pbBuildSelectorFaltaBody(turnoId, dia, hora, serv){
+  const fechas = pbProximasFechasTurno(dia, hora, 6);
+  if (!fechas.length) return '<p style="color:#64748b;font-size:13.5px">No hay próximas fechas para esta clase.</p>';
+  return fechas.map(f => {
+    const est = pbEstadoFaltaFecha(turnoId, f);
+    let accion;
+    if (est.tipo === 'avisada'){
+      accion = `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">
+          <span style="color:#16a34a;font-weight:800;font-size:13px">✓ Avisada</span>
+          <button class="deshacer" onclick="pbFaltaDeshacerFecha(${turnoId},'${f}','${dia}','${hora}','${serv}')">Deshacer</button>
+        </div>`;
+    } else if (est.tipo === 'vacaciones'){
+      accion = `<span style="color:#a16207;font-weight:800;font-size:13px;white-space:nowrap">🏖️ Vacaciones</span>`;
+    } else if (est.tipo === 'presente'){
+      accion = `<span style="color:#16a34a;font-weight:800;font-size:13px;white-space:nowrap">✅ Viniste</span>`;
+    } else if (est.tipo === 'otra-ausencia'){
+      accion = `<span style="color:#991b1b;font-weight:800;font-size:13px;white-space:nowrap">🚫 Ausente</span>`;
+    } else {
+      accion = `<button class="btn-faltar" style="white-space:nowrap" onclick="pbFaltaAvisarFecha(${turnoId},'${f}','${dia}','${hora}','${serv}')">🚫 Avisar</button>`;
+    }
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border:1.5px solid #e2e8f0;border-radius:10px;background:#f8fafc;margin-bottom:6px">
+        <div>
+          <b style="font-size:14px;color:#0f172a">${fmtFechaCorta(f)}</b>
+          <div style="font-size:11.5px;color:#94a3b8">${pbEtiquetaSemana(f)}</div>
+        </div>
+        ${accion}
+      </div>`;
+  }).join('');
+}
+
+// Abre el modal selector
+window.pbAbrirSelectorFalta = function(turnoId, dia, hora, serv){
+  pbAbrirModal({
+    titulo: '🚫 Avisar una falta',
+    subtitulo: `Elegí qué día de <b>${esc(serv)} · ${esc(dia)} ${esc(hora)}</b> no vas a poder venir. Avisá al menos 2 horas antes para poder recuperar la clase.`,
+    cuerpoHTML: pbBuildSelectorFaltaBody(turnoId, dia, hora, serv),
+    botones: [ { label: 'Cerrar', cls: 'cancel', onclick: 'pbCerrarModal()' } ]
+  });
+};
+
+// Re-dibuja el cuerpo del modal sin cerrarlo (tras avisar/deshacer)
+function pbRenderSelectorFaltaBody(turnoId, dia, hora, serv){
+  const cont = document.querySelector('#pbModal .pb-modal-opciones');
+  if (cont) cont.innerHTML = pbBuildSelectorFaltaBody(turnoId, dia, hora, serv);
+}
+
+// Re-dibuja las filas de "Mis clases fijas" (badge de próxima avisada, etc.)
+window.pbRefrescarMisClases = function(){
+  const c = document.getElementById('misClasesRows');
+  if (c) c.innerHTML = pbBuildMisClasesRows();
+};
+
+// Arma las filas de "Mis clases fijas" desde los turnos + asistencias guardados
+function pbBuildMisClasesRows(){
+  const turnos = window._misTurnosFijos || [];
+  const asistencias = window._asistenciasAlumno || [];
+  const _hoyISO = hoyISO();
+  const faltasAvisadas = new Set();
+  const faltasVacaciones = new Set();
+  asistencias.forEach(a => {
+    if (a.fecha >= _hoyISO && (a.estado === 'ausente-justificada' || a.estado === 'ausente')){
+      const m = String(a.motivo||'').toLowerCase();
+      if (m.includes('aviso del alumno')) faltasAvisadas.add(a.turno_id + '|' + a.fecha);
+      else if (a.estado === 'ausente-justificada' && m.includes('vacacion')) faltasVacaciones.add(a.turno_id + '|' + a.fecha);
+    }
+  });
+  let rows = '';
+  turnos.forEach(t => {
+    const proxISO = proximaFechaDelTurno(t.dia, t.hora);
+    const proxLegible = fmtFechaCorta(proxISO);
+    const dia = esc(t.dia||''); const hora = esc(t.hora||''); const serv = esc(t.servicio||'');
+    const yaAvisada = faltasAvisadas.has(t.id + '|' + proxISO);
+    const enVacaciones = faltasVacaciones.has(t.id + '|' + proxISO);
+    const proxBadge = enVacaciones
+      ? ' · <span style="color:#a16207;font-weight:700">🏖️ vacaciones</span>'
+      : yaAvisada
+      ? ' · <span style="color:#16a34a;font-weight:700">✓ avisada</span>' : '';
+    rows += `<div class="clase-fija">
+      <div class="cf-info">
+        <div class="cf-dia">${dia} · ${hora}</div>
+        <div class="cf-sub">${serv}${profesDeTurnoTxt(t.id) ? ' · 🏋️ Con ' + esc(profesDeTurnoTxt(t.id)) : ''} · Próxima: ${proxLegible}${proxBadge}</div>
+      </div>
+      <button class="btn-faltar" onclick="pbAbrirSelectorFalta(${t.id},'${dia}','${hora}','${serv}')">🚫 Avisar falta</button>
+    </div>`;
+  });
+  return rows;
+}
+
+// Mensaje de error legible para avisar falta
+function pbMsgErrorFalta(e){
+  const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+  if (raw.includes('empezó') || raw.includes('empezo') || raw.includes('ya pasó') || raw.includes('ya paso')) return 'La clase ya empezó o ya pasó: no se puede cancelar desde acá. Si no pudiste venir, avisanos por WhatsApp.';
+  if (raw.includes('plan')) return 'No tenés un plan TF activo. Escribinos para resolverlo.';
+  if (raw.includes('ya') && (raw.includes('avis') || raw.includes('exist'))) return 'Ya avisaste esta falta antes.';
+  if (raw.includes('turno') && raw.includes('tuy')) return 'Este turno no figura como tuyo. Hablá con el centro.';
+  if (raw.includes('fecha')) return 'La fecha no es válida para este turno.';
+  return 'No se pudo avisar tu falta.' + (e && e.message ? ' ('+e.message+')' : '');
+}
+
+// Avisar falta para UNA fecha elegida en el selector
+window.pbFaltaAvisarFecha = async function(turnoId, fecha, dia, hora, serv){
+  let dentroDePlazo = true;
+  try {
+    const [hh,mm] = String(hora||'00:00').split(':').map(Number);
+    const inicio = new Date(fecha+'T00:00:00'); inicio.setHours(hh||0, mm||0, 0, 0);
+    dentroDePlazo = (inicio - new Date()) >= 2*3600*1000;
+  } catch(e){}
+  const msg = dentroDePlazo
+    ? `¿Avisar que vas a faltar el ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv})?`
+    : `⚠️ Estás avisando con menos de 2 horas de anticipación.\n\nTu clase del ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv}) quedará cancelada, pero NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`;
+  if (!confirm(msg)) return;
+  try {
+    const { error } = await sb.rpc('alumno_avisar_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    if (error) throw error;
+    await refrescarDatosAgenda();
+    pbRenderSelectorFaltaBody(turnoId, dia, hora, serv);
+    if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+  } catch(e){
+    alert(pbMsgErrorFalta(e));
+  }
+};
+
+// Deshacer el aviso de UNA fecha elegida en el selector
+window.pbFaltaDeshacerFecha = async function(turnoId, fecha, dia, hora, serv){
+  if (!confirm('¿Deshacer el aviso de falta? Volvés a quedar anotado en esa clase.')) return;
+  try {
+    const { error } = await sb.rpc('alumno_deshacer_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    if (error) throw error;
+    await refrescarDatosAgenda();
+    pbRenderSelectorFaltaBody(turnoId, dia, hora, serv);
+    if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+  } catch(e){
+    const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+    if (raw.includes('lugar_ocupado')){
+      alert('😕 Ese lugar ya fue tomado por otro compañero.\n\nTu falta sigue avisada y conservás el recuperatorio: usalo para reprogramar la clase en otro horario desde "Mis recuperatorios".');
+    } else if (raw.includes('aviso_no_encontrado')){
+      alert('No encontramos el aviso de falta. Recargá la página y probá de nuevo.');
+    } else {
+      alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
+    }
+  }
+};
+
+// Avisar falta a MI CLASE FIJA desde la agenda (para una fecha puntual)
+window.pbCancelarFijaDesdeAgenda = async function(turnoId, fecha, dia, hora, serv){
+  let dentroDePlazo = true;
+  try {
+    const [hh,mm] = String(hora||'00:00').split(':').map(Number);
+    const inicio = new Date(fecha+'T00:00:00'); inicio.setHours(hh||0, mm||0, 0, 0);
+    dentroDePlazo = (inicio - new Date()) >= 2*3600*1000;
+  } catch(e){}
+  const msg = dentroDePlazo
+    ? `¿Avisar que vas a faltar el ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv})?`
+    : `⚠️ Estás avisando con menos de 2 horas de anticipación.\n\nTu clase del ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv}) quedará cancelada, pero NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`;
+  if (!confirm(msg)) return;
+  try {
+    const { error } = await sb.rpc('alumno_avisar_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    if (error) throw error;
+    await refrescarDatosAgenda();
+    if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+  } catch(e){
+    alert(pbMsgErrorFalta(e));
+  }
+};
+
+// Revertir / "Me arrepentí" de una falta a MI CLASE FIJA, desde la agenda
+window.pbDeshacerFijaDesdeAgenda = async function(turnoId, fecha){
+  if (!confirm('¿Volver a anotarte en esta clase?')) return;
+  try {
+    const { error } = await sb.rpc('alumno_deshacer_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    if (error) throw error;
+    await refrescarDatosAgenda();
+    if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+  } catch(e){
+    const raw = (e && e.message) ? String(e.message).toLowerCase() : '';
+    if (raw.includes('lugar_ocupado')){
+      alert('😕 Tu lugar ya fue ocupado por otro compañero (un recuperatorio).\n\nTu falta sigue avisada y conservás el recuperatorio: usalo para reprogramar la clase en otro horario desde "Mis recuperatorios".');
+    } else if (raw.includes('aviso_no_encontrado')){
+      alert('No encontramos el aviso de falta. Recargá la página y probá de nuevo.');
+    } else {
+      alert('No pudimos deshacer el aviso desde acá. Escribinos por WhatsApp y lo arreglamos enseguida.\n\n('+(e.message||'error')+')');
+    }
+  }
+};
+
+// ============================================================
 //  AGENDA DE LA SEMANA (solo lectura, sin nombres)
 // ============================================================
 // Mapea actividad de la inscripción -> filtro para turnos.servicio
@@ -2106,6 +2322,16 @@ function bloqueAgenda(data){
   const semanas = Object.keys(grupos).sort();
   const lunDeHoy = lunesDeSemana(hoyISO);
 
+  // Días de la semana (1=Lun..5=Vie) en los que el alumno tiene clase fija,
+  // para resaltarlos en los chips de la agenda.
+  const misDiasFijos = new Set();
+  (data.turnos || []).forEach(t => {
+    if (data.misTurnosIds && data.misTurnosIds.has(t.id)) {
+      const dn = _ORDEN_DIAS_AG[t.dia];
+      if (dn) misDiasFijos.add(dn);
+    }
+  });
+
   // Etiqueta legible para cada semana
   function tituloSemana(lunISO, idx){
     if(lunISO === lunDeHoy) return 'Esta semana';
@@ -2128,10 +2354,13 @@ function bloqueAgenda(data){
       const lbl = DIA_LBL[dow] || '';
       const dm = `${d}/${m}`;
       const esHoy = (iso === hoyISO);
+      const esMiFijo = misDiasFijos.has(dow);
       let cls = 'ag-tab';
       if(iso === diaDefault) cls += ' activo';
       if(esHoy) cls += ' hoy';
-      html += `<button class="${cls}" data-fecha="${iso}" onclick="cambiarDiaAgenda('${iso}')"><span class="ag-tab-dia">${lbl}${esHoy?' · hoy':''}</span><span class="ag-tab-num">${dm}</span></button>`;
+      const _fijoStyle = esMiFijo ? ' style="border-color:#1e9fe0;box-shadow:inset 0 0 0 1.5px #1e9fe0"' : '';
+      const _fijoMark = esMiFijo ? '<span style="display:block;font-size:8.5px;color:#1e9fe0;font-weight:800;letter-spacing:.3px;margin-top:2px">● TU CLASE</span>' : '';
+      html += `<button class="${cls}"${_fijoStyle} data-fecha="${iso}" onclick="cambiarDiaAgenda('${iso}')"><span class="ag-tab-dia">${lbl}${esHoy?' · hoy':''}</span><span class="ag-tab-num">${dm}</span>${_fijoMark}</button>`;
     });
     html += '</div>';
   });
@@ -2199,6 +2428,17 @@ function renderAgendaDia(fechaISO){
     turnoCoincideConActividad(t.servicio, data.actividadAlumno, data.esBonificado)
   );
   turnos.sort((a,b)=> (a.hora||'').localeCompare(b.hora||''));
+
+  // Horas en las que el alumno YA tiene su clase fija ACTIVA ese día.
+  // En esas horas NO ofrecemos "Programar acá" (ya está ocupado a esa hora):
+  // si quiere ir a otra área a la misma hora, usa "Cambiar de área".
+  const misHorasFijasHoy = new Set();
+  turnos.forEach(tt => {
+    if (data.misTurnosIds && data.misTurnosIds.has(tt.id)) {
+      const ausTT = data.misAusenciasFijas && data.misAusenciasFijas.get(tt.id + '|' + fechaISO);
+      if (!ausTT) misHorasFijasHoy.add((tt.hora||'').slice(0,5));
+    }
+  });
 
   if(turnos.length === 0){
     cont.innerHTML = `<p class="empty">No hay turnos disponibles para tu actividad ese día.</p>`;
@@ -2326,6 +2566,26 @@ function renderAgendaDia(fechaISO){
         }
       }
 
+      // BOTÓN CANCELAR · mi clase fija activa ese día y la clase todavía no empezó.
+      // Avisa la falta para ESA fecha, directo desde la agenda.
+      const _noEmpezo = (() => {
+        try { const inicio = new Date(fechaISO + 'T' + (t.hora || '00:00') + ':00'); return (inicio - new Date()) > 0; } catch(e){ return false; }
+      })();
+      if (esMiTurnoFijo && !miAusenciaFija && !estaBloqueado && _noEmpezo) {
+        botonesHtml += `<button class="ag-btn ag-btn-rojo" onclick="pbCancelarFijaDesdeAgenda(${t.id}, '${fechaISO}', '${esc(t.dia||'')}', '${esc(t.hora||'')}', '${esc(t.servicio||'')}')">🚫 Cancelar</button>`;
+      }
+      // BOTÓN REVERTIR / ME ARREPENTÍ · si avisé falta a mi clase fija ese día.
+      //   Dentro de los 5 min (lugar congelado) → "Revertir" (vuelve seguro).
+      //   Pasados los 5 min → "Me arrepentí" (puede que el lugar ya esté ocupado).
+      if (esMiTurnoFijo && miAusenciaFija
+          && miAusenciaFija.estado === 'ausente-justificada'
+          && /aviso del alumno/i.test(miAusenciaFija.motivo || '')) {
+        let dentro5 = false;
+        try { if (miAusenciaFija.avisado_en) dentro5 = (Date.now() - new Date(miAusenciaFija.avisado_en).getTime()) < 5*60*1000; } catch(e){}
+        const lblRev = dentro5 ? '↩️ Revertir' : '↪️ Me arrepentí';
+        botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbDeshacerFijaDesdeAgenda(${t.id}, '${fechaISO}')">${lblRev}</button>`;
+      }
+
       // BOTÓN PROGRAMAR ACÁ · unifica recuperatorio + clase suelta
       const tieneRecupes = (data.recuperatoriosPendientes||[]).length > 0 || (data.feriadosPendientes||[]).length > 0;
       const cupoS = data.cupoSueltas;
@@ -2352,9 +2612,10 @@ function renderAgendaDia(fechaISO){
       }
       // Mostrar botón "Programar acá" si: NO es mi fijo + NO ya estoy anotada acá + ((recupes + dentro15) O (puede suelta + dentro10Hab)) + cupo + actividad + no bloqueado + +2h
       const yaAnotadaEnTurno = data.misAnotaciones && data.misAnotaciones.has(t.id + '|' + fechaISO);
+      const tengoFijoEstaHora = misHorasFijasHoy.has((t.hora||'').slice(0,5));
       const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15;
       const puedeSueltaAca = puedeSuelta && actividadOK && dentro10Hab && dentroSemanaRot;
-      if (!esMiTurnoFijo && !yaAnotadaEnTurno && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta10m) {
+      if (!esMiTurnoFijo && !yaAnotadaEnTurno && !tengoFijoEstaHora && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta10m) {
         botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirProgramar(${t.id}, '${fechaISO}', ${puedeRecuperarAca}, ${puedeSueltaAca})">📅 Programar acá</button>`;
       }
 
@@ -5499,6 +5760,10 @@ window.pbVacacionesCancelar = async function(vacId){
       .filter(f => f && f.fecha)
       .sort((a,b) => (a.fecha < b.fecha ? -1 : 1))
       .find(f => {
+        // El centro está cerrado los fines de semana: un feriado que cae sábado
+        // o domingo no afecta a nadie (no hay clases fijas) → no avisamos.
+        const dowF = new Date(f.fecha + 'T00:00:00').getDay();
+        if (dowF === 0 || dowF === 6) return false;
         const desde = ventanaDesde(f.fecha);
         if (!(hoy >= desde && hoy <= f.fecha)) return false;
         let visto = false;
