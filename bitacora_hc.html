@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bitácora de accesos a HC · PuntoBiO</title>
+<style>
+  :root { --celeste:#1e9fe0; --negro:#111; --gris:#64748b; --borde:#e2e8f0; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#f4f6f9; color:var(--negro); }
+  header { background:var(--negro); color:#fff; padding:18px 22px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; font-weight:800; }
+  header h1 span { color:var(--celeste); }
+  .wrap { max-width:1100px; margin:0 auto; padding:18px 16px 60px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
+  .kpi { background:#fff; border:1px solid var(--borde); border-radius:12px; padding:14px 16px; }
+  .kpi .n { font-size:26px; font-weight:800; color:var(--celeste); }
+  .kpi .l { font-size:12px; color:var(--gris); margin-top:2px; }
+  .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px; }
+  .controls input, .controls select { padding:8px 11px; border:1px solid var(--borde); border-radius:8px; font-size:13px; background:#fff; }
+  .controls input { flex:1; min-width:180px; }
+  .card { background:#fff; border:1px solid var(--borde); border-radius:12px; margin-bottom:18px; overflow:hidden; }
+  .card h2 { font-size:14px; margin:0; padding:13px 16px; border-bottom:1px solid var(--borde); background:#fafbfc; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 14px; border-bottom:1px solid #eef1f4; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--gris); background:#fafbfc; }
+  tr:last-child td { border-bottom:none; }
+  .pill { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
+  .pill.hc { background:#dbeafe; color:#1e40af; }
+  .pill.pdf { background:#dcfce7; color:#15803d; }
+  .pill.cero { background:#fee2e2; color:#b91c1c; }
+  .pill.ok { background:#dcfce7; color:#15803d; }
+  .muted { color:var(--gris); }
+  .estado { text-align:center; padding:40px 20px; color:var(--gris); }
+  .num { font-variant-numeric:tabular-nums; font-weight:700; }
+  .alerta { background:#fff7ed; border:1px solid #fdba74; color:#9a3412; padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:16px; }
+  @media (max-width:560px){ th.opt, td.opt { display:none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>👁 Bitácora <span>PuntoBiO</span></h1>
+  <div style="font-size:12px;opacity:.8">Quién abre las historias clínicas y los PDF</div>
+</header>
+<div class="wrap">
+  <div id="contenido"><div class="estado">Cargando bitácora…</div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, t, fn) => fn() } });
+
+let accesos = [];
+let nombrePorPersona = {};   // persona_id -> nombre (pacientes)
+let equipo = [];             // {id, nombre, email}
+let filtroTexto = '';
+let filtroAccion = 'todas';
+let dias = 30;
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(iso){
+  if(!iso) return '—';
+  const d = new Date(iso);
+  const hoy = new Date(); const ayer = new Date(); ayer.setDate(hoy.getDate()-1);
+  const sameDay = (a,b)=>a.toDateString()===b.toDateString();
+  const hh = d.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});
+  if (sameDay(d,hoy)) return 'Hoy ' + hh;
+  if (sameDay(d,ayer)) return 'Ayer ' + hh;
+  return d.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'}) + ' ' + hh;
+}
+function nombrePac(pid){ return pid==null ? '—' : (nombrePorPersona[pid] || ('Paciente #'+pid)); }
+function norm(s){ return String(s||'').toLowerCase().trim(); }
+
+async function cargar() {
+  try {
+    // Sesión (necesaria para que RLS deje leer la bitácora)
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) { mostrarSinAcceso('Iniciá sesión en el sistema y volvé a abrir esta página.'); return; }
+
+    // Equipo (para detectar quién NUNCA abrió nada)
+    try {
+      const { data: eq } = await sb.from('personas').select('id, nombre, email').eq('es_equipo', true);
+      equipo = eq || [];
+    } catch(e){ equipo = []; }
+
+    await recargar();
+  } catch (e) {
+    mostrarSinAcceso('No se pudo cargar: ' + e.message);
+  }
+}
+
+async function recargar() {
+  let q = sb.from('hc_accesos').select('*').order('creado_en', { ascending: false }).limit(3000);
+  if (dias > 0) {
+    const desde = new Date(); desde.setDate(desde.getDate() - dias);
+    q = q.gte('creado_en', desde.toISOString());
+  }
+  const { data, error } = await q;
+  if (error) { mostrarSinAcceso('Solo las administradoras pueden ver la bitácora.\n(' + error.message + ')'); return; }
+  accesos = data || [];
+
+  // Nombres de pacientes
+  const ids = [...new Set(accesos.map(a => a.persona_id).filter(x => x != null))];
+  nombrePorPersona = {};
+  if (ids.length) {
+    try {
+      const { data: pers } = await sb.from('personas').select('id, nombre').in('id', ids);
+      (pers || []).forEach(p => { nombrePorPersona[p.id] = p.nombre; });
+    } catch(e){}
+  }
+  render();
+}
+
+function mostrarSinAcceso(msg) {
+  document.getElementById('contenido').innerHTML =
+    `<div class="estado"><h3>Sin acceso</h3><p style="white-space:pre-line">${esc(msg)}</p></div>`;
+}
+
+function render() {
+  const cont = document.getElementById('contenido');
+
+  // --- Resumen por profesional ---
+  const porProfe = {};   // email -> {nombre, hc, pdf, ult}
+  accesos.forEach(a => {
+    const k = norm(a.visor_email) || ('id'+a.visor_persona_id);
+    if (!porProfe[k]) porProfe[k] = { nombre: a.visor_nombre || a.visor_email || '—', email: a.visor_email, hc:0, pdf:0, ult:null };
+    if (a.accion === 'abrir_pdf') porProfe[k].pdf++; else porProfe[k].hc++;
+    if (!porProfe[k].ult || a.creado_en > porProfe[k].ult) porProfe[k].ult = a.creado_en;
+  });
+
+  // Sumar miembros del equipo que NO aparecen (nunca abrieron)
+  equipo.forEach(p => {
+    const k = norm(p.email);
+    if (k && !porProfe[k]) porProfe[k] = { nombre: p.nombre, email: p.email, hc:0, pdf:0, ult:null, sinActividad:true };
+  });
+
+  const filasProfe = Object.values(porProfe).sort((a,b) => {
+    if (!a.ult && b.ult) return 1;
+    if (a.ult && !b.ult) return -1;
+    if (a.ult && b.ult) return a.ult < b.ult ? 1 : -1;
+    return 0;
+  });
+
+  const totalHC = accesos.filter(a => a.accion !== 'abrir_pdf').length;
+  const totalPDF = accesos.filter(a => a.accion === 'abrir_pdf').length;
+  const profesActivos = filasProfe.filter(f => f.ult).length;
+
+  // --- Actividad reciente (con filtros) ---
+  const t = norm(filtroTexto);
+  const recientes = accesos.filter(a => {
+    if (filtroAccion === 'hc' && a.accion === 'abrir_pdf') return false;
+    if (filtroAccion === 'pdf' && a.accion !== 'abrir_pdf') return false;
+    if (!t) return true;
+    return norm(a.visor_nombre).includes(t) || norm(nombrePac(a.persona_id)).includes(t) || norm(a.adjunto_nombre).includes(t);
+  }).slice(0, 400);
+
+  const sinActividad = filasProfe.filter(f => f.sinActividad);
+
+  let html = `
+    <div class="kpis">
+      <div class="kpi"><div class="n">${totalHC}</div><div class="l">Aperturas de HC (${dias>0?'últimos '+dias+' días':'histórico'})</div></div>
+      <div class="kpi"><div class="n">${totalPDF}</div><div class="l">PDF / evaluaciones abiertos</div></div>
+      <div class="kpi"><div class="n">${profesActivos}</div><div class="l">Personas que abrieron algo</div></div>
+    </div>`;
+
+  if (sinActividad.length) {
+    html += `<div class="alerta">⚠️ <strong>Sin actividad en este período:</strong> ${sinActividad.map(f => esc(f.nombre)).join(', ')}.</div>`;
+  }
+
+  // Tabla por profesional
+  html += `<div class="card"><h2>📊 Por persona del equipo</h2>
+    <table><thead><tr>
+      <th>Persona</th><th>HC abiertas</th><th>PDF abiertos</th><th>Última vez</th>
+    </tr></thead><tbody>
+    ${filasProfe.map(f => `<tr>
+      <td><strong>${esc(f.nombre)}</strong></td>
+      <td class="num">${f.hc}</td>
+      <td class="num">${f.pdf}</td>
+      <td>${f.ult ? fmt(f.ult) : '<span class="pill cero">Nunca</span>'}</td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+
+  // Controles + actividad reciente
+  html += `<div class="controls">
+      <input id="fTexto" placeholder="Buscar por profe, paciente o archivo…" value="${esc(filtroTexto)}">
+      <select id="fAccion">
+        <option value="todas">Todo</option>
+        <option value="hc">Solo aperturas de HC</option>
+        <option value="pdf">Solo PDF</option>
+      </select>
+      <select id="fDias">
+        <option value="7">Últimos 7 días</option>
+        <option value="30">Últimos 30 días</option>
+        <option value="60">Últimos 60 días</option>
+        <option value="0">Todo el historial</option>
+      </select>
+    </div>`;
+
+  html += `<div class="card"><h2>🕑 Actividad reciente (${recientes.length})</h2>
+    <table><thead><tr>
+      <th>Cuándo</th><th>Quién</th><th>Acción</th><th>Paciente</th><th class="opt">Archivo</th><th class="opt">Desde</th>
+    </tr></thead><tbody>
+    ${recientes.length ? recientes.map(a => `<tr>
+      <td class="muted">${fmt(a.creado_en)}</td>
+      <td><strong>${esc(a.visor_nombre || a.visor_email || '—')}</strong></td>
+      <td>${a.accion === 'abrir_pdf' ? '<span class="pill pdf">📄 Abrió PDF</span>' : '<span class="pill hc">🩺 Abrió HC</span>'}</td>
+      <td>${esc(nombrePac(a.persona_id))}</td>
+      <td class="opt muted">${esc(a.adjunto_nombre || '—')}</td>
+      <td class="opt muted">${a.origen === 'agenda' ? 'Agenda' : (a.origen === 'hc_modulo' ? 'Módulo HC' : 'Visor')}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Sin registros con ese filtro.</td></tr>'}
+    </tbody></table></div>`;
+
+  cont.innerHTML = html;
+
+  // Reenganchar controles
+  const fT = document.getElementById('fTexto');
+  const fA = document.getElementById('fAccion');
+  const fD = document.getElementById('fDias');
+  fA.value = filtroAccion; fD.value = String(dias);
+  fT.oninput = () => { filtroTexto = fT.value; const pos = fT.selectionStart; render(); const n = document.getElementById('fTexto'); n.focus(); n.setSelectionRange(pos,pos); };
+  fA.onchange = () => { filtroAccion = fA.value; render(); };
+  fD.onchange = () => { dias = parseInt(fD.value); recargar(); };
+}
+
+document.addEventListener('DOMContentLoaded', cargar);
+</script>
+</body>
+</html>

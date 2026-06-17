@@ -625,6 +625,7 @@ textarea.form-input { resize: vertical; min-height: 44px; }
         <button class="btn" onclick="closeModal()">Cerrar</button>
         <button class="btn" id="btnFusionarHC" onclick="abrirFusionModal()" style="display:none; background:#ede9fe; color:#6d28d9; border-color:#c4b5fd;">🔀 Fusionar HC</button>
         <button class="btn" id="btnEditarForm" onclick="abrirFormularioPaciente()" style="display:none;">✍️ Cargar/editar formulario</button>
+        <button class="btn" id="btnBitacoraHC" onclick="window.open('bitacora_hc.html','_blank')" style="display:none; background:#fef9c3; color:#854d0e; border-color:#fde047;">👁 Quién vio las HC</button>
         <button class="btn" id="btnGenerarPDF" onclick="abrirSelectorPDF()" style="background:#1e9fe0; color:#fff; border-color:#1e9fe0;">📄 Generar PDF</button>
         <button class="btn btn-success" id="btnMarcarRevisada" onclick="marcarRevisada()">✓ Marcar como revisada</button>
       </div>
@@ -699,6 +700,12 @@ let batchCancel = false;             // bandera para frenar el lote
 
 document.addEventListener('DOMContentLoaded', async () => {
   await detectarUsuario();
+  // Botón de bitácora: solo para administradoras (Lu / Jime)
+  const ADMINS_BITACORA = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com'];
+  if (usuarioActual && ADMINS_BITACORA.includes(normEmail(usuarioActual.email))) {
+    const b = document.getElementById('btnBitacoraHC');
+    if (b) b.style.display = 'inline-block';
+  }
   await loadAllData();
   renderStats();
   renderTab();
@@ -768,6 +775,21 @@ function esProfeSoloLectura() {
 // para un paciente que todavía no completó el formulario público.
 function puedeIniciarEval() {
   return usuarioActual && EMAILS_PUEDEN_EDITAR.includes(normEmail(usuarioActual.email));
+}
+
+// ===== BITÁCORA DE ACCESOS A HC =====
+// Registra quién abre la historia clínica y quién abre los PDF adjuntos.
+async function registrarAccesoHC(accion, extra) {
+  try {
+    if (!usuarioActual || !usuarioActual.email) return;
+    await sb.from('hc_accesos').insert(Object.assign({
+      accion: accion,
+      visor_persona_id: usuarioActual.id || null,
+      visor_nombre: usuarioActual.nombre || null,
+      visor_email: usuarioActual.email || null,
+      origen: RO_URL ? 'agenda' : 'hc_modulo'
+    }, extra || {}));
+  } catch (e) { /* la bitácora nunca rompe la vista */ }
 }
 
 async function detectarUsuario() {
@@ -1394,6 +1416,8 @@ function openHC(hcId) {
   const hc = allHCs.find(h => h.id === hcId);
   if (!hc) return;
   currentHCId = hcId;
+  // Bitácora: registrar que se abrió esta HC
+  registrarAccesoHC('abrir_hc', { persona_id: hc.persona_id, historia_id: hc.id });
   currentMoplexId = null;
   modalType = 'hc';
   // Invalidar cache de datos para PDF (se recargan al abrir el selector)
@@ -2452,6 +2476,13 @@ async function verAdjunto(adjId) {
       .createSignedUrl(adj.storage_path, 60 * 5); // 5 minutos
     if (error) throw error;
     window.open(data.signedUrl, '_blank');
+    // Bitácora: registrar que abrió este PDF
+    registrarAccesoHC('abrir_pdf', {
+      persona_id: adj.persona_id || null,
+      historia_id: adj.historia_id || null,
+      adjunto_id: adj.id,
+      adjunto_nombre: adj.titulo || adj.nombre_original || null
+    });
   } catch (e) {
     alert('No se pudo abrir el archivo: ' + e.message);
   }

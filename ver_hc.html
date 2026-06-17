@@ -261,6 +261,41 @@ let evolucionesAlumno = [];
 
 // Leer parámetro persona_id o dni de la URL
 const params = new URLSearchParams(window.location.search);
+
+// ===== BITÁCORA DE ACCESOS A HC =====
+// Registra quién abre la historia clínica y quién abre los PDF adjuntos.
+let _visorVH = null;
+async function _resolverVisorVH() {
+  if (_visorVH !== null) return _visorVH;
+  try {
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) { _visorVH = {}; return _visorVH; }
+    let p = null;
+    const r1 = await sb.from('personas').select('id, nombre').ilike('email', user.email).maybeSingle();
+    p = r1.data;
+    if (!p) {
+      const r2 = await sb.from('personas').select('id, nombre').eq('auth_user_id', user.id).maybeSingle();
+      p = r2.data;
+    }
+    _visorVH = { id: p ? p.id : null, nombre: p ? p.nombre : user.email, email: user.email };
+  } catch (e) { _visorVH = {}; }
+  return _visorVH;
+}
+async function registrarAccesoVH(accion, extra) {
+  try {
+    const v = await _resolverVisorVH();
+    if (!v || !v.email) return; // sin sesión no registramos
+    await sb.from('hc_accesos').insert(Object.assign({
+      persona_id: persona ? persona.id : null,
+      accion: accion,
+      visor_persona_id: v.id || null,
+      visor_nombre: v.nombre || null,
+      visor_email: v.email || null,
+      origen: (params.get('ro') === '1') ? 'agenda' : 'ver_hc'
+    }, extra || {}));
+  } catch (e) { /* la bitácora nunca rompe la vista */ }
+}
+
 const personaIdParam = params.get('persona_id');
 const dniParam = params.get('dni');
 // ro=1 → modo SOLO LECTURA (profes): se esconden los botones de acción.
@@ -314,6 +349,8 @@ async function cargar() {
 
     renderHeader();
     renderContenido();
+    // Bitácora: registrar que se abrió esta HC
+    registrarAccesoVH('abrir_hc', { historia_id: (hcs[0] ? hcs[0].id : null) });
   } catch (err) {
     console.error(err);
     document.getElementById('personaNombre').textContent = 'Error';
@@ -935,6 +972,12 @@ window.verAdjuntoVH = async function(id, storagePath) {
     const { data, error } = await sb.storage.from('hc-adjuntos').createSignedUrl(storagePath, 60);
     if (error) throw error;
     window.open(data.signedUrl, '_blank');
+    // Bitácora: registrar que abrió este PDF
+    const adjObj = (adjuntosAlumno || []).find(a => a.id === id);
+    registrarAccesoVH('abrir_pdf', {
+      adjunto_id: id,
+      adjunto_nombre: adjObj ? (adjObj.titulo || adjObj.nombre_original) : null
+    });
   } catch (err) {
     alert('No se pudo abrir el adjunto: ' + (err.message || 'error'));
   }
