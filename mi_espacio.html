@@ -1455,21 +1455,24 @@ async function cargarEspacio(per){
   // se crea recién cuando reserva, vía RPC; así no rompemos la agenda del profe.)
   let feriadosPendientes = [];
   try {
-    const diaCorte = (inscripcion && inscripcion.dia_vencimiento) ? parseInt(inscripcion.dia_vencimiento, 10) : 1;
-    const clampD = (y, m, d) => {
-      const last = new Date(y, m, 0).getDate();   // m es 1-indexado: día 0 del mes siguiente = último día de m
-      const dd = Math.min(d, last);
-      return `${y}-${String(m).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
-    };
-    const cicloWindow = (corteRaw, hoyISO) => {
-      const corte = (corteRaw >= 1 && corteRaw <= 31) ? corteRaw : 1;
-      let [y, m, d] = hoyISO.split('-').map(Number);
-      let sy = y, sm = m;
-      if (d < corte) { sm--; if (sm < 1) { sm = 12; sy--; } }
-      let ey = sy, em = sm + 1; if (em > 12) { em = 1; ey++; }
-      return { start: clampD(sy, sm, corte), end: clampD(ey, em, corte) };  // [start, end)
-    };
-    const win = cicloWindow(diaCorte, _hoyISO);
+    // VENTANA POR MES CALENDARIO (no por ciclo): se muestran los feriados que
+    // caen en tu día fijo dentro del mes calendario actual, y se mantienen en
+    // carry-over hasta 60 días (o hasta que los recuperes). Nunca antes del
+    // 2026-06-01. Los feriados de meses futuros aún no se muestran.
+    const _PISO_FERIADOS = '2026-06-01';
+    const _finMesActual = (() => {
+      const [yy, mm] = _hoyISO.split('-').map(Number);
+      const last = new Date(yy, mm, 0).getDate();
+      return `${yy}-${String(mm).padStart(2,'0')}-${String(last).padStart(2,'0')}`;
+    })();
+    const _hace60 = (() => {
+      const d = new Date(_hoyISO + 'T00:00:00');
+      d.setDate(d.getDate() - 60);
+      const off = d.getTimezoneOffset();
+      return new Date(d - off*60000).toISOString().slice(0,10);
+    })();
+    const _pisoFer = (_hace60 > _PISO_FERIADOS) ? _hace60 : _PISO_FERIADOS;
+
     const { data: feriadosData } = await sb.from('feriados').select('fecha, motivo');
     const diasFijos = new Set((misTurnosRes.data || []).map(r => r.turnos && r.turnos.dia).filter(Boolean));
     // Feriados que YA estás recuperando (fila cargada) → no los volvemos a ofrecer
@@ -1482,9 +1485,11 @@ async function cargarEspacio(per){
     (feriadosData || []).forEach(f => {
       const fIso = f.fecha;
       if (!fIso) return;
-      if (fIso < win.start || fIso >= win.end) return;       // fuera de tu ciclo actual
+      if (fIso < _pisoFer) return;          // expirado (>60 días) o antes del piso
+      if (fIso > _finMesActual) return;     // feriado de un mes futuro: todavía no
       if (feriadosYaCargados.has(fIso)) return;              // ya lo estás recuperando
       const dow = new Date(fIso + 'T00:00:00').getDay();
+      if (dow === 0 || dow === 6) return;   // finde: el centro está cerrado, no aplica
       const nombreDia = NOMBRE_DIA[dow];
       const tieneFijoEseDia = diasFijos.has(nombreDia) ||
         (nombreDia === 'Miércoles' && diasFijos.has('Miercoles'));
@@ -1647,6 +1652,18 @@ async function cargarEspacio(per){
 // ============================================================
 //  BLOQUES
 // ============================================================
+// Cupo de recuperatorios por plan (mismo criterio que administración):
+//   BON → 14 · ROT (CODxROT) → N×5 · regular (CODx) → N+2  (N = primer dígito)
+function cupoRecuperatoriosPlan(cod){
+  const s = String(cod||'').toUpperCase();
+  if(/BON/.test(s)) return 14;
+  const m = s.match(/COD\s*0*([1-9])/);
+  const n = m ? parseInt(m[1],10) : 0;
+  if(!n) return null;
+  if(/ROT/.test(s)) return n*5;
+  return n+2;
+}
+
 function bloquePlan(i){
   if(!i){
     return `<section class="card reveal d2">
@@ -1672,6 +1689,11 @@ function bloquePlan(i){
       <div class="meta-box"><div class="l">Vencimiento</div><div class="v">Día ${i.dia_vencimiento||'—'}</div></div>
       ${i.plan_futuro?`<div class="meta-box"><div class="l">Próximo plan</div><div class="v">${esc(i.plan_futuro)}</div></div>`:''}
     </div>
+    ${(esBonif ? '' : (() => {
+      const cupo = cupoRecuperatoriosPlan(i.plan);
+      if (cupo == null) return '';
+      return `<div style="margin-top:10px;padding:10px 13px;background:rgba(30,159,224,.08);border:1px solid rgba(30,159,224,.22);border-radius:9px;font-size:13px;color:#1e9fe0;font-weight:600">♻️ Con tu plan podés recuperar hasta <b>${cupo}</b> clase${cupo===1?'':'s'} por ciclo.</div>`;
+    })())}
   </section>`;
 }
 
@@ -2727,14 +2749,18 @@ function bloqueRecuperatorios(recus){
   // Tarjetas de feriado (van arriba): no gastan cupo, disponibles todo el ciclo
   let ferRows='';
   feriadosPend.forEach(f=>{
+    const diasF = DIAS_PARA_RECUPERAR - diasEntre(f.fecha, hoy);
+    let clsF='ok'; if(diasF<=10) clsF='urge'; else if(diasF<=25) clsF='warn';
+    const dnumF = diasF<=0 ? '0' : diasF;
+    const lblF = diasF<=0 ? 'vencido' : (diasF===1?'día':'días');
     ferRows += `<div class="recu">
       <div class="info">
         <div class="fa">Feriado del ${fmtFecha(f.fecha)} <span class="badge-fer">Feriado</span></div>
         <div class="sub">Cayó en tu día fijo. Lo recuperás eligiendo una clase de tu área en la agenda (no gasta cupo).</div>
       </div>
-      <div class="cuenta ok">
-        <div class="d">★</div>
-        <div class="l">libre</div>
+      <div class="cuenta ${clsF}">
+        <div class="d">${dnumF}</div>
+        <div class="l">${lblF}</div>
       </div>
     </div>`;
   });
