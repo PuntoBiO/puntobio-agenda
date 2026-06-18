@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bitácora de accesos a HC · PuntoBiO</title>
+<title>Revisión HC equipo · PuntoBiO</title>
 <style>
   :root { --celeste:#1e9fe0; --negro:#111; --gris:#64748b; --borde:#e2e8f0; }
   * { box-sizing: border-box; }
@@ -39,7 +39,7 @@
 </head>
 <body>
 <header>
-  <h1>👁 Bitácora <span>PuntoBiO</span></h1>
+  <h1>👁 Revisión HC <span>Equipo</span></h1>
   <div style="font-size:12px;opacity:.8">Quién abre las historias clínicas y los PDF</div>
 </header>
 <div class="wrap">
@@ -56,11 +56,13 @@ let accesos = [];
 let nombrePorPersona = {};   // persona_id -> nombre (pacientes)
 let equipo = [];             // {id, nombre, email}
 let hcPorPersona = {};       // persona_id -> {persona_id, dni, total, ultima}
+let personasConEval = new Set(); // pacientes cuya HC tiene evaluación cargada (TF)
 let filtroTexto = '';
 let filtroAccion = 'todas';
 let soloSinVer = false;
+let soloConEval = true;      // por defecto: solo HC con evaluación cargada
 let dias = 30;
-let diasHC = 30;   // antigüedad máxima de las HC que se listan (por fecha de carga)
+let diasHC = 0;   // antigüedad de las HC listadas (0 = todas). El filtro fuerte es "con evaluación".
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmt(iso){
@@ -107,10 +109,11 @@ async function recargar() {
   // Cargar TODAS las HC (para listar incluso las que nadie abrió)
   let hcRows = [];
   try {
-    const r = await sb.from('historias_clinicas').select('persona_id, dni, completado_en');
+    const r = await sb.from('historias_clinicas').select('persona_id, dni, completado_en, origen');
     hcRows = r.data || [];
   } catch (e) { hcRows = []; }
   hcPorPersona = {};
+  personasConEval = new Set();
   hcRows.forEach(h => {
     if (h.persona_id == null) return;
     if (!hcPorPersona[h.persona_id]) hcPorPersona[h.persona_id] = { persona_id: h.persona_id, dni: h.dni || null, total: 0, ultima: null };
@@ -118,7 +121,22 @@ async function recargar() {
     g.total++;
     if (!g.dni && h.dni) g.dni = h.dni;
     if (!g.ultima || (h.completado_en && h.completado_en > g.ultima)) g.ultima = h.completado_en;
+    // HC abierta por profesional = tiene evaluación profesional cargada
+    if (h.origen === 'profesional') personasConEval.add(h.persona_id);
   });
+
+  // Adjuntos cargados por el equipo (las "Evaluación X.pdf") = también cuentan como evaluación
+  try {
+    const { data: adjs } = await sb.from('hc_adjuntos').select('persona_id, subido_por_alumno');
+    (adjs || []).forEach(a => {
+      if (a.persona_id != null && a.subido_por_alumno !== true) personasConEval.add(a.persona_id);
+    });
+  } catch (e) {}
+  // Evaluaciones MOPLEX (si existen) también cuentan
+  try {
+    const { data: mop } = await sb.from('evaluaciones_moplex').select('persona_id');
+    (mop || []).forEach(m => { if (m.persona_id != null) personasConEval.add(m.persona_id); });
+  } catch (e) {}
 
   // Nombres de pacientes (unión: los que tienen accesos + los que tienen HC)
   const ids = [...new Set([
@@ -180,14 +198,19 @@ function render() {
     if (!m[k].ult || a.creado_en > m[k].ult) m[k].ult = a.creado_en;
   });
 
-  // --- Filas por historia clínica: SOLO las cargadas recientemente ---
-  // (las viejas no sirven: no hay historial de quién las vio antes).
+  // --- Filas por historia clínica ---
+  // Lo que importa: HC con EVALUACIÓN cargada (TF). Las de fisio sin evaluación se omiten.
   let cutoffHC = null;
   if (diasHC > 0) {
     const d = new Date(); d.setDate(d.getDate() - diasHC);
     cutoffHC = d.toISOString();
   }
-  let filasHC = Object.values(hcPorPersona).map(g => {
+  const pasaBase = (g) => {
+    if (soloConEval && !personasConEval.has(g.persona_id)) return false;
+    if (cutoffHC && !(g.ultima && g.ultima >= cutoffHC)) return false;
+    return true;
+  };
+  let filasHC = Object.values(hcPorPersona).filter(pasaBase).map(g => {
     const vs = Object.values(viewersPorPac[g.persona_id] || {});
     let ult = null;
     vs.forEach(v => { if (v.ult && (!ult || v.ult > ult)) ult = v.ult; });
@@ -201,8 +224,6 @@ function render() {
       ultVista: ult
     };
   });
-  // Solo HC cargadas dentro de la ventana elegida
-  if (cutoffHC) filasHC = filasHC.filter(f => f.cargada && f.cargada >= cutoffHC);
   // Filtros del listado
   filasHC = filasHC.filter(f => {
     if (soloSinVer && f.viewers.length) return false;
@@ -213,12 +234,10 @@ function render() {
   // Orden: la más recientemente cargada arriba
   filasHC.sort((a,b) => (b.cargada || '') < (a.cargada || '') ? -1 : 1);
 
-  // KPIs sobre el conjunto reciente (lo que de verdad importa seguir)
-  const recientesHC = cutoffHC
-    ? Object.values(hcPorPersona).filter(g => g.ultima && g.ultima >= cutoffHC)
-    : Object.values(hcPorPersona);
-  const totalHCpac = recientesHC.length;
-  const sinVer = recientesHC.filter(g => !(viewersPorPac[g.persona_id] && Object.keys(viewersPorPac[g.persona_id]).length)).length;
+  // KPIs sobre el conjunto que importa (HC con evaluación)
+  const baseHC = Object.values(hcPorPersona).filter(pasaBase);
+  const totalHCpac = baseHC.length;
+  const sinVer = baseHC.filter(g => !(viewersPorPac[g.persona_id] && Object.keys(viewersPorPac[g.persona_id]).length)).length;
 
   // --- Actividad reciente ---
   const recientes = accesos.filter(a => {
@@ -231,7 +250,7 @@ function render() {
   // ===== HTML =====
   let html = `
     <div class="kpis">
-      <div class="kpi"><div class="n">${totalHCpac}</div><div class="l">HC cargadas ${diasHC>0?'(últimos '+diasHC+' días)':'(todas)'}</div></div>
+      <div class="kpi"><div class="n">${totalHCpac}</div><div class="l">${soloConEval?'HC con evaluación cargada':'HC en total'}</div></div>
       <div class="kpi"><div class="n" style="color:${sinVer?'#dc2626':'#16a34a'}">${sinVer}</div><div class="l">De esas, sin ver todavía</div></div>
       <div class="kpi"><div class="n">${totalHC}</div><div class="l">Aperturas de HC (${dias>0?'últimos '+dias+' días':'histórico'})</div></div>
       <div class="kpi"><div class="n">${totalPDF}</div><div class="l">PDF / evaluaciones abiertos</div></div>
@@ -244,11 +263,17 @@ function render() {
   // Filtros (arriba, aplican a todo)
   html += `<div class="controls">
       <input id="fTexto" placeholder="Buscar paciente, DNI o profe…" value="${esc(filtroTexto)}">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--gris);cursor:pointer;font-weight:700">
+        <input type="checkbox" id="fEval" ${soloConEval?'checked':''}> Solo con evaluación cargada
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--gris);cursor:pointer">
+        <input type="checkbox" id="fSinVer" ${soloSinVer?'checked':''}> Solo las que nadie vio
+      </label>
       <select id="fDiasHC">
-        <option value="30">HC cargadas: últimos 30 días</option>
-        <option value="60">HC cargadas: últimos 60 días</option>
-        <option value="90">HC cargadas: últimos 90 días</option>
-        <option value="0">HC cargadas: todas</option>
+        <option value="0">Antigüedad HC: todas</option>
+        <option value="30">Cargadas: últimos 30 días</option>
+        <option value="60">Cargadas: últimos 60 días</option>
+        <option value="90">Cargadas: últimos 90 días</option>
       </select>
       <select id="fDias">
         <option value="7">Ver accesos: últimos 7 días</option>
@@ -256,13 +281,10 @@ function render() {
         <option value="60">Ver accesos: últimos 60 días</option>
         <option value="0">Ver accesos: todo</option>
       </select>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--gris);cursor:pointer">
-        <input type="checkbox" id="fSinVer" ${soloSinVer?'checked':''}> Solo las que nadie vio
-      </label>
     </div>`;
 
   // TABLA PRINCIPAL: Por historia clínica → quién la vio
-  html += `<div class="card"><h2>🩺 Historias clínicas · quién las vio (${filasHC.length})</h2>
+  html += `<div class="card"><h2>🩺 Historias clínicas con evaluación · quién las vio (${filasHC.length})</h2>
     <table><thead><tr>
       <th>Paciente</th><th class="opt">Cargada</th><th>Vista por</th><th class="opt">Última vez</th>
     </tr></thead><tbody>
@@ -314,12 +336,14 @@ function render() {
   const fD = document.getElementById('fDias');
   const fDH = document.getElementById('fDiasHC');
   const fS = document.getElementById('fSinVer');
+  const fE = document.getElementById('fEval');
   fD.value = String(dias);
   fDH.value = String(diasHC);
   fT.oninput = () => { filtroTexto = fT.value; const pos = fT.selectionStart; render(); const n = document.getElementById('fTexto'); n.focus(); n.setSelectionRange(pos,pos); };
   fD.onchange = () => { dias = parseInt(fD.value); recargar(); };
   fDH.onchange = () => { diasHC = parseInt(fDH.value); render(); };
   fS.onchange = () => { soloSinVer = fS.checked; render(); };
+  fE.onchange = () => { soloConEval = fE.checked; render(); };
 }
 
 document.addEventListener('DOMContentLoaded', cargar);
