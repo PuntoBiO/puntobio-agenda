@@ -1944,7 +1944,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes] = await Promise.all([
       sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
       sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado').eq('persona_id', p.id).neq('estado', 'cancelado'),
-      sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
+      sb.from('turno_alumnos').select('turno_id, fecha_desde').eq('persona_id', p.id).eq('activo', true),
       fichaTurnosSistema.length ? { data: fichaTurnosSistema } : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sb.from('clases_cerradas').select('turno_id,fecha,tipo,motivo').eq('tipo', 'centro'),
       sb.from('feriados').select('fecha,motivo')
@@ -2002,6 +2002,22 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const diasDesde = (fIso) => Math.round((new Date(hoy + 'T00:00:00') - new Date(fIso + 'T00:00:00')) / 86400000);
     const NOMBRE_DIA = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
     const diasFijosNombres = new Set((misTurnosRes.data || []).map(t => (turnoMap[t.turno_id] || {}).dia).filter(Boolean));
+    // Map nombre-de-día -> fecha_desde MÍNIMA (null = sin piso). Para no mostrar
+    // como pendiente un feriado anterior al alta del alumno en ese día.
+    const _desdePorDia = {};
+    (misTurnosRes.data || []).forEach(t => {
+      const dia = (turnoMap[t.turno_id] || {}).dia;
+      if (!dia) return;
+      const fd = t.fecha_desde || null;
+      if (!(dia in _desdePorDia)) { _desdePorDia[dia] = fd; return; }
+      const prev = _desdePorDia[dia];
+      if (prev === null || fd === null) _desdePorDia[dia] = null;
+      else if (fd < prev) _desdePorDia[dia] = fd;
+    });
+    const _pisoAltaDia = (nd) => {
+      const k = (nd in _desdePorDia) ? nd : (nd === 'Miércoles' && ('Miercoles' in _desdePorDia)) ? 'Miercoles' : null;
+      return k ? _desdePorDia[k] : null;
+    };
     const pendientes = [];
     (asisRes.data || []).forEach(a => {
       if (a.estado !== 'ausente-justificada' || yaBooked.has(a.fecha)) return;
@@ -2020,6 +2036,8 @@ async function abrirBitacoraAlumno(ventana = 60) {
       if (!fIso || yaBooked.has(fIso)) return;
       const nd = NOMBRE_DIA[new Date(fIso + 'T00:00:00').getDay()];
       if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
+      const _piso = _pisoAltaDia(nd);
+      if (_piso && fIso < _piso) return;   // feriado anterior al alta en ese día
       const d = diasDesde(fIso);
       if (d < 0 || d > ventana) return;
       pendientes.push({ fecha: fIso, dias: ventana - d, motivo: 'Feriado · ' + (fe.motivo || 'feriado'), sub: '', cupo: false });
@@ -2400,7 +2418,7 @@ async function abrirFichaAlumno() {
     // su inscripción (plan), los feriados del calendario y sus recuperatorios
     const [turnosRes, misTurnosRes, asisRes, evoRes, inscRes, ferRes, recupRes] = await Promise.all([
       fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
-      sb.from('turno_alumnos').select('turno_id').eq('persona_id', p.id).eq('activo', true),
+      sb.from('turno_alumnos').select('turno_id, fecha_desde').eq('persona_id', p.id).eq('activo', true),
       sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('inscripciones_tf').select('plan,estado,dia_vencimiento,creado_en,fecha_alta').eq('persona_id', p.id).order('creado_en', {ascending:false}).limit(1),
@@ -2443,6 +2461,19 @@ async function abrirFichaAlumno() {
     // dentro de los últimos 60 días, que TODAVÍA no recuperó. No gastan cupo, suman aparte.
     const hoyIsoFicha = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
     const diasFijosNombres = new Set(misTurnos.map(t => t.dia));   // {"Lunes","Martes"...}
+    // fecha_desde por turno → fecha_desde MÍNIMA por día (null = sin piso). Para no
+    // contar como pendiente un feriado anterior al alta del alumno en ese día.
+    const _desdePorTurnoF = {};
+    (misTurnosRes.data || []).forEach(t => { _desdePorTurnoF[t.turno_id] = t.fecha_desde || null; });
+    const _desdePorDiaF = {};
+    misTurnos.forEach(t => {
+      const dia = t.dia; if (!dia) return;
+      const fd = _desdePorTurnoF[t.id] || null;
+      if (!(dia in _desdePorDiaF)) { _desdePorDiaF[dia] = fd; return; }
+      const prev = _desdePorDiaF[dia];
+      if (prev === null || fd === null) _desdePorDiaF[dia] = null;
+      else if (fd < prev) _desdePorDiaF[dia] = fd;
+    });
     const feriados = ferRes.data || [];
     const recups = recupRes.data || [];
     // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
@@ -2453,6 +2484,8 @@ async function abrirFichaAlumno() {
       if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
       const nombreDia = nombreDiaDeFechaFicha(fFer);
       if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
+      const _pisoF = _desdePorDiaF[nombreDia] || null;
+      if (_pisoF && fFer < _pisoF) return;                         // feriado anterior al alta
       const dias = diasEntreFicha(fFer, hoyIsoFicha);
       if (dias < 0 || dias > 60) return;                           // futuro o vencido (>60 días)
       feriadosExtraPend++;

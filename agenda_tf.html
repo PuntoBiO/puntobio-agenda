@@ -3147,11 +3147,21 @@ async function recuperatoriosDe(personaId) {
 async function diasFijosDePersona(personaId) {
   try {
     const filas = await supabaseQuery('turno_alumnos',
-      `?select=turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
-    const dias = new Set();
-    (filas || []).forEach(f => { if (f.turnos && f.turnos.dia) dias.add(f.turnos.dia); });
-    return dias;  // Set de nombres: {"Lunes","Miércoles"}
-  } catch (e) { console.warn('No se pudo leer días fijos', e); return new Set(); }
+      `?select=fecha_desde,turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
+    // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
+    // Sirve para no ofrecer un feriado anterior al alta del alumno en ese día.
+    const m = new Map();
+    (filas || []).forEach(f => {
+      const dia = f.turnos && f.turnos.dia;
+      if (!dia) return;
+      const fd = f.fecha_desde || null;
+      if (!m.has(dia)) { m.set(dia, fd); return; }
+      const prev = m.get(dia);
+      if (prev === null || fd === null) m.set(dia, null);
+      else if (fd < prev) m.set(dia, fd);
+    });
+    return m;  // Map de nombres -> fecha_desde mínima. Conserva .has() para la lógica vieja.
+  } catch (e) { console.warn('No se pudo leer días fijos', e); return new Map(); }
 }
 // Turnos FIJOS (turno_id + desde cuándo) en que la persona está activa.
 // Sirve para saber si le corresponde el recupero de una clase cancelada por el centro.
@@ -3235,7 +3245,16 @@ async function estadoRecuperatorios(personaId) {
   Object.keys(FERIADOS || {}).forEach(fFer => {
     if (feriadosYaRecuperados.has(fFer)) return;            // ya lo recuperó
     const nombreDia = nombreDiaDeFecha(fFer);
-    if (!nombreDia || !diasFijos.has(nombreDia)) return;    // no tenía clase ese día
+    // En la base conviven "Miércoles" (con acento) y "Miercoles" (sin acento):
+    // resolvemos cuál de las dos claves tiene el alumno.
+    const _diaKey = diasFijos.has(nombreDia) ? nombreDia
+                  : (nombreDia === 'Miércoles' && diasFijos.has('Miercoles')) ? 'Miercoles'
+                  : null;
+    if (!_diaKey) return;    // no tenía clase ese día
+    // FERIADO ANTERIOR AL ALTA: si el feriado cayó antes de que el alumno se diera
+    // de alta en ese día, no perdió ninguna clase → no se recupera.
+    const _pisoAlta = diasFijos.get(_diaKey);
+    if (_pisoAlta && fFer < _pisoAlta) return;
     const dias = diasEntre(fFer, hoy);
     // FERIADO FUTURO: se habilita recién el 1ro de SU mes calendario (regla unificada
     // con Mi Espacio). Ej: hoy 19/6 → un feriado de julio NO aparece hasta el 1/7.

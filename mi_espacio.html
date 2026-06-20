@@ -1350,7 +1350,7 @@ async function cargarEspacio(per){
     sb.from('evaluaciones_moplex').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
     // Turnos fijos del alumno (JOIN con tabla turnos para traer dia/hora/servicio)
     sb.from('turno_alumnos')
-      .select('turno_id, turnos!inner(id, dia, hora, servicio, capacidad)')
+      .select('turno_id, fecha_desde, turnos!inner(id, dia, hora, servicio, capacidad)')
       .eq('persona_id', pid)
       .eq('activo', true),
     // Todos los turnos del centro (para el panel "Agenda de la semana")
@@ -1474,7 +1474,18 @@ async function cargarEspacio(per){
     const _pisoFer = (_hace60 > _PISO_FERIADOS) ? _hace60 : _PISO_FERIADOS;
 
     const { data: feriadosData } = await sb.from('feriados').select('fecha, motivo');
-    const diasFijos = new Set((misTurnosRes.data || []).map(r => r.turnos && r.turnos.dia).filter(Boolean));
+    // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
+    // Conserva .has() para la lógica de abajo y agrega .get() para el piso de alta.
+    const diasFijos = new Map();
+    (misTurnosRes.data || []).forEach(r => {
+      const dia = r.turnos && r.turnos.dia;
+      if (!dia) return;
+      const fd = r.fecha_desde || null;
+      if (!diasFijos.has(dia)) { diasFijos.set(dia, fd); return; }
+      const prev = diasFijos.get(dia);
+      if (prev === null || fd === null) diasFijos.set(dia, null);
+      else if (fd < prev) diasFijos.set(dia, fd);
+    });
     // Feriados que YA estás recuperando (fila cargada) → no los volvemos a ofrecer
     const feriadosYaCargados = new Set(
       (recus.data || [])
@@ -1496,9 +1507,14 @@ async function cargarEspacio(per){
       const dow = new Date(fIso + 'T00:00:00').getDay();
       if (dow === 0 || dow === 6) return;   // finde: el centro está cerrado, no aplica
       const nombreDia = NOMBRE_DIA[dow];
-      const tieneFijoEseDia = diasFijos.has(nombreDia) ||
-        (nombreDia === 'Miércoles' && diasFijos.has('Miercoles'));
-      if (!tieneFijoEseDia) return;                          // ese día no tenés clase fija
+      const _diaKey = diasFijos.has(nombreDia) ? nombreDia
+                    : (nombreDia === 'Miércoles' && diasFijos.has('Miercoles')) ? 'Miercoles'
+                    : null;
+      if (!_diaKey) return;                          // ese día no tenés clase fija
+      // FERIADO ANTERIOR AL ALTA: si cayó antes de que te dieras de alta en ese
+      // día, no perdiste ninguna clase → no se recupera.
+      const _pisoAlta = diasFijos.get(_diaKey);
+      if (_pisoAlta && fIso < _pisoAlta) return;
       feriadosPendientes.push({ fecha: fIso, motivo: f.motivo || 'Feriado' });
     });
     feriadosPendientes.sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
