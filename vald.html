@@ -162,6 +162,11 @@
   .vr-ficha { display:none; flex-basis:100%; order:9; margin:6px 0 2px; padding:8px 10px; background:#f8fafc; border-left:3px solid var(--azul); border-radius:6px; font-size:12px; line-height:1.5; color:var(--txt); }
   .vr-row.vr-open .vr-ficha { display:block; }
   .vr-ficha .fk { color:var(--azul); font-weight:600; }
+  .vr-vigilar { margin-top:14px; border-top:1px dashed #d7dee6; padding-top:6px; }
+  .vr-vigilar > summary { cursor:pointer; font-size:12px; font-weight:600; color:#64748b; padding:4px 0; list-style:none; }
+  .vr-vigilar > summary::-webkit-details-marker { display:none; }
+  .vr-vigilar > summary::before { content:'▸ '; }
+  .vr-vigilar[open] > summary::before { content:'▾ '; }
   /* Chequeo de calidad de la toma */
   .vr-qa { border-radius:10px; padding:10px 12px; margin-bottom:10px; font-size:13px; }
   .vr-qa.bad { background:#fff4ed; border:1px solid #fdba74; }
@@ -605,9 +610,11 @@ function pintarEvaluacion(datos, normas) {
       // No gradeable → informativo (⚪, no marca rojo)
       conteo.vigilar++;
       if (L != null && R != null) {
-        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${u}`.trim(), fuente: 'VALD' });
+        const det = (Math.abs(L) < 0.05 && Math.abs(R) < 0.05) ? `≈ 0 ${u}`.trim() : `L ${L} / R ${R} ${u}`.trim();
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det, fuente: 'VALD' });
       } else if (uni != null) {
-        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${uni} ${u}`.trim(), fuente: 'VALD' });
+        const det = (Math.abs(uni) < 0.05) ? `≈ 0 ${u}`.trim() : `${uni} ${u}`.trim();
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det, fuente: 'VALD' });
       }
     }
   }
@@ -702,19 +709,31 @@ function renderChequeo(chk) {
 let GLOSARIO = [];
 function normTxt(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim(); }
 function fichaPara(nom){
-  const n = normTxt(nom);
+  const n = ' ' + normTxt(nom) + ' ';
   let best = null;
-  for (const g of GLOSARIO){ if (g.clave && n.includes(g.clave)){ if (!best || (g.prioridad||1) > (best.prioridad||1)) best = g; } }
+  for (const g of GLOSARIO){
+    if (!g.clave) continue;
+    const c = ' ' + normTxt(g.clave) + ' ';   // bordes de palabra: 'rsi' NO matchea dentro de 'excursion'
+    if (n.includes(c)){ if (!best || (g.prioridad||1) > (best.prioridad||1)) best = g; }
+  }
   return best;
 }
 
 function renderEvaluacion(c, datos) {
-  const fmtRows = (arr, sec) => (arr || []).map((x, i) => {
+  const rowHtml = (x, sec, i) => {
     const f = fichaPara(x.nom);
     const iBtn = f ? `<button class="vr-i" onclick="this.closest('.vr-row').classList.toggle('vr-open')" title="¿Qué es?">ⓘ</button>` : '';
     const ficha = f ? `<div class="vr-ficha"><b>${escapeHtml(f.titulo || x.nom)}</b><br><span class="fk">Qué mide:</span> ${escapeHtml(f.que_mide||'')}<br><span class="fk">Normal:</span> ${escapeHtml(f.normal||'')}<br><span class="fk">Qué sería un déficit:</span> ${escapeHtml(f.deficit||'')}<br><span class="fk">Por qué importa:</span> ${escapeHtml(f.por_que_importa||'')}<br><span class="fk">Fuente:</span> ${escapeHtml(f.fuente||'')}</div>` : '';
     return `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span>${iBtn}<button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button>${ficha}</div>`;
-  }).join('');
+  };
+  // Mantiene el índice original (para que la ✕ excluya el correcto), filtra por predicado.
+  const fmtRows = (arr, sec, pred) => (arr || [])
+    .map((x, i) => ({ x, i }))
+    .filter(o => !pred || pred(o.x))
+    .map(o => rowHtml(o.x, sec, o.i)).join('');
+  const graded = (x) => x.em !== '⚪';   // 🟢🟡🔴⚠️ = se mira
+  const gris = (x) => x.em === '⚪';      // informativo
+
   const co = contarHallazgos(c);
   let html = renderChequeo(chequeoToma(datos));
   html += `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
@@ -725,10 +744,14 @@ function renderEvaluacion(c, datos) {
     <span class="vr-pill" style="background:#fde68a;color:#92400e">⚠️ revisar ${co.revisar}</span>
     <span class="vr-pill" style="background:#f1f5f9;color:#475569">⚪ vigilar ${co.vigilar}</span>
   </div>
-  <div class="hint" style="margin:-4px 0 6px;">Tip: ⭐ = métrica clave del test (catálogo VALD + consenso). Tocá la ✕ para excluir un test mal tomado, y la ⓘ para ver qué significa cada métrica.</div>`;
-  if (c.fuerza.length) html += `<div class="vr-section"><h4>Fuerza · DynaMo</h4>${fmtRows(c.fuerza, 'fuerza')}</div>`;
-  if (c.forceDecks.length) html += `<div class="vr-section"><h4>ForceDecks</h4>${fmtRows(c.forceDecks, 'forceDecks')}</div>`;
-  if (c.movilidad.length) html += `<div class="vr-section"><h4>Movilidad · HumanTrak (Primary)</h4>${fmtRows(c.movilidad, 'movilidad')}</div>`;
+  <div class="hint" style="margin:-4px 0 6px;">Arriba lo que se mira (🟢🟡🔴). Lo gris (informativo) está abajo en "Vigilar". ⭐ = métrica clave · ⓘ = qué significa · ✕ = excluir test mal tomado.</div>`;
+
+  // ── ARRIBA: solo lo graduado (lo que realmente mirás) ──
+  const secs = [['fuerza','Fuerza · DynaMo'], ['forceDecks','ForceDecks'], ['movilidad','Movilidad · HumanTrak (Primary)']];
+  for (const [sec, titulo] of secs) {
+    const rows = fmtRows(c[sec], sec, graded);
+    if (rows) html += `<div class="vr-section"><h4>${titulo}</h4>${rows}</div>`;
+  }
   if (c.postura) {
     const p = c.postura, pl = [];
     if (p.descenso_hombro) pl.push(`Descenso hombro ${p.descenso_hombro.cm} cm (${p.descenso_hombro.lado_descendido})`);
@@ -736,6 +759,12 @@ function renderEvaluacion(c, datos) {
     if (p.flexion_cervical_grados != null) pl.push(`Flexión cervical ${p.flexion_cervical_grados}°`);
     if (p.anteversion_pelvica_grados != null) pl.push(`Anteversión pélvica ${p.anteversion_pelvica_grados}°`);
     html += `<div class="vr-section"><h4>Postura</h4><div class="det" style="font-size:12px">${pl.map(escapeHtml).join(' · ')}</div></div>`;
+  }
+
+  // ── ABAJO: lo gris, colapsado ──
+  const grisRows = fmtRows(c.fuerza, 'fuerza', gris) + fmtRows(c.forceDecks, 'forceDecks', gris) + fmtRows(c.movilidad, 'movilidad', gris);
+  if (grisRows) {
+    html += `<details class="vr-vigilar"><summary>⚪ Vigilar · ${co.vigilar} métricas informativas (tocá para abrir)</summary><div class="vr-section">${grisRows}</div></details>`;
   }
   return html;
 }
