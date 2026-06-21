@@ -547,40 +547,64 @@ function pintarEvaluacion(datos, normas) {
   // RFD / potencia / etc. son tasas: pueden dar 0 o negativo sin ser artefacto.
   const FD_FUERZA = new Set([
     'REPEAT_PEAK_FORCE', 'REPEAT_PEAK_ECCENTRIC_FORCE', 'REPEAT_MEAN_ECCENTRIC_FORCE',
-    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE'
+    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE',
+    'REPEAT_MEAN_CONCENTRIC_FORCE', 'REPEAT_PEAK_CONCENTRIC_FORCE', 'REPEAT_CONCENTRIC_IMPULSE'
   ]);
+  // ⭐ Métricas CLAVE por test (catálogo VALD + consenso). Por código o por nombre.
+  const FD_ESTRELLA_COD = new Set([
+    'JUMP_HEIGHT_IMP_MOM','RSI_MODIFIED','REPEAT_PEAK_CONCENTRIC_POWER',
+    'REPEAT_MEAN_CONCENTRIC_FORCE','REPEAT_CONCENTRIC_IMPULSE','REPEAT_MEAN_ECCENTRIC_FORCE',
+    'REPEAT_PEAK_ECCENTRIC_FORCE','REPEAT_ECCENTRIC_DECEL_RFD','REPEAT_SQUAT_DEPTH',
+    'REPEAT_PEAK_FORCE','REPEAT_PEAK_CONCENTRIC_FORCE','PEAK_VERTICAL_FORCE',
+    'BAL_COP_RANGE_ANTPOST','BAL_COP_RANGE_MEDLAT','BAL_COP_TOTAL_EXCURSION','BAL_MEAN_FORCE'
+  ]);
+  const FD_ESTRELLA_KW = ['jump height','rsi','peak power','concentric mean force','concentric impulse',
+    'eccentric mean force','eccentric peak force','peak braking force','deceleration rfd','depth',
+    'negative displacement','peak force','time to peak','time to stand','standing force','contact time',
+    'concentric duration','eccentric duration','active stiffness','cop','excursion','mean force'];
+  const fdEstrella = (nombre, codigo) => {
+    if (codigo && FD_ESTRELLA_COD.has(codigo)) return true;
+    const n = normTxt(nombre);
+    return FD_ESTRELLA_KW.some(k => n.includes(k));
+  };
   const forceDecks = [];
   for (const t of (datos.forceDecks || [])) {
     for (const nombre in (t.resultados || {})) {
       const r = t.resultados[nombre];
       const L = r.lados.Left, R = r.lados.Right, A = r.lados.Asym, Trial = r.lados.Trial;
+      const star = fdEstrella(nombre, r.codigo) ? '⭐ ' : '';
       if (/^CoP/.test(nombre) && Trial != null) {
         conteo.vigilar++;
-        forceDecks.push({ em: '⚪', nom: `${t.prueba} · ${nombre}`, det: `${Trial} mm · control unipodal (sin norma poblacional)`, fuente: 'LSI+delta' });
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${Trial} mm · control unipodal (sin norma poblacional)`, fuente: 'LSI+delta' });
         continue;
       }
       if (L != null && R != null) {
         const esFuerza = FD_FUERZA.has(r.codigo);
         if (esFuerza && (L < 0 || R < 0)) {
           conteo.revisar++;
-          forceDecks.push({ em: '⚠️', nom: `${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar dato`, fuente: '—' });
+          forceDecks.push({ em: '⚠️', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar dato`, fuente: '—' });
           continue;
         }
         if (!esFuerza) {
-          // RFD / potencia: NO es fuerza, así que un negativo NO es artefacto.
-          // Pero la asimetría SÍ importa (la calcula VALD) → la grado igual.
           if (A == null) {
             conteo.vigilar++;
-            forceDecks.push({ em: '⚪', nom: `${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${r.unidad || 'N/s'} (tasa/potencia)`, fuente: 'VALD' });
+            forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${r.unidad || 'N/s'} (tasa/potencia)`, fuente: 'VALD' });
             continue;
           }
           const cR = colorAsim(A); cnt(cR);
           const nota = (L < 0 || R < 0) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
-          forceDecks.push({ em: cR, nom: `${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} ${r.unidad || 'N/s'}${nota}`, fuente: 'asimetría VALD' });
+          forceDecks.push({ em: cR, nom: `${star}${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} ${r.unidad || 'N/s'}${nota}`, fuente: 'asimetría VALD' });
           continue;
         }
         const c = colorAsim(A); cnt(c);
-        forceDecks.push({ em: c, nom: `${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} N`, fuente: 'LSI+delta' });
+        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} N`, fuente: 'LSI+delta' });
+        continue;
+      }
+      // Métrica de UN SOLO valor (sin L/R): altura, RSI, profundidad, tiempos, potencia…
+      const uni = (Trial != null) ? Trial : (r.lados.Both != null ? r.lados.Both : null);
+      if (uni != null) {
+        conteo.vigilar++;
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${uni} ${r.unidad || ''}`.trim(), fuente: 'VALD' });
       }
     }
   }
@@ -631,7 +655,8 @@ function chequeoToma(datos) {
   // ForceDecks: fuerza negativa SÓLO en métricas de fuerza (RFD/tasas pueden ser negativas)
   const FD_FUERZA_QA = new Set([
     'REPEAT_PEAK_FORCE', 'REPEAT_PEAK_ECCENTRIC_FORCE', 'REPEAT_MEAN_ECCENTRIC_FORCE',
-    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE'
+    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE',
+    'REPEAT_MEAN_CONCENTRIC_FORCE', 'REPEAT_PEAK_CONCENTRIC_FORCE', 'REPEAT_CONCENTRIC_IMPULSE'
   ]);
   for (const t of (datos.forceDecks || [])) {
     for (const nombre in (t.resultados || {})) {
@@ -697,7 +722,7 @@ function renderEvaluacion(c, datos) {
     <span class="vr-pill" style="background:#fde68a;color:#92400e">⚠️ revisar ${co.revisar}</span>
     <span class="vr-pill" style="background:#f1f5f9;color:#475569">⚪ vigilar ${co.vigilar}</span>
   </div>
-  <div class="hint" style="margin:-4px 0 6px;">Tip: tocá la ✕ para excluir un test mal tomado — sale del informe y no lo ve la IA.</div>`;
+  <div class="hint" style="margin:-4px 0 6px;">Tip: ⭐ = métrica clave del test (catálogo VALD + consenso). Tocá la ✕ para excluir un test mal tomado, y la ⓘ para ver qué significa cada métrica.</div>`;
   if (c.fuerza.length) html += `<div class="vr-section"><h4>Fuerza · DynaMo</h4>${fmtRows(c.fuerza, 'fuerza')}</div>`;
   if (c.forceDecks.length) html += `<div class="vr-section"><h4>ForceDecks</h4>${fmtRows(c.forceDecks, 'forceDecks')}</div>`;
   if (c.movilidad.length) html += `<div class="vr-section"><h4>Movilidad · HumanTrak (Primary)</h4>${fmtRows(c.movilidad, 'movilidad')}</div>`;
