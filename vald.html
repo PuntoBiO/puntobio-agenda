@@ -413,10 +413,11 @@ let ultimaEvaluacion = null;
 let protocoloItems = [];   // ítems del protocolo de la población activa
 let tildados = {};         // id -> 'auto' | 'manual'
 let valoresManual = {};    // id -> valor escrito a mano (tests manuales)
+let calcData = {};         // id -> datos estructurados de calculadoras (SARC-F, etc.)
 
 function resetEvaluacion() {
   ultimaEvaluacion = null;
-  protocoloItems = []; tildados = {}; valoresManual = {};
+  protocoloItems = []; tildados = {}; valoresManual = {}; calcData = {};
   const pp = document.getElementById('protocoloPanel');
   if (pp) { pp.style.display = 'none'; pp.innerHTML = ''; }
   const cardProt = document.getElementById('cardProtocolo');
@@ -532,7 +533,7 @@ const DY_C = [
   { id:'dy_shabd', sistema:'DynaMo', label:'Abducción de hombro', match:['shoulder abduction','abducción de hombro'] },
 ];
 const MN_C = [
-  { id:'mn_sarcf',sistema:'Manual', label:'SARC-F (cuestionario)', manual:true },
+  { id:'mn_sarcf',sistema:'Manual', label:'SARC-F (cuestionario de sarcopenia)', manual:true, calc:'sarcf' },
   { id:'mn_gait', sistema:'Manual', label:'Gait Speed (velocidad de marcha)', manual:true },
   { id:'mn_sppb', sistema:'Manual', label:'SPPB (equilibrio + marcha + silla)', manual:true },
   { id:'mn_tug',  sistema:'Manual', label:'Timed Up & Go (TUG)', manual:true },
@@ -670,6 +671,47 @@ function setManual(id, val) {
   if (val && val.trim()) { if (!tildados[id]) tildados[id] = 'manual'; }
   else { if (tildados[id] === 'manual') delete tildados[id]; }
 }
+
+// ---- Calculadora SARC-F (cuestionario de sarcopenia) ----
+const SARCF_PREGUNTAS = [
+  { t:'Fuerza — levantar/cargar ~4,5 kg', op:['Ninguna','Alguna','Mucha / no puede'] },
+  { t:'Caminar por una habitación', op:['Ninguna','Alguna','Mucha / usa ayuda'] },
+  { t:'Levantarse de una silla o cama', op:['Ninguna','Alguna','No puede sin ayuda'] },
+  { t:'Subir 10 escalones', op:['Ninguna','Alguna','Mucha / no puede'] },
+  { t:'Caídas en el último año', op:['Ninguna','1–3 caídas','≥4 caídas'] },
+];
+function setSarcf(id, qIdx, val) {
+  const d = calcData[id] || { tipo:'sarcf', q:[null,null,null,null,null] };
+  d.q[qIdx] = val;
+  d.total = d.q.reduce((s, x) => s + (x || 0), 0);
+  d.completo = d.q.every(x => x !== null);
+  d.riesgo = d.total >= 4;
+  calcData[id] = d;
+  valoresManual[id] = d.completo
+    ? (d.total + '/10 · ' + (d.riesgo ? 'riesgo de sarcopenia' : 'sin riesgo'))
+    : (d.total + '/10 (incompleto)');
+  if (d.completo && !tildados[id]) tildados[id] = 'manual';
+  renderChecklist();
+}
+function renderSarcfForm(id) {
+  const d = calcData[id] || { q:[null,null,null,null,null], total:0 };
+  let h = '<div onclick="event.stopPropagation()" style="margin:0 0 12px 26px; border-left:2px solid #e2e8f0; padding:4px 0 8px 12px;">';
+  SARCF_PREGUNTAS.forEach((q, i) => {
+    h += '<div style="display:flex; align-items:center; gap:6px; margin:5px 0; flex-wrap:wrap;">';
+    h += '<span style="font-size:12px; flex:1 1 170px; color:#334155;">' + (i + 1) + '. ' + escapeHtml(q.t) + '</span>';
+    q.op.forEach((op, j) => {
+      const sel = d.q[i] === j;
+      h += '<button onclick="setSarcf(\'' + id + '\',' + i + ',' + j + ')" style="font-size:11px; padding:4px 8px; border-radius:6px; cursor:pointer; border:1px solid ' + (sel ? '#1e9fe0' : '#cbd5e1') + '; background:' + (sel ? '#1e9fe0' : '#fff') + '; color:' + (sel ? '#fff' : '#475569') + ';">' + escapeHtml(op) + ' (' + j + ')</button>';
+    });
+    h += '</div>';
+  });
+  const total = d.total || 0;
+  const completo = d.q.every(x => x !== null);
+  const interp = total >= 4 ? '🔴 riesgo de sarcopenia (≥4)' : '🟢 sin riesgo';
+  h += '<div style="margin-top:6px; font-size:13px;"><b>Total: ' + total + '/10</b> — ' + (completo ? interp : '<span class="hint" style="margin:0;">faltan respuestas</span>') + '</div>';
+  h += '</div>';
+  return h;
+}
 function renderChecklist() {
   const panel = document.getElementById('protocoloPanel');
   if (!panel || !protocoloItems.length) return;
@@ -688,7 +730,11 @@ function renderChecklist() {
       const on = !!tildados[it.id];
       const auto = tildados[it.id] === 'auto';
       let trailing;
-      if (it.manual) {
+      if (it.manual && it.calc === 'sarcf') {
+        const d = calcData[it.id];
+        const resumen = d ? (d.total + '/10' + (d.completo ? (d.riesgo ? ' · 🔴 riesgo' : ' · 🟢 ok') : '')) : 'completá abajo ↓';
+        trailing = '<span class="hint" style="margin:0 0 0 auto; font-size:12px;">' + resumen + '</span>';
+      } else if (it.manual) {
         trailing = '<span class="hint" style="margin:0 0 0 auto;">✋</span>'
           + '<input type="text" value="' + escapeHtml(valoresManual[it.id] || '') + '" placeholder="resultado / valor" '
           + 'onclick="event.stopPropagation()" oninput="setManual(\'' + it.id + '\', this.value)" onchange="renderChecklist()" '
@@ -702,6 +748,7 @@ function renderChecklist() {
         + trailing
         + (it.extra ? '<span onclick="event.stopPropagation(); removeExtra(\'' + it.id + '\')" title="Quitar" style="margin-left:auto; color:#94a3b8; cursor:pointer; font-size:15px;">×</span>' : '')
         + '</div>';
+      if (it.manual && it.calc === 'sarcf') html += renderSarcfForm(it.id);
     }
   }
   // Desplegable para agregar cualquier test del catálogo VALD
@@ -1259,7 +1306,7 @@ function clasificarYMostrar() {
   box.style.display = 'block';
 
   // Paso 3: mostrar el protocolo de la población para ir tildando a mano (todavía sin VALD)
-  protocoloItems = []; tildados = {}; valoresManual = {};
+  protocoloItems = []; tildados = {}; valoresManual = {}; calcData = {};
   const cardProt = document.getElementById('cardProtocolo');
   if (cardProt) cardProt.style.display = 'block';
   const btnEv = document.getElementById('btnEvalRealizada');
@@ -1304,7 +1351,8 @@ async function guardarProtocolo() {
     const items = protocoloItems.map(it => ({
       id: it.id, sistema: it.sistema || 'Manual', label: it.label,
       hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra,
-      valor: it.manual ? (valoresManual[it.id] || null) : null
+      valor: it.manual ? (valoresManual[it.id] || null) : null,
+      calc: calcData[it.id] || null
     }));
     const realizados = items.filter(i => i.hecho).length;
     const protocolo = { poblacion: pobActual(), total: items.length, realizados, items };
