@@ -298,13 +298,18 @@
                style="width:100%; box-sizing:border-box; padding:8px 12px; border:1px solid var(--border); border-radius:8px; font-size:12px; color:var(--muted);">
       </div>
       <div id="valdPicker" style="margin-bottom:10px;"></div>
+
+      <!-- CHECKLIST DEL PROTOCOLO (según población) -->
+      <div id="protocoloPanel" style="display:none; margin-bottom:12px;"></div>
+
       <div id="valdReport" class="vald-report">
         <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
       </div>
       <div style="margin-top:12px;">
         <input id="valdMotivo" type="text" placeholder="Motivo / objetivo / antecedentes relevantes (la IA lo tiene en cuenta)"
                style="width:100%; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; margin-bottom:8px; box-sizing:border-box;">
-        <button class="btn" id="btnGenIA" onclick="generar()" disabled>🤖 Interpretar y redactar con IA</button>
+        <button class="btn ghost" id="btnFinalizarEval" onclick="finalizarEvaluacion()" style="display:none; margin-right:8px;">✅ Finalizar evaluación</button>
+        <button class="btn" id="btnGenIA" onclick="generar()" disabled>📋 Crear informe</button>
         <div id="valdBorrador" style="margin-top:10px;"></div>
       </div>
     </div>
@@ -399,9 +404,16 @@ function seleccionar(p) {
 
 // ---- PASO 4: traer VALD + pintar 🟢🟡🔴 con las normas ----
 let ultimaEvaluacion = null;
+let protocoloItems = [];   // ítems del protocolo de la población activa
+let tildados = {};         // id -> 'auto' | 'manual'
 
 function resetEvaluacion() {
   ultimaEvaluacion = null;
+  protocoloItems = []; tildados = {};
+  const pp = document.getElementById('protocoloPanel');
+  if (pp) { pp.style.display = 'none'; pp.innerHTML = ''; }
+  const fin = document.getElementById('btnFinalizarEval');
+  if (fin) fin.style.display = 'none';
   const r = document.getElementById('valdReport');
   if (r) r.innerHTML = '<div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>';
   const b = document.getElementById('btnGenIA');
@@ -416,6 +428,145 @@ function resetEvaluacion() {
   if (mot) mot.value = '';
   const bor = document.getElementById('valdBorrador');
   if (bor) bor.innerHTML = '';
+}
+
+// ============ CHECKLIST DEL PROTOCOLO (por población) ============
+// Orden del circuito: HumanTrak -> ForceDecks -> DynaMo (-> Manual).
+// match = palabras clave (minúsculas) contra el nombre que devuelve VALD:
+//   HumanTrak -> datos.movilidad[].prueba (+ datos.postura)
+//   ForceDecks -> datos.forceDecks[].prueba
+//   DynaMo    -> datos.fuerza[].grupo
+// exclude = palabras que NO deben estar (para separar SQT de Single Leg SQT).
+// manual:true = no llega por VALD (cuestionario / test clínico) -> se tilda a mano.
+const PROTOCOLOS = {
+  A: [
+    { id:'ht_ohs',  sistema:'HumanTrak', label:'Overhead Squat', match:['overhead'] },
+    { id:'ht_sls',  sistema:'HumanTrak', label:'Single Leg Squat / Step-Down', match:['single leg squat'] },
+    { id:'ht_lunge',sistema:'HumanTrak', label:'Lunge', match:['lunge'] },
+    { id:'ht_bal',  sistema:'HumanTrak', label:'Balance 1 pierna', manual:true },
+    { id:'fd_qsb',  sistema:'ForceDecks', label:'Quiet Stand (balance bipodal)', match:['quiet stand'] },
+    { id:'fd_slsb', sistema:'ForceDecks', label:'Single Leg Stand (balance unipodal)', match:['single leg stand'] },
+    { id:'fd_sts',  sistema:'ForceDecks', label:'Sit-to-Stand (STS)', match:['sit-to-stand','sit to stand','sts'] },
+    { id:'fd_cmj',  sistema:'ForceDecks', label:'CMJ (Countermovement Jump)', match:['countermovement'] },
+    { id:'fd_sj',   sistema:'ForceDecks', label:'Squat Jump', match:['squat jump'] },
+    { id:'fd_dj',   sistema:'ForceDecks', label:'Drop Jump', match:['drop jump'] },
+    { id:'fd_imtp', sistema:'ForceDecks', label:'IMTP (fuerza isométrica)', match:['mid-thigh','imtp'] },
+    { id:'dy_grip', sistema:'DynaMo', label:'Handgrip', match:['prensión','grip'] },
+    { id:'dy_kext', sistema:'DynaMo', label:'Knee Extension (cuádriceps)', match:['cuádriceps','knee extension','extensión rodilla'] },
+    { id:'dy_kflx', sistema:'DynaMo', label:'Knee Flexion (isquios)', match:['isquio','knee flexion','flexión rodilla','flexión de rodilla'] },
+    { id:'dy_habd', sistema:'DynaMo', label:'Hip Abduction (glúteo medio)', match:['abducción','hip abduction'] },
+    { id:'dy_hadd', sistema:'DynaMo', label:'Hip Adduction (aductores)', match:['aducción','aductor','hip adduction'] },
+    { id:'dy_hext', sistema:'DynaMo', label:'Hip Extension (glúteo mayor)', match:['extensión de cadera','glúteo mayor','hip extension'] },
+    { id:'dy_sh',   sistema:'DynaMo', label:'Shoulder ER / IR (rotadores)', match:['rotador','rotation','shoulder er','shoulder ir'] },
+  ],
+  C: [
+    { id:'fd_qsb',  sistema:'ForceDecks', label:'Quiet Stand (QSB)', match:['quiet stand'] },
+    { id:'fd_slsb', sistema:'ForceDecks', label:'Single Leg Stand (SLSB)', match:['single leg stand'] },
+    { id:'fd_sqt',  sistema:'ForceDecks', label:'Squat Assessment (SQT)', match:['squat assessment'], exclude:['single leg'] },
+    { id:'dy_grip', sistema:'DynaMo', label:'Handgrip (corte sarcopenia)', match:['prensión','grip'] },
+    { id:'dy_elb',  sistema:'DynaMo', label:'Elbow Flexion 90°', match:['flexión de codo','elbow flexion','codo'] },
+    { id:'mn_sarcf',sistema:'Manual', label:'SARC-F (cuestionario)', manual:true },
+    { id:'mn_ishii',sistema:'Manual', label:'Ishii Test', manual:true },
+    { id:'mn_chair',sistema:'Manual', label:'Chair Stand 5 rep (cronometrado)', manual:true },
+    { id:'mn_gait', sistema:'Manual', label:'Gait Speed (velocidad de marcha)', manual:true },
+    { id:'mn_sppb', sistema:'Manual', label:'SPPB (equilibrio + marcha + silla)', manual:true },
+    { id:'mn_tug',  sistema:'Manual', label:'Timed Up & Go (TUG)', manual:true },
+  ],
+  B: [
+    { id:'ht_ohs',  sistema:'HumanTrak', label:'Overhead Squat', match:['overhead'] },
+    { id:'ht_sls',  sistema:'HumanTrak', label:'Single Leg Squat / Step-Down', match:['single leg squat'] },
+    { id:'fd_slsq', sistema:'ForceDecks', label:'Single Leg Squat Assessment', match:['single leg squat assessment'] },
+    { id:'fd_cmj',  sistema:'ForceDecks', label:'CMJ', match:['countermovement'] },
+    { id:'fd_slht', sistema:'ForceDecks', label:'Single Leg Hop / Hop & Return', match:['hop'] },
+    { id:'dy_seg',  sistema:'DynaMo', label:'Fuerza del segmento lesionado (a definir)', manual:true },
+  ],
+};
+// D = misma batería que A + ROM 3D (se interpreta con norma de adulto general).
+PROTOCOLOS.D = PROTOCOLOS.A.slice();
+PROTOCOLOS.D.splice(4, 0, { id:'ht_rom', sistema:'HumanTrak', label:'ROM 3D (cadera/lumbar/torácica/hombro)', match:['rom'] });
+
+function pobActual() {
+  return (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null;
+}
+function protocoloDePoblacion() {
+  return PROTOCOLOS[pobActual()] || null;
+}
+function nombresDe(datos, sistema) {
+  if (sistema === 'HumanTrak') {
+    const arr = (datos.movilidad || []).map(m => m.prueba || '');
+    if (datos.postura) arr.push('Postura de pie');
+    return arr;
+  }
+  if (sistema === 'ForceDecks') return (datos.forceDecks || []).map(f => f.prueba || '');
+  if (sistema === 'DynaMo') return (datos.fuerza || []).map(f => f.grupo || '');
+  return [];
+}
+function itemPresente(item, datos) {
+  if (item.manual) return false;
+  const nombres = nombresDe(datos, item.sistema).map(s => String(s).toLowerCase());
+  const incs = (item.match || []).map(s => s.toLowerCase());
+  const excs = (item.exclude || []).map(s => s.toLowerCase());
+  return nombres.some(n => incs.some(i => n.includes(i)) && !excs.some(e => n.includes(e)));
+}
+function mostrarChecklist() {
+  const panel = document.getElementById('protocoloPanel');
+  if (!panel) return;
+  const items = protocoloDePoblacion();
+  if (!items) {
+    protocoloItems = [];
+    panel.style.display = 'block';
+    panel.innerHTML = '<div class="hint">Clasificá la población (paso 2) y volvé a traer la evaluación para ver el checklist del protocolo.</div>';
+    return;
+  }
+  protocoloItems = items;
+  panel.style.display = 'block';
+  renderChecklist();
+}
+function autoTilde(datos) {
+  if (!protocoloItems.length) return;
+  for (const it of protocoloItems) {
+    if (!it.manual && !tildados[it.id] && itemPresente(it, datos)) tildados[it.id] = 'auto';
+  }
+  renderChecklist();
+}
+function toggleTilde(id) {
+  if (tildados[id]) delete tildados[id];
+  else tildados[id] = 'manual';
+  renderChecklist();
+}
+function renderChecklist() {
+  const panel = document.getElementById('protocoloPanel');
+  if (!panel || !protocoloItems.length) return;
+  const orden = ['HumanTrak', 'ForceDecks', 'DynaMo', 'Manual'];
+  const hechos = protocoloItems.filter(it => tildados[it.id]).length;
+  const total = protocoloItems.length;
+  let html = '<div style="border:1px solid var(--border); border-radius:12px; padding:12px;">';
+  html += '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">'
+    + '<b style="color:var(--azul); font-size:13px;">Protocolo · ' + escapeHtml(NOMBRE_POB[pobActual()] || pobActual() || '') + '</b>'
+    + '<span class="hint" style="margin:0;">' + hechos + '/' + total + ' hechos</span></div>';
+  for (const sis of orden) {
+    const grupo = protocoloItems.filter(it => (it.sistema || 'Manual') === sis);
+    if (!grupo.length) continue;
+    html += '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); margin:8px 0 2px;">' + sis + '</div>';
+    for (const it of grupo) {
+      const on = !!tildados[it.id];
+      const auto = tildados[it.id] === 'auto';
+      html += '<div onclick="toggleTilde(\'' + it.id + '\')" style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; cursor:pointer;' + (on ? 'background:#ecfdf5;' : '') + '">'
+        + '<span style="flex:none; width:18px; height:18px; border-radius:5px; border:1px solid ' + (on ? '#16a34a' : '#cbd5e1') + '; background:' + (on ? '#16a34a' : '#fff') + '; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:12px;">' + (on ? '✓' : '') + '</span>'
+        + '<span style="font-size:13px;' + (on ? 'color:#065f46;' : '') + '">' + escapeHtml(it.label) + '</span>'
+        + (it.manual ? '<span class="hint" style="margin:0;">✋ manual</span>' : (auto ? '<span class="hint" style="margin:0; color:#16a34a;">✓ detectado</span>' : ''))
+        + '</div>';
+    }
+  }
+  html += '</div>';
+  panel.innerHTML = html;
+}
+function finalizarEvaluacion() {
+  const fin = document.getElementById('btnFinalizarEval');
+  if (fin) fin.style.display = 'none';
+  const ia = document.getElementById('btnGenIA');
+  if (ia) ia.disabled = !ultimaEvaluacion;
+  toast('Evaluación finalizada. Ya podés crear el informe.');
 }
 
 async function traerEvaluacionVALD(forzarProfileId) {
@@ -475,7 +626,13 @@ async function traerEvaluacionVALD(forzarProfileId) {
     const colored = pintarEvaluacion(datos, normas || []);
     ultimaEvaluacion = { datos, colored };
     cont.innerHTML = renderEvaluacion(colored, datos);
-    document.getElementById('btnGenIA').disabled = false;
+    // Checklist del protocolo: lo mostramos, auto-tildamos lo que llegó y habilitamos "Finalizar"
+    mostrarChecklist();
+    autoTilde(datos);
+    const finBtn = document.getElementById('btnFinalizarEval');
+    if (finBtn) finBtn.style.display = 'inline-block';
+    // La IA queda BLOQUEADA hasta apretar "Finalizar evaluación" (paciente ya se fue)
+    document.getElementById('btnGenIA').disabled = true;
 
     // Guardo el vínculo persona ↔ perfil VALD para la próxima (silencioso)
     if (datos.profileId && pacienteSel.vald_profile_id !== datos.profileId) {
@@ -781,7 +938,7 @@ async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
   const btn = document.getElementById('btnGenIA');
   const cont = document.getElementById('valdBorrador');
-  btn.disabled = true; btn.textContent = '🤖 Redactando…';
+  btn.disabled = true; btn.textContent = '📋 Redactando…';
   cont.innerHTML = '<div class="hint">La IA está interpretando los hallazgos marcados…</div>';
   try {
     const edadVal = document.getElementById('f_edad').value;
@@ -796,7 +953,7 @@ async function generar() {
       paciente: {
         nombre: pacienteSel.nombre,
         edad: edadVal ? Number(edadVal) : null,
-        poblacion: (ultimaClasificacion && ultimaClasificacion.poblacion) || null,
+        poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
       },
       hallazgos: sinExcluidos,
@@ -814,7 +971,7 @@ async function generar() {
   } catch (e) {
     cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
   } finally {
-    btn.disabled = false; btn.textContent = '🤖 Interpretar y redactar con IA';
+    btn.disabled = false; btn.textContent = '📋 Crear informe';
   }
 }
 
