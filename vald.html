@@ -157,6 +157,11 @@
   .vr-x:hover { background:#e2e8f0; }
   .vr-row.vr-ex { opacity:.45; }
   .vr-row.vr-ex .nom, .vr-row.vr-ex .det { text-decoration:line-through; }
+  .vr-i { border:none; background:#e0f2fe; color:#0369a1; border-radius:50%; cursor:pointer; font-size:12px; width:20px; height:20px; line-height:1; align-self:flex-start; padding:0; }
+  .vr-i:hover { background:#bae6fd; }
+  .vr-ficha { display:none; flex-basis:100%; order:9; margin:6px 0 2px; padding:8px 10px; background:#f8fafc; border-left:3px solid var(--azul); border-radius:6px; font-size:12px; line-height:1.5; color:var(--txt); }
+  .vr-row.vr-open .vr-ficha { display:block; }
+  .vr-ficha .fk { color:var(--azul); font-weight:600; }
   /* Chequeo de calidad de la toma */
   .vr-qa { border-radius:10px; padding:10px 12px; margin-bottom:10px; font-size:13px; }
   .vr-qa.bad { background:#fff4ed; border:1px solid #fdba74; }
@@ -457,6 +462,11 @@ async function traerEvaluacionVALD(forzarProfileId) {
       .select('test_id,bloque,sexo,corte_verde,corte_amarillo,corte_rojo');
     if (error) throw error;
 
+    try {
+      const { data: glos } = await sb.from('biolab_glosario').select('*');
+      GLOSARIO = glos || [];
+    } catch (_) { GLOSARIO = GLOSARIO || []; }
+
     const colored = pintarEvaluacion(datos, normas || []);
     ultimaEvaluacion = { datos, colored };
     cont.innerHTML = renderEvaluacion(colored, datos);
@@ -661,10 +671,22 @@ function renderChequeo(chk) {
   return `<div class="vr-qa ok"><b>✅ CHEQUEO DE LA TOMA — sin datos imposibles.</b>Las tomas se ven válidas; podés dejar ir al paciente.${meta}</div>`;
 }
 
+let GLOSARIO = [];
+function normTxt(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim(); }
+function fichaPara(nom){
+  const n = normTxt(nom);
+  let best = null;
+  for (const g of GLOSARIO){ if (g.clave && n.includes(g.clave)){ if (!best || (g.prioridad||1) > (best.prioridad||1)) best = g; } }
+  return best;
+}
+
 function renderEvaluacion(c, datos) {
-  const fmtRows = (arr, sec) => (arr || []).map((x, i) =>
-    `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span><button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button></div>`
-  ).join('');
+  const fmtRows = (arr, sec) => (arr || []).map((x, i) => {
+    const f = fichaPara(x.nom);
+    const iBtn = f ? `<button class="vr-i" onclick="this.closest('.vr-row').classList.toggle('vr-open')" title="¿Qué es?">ⓘ</button>` : '';
+    const ficha = f ? `<div class="vr-ficha"><b>${escapeHtml(f.titulo || x.nom)}</b><br><span class="fk">Qué mide:</span> ${escapeHtml(f.que_mide||'')}<br><span class="fk">Normal:</span> ${escapeHtml(f.normal||'')}<br><span class="fk">Qué sería un déficit:</span> ${escapeHtml(f.deficit||'')}<br><span class="fk">Por qué importa:</span> ${escapeHtml(f.por_que_importa||'')}<br><span class="fk">Fuente:</span> ${escapeHtml(f.fuente||'')}</div>` : '';
+    return `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span>${iBtn}<button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button>${ficha}</div>`;
+  }).join('');
   const co = contarHallazgos(c);
   let html = renderChequeo(chequeoToma(datos));
   html += `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
