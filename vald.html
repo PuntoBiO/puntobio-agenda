@@ -545,66 +545,69 @@ function pintarEvaluacion(datos, normas) {
   // FORCEDECKS (guardia de artefactos SOLO en métricas de fuerza)
   // Fuerzas/impulso ⇒ no pueden ser negativos (un pie no tira para arriba).
   // RFD / potencia / etc. son tasas: pueden dar 0 o negativo sin ser artefacto.
-  const FD_FUERZA = new Set([
-    'REPEAT_PEAK_FORCE', 'REPEAT_PEAK_ECCENTRIC_FORCE', 'REPEAT_MEAN_ECCENTRIC_FORCE',
-    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE',
-    'REPEAT_MEAN_CONCENTRIC_FORCE', 'REPEAT_PEAK_CONCENTRIC_FORCE', 'REPEAT_CONCENTRIC_IMPULSE'
+  // Solo estas métricas tienen asimetría L/R CONFIABLE (consenso) → se gradúan 🟢🟡🔴.
+  // El resto se muestra en gris (⚪) como informativo, sin marcar rojos falsos.
+  const FD_ASIM_OK = new Set([
+    'Peak Force','Eccentric Peak Force','Concentric Peak Force',
+    'Eccentric Mean Force','Concentric Mean Force',
+    'Eccentric Impulse','Concentric Impulse',
+    'Eccentric Deceleration RFD','Eccentric Deceleration Peak Force','Eccentric Deceleration Mean Force',
+    'Mean Force','Takeoff Peak Force','Eccentric:Concentric Mean Force Ratio'
   ]);
-  // ⭐ Métricas CLAVE por test (catálogo VALD + consenso). Por código o por nombre.
-  const FD_ESTRELLA_COD = new Set([
-    'JUMP_HEIGHT_IMP_MOM','RSI_MODIFIED','REPEAT_PEAK_CONCENTRIC_POWER',
-    'REPEAT_MEAN_CONCENTRIC_FORCE','REPEAT_CONCENTRIC_IMPULSE','REPEAT_MEAN_ECCENTRIC_FORCE',
-    'REPEAT_PEAK_ECCENTRIC_FORCE','REPEAT_ECCENTRIC_DECEL_RFD','REPEAT_SQUAT_DEPTH',
-    'REPEAT_PEAK_FORCE','REPEAT_PEAK_CONCENTRIC_FORCE','PEAK_VERTICAL_FORCE',
-    'BAL_COP_RANGE_ANTPOST','BAL_COP_RANGE_MEDLAT','BAL_COP_TOTAL_EXCURSION','BAL_MEAN_FORCE'
+  // Tasas/ratios: un negativo NO es artefacto (la fuerza sí).
+  const FD_ASIM_TASA = new Set(['Eccentric Deceleration RFD','Eccentric:Concentric Mean Force Ratio']);
+  // ⭐ Métricas CLAVE del test (catálogo VALD + consenso) — por nombre exacto.
+  const FD_ESTRELLA = new Set([
+    'Peak Force','Eccentric Peak Force','Concentric Peak Force','Eccentric Mean Force','Concentric Mean Force',
+    'Eccentric Impulse','Concentric Impulse','Maximum Negative Displacement','Eccentric Deceleration RFD',
+    'Eccentric:Concentric Mean Force Ratio',
+    'Jump Height (Imp-Mom)','RSI-modified','RSI-modified (Imp-Mom)','Peak Power / BM','Peak Power',
+    'Countermovement Depth','Concentric Peak Power / BM','Velocity at Peak Power',
+    'CoP Range - Medial-Lateral','CoP Range - Anterior-Posterior','Area of CoP Ellipse','Total Excursion',
+    'Peak Vertical Force','Peak Vertical Force / BM','Time to Stand','Peak Standing Force'
   ]);
-  const FD_ESTRELLA_KW = ['jump height','rsi','peak power','concentric mean force','concentric impulse',
-    'eccentric mean force','eccentric peak force','peak braking force','deceleration rfd','depth',
-    'negative displacement','peak force','time to peak','time to stand','standing force','contact time',
-    'concentric duration','eccentric duration','active stiffness','cop','excursion','mean force'];
-  const fdEstrella = (nombre, codigo) => {
-    if (codigo && FD_ESTRELLA_COD.has(codigo)) return true;
-    const n = normTxt(nombre);
-    return FD_ESTRELLA_KW.some(k => n.includes(k));
-  };
+  const fdStar = (n) => FD_ESTRELLA.has(n) ? '⭐ ' : '';
   const forceDecks = [];
   for (const t of (datos.forceDecks || [])) {
     for (const nombre in (t.resultados || {})) {
       const r = t.resultados[nombre];
-      const L = r.lados.Left, R = r.lados.Right, A = r.lados.Asym, Trial = r.lados.Trial;
-      const star = fdEstrella(nombre, r.codigo) ? '⭐ ' : '';
-      if (/^CoP/.test(nombre) && Trial != null) {
+      const L = r.lados.Left, R = r.lados.Right, A = r.lados.Asym, Trial = r.lados.Trial, Both = r.lados.Both;
+      const star = fdStar(nombre);
+      const uni = (Trial != null) ? Trial : (Both != null ? Both : null);
+      const u = r.unidad || '';
+      // CoP Range: oscilación (un valor, mm). No es izquierda/derecha.
+      if (/^CoP Range/.test(nombre)) {
         conteo.vigilar++;
-        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${Trial} mm · control unipodal (sin norma poblacional)`, fuente: 'LSI+delta' });
+        const v = (uni != null) ? uni : (L != null ? L : '');
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${v} mm · oscilación (comparar con baseline)`, fuente: 'VALD' });
         continue;
       }
-      if (L != null && R != null) {
-        const esFuerza = FD_FUERZA.has(r.codigo);
-        if (esFuerza && (L < 0 || R < 0)) {
+      // ¿Se gradúa por asimetría? SOLO las confiables.
+      if (FD_ASIM_OK.has(nombre) && L != null && R != null) {
+        const esTasa = FD_ASIM_TASA.has(nombre);
+        const mag = Math.max(Math.abs(L), Math.abs(R));
+        if (!esTasa && (L < 0 || R < 0)) {
           conteo.revisar++;
-          forceDecks.push({ em: '⚠️', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar dato`, fuente: '—' });
+          forceDecks.push({ em: '⚠️', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar`, fuente: '—' });
           continue;
         }
-        if (!esFuerza) {
-          if (A == null) {
-            conteo.vigilar++;
-            forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${r.unidad || 'N/s'} (tasa/potencia)`, fuente: 'VALD' });
-            continue;
-          }
-          const cR = colorAsim(A); cnt(cR);
-          const nota = (L < 0 || R < 0) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
-          forceDecks.push({ em: cR, nom: `${star}${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} ${r.unidad || 'N/s'}${nota}`, fuente: 'asimetría VALD' });
+        if (mag < 1) { // valores ~0: no tiene sentido la asimetría
+          conteo.vigilar++;
+          forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${u} (valor ~0)`.trim(), fuente: 'VALD' });
           continue;
         }
-        const c = colorAsim(A); cnt(c);
-        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} N`, fuente: 'LSI+delta' });
+        const asim = (A != null) ? A : Math.round((R - L) / (mag || 1) * 1000) / 10;
+        const c = colorAsim(asim); cnt(c);
+        const nota = (esTasa && (L < 0 || R < 0)) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
+        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${asim}% asim · L ${L} / R ${R} ${u || (esTasa ? '' : 'N')}${nota}`.trim(), fuente: 'asimetría VALD' });
         continue;
       }
-      // Métrica de UN SOLO valor (sin L/R): altura, RSI, profundidad, tiempos, potencia…
-      const uni = (Trial != null) ? Trial : (r.lados.Both != null ? r.lados.Both : null);
-      if (uni != null) {
-        conteo.vigilar++;
-        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${uni} ${r.unidad || ''}`.trim(), fuente: 'VALD' });
+      // No gradeable → informativo (⚪, no marca rojo)
+      conteo.vigilar++;
+      if (L != null && R != null) {
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${u}`.trim(), fuente: 'VALD' });
+      } else if (uni != null) {
+        forceDecks.push({ em: '⚪', nom: `${star}${t.prueba} · ${nombre}`, det: `${uni} ${u}`.trim(), fuente: 'VALD' });
       }
     }
   }
