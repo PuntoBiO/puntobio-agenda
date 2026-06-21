@@ -153,6 +153,10 @@
   .vr-row .nom { flex:1; font-weight:600; }
   .vr-row .det { color:var(--txt-soft); font-size:12px; font-weight:400; margin-top:1px; }
   .vr-fuente { color:#aab4c0; font-size:10px; white-space:nowrap; padding-top:2px; }
+  .vr-x { border:none; background:#f1f5f9; color:#64748b; border-radius:6px; cursor:pointer; font-size:12px; padding:2px 7px; align-self:flex-start; }
+  .vr-x:hover { background:#e2e8f0; }
+  .vr-row.vr-ex { opacity:.45; }
+  .vr-row.vr-ex .nom, .vr-row.vr-ex .det { text-decoration:line-through; }
 </style>
 </head>
 <body>
@@ -274,7 +278,7 @@
         <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
       </div>
       <div style="margin-top:12px;">
-        <input id="valdMotivo" type="text" placeholder="Motivo de consulta / dolor (la IA lo tiene en cuenta)"
+        <input id="valdMotivo" type="text" placeholder="Motivo / objetivo / antecedentes relevantes (la IA lo tiene en cuenta)"
                style="width:100%; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; margin-bottom:8px; box-sizing:border-box;">
         <button class="btn" id="btnGenIA" onclick="generar()" disabled>🤖 Interpretar y redactar con IA</button>
         <div id="valdBorrador" style="margin-top:10px;"></div>
@@ -484,11 +488,31 @@ function pintarEvaluacion(datos, normas) {
   return { fuerza, forceDecks, movilidad, postura: datos.postura, conteo };
 }
 
+function contarHallazgos(c) {
+  const co = { rojo: 0, amar: 0, verde: 0, revisar: 0, vigilar: 0 };
+  const add = (arr) => (arr || []).forEach(x => {
+    if (x.excluido) return;
+    if (x.em === '🔴') co.rojo++; else if (x.em === '🟡') co.amar++;
+    else if (x.em === '🟢') co.verde++; else if (x.em === '⚠️') co.revisar++;
+    else if (x.em === '⚪') co.vigilar++;
+  });
+  add(c.fuerza); add(c.forceDecks); add(c.movilidad);
+  return co;
+}
+
+function excluirItem(sec, i) {
+  if (!ultimaEvaluacion) return;
+  const arr = ultimaEvaluacion.colored[sec];
+  if (!arr || !arr[i]) return;
+  arr[i].excluido = !arr[i].excluido;
+  document.getElementById('valdReport').innerHTML = renderEvaluacion(ultimaEvaluacion.colored, ultimaEvaluacion.datos);
+}
+
 function renderEvaluacion(c, datos) {
-  const fmtRows = (arr) => arr.map(x =>
-    `<div class="vr-row"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span></div>`
+  const fmtRows = (arr, sec) => (arr || []).map((x, i) =>
+    `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span><button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button></div>`
   ).join('');
-  const co = c.conteo;
+  const co = contarHallazgos(c);
   let html = `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
   html += `<div class="vr-summary">
     <span class="vr-pill" style="background:#fee2e2;color:#b91c1c">🔴 ${co.rojo}</span>
@@ -496,10 +520,11 @@ function renderEvaluacion(c, datos) {
     <span class="vr-pill" style="background:#dcfce7;color:#166534">🟢 ${co.verde}</span>
     <span class="vr-pill" style="background:#fde68a;color:#92400e">⚠️ revisar ${co.revisar}</span>
     <span class="vr-pill" style="background:#f1f5f9;color:#475569">⚪ vigilar ${co.vigilar}</span>
-  </div>`;
-  if (c.fuerza.length) html += `<div class="vr-section"><h4>Fuerza · DynaMo</h4>${fmtRows(c.fuerza)}</div>`;
-  if (c.forceDecks.length) html += `<div class="vr-section"><h4>ForceDecks</h4>${fmtRows(c.forceDecks)}</div>`;
-  if (c.movilidad.length) html += `<div class="vr-section"><h4>Movilidad · HumanTrak (Primary)</h4>${fmtRows(c.movilidad)}</div>`;
+  </div>
+  <div class="hint" style="margin:-4px 0 6px;">Tip: tocá la ✕ para excluir un test mal tomado — sale del informe y no lo ve la IA.</div>`;
+  if (c.fuerza.length) html += `<div class="vr-section"><h4>Fuerza · DynaMo</h4>${fmtRows(c.fuerza, 'fuerza')}</div>`;
+  if (c.forceDecks.length) html += `<div class="vr-section"><h4>ForceDecks</h4>${fmtRows(c.forceDecks, 'forceDecks')}</div>`;
+  if (c.movilidad.length) html += `<div class="vr-section"><h4>Movilidad · HumanTrak (Primary)</h4>${fmtRows(c.movilidad, 'movilidad')}</div>`;
   if (c.postura) {
     const p = c.postura, pl = [];
     if (p.descenso_hombro) pl.push(`Descenso hombro ${p.descenso_hombro.cm} cm (${p.descenso_hombro.lado_descendido})`);
@@ -519,6 +544,13 @@ async function generar() {
   cont.innerHTML = '<div class="hint">La IA está interpretando los hallazgos marcados…</div>';
   try {
     const edadVal = document.getElementById('f_edad').value;
+    const col = ultimaEvaluacion.colored;
+    const sinExcluidos = {
+      fuerza: (col.fuerza || []).filter(x => !x.excluido),
+      forceDecks: (col.forceDecks || []).filter(x => !x.excluido),
+      movilidad: (col.movilidad || []).filter(x => !x.excluido),
+      postura: col.postura,
+    };
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
@@ -526,7 +558,7 @@ async function generar() {
         poblacion: (ultimaClasificacion && ultimaClasificacion.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
       },
-      hallazgos: ultimaEvaluacion.colored,
+      hallazgos: sinExcluidos,
       fecha: ultimaEvaluacion.datos.fechaEvaluacion,
     };
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
@@ -549,9 +581,51 @@ function mostrarBorrador(texto) {
   const cont = document.getElementById('valdBorrador');
   cont.innerHTML =
     '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--azul); margin-bottom:4px;">Borrador para revisar y firmar</div>' +
-    '<textarea id="valdBorradorTxt" style="width:100%; min-height:220px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;"></textarea>' +
-    '<div class="hint">Editá lo que quieras. Guardar firmado en la HC del paciente = próximo paso.</div>';
+    '<textarea id="valdBorradorTxt" style="width:100%; min-height:240px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;"></textarea>' +
+    '<div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
+      '<button class="btn" id="btnGuardarNota" onclick="guardarNotaProfes()">💾 Firmar y guardar en HC</button>' +
+      '<span class="hint" style="margin:0;">Queda como Nota para Profes (interna) en la HC del paciente.</span>' +
+    '</div>';
   document.getElementById('valdBorradorTxt').value = texto;
+}
+
+async function guardarNotaProfes() {
+  if (!pacienteSel) { toast('Seleccioná un paciente.'); return; }
+  const ta = document.getElementById('valdBorradorTxt');
+  const texto = ((ta && ta.value) || '').trim();
+  if (!texto) { toast('No hay borrador para guardar.'); return; }
+  if (!usuarioActual) await detectarUsuario();
+  if (!usuarioActual) { toast('No detectamos tu usuario. Iniciá sesión para guardar.'); return; }
+  const btn = document.getElementById('btnGuardarNota');
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  try {
+    const { data: hcs, error: e1 } = await sb.from('historias_clinicas')
+      .select('id').eq('persona_id', pacienteSel.id).is('fusionada_en', null)
+      .order('completado_en', { ascending: false }).limit(1);
+    if (e1) throw e1;
+    if (!hcs || !hcs.length) {
+      toast('El paciente no tiene HC abierta. Abrí una primero y reintentá.');
+      btn.disabled = false; btn.textContent = '💾 Firmar y guardar en HC';
+      return;
+    }
+    const fecha = (ultimaEvaluacion && ultimaEvaluacion.datos.fechaEvaluacion) || '';
+    const encabezado = '🔬 BiOLAB — Consideraciones para el Profesor (evaluación VALD ' + fecha + ')\n\n';
+    const { error: e2 } = await sb.from('hc_observaciones').insert({
+      historia_id: hcs[0].id,
+      persona_id: pacienteSel.id,
+      tipo: 'nota',
+      texto: encabezado + texto,
+      autor_id: usuarioActual.id,
+      autor_nombre: usuarioActual.nombre,
+      autor_email: usuarioActual.email
+    });
+    if (e2) throw e2;
+    btn.textContent = '✅ Guardada en la HC';
+    toast('Nota para profes guardada en la HC del paciente.');
+  } catch (e) {
+    toast('Error al guardar: ' + (e.message || e));
+    btn.disabled = false; btn.textContent = '💾 Firmar y guardar en HC';
+  }
 }
 
 // ---- PASO 1: clasificación de población ----
@@ -629,6 +703,27 @@ async function guardarClasificacion() {
     btn.disabled = false;
   }
 }
+
+let usuarioActual = null;
+async function detectarUsuario() {
+  try {
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) return;
+    let persona = null;
+    const { data: porEmail } = await sb.from('personas')
+      .select('id, nombre, rol_principal').ilike('email', user.email).maybeSingle();
+    persona = porEmail;
+    if (!persona) {
+      const { data: porAuth } = await sb.from('personas')
+        .select('id, nombre, rol_principal').eq('auth_user_id', user.id).maybeSingle();
+      persona = porAuth;
+    }
+    usuarioActual = persona
+      ? { id: persona.id, nombre: persona.nombre, email: user.email }
+      : { id: null, nombre: user.email, email: user.email };
+  } catch (e) { console.warn('No se pudo detectar usuario:', e.message); }
+}
+detectarUsuario();
 
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
 </script>
