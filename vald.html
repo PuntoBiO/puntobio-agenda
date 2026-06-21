@@ -277,11 +277,17 @@
 
     <div class="card">
       <p class="card-title">3 · Evaluación BiOLAB</p>
-      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
-        <input id="valdProfileId" type="text" placeholder="VALD profileId (vacío = Daniela, demo)"
-               style="flex:1; min-width:240px; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+        <label style="font-size:12px; color:var(--muted);">Fecha de la toma (opcional)
+          <input id="valdFecha" type="date" style="margin-left:6px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:13px;">
+        </label>
         <button class="btn" id="btnTraerVALD" onclick="traerEvaluacionVALD()">🔬 Traer evaluación de VALD</button>
       </div>
+      <div style="margin-bottom:8px;">
+        <input id="valdProfileId" type="text" placeholder="(avanzado) forzar un profileId de VALD — normalmente dejalo vacío"
+               style="width:100%; box-sizing:border-box; padding:8px 12px; border:1px solid var(--border); border-radius:8px; font-size:12px; color:var(--muted);">
+      </div>
+      <div id="valdPicker" style="margin-bottom:10px;"></div>
       <div id="valdReport" class="vald-report">
         <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
       </div>
@@ -342,7 +348,7 @@ async function buscar() {
   try {
     const { data, error } = await sb
       .from('personas')
-      .select('id, dni, nombre, fecha_nacimiento')
+      .select('id, dni, nombre, fecha_nacimiento, vald_profile_id')
       .or(`nombre.ilike.%${q}%,dni.ilike.%${q}%`)
       .order('nombre', { ascending: true })
       .limit(20);
@@ -392,27 +398,60 @@ function resetEvaluacion() {
   if (b) b.disabled = true;
   const pid = document.getElementById('valdProfileId');
   if (pid) pid.value = '';
+  const fch = document.getElementById('valdFecha');
+  if (fch) fch.value = '';
+  const pck = document.getElementById('valdPicker');
+  if (pck) pck.innerHTML = '';
   const mot = document.getElementById('valdMotivo');
   if (mot) mot.value = '';
   const bor = document.getElementById('valdBorrador');
   if (bor) bor.innerHTML = '';
 }
 
-async function traerEvaluacionVALD() {
+async function traerEvaluacionVALD(forzarProfileId) {
   if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
   const btn = document.getElementById('btnTraerVALD');
   const cont = document.getElementById('valdReport');
+  const picker = document.getElementById('valdPicker');
+  if (picker) picker.innerHTML = '';
   btn.disabled = true;
-  cont.innerHTML = '<div class="hint">Consultando a VALD y aplicando normas… (unos segundos)</div>';
+  cont.innerHTML = '<div class="hint">Buscando el perfil del paciente en VALD y aplicando normas… (unos segundos)</div>';
   try {
-    const pid = document.getElementById('valdProfileId').value.trim();
-    let url = SUPABASE_URL + '/functions/v1/vald-datos-ts';
-    if (pid) url += '?profileId=' + encodeURIComponent(pid);
+    const manual = document.getElementById('valdProfileId').value.trim();
+    const pid = forzarProfileId || manual || (pacienteSel.vald_profile_id || '');
+    const fecha = document.getElementById('valdFecha').value; // yyyy-mm-dd o ''
+    const qs = [];
+    if (pid) {
+      qs.push('profileId=' + encodeURIComponent(pid));
+    } else {
+      qs.push('nombre=' + encodeURIComponent(pacienteSel.nombre || ''));
+      if (pacienteSel.dni) qs.push('dni=' + encodeURIComponent(pacienteSel.dni));
+    }
+    if (fecha) qs.push('from=' + encodeURIComponent(fecha + 'T00:00:00.0000000Z'));
+    const url = SUPABASE_URL + '/functions/v1/vald-datos-ts?' + qs.join('&');
     const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY } });
     const txt = await resp.text();
     let datos;
     try { datos = JSON.parse(txt); } catch { throw new Error(txt || ('HTTP ' + resp.status)); }
     if (!resp.ok) throw new Error('VALD HTTP ' + resp.status);
+
+    // El sistema no encontró un único perfil → muestro opciones para elegir
+    if (datos.needsPicker) {
+      renderPickerVALD(datos.candidatos || []);
+      cont.innerHTML = '<div class="hint">No pude identificar un único perfil de VALD para este paciente. Elegí cuál es 👇</div>';
+      return;
+    }
+
+    // Si vino sin tests
+    const vacio = !datos.postura && !(datos.movilidad || []).length && !(datos.forceDecks || []).length && !(datos.fuerza || []).length;
+    if (vacio) {
+      cont.innerHTML = '<div class="hint">No encontré tomas de VALD para este paciente'
+        + (fecha ? ' en esa fecha.' : ' en los últimos 120 días.')
+        + ' Si la toma es más vieja, poné la fecha de la toma arriba y volvé a intentar.'
+        + (datos.perfil ? ' (Perfil VALD: ' + escapeHtml(datos.perfil.nombre || '') + ')' : '') + '</div>';
+      if (datos.perfil && datos.perfil.profileId) vincularPerfilVALD(datos.perfil.profileId, false);
+      return;
+    }
 
     const { data: normas, error } = await sb.from('biolab_normas')
       .select('test_id,bloque,sexo,corte_verde,corte_amarillo,corte_rojo');
@@ -422,10 +461,50 @@ async function traerEvaluacionVALD() {
     ultimaEvaluacion = { datos, colored };
     cont.innerHTML = renderEvaluacion(colored, datos);
     document.getElementById('btnGenIA').disabled = false;
+
+    // Guardo el vínculo persona ↔ perfil VALD para la próxima (silencioso)
+    if (datos.profileId && pacienteSel.vald_profile_id !== datos.profileId) {
+      vincularPerfilVALD(datos.profileId, false);
+    }
   } catch (e) {
     cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
   } finally {
     btn.disabled = false;
+  }
+}
+
+function renderPickerVALD(candidatos) {
+  const picker = document.getElementById('valdPicker');
+  if (!picker) return;
+  if (!candidatos.length) {
+    picker.innerHTML = '<div class="hint">No encontré ningún perfil parecido en VALD. '
+      + 'Verificá que el paciente tenga evaluaciones cargadas en VALD, o pegá su profileId en el campo avanzado de abajo.</div>';
+    return;
+  }
+  picker.innerHTML = '<div style="font-size:12px; color:var(--muted); margin:6px 0;">Posibles perfiles en VALD (tocá el correcto):</div>'
+    + candidatos.map(c =>
+        '<div class="result-item" style="cursor:pointer" onclick="elegirPerfilVALD(\'' + c.profileId + '\')">'
+        + '<span class="nom">' + escapeHtml(c.nombre || '(sin nombre)') + '</span>'
+        + '<span class="meta">' + (c.dni ? 'DNI ' + escapeHtml(c.dni) : '') + '</span>'
+        + '</div>').join('');
+}
+
+function elegirPerfilVALD(profileId) {
+  const pck = document.getElementById('valdPicker');
+  if (pck) pck.innerHTML = '';
+  vincularPerfilVALD(profileId, true);
+  traerEvaluacionVALD(profileId);
+}
+
+async function vincularPerfilVALD(profileId, avisar) {
+  if (!pacienteSel || !profileId) return;
+  try {
+    pacienteSel.vald_profile_id = profileId;
+    const { error } = await sb.from('personas').update({ vald_profile_id: profileId }).eq('id', pacienteSel.id);
+    if (error) throw error;
+    if (avisar) toast('Perfil de VALD vinculado a ' + (pacienteSel.nombre || 'el paciente') + '.');
+  } catch (e) {
+    if (avisar) toast('No pude guardar el vínculo (revisá permisos de personas): ' + (e.message || e));
   }
 }
 
