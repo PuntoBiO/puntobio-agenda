@@ -38,7 +38,7 @@
     }
     // G3 — Performance
     if (p.compite || p.objetivo_rendimiento_competicion) {
-      var modalidad = p.comparten_nivel_grupo ? 'grupal (nivel compartido)' : 'individual';
+      var modalidad = p.comparten_nivel_grupo ? 'grupal (nivel compartido)' : 'individual (trabajo solo para marcas)';
       var revisar = p.edad >= 60;
       return armar('A', 'G3',
         'Objetivo de rendimiento / competencia (amateur o profesional)',
@@ -46,12 +46,13 @@
         revisar ? 'Deportista ≥60: confirmar ausencia de sarcopenia' : null);
     }
     // G4 — Por defecto
-    var subnivel = null, modalidad2 = 'grupal / circuitos';
+    var subnivel = null, base = 'grupal / circuitos';
     if (p.experiencia_entrenamiento === 'avanzado') {
-      subnivel = 'Grupo 2'; modalidad2 = 'grupal alta intensidad';
+      subnivel = 'Grupo 2'; base = 'grupal alta intensidad';
     } else if (p.experiencia_entrenamiento === 'novato' || p.experiencia_entrenamiento === 'intermedio') {
-      subnivel = 'Grupo 1'; modalidad2 = 'grupal / circuitos adaptados';
+      subnivel = 'Grupo 1'; base = 'grupal / circuitos adaptados';
     }
+    var modalidad2 = p.comparten_nivel_grupo ? base : 'individual (su estado no permite grupo)';
     return armar('D', 'G4',
       'Sin readaptación / sarcopenia / objetivo de rendimiento: acondicionamiento general',
       subnivel, modalidad2, false, null);
