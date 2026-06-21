@@ -141,6 +141,18 @@
   .pob-legend b { color: var(--txt); }
   .pob-legend .si { color: var(--verde); font-weight: 700; }
   .pob-legend .no { color: #dc2626; font-weight: 700; }
+
+  /* --- Informe VALD pintado --- */
+  .vald-report { border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:#fff; min-height:70px; font-size:13px; }
+  .vr-summary { display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 10px; }
+  .vr-pill { border-radius:999px; padding:3px 11px; font-size:12px; font-weight:700; }
+  .vr-section { margin-top:12px; }
+  .vr-section h4 { margin:0 0 4px; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--azul); }
+  .vr-row { display:flex; align-items:flex-start; gap:8px; padding:5px 0; border-bottom:1px solid #f4f6f9; }
+  .vr-row .em { font-size:15px; line-height:1.3; }
+  .vr-row .nom { flex:1; font-weight:600; }
+  .vr-row .det { color:var(--txt-soft); font-size:12px; font-weight:400; margin-top:1px; }
+  .vr-fuente { color:#aab4c0; font-size:10px; white-space:nowrap; padding-top:2px; }
 </style>
 </head>
 <body>
@@ -252,30 +264,17 @@
     </div>
 
     <div class="card">
-      <p class="card-title">3 · Evaluación BiOLAB <span class="pending-tag">se activa al conectar</span></p>
-      <div class="work-grid">
-        <div>
-          <div class="dropzone" id="dz" onclick="document.getElementById('file').click()">
-            <div class="big">⬆️</div>
-            <div>Subí el CSV o PDF que exportás de VALD Hub</div>
-            <div style="font-size:12px; margin-top:4px;">ForceDecks · HumanTrak</div>
-          </div>
-          <input id="file" type="file" accept=".csv,.pdf" style="display:none" onchange="archivoElegido(this)">
-          <div class="file-pill" id="filePill">
-            <span id="fileName"></span>
-            <span style="cursor:pointer" onclick="quitarArchivo()">✕</span>
-          </div>
-          <div class="hint">
-            El archivo se guardará como adjunto en la HC del paciente (con control de si lo ve o no en Mi Espacio)
-            cuando activemos esta parte.
-          </div>
-        </div>
-        <div>
-          <button class="btn" id="btnGen" onclick="generar()" disabled style="width:100%">
-            🤖 Generar informe BiOLAB con IA
-          </button>
-          <div class="preview" id="preview" style="margin-top:10px">El informe generado va a aparecer acá para que lo revises y firmes antes de guardarlo.</div>
-        </div>
+      <p class="card-title">3 · Evaluación BiOLAB</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
+        <input id="valdProfileId" type="text" placeholder="VALD profileId (vacío = Daniela, demo)"
+               style="flex:1; min-width:240px; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px;">
+        <button class="btn" id="btnTraerVALD" onclick="traerEvaluacionVALD()">🔬 Traer evaluación de VALD</button>
+      </div>
+      <div id="valdReport" class="vald-report">
+        <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
+      </div>
+      <div style="margin-top:12px;">
+        <button class="btn" id="btnGenIA" onclick="generar()" disabled>🤖 Interpretar y redactar con IA</button>
       </div>
     </div>
   </div>
@@ -358,7 +357,7 @@ function seleccionar(p) {
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('results').innerHTML = '';
   document.getElementById('q').value = '';
-  quitarArchivo();
+  resetEvaluacion();
 
   // Autocompletar edad y resetear la clasificación de población
   document.getElementById('f_edad').value = (edad != null ? edad : '');
@@ -367,23 +366,147 @@ function seleccionar(p) {
   document.getElementById('btnGuardarPob').style.display = 'none';
 }
 
-function archivoElegido(input) {
-  const f = input.files && input.files[0];
-  if (!f) return;
-  document.getElementById('fileName').textContent = '📄 ' + f.name;
-  document.getElementById('filePill').style.display = 'flex';
-  toast('Archivo cargado. La generación se activa al conectar VALD/IA.');
+// ---- PASO 4: traer VALD + pintar 🟢🟡🔴 con las normas ----
+let ultimaEvaluacion = null;
+
+function resetEvaluacion() {
+  ultimaEvaluacion = null;
+  const r = document.getElementById('valdReport');
+  if (r) r.innerHTML = '<div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>';
+  const b = document.getElementById('btnGenIA');
+  if (b) b.disabled = true;
+  const pid = document.getElementById('valdProfileId');
+  if (pid) pid.value = '';
 }
 
-function quitarArchivo() {
-  document.getElementById('file').value = '';
-  document.getElementById('filePill').style.display = 'none';
+async function traerEvaluacionVALD() {
+  if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  const btn = document.getElementById('btnTraerVALD');
+  const cont = document.getElementById('valdReport');
+  btn.disabled = true;
+  cont.innerHTML = '<div class="hint">Consultando a VALD y aplicando normas… (unos segundos)</div>';
+  try {
+    const pid = document.getElementById('valdProfileId').value.trim();
+    let url = SUPABASE_URL + '/functions/v1/vald-datos-ts';
+    if (pid) url += '?profileId=' + encodeURIComponent(pid);
+    const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY } });
+    const txt = await resp.text();
+    let datos;
+    try { datos = JSON.parse(txt); } catch { throw new Error(txt || ('HTTP ' + resp.status)); }
+    if (!resp.ok) throw new Error('VALD HTTP ' + resp.status);
+
+    const { data: normas, error } = await sb.from('biolab_normas')
+      .select('test_id,bloque,sexo,corte_verde,corte_amarillo,corte_rojo');
+    if (error) throw error;
+
+    const colored = pintarEvaluacion(datos, normas || []);
+    ultimaEvaluacion = { datos, colored };
+    cont.innerHTML = renderEvaluacion(colored, datos);
+    document.getElementById('btnGenIA').disabled = false;
+  } catch (e) {
+    cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function pintarEvaluacion(datos, normas) {
+  const rLSI = (normas || []).find(n => n.test_id === 'R-LSI' && n.bloque === 'GENERICA') || {};
+  const vA = rLSI.corte_verde != null ? Number(rLSI.corte_verde) : 10;
+  const aA = rLSI.corte_amarillo != null ? Number(rLSI.corte_amarillo) : 15;
+  const N_PER_KG = 9.80665;
+  const conteo = { rojo: 0, amar: 0, verde: 0, revisar: 0, vigilar: 0 };
+  const colorAsim = (a) => { a = Math.abs(a); return a < vA ? '🟢' : (a <= aA ? '🟡' : '🔴'); };
+  const cnt = (c) => { if (c === '🔴') conteo.rojo++; else if (c === '🟡') conteo.amar++; else if (c === '🟢') conteo.verde++; };
+
+  // FUERZA (DynaMo)
+  const fuerza = [];
+  for (const f of (datos.fuerza || [])) {
+    const c = colorAsim(f.asimetria_pct); cnt(c);
+    const debil = f.lado_fuerte === 'derecho' ? 'izquierdo' : (f.lado_fuerte === 'izquierdo' ? 'derecho' : '—');
+    let det = `${f.asimetria_pct}% asim · L ${f.izquierda_N} / R ${f.derecha_N} N · débil: ${debil}`;
+    let fuente = 'Noyes_1991';
+    if (/Prensi/i.test(f.grupo)) {
+      const Lkg = f.izquierda_N / N_PER_KG, Rkg = f.derecha_N / N_PER_KG;
+      det += ` · grip ${Lkg.toFixed(1)}/${Rkg.toFixed(1)} kg${Math.min(Lkg, Rkg) < 16 ? ' ⚠️<16' : ''}`;
+      fuente = 'Noyes_1991 + EWGSOP2';
+    }
+    fuerza.push({ em: c, nom: f.grupo, det, fuente });
+  }
+
+  // FORCEDECKS (con guardia de artefactos)
+  const forceDecks = [];
+  for (const t of (datos.forceDecks || [])) {
+    for (const nombre in (t.resultados || {})) {
+      const r = t.resultados[nombre];
+      const L = r.lados.Left, R = r.lados.Right, A = r.lados.Asym, Trial = r.lados.Trial;
+      if (/^CoP/.test(nombre) && Trial != null) {
+        conteo.vigilar++;
+        forceDecks.push({ em: '⚪', nom: `${t.prueba} · ${nombre}`, det: `${Trial} mm · control unipodal (sin norma poblacional)`, fuente: 'LSI+delta' });
+        continue;
+      }
+      if (L != null && R != null) {
+        if (L < 0 || R < 0) {
+          conteo.revisar++;
+          forceDecks.push({ em: '⚠️', nom: `${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar dato`, fuente: '—' });
+          continue;
+        }
+        const c = colorAsim(A); cnt(c);
+        forceDecks.push({ em: c, nom: `${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} N`, fuente: 'LSI+delta' });
+      }
+    }
+  }
+
+  // MOVILIDAD (solo Primary o magnitud real ≥10 → evita ruido de valores chicos)
+  const movilidad = [];
+  for (const p of (datos.movilidad || [])) {
+    for (const m of (p.metricas || [])) {
+      const rel = m.clasificacion === 'Primary' ||
+        (m.izquierda != null && m.derecha != null && Math.max(Math.abs(m.izquierda), Math.abs(m.derecha)) >= 10);
+      if (!rel) continue;
+      if (m.asimetria_pct == null) {
+        cnt('🟢');
+        movilidad.push({ em: '🟢', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor}° (referencia HumanTrak)`, fuente: 'HumanTrak' });
+        continue;
+      }
+      const c = colorAsim(m.asimetria_pct); cnt(c);
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}`, fuente: 'HumanTrak / LSI' });
+    }
+  }
+
+  return { fuerza, forceDecks, movilidad, postura: datos.postura, conteo };
+}
+
+function renderEvaluacion(c, datos) {
+  const fmtRows = (arr) => arr.map(x =>
+    `<div class="vr-row"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span></div>`
+  ).join('');
+  const co = c.conteo;
+  let html = `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
+  html += `<div class="vr-summary">
+    <span class="vr-pill" style="background:#fee2e2;color:#b91c1c">🔴 ${co.rojo}</span>
+    <span class="vr-pill" style="background:#fef3c7;color:#92400e">🟡 ${co.amar}</span>
+    <span class="vr-pill" style="background:#dcfce7;color:#166534">🟢 ${co.verde}</span>
+    <span class="vr-pill" style="background:#fde68a;color:#92400e">⚠️ revisar ${co.revisar}</span>
+    <span class="vr-pill" style="background:#f1f5f9;color:#475569">⚪ vigilar ${co.vigilar}</span>
+  </div>`;
+  if (c.fuerza.length) html += `<div class="vr-section"><h4>Fuerza · DynaMo</h4>${fmtRows(c.fuerza)}</div>`;
+  if (c.forceDecks.length) html += `<div class="vr-section"><h4>ForceDecks</h4>${fmtRows(c.forceDecks)}</div>`;
+  if (c.movilidad.length) html += `<div class="vr-section"><h4>Movilidad · HumanTrak (Primary)</h4>${fmtRows(c.movilidad)}</div>`;
+  if (c.postura) {
+    const p = c.postura, pl = [];
+    if (p.descenso_hombro) pl.push(`Descenso hombro ${p.descenso_hombro.cm} cm (${p.descenso_hombro.lado_descendido})`);
+    if (p.descenso_pelvis) pl.push(`Descenso pelvis ${p.descenso_pelvis.cm} cm (${p.descenso_pelvis.lado_descendido})`);
+    if (p.flexion_cervical_grados != null) pl.push(`Flexión cervical ${p.flexion_cervical_grados}°`);
+    if (p.anteversion_pelvica_grados != null) pl.push(`Anteversión pélvica ${p.anteversion_pelvica_grados}°`);
+    html += `<div class="vr-section"><h4>Postura</h4><div class="det" style="font-size:12px">${pl.map(escapeHtml).join(' · ')}</div></div>`;
+  }
+  return html;
 }
 
 function generar() {
-  // Placeholder honesto: la generación real se enchufa cuando esté el Edge Function
-  // (informe-biolab) + la API key de la IA. No simula un informe.
-  toast('Pendiente: conectar la API de VALD y la IA. Lo activamos en el próximo paso.');
+  // Paso 5 (próximo): manda lo marcado 🟡🔴 a la IA para que lo interprete y Lu firme.
+  toast('Paso 5: interpretación con IA. Lo activamos a continuación.');
 }
 
 // ---- PASO 1: clasificación de población ----
