@@ -285,8 +285,17 @@
       <div class="pob-result" id="pobResult"></div>
     </div>
 
+    <!-- 3 · PROTOCOLO A REALIZAR (según población) -->
+    <div class="card" id="cardProtocolo" style="display:none">
+      <p class="card-title">3 · Protocolo a realizar (según población)</p>
+      <div class="hint" style="margin-top:0">Acá aparece el protocolo según la población que clasificaste. Andá tildando cada test a medida que se lo hacés al paciente, así no te olvidás de ninguno. Cuando termines de tomarlo, apretá <b>"Evaluación realizada"</b>.</div>
+      <div id="protocoloPanel" style="margin:10px 0;"></div>
+      <button class="btn" id="btnEvalRealizada" onclick="guardarProtocolo()">✅ Evaluación realizada — guardar protocolo</button>
+      <div id="protocoloGuardado" class="hint" style="margin-top:8px;"></div>
+    </div>
+
     <div class="card">
-      <p class="card-title">3 · Evaluación BiOLAB</p>
+      <p class="card-title">4 · Evaluación BiOLAB</p>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
         <label style="font-size:12px; color:var(--muted);">Fecha de la toma (opcional)
           <input id="valdFecha" type="date" style="margin-left:6px; padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:13px;">
@@ -298,9 +307,6 @@
                style="width:100%; box-sizing:border-box; padding:8px 12px; border:1px solid var(--border); border-radius:8px; font-size:12px; color:var(--muted);">
       </div>
       <div id="valdPicker" style="margin-bottom:10px;"></div>
-
-      <!-- CHECKLIST DEL PROTOCOLO (según población) -->
-      <div id="protocoloPanel" style="display:none; margin-bottom:12px;"></div>
 
       <div id="valdReport" class="vald-report">
         <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
@@ -412,6 +418,11 @@ function resetEvaluacion() {
   protocoloItems = []; tildados = {};
   const pp = document.getElementById('protocoloPanel');
   if (pp) { pp.style.display = 'none'; pp.innerHTML = ''; }
+  const cardProt = document.getElementById('cardProtocolo');
+  if (cardProt) cardProt.style.display = 'none';
+  const btnEv = document.getElementById('btnEvalRealizada');
+  if (btnEv) { btnEv.disabled = false; btnEv.textContent = '✅ Evaluación realizada — guardar protocolo'; }
+  const gp = document.getElementById('protocoloGuardado'); if (gp) gp.innerHTML = '';
   const fin = document.getElementById('btnFinalizarEval');
   if (fin) fin.style.display = 'none';
   const r = document.getElementById('valdReport');
@@ -629,7 +640,7 @@ function mostrarChecklist() {
   if (!items) {
     protocoloItems = [];
     panel.style.display = 'block';
-    panel.innerHTML = '<div class="hint">Clasificá la población (paso 2) y volvé a traer la evaluación para ver el checklist del protocolo.</div>';
+    panel.innerHTML = '<div class="hint">Clasificá la población arriba para ver el protocolo a realizar.</div>';
     return;
   }
   protocoloItems = items.slice();
@@ -769,8 +780,10 @@ async function traerEvaluacionVALD(forzarProfileId) {
     const colored = pintarEvaluacion(datos, normas || []);
     ultimaEvaluacion = { datos, colored };
     cont.innerHTML = renderEvaluacion(colored, datos);
-    // Checklist del protocolo: lo mostramos, auto-tildamos lo que llegó y habilitamos "Finalizar"
-    mostrarChecklist();
+    // Checklist del protocolo: ya quedó armado en el paso 3; sólo auto-tildamos lo que llegó de VALD
+    const cardProt2 = document.getElementById('cardProtocolo');
+    if (cardProt2) cardProt2.style.display = 'block';
+    if (!protocoloItems.length) mostrarChecklist();
     autoTilde(datos);
     const finBtn = document.getElementById('btnFinalizarEval');
     if (finBtn) finBtn.style.display = 'inline-block';
@@ -1224,7 +1237,15 @@ function clasificarYMostrar() {
 
   box.innerHTML = html;
   box.style.display = 'block';
-  document.getElementById('btnGuardarPob').style.display = 'inline-block';
+
+  // Paso 3: mostrar el protocolo de la población para ir tildando a mano (todavía sin VALD)
+  protocoloItems = []; tildados = {};
+  const cardProt = document.getElementById('cardProtocolo');
+  if (cardProt) cardProt.style.display = 'block';
+  const btnEv = document.getElementById('btnEvalRealizada');
+  if (btnEv) { btnEv.disabled = false; btnEv.textContent = '✅ Evaluación realizada — guardar protocolo'; }
+  const gp = document.getElementById('protocoloGuardado'); if (gp) gp.innerHTML = '';
+  mostrarChecklist();
 }
 
 async function guardarClasificacion() {
@@ -1250,6 +1271,38 @@ async function guardarClasificacion() {
     toast('Error al guardar: ' + (e.message || e));
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function guardarProtocolo() {
+  if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  if (!ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
+  if (!protocoloItems.length) { toast('No hay protocolo cargado.'); return; }
+  const btn = document.getElementById('btnEvalRealizada');
+  btn.disabled = true;
+  try {
+    const items = protocoloItems.map(it => ({
+      id: it.id, sistema: it.sistema || 'Manual', label: it.label,
+      hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra
+    }));
+    const realizados = items.filter(i => i.hecho).length;
+    const protocolo = { poblacion: pobActual(), total: items.length, realizados, items };
+    const r = ultimaClasificacion.resultado;
+    const { error } = await sb.from('biolab_evaluaciones').insert({
+      persona_id: String(pacienteSel.id),
+      ingreso: ultimaClasificacion.ingreso,
+      poblacion: r.poblacion, subnivel: r.subnivel, modalidad: r.modalidad,
+      gate: r.gate, motivo: r.motivo, revisar: r.revisar, version_logica: r.version_logica,
+      protocolo
+    });
+    if (error) throw error;
+    const g = document.getElementById('protocoloGuardado');
+    if (g) g.innerHTML = '✅ Protocolo guardado en la HC (' + realizados + '/' + items.length + ' tests realizados). Ahora podés traer la evaluación de VALD abajo (paso 4).';
+    btn.textContent = '✅ Protocolo guardado';
+    toast('Protocolo guardado en la HC del paciente.');
+  } catch (e) {
+    btn.disabled = false;
+    toast('Error al guardar protocolo: ' + (e.message || e));
   }
 }
 
