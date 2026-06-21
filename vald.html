@@ -107,6 +107,29 @@
     font-size: 14px; display: none; z-index: 50; max-width: 90%;
   }
   .toast.show { display: block; }
+
+  /* --- Formulario de ingreso / clasificación de población --- */
+  .pob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  @media (max-width: 720px) { .pob-grid { grid-template-columns: 1fr; } }
+  .pob-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .pob-field label { color: var(--txt-soft); font-weight: 600; }
+  .pob-field select, .pob-field input[type="number"] {
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; outline: none;
+  }
+  .pob-check { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 0; }
+  .pob-check input { width: 16px; height: 16px; }
+  .pob-result {
+    margin-top: 12px; border-radius: 10px; padding: 14px 16px; font-size: 14px; line-height: 1.5;
+    border: 1px solid var(--border); background: #f8fbff; display: none;
+  }
+  .pob-badge {
+    display: inline-block; font-weight: 700; padding: 3px 12px; border-radius: 999px;
+    font-size: 15px; color: #fff;
+  }
+  .pob-revisar {
+    margin-top: 8px; background: var(--naranja-soft); border-left: 3px solid var(--naranja);
+    color: #92400e; padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -149,6 +172,56 @@
       </div>
     </div>
 
+    <div class="card" id="cardPoblacion">
+      <p class="card-title">2.5 · Ingreso y clasificación de población</p>
+      <div class="pob-grid">
+        <div class="pob-field">
+          <label>Edad</label>
+          <input type="number" id="f_edad" min="0" max="120" placeholder="—">
+        </div>
+        <div class="pob-field">
+          <label>Objetivo principal</label>
+          <select id="f_objetivo">
+            <option value="salud_cotidiana">Salud / bienestar cotidiano</option>
+            <option value="rendimiento">Rendimiento / competencia</option>
+            <option value="volver_a_entrenar">Volver a entrenar (post-lesión)</option>
+            <option value="independencia_AVD">Independencia / AVD</option>
+          </select>
+        </div>
+        <div class="pob-field">
+          <label>Experiencia de entrenamiento</label>
+          <select id="f_exp">
+            <option value="">— (sin dato)</option>
+            <option value="novato">Novato</option>
+            <option value="intermedio">Intermedio</option>
+            <option value="avanzado">Avanzado</option>
+          </select>
+        </div>
+        <div class="pob-field">
+          <label>SARC-F (0–10, solo 60+)</label>
+          <input type="number" id="f_sarcf" min="0" max="10" value="0">
+        </div>
+      </div>
+
+      <div style="margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:2px 16px;">
+        <label class="pob-check"><input type="checkbox" id="f_banderas"> Banderas rojas (dolor agudo / signos médicos)</label>
+        <label class="pob-check"><input type="checkbox" id="f_fragil"> Signos de fragilidad</label>
+        <label class="pob-check"><input type="checkbox" id="f_lesion"> Lesión / cirugía reciente</label>
+        <label class="pob-check"><input type="checkbox" id="f_dolor"> Dolor crónico en recuperación</label>
+        <label class="pob-check"><input type="checkbox" id="f_alta"> Tiene alta de fisioterapia</label>
+        <label class="pob-check"><input type="checkbox" id="f_compite"> Compite</label>
+        <label class="pob-check"><input type="checkbox" id="f_rend"> Objetivo de rendimiento/marcas</label>
+        <label class="pob-check"><input type="checkbox" id="f_grupo"> Comparte nivel para grupo</label>
+      </div>
+
+      <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" onclick="clasificarYMostrar()">⚙️ Clasificar población</button>
+        <button class="btn ghost" id="btnGuardarPob" onclick="guardarClasificacion()" style="display:none">💾 Guardar clasificación</button>
+      </div>
+
+      <div class="pob-result" id="pobResult"></div>
+    </div>
+
     <div class="card">
       <p class="card-title">3 · Evaluación BiOLAB <span class="pending-tag">se activa al conectar</span></p>
       <div class="work-grid">
@@ -187,12 +260,14 @@
 <div class="toast" id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="clasificador-poblacion.js"></script>
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxcGp0b2lpY3RuemNhc3hmdWNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MDQwOTMsImV4cCI6MjA5NDI4MDA5M30.N1pG65Bm0EmPqxe8hzEFQqE0v1_N5pwrv8HO8We8Xdw';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
 
 let pacienteSel = null;
+let ultimaClasificacion = null;
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -255,6 +330,12 @@ function seleccionar(p) {
   document.getElementById('results').innerHTML = '';
   document.getElementById('q').value = '';
   quitarArchivo();
+
+  // Autocompletar edad y resetear la clasificación de población
+  document.getElementById('f_edad').value = (edad != null ? edad : '');
+  ultimaClasificacion = null;
+  document.getElementById('pobResult').style.display = 'none';
+  document.getElementById('btnGuardarPob').style.display = 'none';
 }
 
 function archivoElegido(input) {
@@ -274,6 +355,82 @@ function generar() {
   // Placeholder honesto: la generación real se enchufa cuando esté el Edge Function
   // (informe-biolab) + la API key de la IA. No simula un informe.
   toast('Pendiente: conectar la API de VALD y la IA. Lo activamos en el próximo paso.');
+}
+
+// ---- PASO 1: clasificación de población ----
+function chk(id) { return document.getElementById(id).checked; }
+
+const COLOR_POB = { A: '#16a34a', B: '#d97706', C: '#dc2626', D: '#eab308', DERIVACION_CLINICA: '#64748b' };
+const NOMBRE_POB = {
+  A: 'Población A · Performance', B: 'Población B · Readaptación',
+  C: 'Población C · Salud & Fuerza Vital', D: 'Población D · Fitness & Bienestar',
+  DERIVACION_CLINICA: 'Derivación clínica (no apto aún)'
+};
+
+function leerIngreso() {
+  return {
+    edad: Number(document.getElementById('f_edad').value) || 0,
+    banderas_rojas: chk('f_banderas'),
+    lesion_o_cirugia_reciente: chk('f_lesion'),
+    dolor_cronico_en_readaptacion: chk('f_dolor'),
+    alta_fisioterapia: chk('f_alta'),
+    objetivo_rendimiento_competicion: chk('f_rend'),
+    compite: chk('f_compite'),
+    sarc_f: Number(document.getElementById('f_sarcf').value) || 0,
+    signos_fragilidad: chk('f_fragil'),
+    objetivo: document.getElementById('f_objetivo').value,
+    experiencia_entrenamiento: document.getElementById('f_exp').value || undefined,
+    comparten_nivel_grupo: chk('f_grupo')
+  };
+}
+
+function clasificarYMostrar() {
+  if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  if (typeof window.clasificarPoblacion !== 'function') {
+    toast('No cargó clasificador-poblacion.js. Verificá que esté subido.'); return;
+  }
+  const ingreso = leerIngreso();
+  const r = window.clasificarPoblacion(ingreso);
+  ultimaClasificacion = { ingreso: ingreso, resultado: r };
+
+  const box = document.getElementById('pobResult');
+  let html = '<span class="pob-badge" style="background:' + (COLOR_POB[r.poblacion] || '#334155') + '">' +
+    escapeHtml(NOMBRE_POB[r.poblacion] || r.poblacion) + '</span>';
+  if (r.subnivel) html += ' <b>' + escapeHtml(r.subnivel) + '</b>';
+  if (r.modalidad) html += ' · ' + escapeHtml(r.modalidad);
+  html += '<div style="margin-top:8px;color:#475569">' + escapeHtml(r.motivo) +
+    ' <span style="color:#94a3b8">(' + escapeHtml(r.gate) + ' · ' + escapeHtml(r.version_logica) + ')</span></div>';
+  if (r.revisar) html += '<div class="pob-revisar">⚠️ Revisar: ' + escapeHtml(r.nota_revisar || 'caso de borde, confirmar a mano') + '</div>';
+
+  box.innerHTML = html;
+  box.style.display = 'block';
+  document.getElementById('btnGuardarPob').style.display = 'inline-block';
+}
+
+async function guardarClasificacion() {
+  if (!pacienteSel || !ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
+  const btn = document.getElementById('btnGuardarPob');
+  btn.disabled = true;
+  try {
+    const r = ultimaClasificacion.resultado;
+    const { error } = await sb.from('biolab_evaluaciones').insert({
+      persona_id: String(pacienteSel.id),
+      ingreso: ultimaClasificacion.ingreso,
+      poblacion: r.poblacion,
+      subnivel: r.subnivel,
+      modalidad: r.modalidad,
+      gate: r.gate,
+      motivo: r.motivo,
+      revisar: r.revisar,
+      version_logica: r.version_logica
+    });
+    if (error) throw error;
+    toast('Clasificación guardada en la HC del paciente.');
+  } catch (e) {
+    toast('Error al guardar: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
