@@ -274,7 +274,10 @@
         <div class="hint">Apretá "Traer evaluación de VALD" para ver el informe pintado 🟢🟡🔴 según las normas.</div>
       </div>
       <div style="margin-top:12px;">
+        <input id="valdMotivo" type="text" placeholder="Motivo de consulta / dolor (la IA lo tiene en cuenta)"
+               style="width:100%; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; margin-bottom:8px; box-sizing:border-box;">
         <button class="btn" id="btnGenIA" onclick="generar()" disabled>🤖 Interpretar y redactar con IA</button>
+        <div id="valdBorrador" style="margin-top:10px;"></div>
       </div>
     </div>
   </div>
@@ -377,6 +380,10 @@ function resetEvaluacion() {
   if (b) b.disabled = true;
   const pid = document.getElementById('valdProfileId');
   if (pid) pid.value = '';
+  const mot = document.getElementById('valdMotivo');
+  if (mot) mot.value = '';
+  const bor = document.getElementById('valdBorrador');
+  if (bor) bor.innerHTML = '';
 }
 
 async function traerEvaluacionVALD() {
@@ -504,9 +511,47 @@ function renderEvaluacion(c, datos) {
   return html;
 }
 
-function generar() {
-  // Paso 5 (próximo): manda lo marcado 🟡🔴 a la IA para que lo interprete y Lu firme.
-  toast('Paso 5: interpretación con IA. Lo activamos a continuación.');
+async function generar() {
+  if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
+  const btn = document.getElementById('btnGenIA');
+  const cont = document.getElementById('valdBorrador');
+  btn.disabled = true; btn.textContent = '🤖 Redactando…';
+  cont.innerHTML = '<div class="hint">La IA está interpretando los hallazgos marcados…</div>';
+  try {
+    const edadVal = document.getElementById('f_edad').value;
+    const body = {
+      paciente: {
+        nombre: pacienteSel.nombre,
+        edad: edadVal ? Number(edadVal) : null,
+        poblacion: (ultimaClasificacion && ultimaClasificacion.poblacion) || null,
+        motivo: document.getElementById('valdMotivo').value.trim(),
+      },
+      hallazgos: ultimaEvaluacion.colored,
+      fecha: ultimaEvaluacion.datos.fechaEvaluacion,
+    };
+    const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const txt = await resp.text();
+    let out; try { out = JSON.parse(txt); } catch { out = { borrador: txt }; }
+    if (!resp.ok || out.error) throw new Error(out.error || ('HTTP ' + resp.status));
+    mostrarBorrador(out.borrador || '');
+  } catch (e) {
+    cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
+  } finally {
+    btn.disabled = false; btn.textContent = '🤖 Interpretar y redactar con IA';
+  }
+}
+
+function mostrarBorrador(texto) {
+  const cont = document.getElementById('valdBorrador');
+  cont.innerHTML =
+    '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--azul); margin-bottom:4px;">Borrador para revisar y firmar</div>' +
+    '<textarea id="valdBorradorTxt" style="width:100%; min-height:220px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;"></textarea>' +
+    '<div class="hint">Editá lo que quieras. Guardar firmado en la HC del paciente = próximo paso.</div>';
+  document.getElementById('valdBorradorTxt').value = texto;
 }
 
 // ---- PASO 1: clasificación de población ----
