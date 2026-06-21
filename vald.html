@@ -157,6 +157,14 @@
   .vr-x:hover { background:#e2e8f0; }
   .vr-row.vr-ex { opacity:.45; }
   .vr-row.vr-ex .nom, .vr-row.vr-ex .det { text-decoration:line-through; }
+  /* Chequeo de calidad de la toma */
+  .vr-qa { border-radius:10px; padding:10px 12px; margin-bottom:10px; font-size:13px; }
+  .vr-qa.bad { background:#fff4ed; border:1px solid #fdba74; }
+  .vr-qa.ok  { background:#ecfdf5; border:1px solid #86efac; }
+  .vr-qa b { display:block; margin-bottom:4px; }
+  .vr-qa ul { margin:4px 0 0; padding-left:18px; }
+  .vr-qa li { margin:2px 0; }
+  .vr-qa .meta { color:var(--txt-soft); font-size:11px; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -171,9 +179,9 @@
   </div>
 
   <div class="banner">
-    <b>En preparación.</b> El apartado está listo y conectado a las historias clínicas.
-    La generación automática del informe se activa cuando VALD habilite el acceso a la API
-    (pedido ya enviado) y se conecte la IA. Mientras tanto, ya podés buscar al paciente y abrir su HC desde acá.
+    <b>✅ Conectado y funcionando.</b> Buscá al paciente, traé su evaluación de VALD y el sistema la trae,
+    la clasifica 🟢🟡🔴, hace el <b>chequeo de calidad de la toma</b>, la IA redacta las consideraciones
+    para el profe y vos firmás y guardás en la HC.
   </div>
 
   <div class="card">
@@ -508,12 +516,53 @@ function excluirItem(sec, i) {
   document.getElementById('valdReport').innerHTML = renderEvaluacion(ultimaEvaluacion.colored, ultimaEvaluacion.datos);
 }
 
+function chequeoToma(datos) {
+  const problemas = [];
+  const push = (test, motivo) => problemas.push({ test, motivo });
+  // ForceDecks: fuerza negativa o asimetría imposible (≈100% con un lado ~0/negativo)
+  for (const t of (datos.forceDecks || [])) {
+    for (const nombre in (t.resultados || {})) {
+      const lad = t.resultados[nombre].lados || {};
+      const L = lad.Left, R = lad.Right;
+      if ((L != null && L < 0) || (R != null && R < 0)) { push(t.prueba, 'fuerza negativa (físicamente imposible)'); break; }
+    }
+  }
+  // Fuerza DynaMo: negativos o un lado en 0
+  for (const f of (datos.fuerza || [])) {
+    if ((f.izquierda_N != null && f.izquierda_N < 0) || (f.derecha_N != null && f.derecha_N < 0)) push(f.grupo, 'fuerza negativa (imposible)');
+    else if (f.izquierda_N === 0 || f.derecha_N === 0) push(f.grupo, 'un lado quedó en 0 (¿no registró?)');
+  }
+  // dedup
+  const seen = new Set(), probs = [];
+  for (const p of problemas) { const k = p.test + '|' + p.motivo; if (!seen.has(k)) { seen.add(k); probs.push(p); } }
+  return {
+    problemas: probs,
+    recibidos: {
+      forceDecks: (datos.forceDecks || []).length,
+      fuerza: (datos.fuerza || []).length,
+      movilidad: (datos.movilidad || []).length,
+      postura: datos.postura ? 1 : 0,
+    },
+  };
+}
+
+function renderChequeo(chk) {
+  const r = chk.recibidos;
+  const meta = `<div class="meta">Recibido de VALD: ${r.forceDecks} ForceDecks · ${r.fuerza} fuerza (DynaMo) · ${r.movilidad} movilidad${r.postura ? ' · postura' : ''}. Verificá que estén todos los tests que tomaste.</div>`;
+  if (chk.problemas.length) {
+    const items = chk.problemas.map(p => `<li><b style="display:inline">${escapeHtml(p.test)}</b> — ${escapeHtml(p.motivo)} → <u>conviene re-tomar</u></li>`).join('');
+    return `<div class="vr-qa bad"><b>⚠️ CHEQUEO DE LA TOMA — revisar antes de que se vaya el paciente:</b><ul>${items}</ul>${meta}</div>`;
+  }
+  return `<div class="vr-qa ok"><b>✅ CHEQUEO DE LA TOMA — sin datos imposibles.</b>Las tomas se ven válidas; podés dejar ir al paciente.${meta}</div>`;
+}
+
 function renderEvaluacion(c, datos) {
   const fmtRows = (arr, sec) => (arr || []).map((x, i) =>
     `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span><button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button></div>`
   ).join('');
   const co = contarHallazgos(c);
-  let html = `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
+  let html = renderChequeo(chequeoToma(datos));
+  html += `<div style="font-weight:700; margin-bottom:2px;">Evaluación ${escapeHtml(datos.fechaEvaluacion || '')} · ${escapeHtml((pacienteSel && pacienteSel.nombre) || '')}</div>`;
   html += `<div class="vr-summary">
     <span class="vr-pill" style="background:#fee2e2;color:#b91c1c">🔴 ${co.rojo}</span>
     <span class="vr-pill" style="background:#fef3c7;color:#92400e">🟡 ${co.amar}</span>
