@@ -532,7 +532,13 @@ function pintarEvaluacion(datos, normas) {
     fuerza.push({ em: c, nom: f.grupo, det, fuente });
   }
 
-  // FORCEDECKS (con guardia de artefactos)
+  // FORCEDECKS (guardia de artefactos SOLO en métricas de fuerza)
+  // Fuerzas/impulso ⇒ no pueden ser negativos (un pie no tira para arriba).
+  // RFD / potencia / etc. son tasas: pueden dar 0 o negativo sin ser artefacto.
+  const FD_FUERZA = new Set([
+    'REPEAT_PEAK_FORCE', 'REPEAT_PEAK_ECCENTRIC_FORCE', 'REPEAT_MEAN_ECCENTRIC_FORCE',
+    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE'
+  ]);
   const forceDecks = [];
   for (const t of (datos.forceDecks || [])) {
     for (const nombre in (t.resultados || {})) {
@@ -544,9 +550,23 @@ function pintarEvaluacion(datos, normas) {
         continue;
       }
       if (L != null && R != null) {
-        if (L < 0 || R < 0) {
+        const esFuerza = FD_FUERZA.has(r.codigo);
+        if (esFuerza && (L < 0 || R < 0)) {
           conteo.revisar++;
           forceDecks.push({ em: '⚠️', nom: `${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} N → fuerza negativa = posible ARTEFACTO, revisar dato`, fuente: '—' });
+          continue;
+        }
+        if (!esFuerza) {
+          // RFD / potencia: NO es fuerza, así que un negativo NO es artefacto.
+          // Pero la asimetría SÍ importa (la calcula VALD) → la grado igual.
+          if (A == null) {
+            conteo.vigilar++;
+            forceDecks.push({ em: '⚪', nom: `${t.prueba} · ${nombre}`, det: `L ${L} / R ${R} ${r.unidad || 'N/s'} (tasa/potencia)`, fuente: 'VALD' });
+            continue;
+          }
+          const cR = colorAsim(A); cnt(cR);
+          const nota = (L < 0 || R < 0) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
+          forceDecks.push({ em: cR, nom: `${t.prueba} · ${nombre}`, det: `${A}% asim · L ${L} / R ${R} ${r.unidad || 'N/s'}${nota}`, fuente: 'asimetría VALD' });
           continue;
         }
         const c = colorAsim(A); cnt(c);
@@ -598,11 +618,17 @@ function excluirItem(sec, i) {
 function chequeoToma(datos) {
   const problemas = [];
   const push = (test, motivo) => problemas.push({ test, motivo });
-  // ForceDecks: fuerza negativa o asimetría imposible (≈100% con un lado ~0/negativo)
+  // ForceDecks: fuerza negativa SÓLO en métricas de fuerza (RFD/tasas pueden ser negativas)
+  const FD_FUERZA_QA = new Set([
+    'REPEAT_PEAK_FORCE', 'REPEAT_PEAK_ECCENTRIC_FORCE', 'REPEAT_MEAN_ECCENTRIC_FORCE',
+    'BAL_MEAN_FORCE', 'PEAK_VERTICAL_FORCE', 'REPEAT_ECCENTRIC_IMPULSE'
+  ]);
   for (const t of (datos.forceDecks || [])) {
     for (const nombre in (t.resultados || {})) {
-      const lad = t.resultados[nombre].lados || {};
+      const r = t.resultados[nombre] || {};
+      const lad = r.lados || {};
       const L = lad.Left, R = lad.Right;
+      if (!FD_FUERZA_QA.has(r.codigo)) continue;
       if ((L != null && L < 0) || (R != null && R < 0)) { push(t.prueba, 'fuerza negativa (físicamente imposible)'); break; }
     }
   }
