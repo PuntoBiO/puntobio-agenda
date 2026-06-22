@@ -539,8 +539,8 @@ const DY_C = [
 const MN_C = [
   { id:'mn_sarcf',sistema:'Manual', label:'SARC-F (cuestionario de sarcopenia)', manual:true, calc:'sarcf',
     info:'<b>Qué es:</b> cuestionario de autopercepción — no medís nada, le preguntás al paciente y él responde.<br><b>Cómo:</b> le hacés las 5 preguntas y marcás la respuesta de cada una (0, 1 o 2 puntos):<br>1) ¿Cuánta dificultad para levantar/cargar ~4,5 kg? · 2) ¿para caminar por una habitación? · 3) ¿para levantarse de una silla o cama? · 4) ¿para subir 10 escalones? · 5) ¿cuántas caídas tuvo en el último año?<br><b>Resultado:</b> total 0–10. <b>≥4 = riesgo de sarcopenia</b> (conviene seguir evaluando).' },
-  { id:'mn_gait', sistema:'Manual', label:'Gait Speed (velocidad de marcha)', manual:true,
-    info:'<b>Qué mide:</b> la velocidad al caminar a paso normal.<br><b>Cómo:</b> marcá <b>4 metros</b> en el piso. El paciente camina a su <b>paso habitual</b> (no apurado), de una marca a la otra. Cronometrás cuánto tarda en recorrer los 4 m. Hacé 2 intentos y quedate con el mejor (menor tiempo).<br><b>Cálculo:</b> velocidad = 4 ÷ segundos = m/s.<br><b>Corte:</b> <b>≤0,80 m/s</b> = marcha lenta / riesgo de sarcopenia.' },
+  { id:'mn_gait', sistema:'Manual', label:'Gait Speed (velocidad de marcha)', manual:true, calc:'gait',
+    info:'<b>Qué mide:</b> la velocidad al caminar a paso normal.<br><b>Cómo:</b> marcá <b>4 metros</b> en el piso. El paciente camina a su <b>paso habitual</b> (no apurado), de una marca a la otra. Cronometrás cuánto tarda en recorrer los 4 m. Hacé 2 intentos y quedate con el mejor (menor tiempo). Cargás el <b>tiempo en segundos</b> y el sistema calcula la velocidad (m/s = 4 ÷ seg).<br><b>Interpretación (validada · EWGSOP2 / criterio PuntoBiO):</b> &lt;0,80 m/s = fragilidad o riesgo de deterioro funcional · 0,80–1,0 m/s = movilidad moderada, posibles limitaciones · &gt;1,0 m/s = adecuada para mantener la independencia funcional.' },
   { id:'mn_sppb', sistema:'Manual', label:'SPPB (equilibrio + marcha + silla)', manual:true, calc:'sppb',
     info:'<b>Qué es:</b> batería de 3 pruebas (equilibrio + marcha + silla). Cada una puntúa 0–4; total 0–12.<br><b>1) Equilibrio</b> — de pie SIN apoyarse, intenta aguantar 10 seg en 3 posiciones; anotás los segundos que logra en cada una:<br>• <b>Pies juntos</b> (uno al lado del otro).<br>• <b>Semi-tándem</b> (el talón de un pie tocando el costado del dedo gordo del otro).<br>• <b>Tándem</b> (un pie justo delante del otro, talón pegado a la punta).<br><b>2) Marcha 4 m</b> — camina 4 m a paso normal y cronometrás (igual que Gait Speed).<br><b>3) Silla 5 rep</b> — sentado, <b>brazos cruzados al pecho</b>, se para y se sienta <b>5 veces</b> lo más rápido que pueda. Cronometrás desde «ya» hasta que queda parado la 5ª vez. Si usa los brazos para empujarse o no puede, poné <b>0</b>.<br><b>Lectura:</b> total <b>&lt;10</b> indica limitación de movilidad.' },
   { id:'mn_tug',  sistema:'Manual', label:'Timed Up & Go (TUG)', manual:true, calc:'tug',
@@ -886,10 +886,13 @@ function gripDeVALD() {
   const g = lista.find(f => /prensi|grip|hand/i.test(f.grupo || ''));
   if (!g) return null;
   const N_PER_KG = 9.80665;
-  const vals = [g.izquierda_N, g.derecha_N]
-    .filter(x => x != null && x > 0)
-    .map(x => x / N_PER_KG);
-  if (!vals.length) return null;
+  const crudos = [g.izquierda_N, g.derecha_N].filter(x => x != null && x > 0);
+  if (!crudos.length) return null;
+  // VALD a veces reporta la fuerza en Newton y a veces en kg. Salvaguarda por magnitud:
+  // un grip humano en kg es ~10–90; en Newton ~100–900. Si el valor es grande (≥90)
+  // lo tomamos como Newton y lo pasamos a kg; si es chico, ya viene en kg.
+  const aKg = (x) => (x >= 90 ? x / N_PER_KG : x);
+  const vals = crudos.map(aKg);
   return Math.round(Math.max(...vals) * 10) / 10;   // mejor mano, kg (1 decimal)
 }
 function ishiiScore(sexo, edad, fuerza, cc) {
@@ -1013,6 +1016,43 @@ function renderTugForm(id) {
   h += '</div>';
   return h;
 }
+// ---------- Gait Speed (velocidad de marcha) — m/s a partir del tiempo en 4 m ----------
+function gaitInterp(ms) {
+  if (ms == null || isNaN(ms)) return null;
+  if (ms < 0.80) return { nivel:'fragilidad', texto:'fragilidad / riesgo de deterioro funcional', color:'#dc2626', icon:'🔴' };
+  if (ms <= 1.00) return { nivel:'moderada', texto:'movilidad moderada · posibles limitaciones', color:'#65a30d', icon:'🟡' };
+  return { nivel:'adecuada', texto:'adecuada para mantener la independencia funcional', color:'#16a34a', icon:'🟢' };
+}
+function setGait(id, raw) {
+  const d = calcData[id] || { tipo:'gait' };
+  d.seg = (raw === '' || raw == null) ? null : Number(raw);
+  d.ms = (d.seg != null && !isNaN(d.seg) && d.seg > 0) ? Math.round((4 / d.seg) * 100) / 100 : null;
+  const b = gaitInterp(d.ms);
+  if (b) {
+    d.nivel = b.nivel; d.texto = b.texto; d.color = b.color; d.icon = b.icon; d.completo = true;
+    if (!tildados[id]) tildados[id] = 'manual';
+    valoresManual[id] = d.ms + ' m/s · ' + b.texto;
+  } else {
+    d.nivel = null; d.completo = false; valoresManual[id] = '';
+  }
+  calcData[id] = d;
+}
+function renderGaitForm(id) {
+  const d = calcData[id] || {};
+  let h = '<div onclick="event.stopPropagation()" style="margin:0 0 12px 26px; border-left:2px solid #e2e8f0; padding:6px 0 8px 12px; font-size:12px; color:#334155;">';
+  h += '<div style="margin:5px 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">Tiempo en 4 m '
+    + '<input type="number" step="0.1" min="0" value="' + (d.seg != null ? d.seg : '') + '" placeholder="seg" '
+    + 'onclick="event.stopPropagation()" oninput="setGait(\'' + id + '\',this.value)" onchange="renderChecklist()" '
+    + 'style="width:72px; padding:4px 6px; border:1px solid var(--border); border-radius:6px; font-size:12px;"> seg'
+    + (d.ms != null ? ' → <b>' + d.ms + ' m/s</b>' : '') + '</div>';
+  if (d.nivel) {
+    h += '<div style="margin-top:6px; font-size:13px;">' + d.icon + ' <b style="color:' + d.color + ';">' + d.texto + '</b></div>';
+  } else {
+    h += '<div class="hint" style="margin:3px 0;">Cargá el tiempo que tardó en recorrer los 4 m.</div>';
+  }
+  h += '</div>';
+  return h;
+}
 function renderChecklist() {
   const panel = document.getElementById('protocoloPanel');
   if (!panel || !protocoloItems.length) return;
@@ -1051,6 +1091,10 @@ function renderChecklist() {
         const d = calcData[it.id];
         const resumen = (d && d.nivel) ? (d.seg + ' seg · ' + d.nivel) : 'completá abajo ↓';
         trailing = '<span class="hint" style="margin:0 0 0 auto; font-size:12px;">' + resumen + '</span>';
+      } else if (it.manual && it.calc === 'gait') {
+        const d = calcData[it.id];
+        const resumen = (d && d.nivel) ? (d.ms + ' m/s · ' + d.nivel) : 'completá abajo ↓';
+        trailing = '<span class="hint" style="margin:0 0 0 auto; font-size:12px;">' + resumen + '</span>';
       } else if (it.manual) {
         trailing = '<span class="hint" style="margin:0 0 0 auto;">✋</span>'
           + '<input type="text" value="' + escapeHtml(valoresManual[it.id] || '') + '" placeholder="resultado / valor" '
@@ -1074,6 +1118,7 @@ function renderChecklist() {
       if (it.manual && it.calc === '2step') html += render2stepForm(it.id);
       if (it.manual && it.calc === 'ishii') html += renderIshiiForm(it.id);
       if (it.manual && it.calc === 'tug') html += renderTugForm(it.id);
+      if (it.manual && it.calc === 'gait') html += renderGaitForm(it.id);
     }
   }
   // Desplegable para agregar cualquier test del catálogo VALD
