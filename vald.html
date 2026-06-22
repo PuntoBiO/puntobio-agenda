@@ -215,6 +215,7 @@
           <button class="btn ghost" id="btnHC">🩺 Abrir historia clínica</button>
         </div>
       </div>
+      <div id="retomarBanner" style="display:none; margin-top:10px; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px 12px; font-size:13px; color:#92400e;"></div>
     </div>
 
     <div class="card" id="cardPoblacion">
@@ -285,7 +286,10 @@
       <p class="card-title">4 · Protocolo a realizar (según población)</p>
       <div class="hint" style="margin-top:0">Acá aparece el protocolo según la población que clasificaste. Andá tildando cada test a medida que se lo hacés al paciente, así no te olvidás de ninguno. Cuando termines de tomarlo, apretá <b>"Evaluación realizada"</b>.</div>
       <div id="protocoloPanel" style="margin:10px 0;"></div>
-      <button class="btn" id="btnEvalRealizada" onclick="guardarProtocolo()">✅ Evaluación realizada — guardar protocolo</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn ghost" id="btnGuardarBorrador" onclick="guardarBorrador()">💾 Guardar borrador</button>
+        <button class="btn" id="btnEvalRealizada" onclick="guardarProtocolo()">✅ Evaluación realizada — guardar protocolo</button>
+      </div>
       <div id="protocoloGuardado" class="hint" style="margin-top:8px;"></div>
     </div>
 
@@ -332,6 +336,7 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
 
 let pacienteSel = null;
+let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
 let ultimaClasificacion = null;
 
 function toast(msg) {
@@ -401,6 +406,8 @@ function seleccionar(p) {
   ultimaClasificacion = null;
   document.getElementById('pobResult').style.display = 'none';
   document.getElementById('btnGuardarPob').style.display = 'none';
+  // ¿Hay un borrador guardado para este paciente? -> ofrecer "Retomar"
+  buscarBorrador();
 }
 
 // ---- PASO 4: traer VALD + pintar 🟢🟡🔴 con las normas ----
@@ -1615,6 +1622,25 @@ async function guardarClasificacion() {
   }
 }
 
+function payloadEvaluacion(estado) {
+  const items = protocoloItems.map(it => ({
+    id: it.id, sistema: it.sistema || 'Manual', label: it.label,
+    hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra,
+    manual: !!it.manual, calcTipo: it.calc || null,
+    valor: it.manual ? (valoresManual[it.id] || null) : null,
+    calc: calcData[it.id] || null
+  }));
+  const realizados = items.filter(i => i.hecho).length;
+  const protocolo = { poblacion: pobActual(), total: items.length, realizados, items };
+  const r = ultimaClasificacion.resultado;
+  return {
+    persona_id: String(pacienteSel.id),
+    ingreso: ultimaClasificacion.ingreso,
+    poblacion: r.poblacion, subnivel: r.subnivel, modalidad: r.modalidad,
+    gate: r.gate, motivo: r.motivo, revisar: r.revisar, version_logica: r.version_logica,
+    estado: estado, protocolo
+  };
+}
 async function guardarProtocolo() {
   if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
   if (!ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
@@ -1622,31 +1648,110 @@ async function guardarProtocolo() {
   const btn = document.getElementById('btnEvalRealizada');
   btn.disabled = true;
   try {
-    const items = protocoloItems.map(it => ({
-      id: it.id, sistema: it.sistema || 'Manual', label: it.label,
-      hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra,
-      valor: it.manual ? (valoresManual[it.id] || null) : null,
-      calc: calcData[it.id] || null
-    }));
-    const realizados = items.filter(i => i.hecho).length;
-    const protocolo = { poblacion: pobActual(), total: items.length, realizados, items };
-    const r = ultimaClasificacion.resultado;
-    const { error } = await sb.from('biolab_evaluaciones').insert({
-      persona_id: String(pacienteSel.id),
-      ingreso: ultimaClasificacion.ingreso,
-      poblacion: r.poblacion, subnivel: r.subnivel, modalidad: r.modalidad,
-      gate: r.gate, motivo: r.motivo, revisar: r.revisar, version_logica: r.version_logica,
-      protocolo
-    });
+    const payload = payloadEvaluacion('final');
+    const { error } = await sb.from('biolab_evaluaciones').insert(payload);
     if (error) throw error;
     const g = document.getElementById('protocoloGuardado');
-    if (g) g.innerHTML = '✅ Protocolo guardado en la HC (' + realizados + '/' + items.length + ' tests realizados). Ahora podés traer la evaluación de VALD abajo (paso 5).';
+    if (g) g.innerHTML = '✅ Protocolo guardado en la HC (' + payload.protocolo.realizados + '/' + payload.protocolo.total + ' tests realizados). Ahora podés traer la evaluación de VALD abajo (paso 5).';
     btn.textContent = '✅ Protocolo guardado';
     toast('Protocolo guardado en la HC del paciente.');
   } catch (e) {
     btn.disabled = false;
     toast('Error al guardar protocolo: ' + (e.message || e));
   }
+}
+async function guardarBorrador() {
+  if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  if (!ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
+  if (!protocoloItems.length) { toast('No hay protocolo cargado.'); return; }
+  const btn = document.getElementById('btnGuardarBorrador');
+  if (btn) btn.disabled = true;
+  try {
+    const { error } = await sb.from('biolab_evaluaciones').insert(payloadEvaluacion('borrador'));
+    if (error) throw error;
+    const g = document.getElementById('protocoloGuardado');
+    if (g) g.innerHTML = '💾 Borrador guardado. Podés cerrar y, cuando vuelvas a abrir este paciente, tocás «Retomar» para seguir donde lo dejaste.';
+    toast('Borrador guardado.');
+  } catch (e) {
+    toast('Error al guardar borrador: ' + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+async function buscarBorrador() {
+  const banner = document.getElementById('retomarBanner');
+  borradorActual = null;
+  if (banner) { banner.style.display = 'none'; banner.innerHTML = ''; }
+  if (!pacienteSel || !banner) return;
+  try {
+    const { data, error } = await sb.from('biolab_evaluaciones')
+      .select('id, created_at, poblacion, subnivel, modalidad, gate, motivo, revisar, version_logica, ingreso, protocolo, estado')
+      .eq('persona_id', String(pacienteSel.id))
+      .eq('estado', 'borrador')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw error;
+    if (!data || !data.length) return;
+    const b = data[0];
+    borradorActual = b;
+    const pr = b.protocolo || {};
+    let f = '';
+    try { f = b.created_at ? new Date(b.created_at).toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : ''; } catch (_) {}
+    banner.innerHTML = '📂 Este paciente tiene una evaluación guardada' + (f ? ' del <b>' + f + '</b>' : '') + ' (' + (pr.realizados || 0) + '/' + (pr.total || 0) + ' tests). '
+      + '<button class="btn" style="padding:5px 12px; margin-left:6px;" onclick="retomarBorrador()">Retomar</button>';
+    banner.style.display = 'block';
+  } catch (e) {
+    // sin policy de SELECT o columna faltante: no mostramos nada (no rompe el flujo)
+  }
+}
+function retomarBorrador() {
+  if (!borradorActual) return;
+  const b = borradorActual;
+  ultimaClasificacion = {
+    ingreso: b.ingreso || {},
+    resultado: { poblacion: b.poblacion, subnivel: b.subnivel, modalidad: b.modalidad,
+      gate: b.gate, motivo: b.motivo, revisar: b.revisar, version_logica: b.version_logica }
+  };
+  if (b.ingreso && b.ingreso.edad != null) {
+    const fe = document.getElementById('f_edad'); if (fe) fe.value = b.ingreso.edad;
+  }
+  const box = document.getElementById('pobResult');
+  if (box) {
+    box.innerHTML = '<span class="pob-badge" style="background:' + (COLOR_POB[b.poblacion] || '#334155') + '">'
+      + escapeHtml(NOMBRE_POB[b.poblacion] || b.poblacion || '') + '</span>'
+      + '<div style="margin-top:8px;color:#475569">retomado de un borrador guardado</div>';
+    box.style.display = 'block';
+  }
+  // Reconstruir el protocolo: base de la población + tests extra guardados
+  const base = (PROTOCOLOS[b.poblacion] || []).slice();
+  const baseIds = new Set(base.map(x => x.id));
+  const saved = (b.protocolo && b.protocolo.items) || [];
+  protocoloItems = base.slice();
+  for (const si of saved) {
+    if (si.extra && !baseIds.has(si.id)) {
+      protocoloItems.push({ id: si.id, sistema: si.sistema || 'Manual', label: si.label,
+        manual: !!si.manual, calc: si.calcTipo || null, extra: true });
+    }
+  }
+  // Restaurar tildes, valores y datos de calculadoras
+  tildados = {}; valoresManual = {}; calcData = {};
+  for (const si of saved) {
+    if (si.hecho) tildados[si.id] = si.origen || 'manual';
+    if (si.valor != null) valoresManual[si.id] = si.valor;
+    if (si.calc != null) calcData[si.id] = si.calc;
+  }
+  const cardProt = document.getElementById('cardProtocolo');
+  if (cardProt) cardProt.style.display = 'block';
+  const btnEv = document.getElementById('btnEvalRealizada');
+  if (btnEv) { btnEv.disabled = false; btnEv.textContent = '✅ Evaluación realizada — guardar protocolo'; }
+  const gp = document.getElementById('protocoloGuardado'); if (gp) gp.innerHTML = '';
+  cargarNormasFunc();
+  const panel = document.getElementById('protocoloPanel');
+  if (panel) panel.style.display = 'block';
+  renderChecklist();
+  const banner = document.getElementById('retomarBanner');
+  if (banner) banner.style.display = 'none';
+  toast('Evaluación retomada. Completá lo que falte y volvé a guardar.');
 }
 
 let usuarioActual = null;
