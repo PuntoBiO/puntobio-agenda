@@ -540,6 +540,8 @@ const MN_C = [
     info:'<b>Qué mide:</b> movilidad funcional y riesgo de caídas.<br><b>Cómo:</b> el paciente arranca <b>sentado</b> en una silla con apoyabrazos. Marcá <b>3 metros</b> en el piso desde la silla. A la señal <b>«ya»</b>: se levanta, camina los 3 m, <b>gira</b>, vuelve y se vuelve a sentar. Cronometrás <b>todo el recorrido</b> (de «ya» hasta que se sienta).<br>Puede usar su calzado y bastón habitual. Dejá 1 intento de práctica y después 1 medido.<br><b>Cortes:</b> <b>≥13,5 seg</b> = riesgo de caídas · ≥20 seg = movilidad muy comprometida.' },
   { id:'mn_2step',sistema:'Manual', label:'2-Minute Step Test (resistencia cardiovascular)', manual:true, calc:'2step',
     info:'<b>Qué mide:</b> resistencia cardiovascular / aeróbica.<br><b>Preparación:</b> definí la altura a la que tiene que subir la rodilla = <b>punto medio entre la rótula y la cresta ilíaca</b> (el hueso de la cadera). Marcalo en la pared o con una cinta en la pierna como referencia.<br><b>Cómo:</b> el paciente <b>marcha en el lugar durante 2 minutos</b>, levantando las rodillas hasta esa altura. Puede apoyar una mano en una silla o pared para el equilibrio (no para impulsarse).<br><b>Conteo:</b> contás cuántas veces la <b>rodilla derecha</b> llega a la marca en los 2 minutos.<br><b>Resultado:</b> el sistema compara ese número con la tabla por sexo y edad → Bajo / Promedio / Alto.' },
+  { id:'mn_ishii',sistema:'Manual', label:'Ishii Test (score de sarcopenia)', manual:true, calc:'ishii',
+    info:'<b>Qué es:</b> score que estima la probabilidad de sarcopenia con 3 datos: edad, fuerza de prensión (grip) y perímetro de pantorrilla. La fórmula es distinta por sexo (la elegís con el toggle ♀/♂).<br><b>Fuerza (grip):</b> con dinamómetro de mano, tomás el mejor valor en <b>kg</b>.<br><b>Perímetro de pantorrilla:</b> con cinta métrica, en la <b>parte más ancha</b> de la pantorrilla, con el paciente acostado y la rodilla flexionada (pantorrilla en ángulo recto), en <b>cm</b>.<br><b>La edad la toma sola del paso 3.</b><br><b>Resultado:</b> el sistema calcula el score solo. Cortes de sarcopenia: <b>≥105 en hombres · ≥120 en mujeres</b> (a mayor score, mayor probabilidad de sarcopenia).' },
 ];
 // (Población B usa las mismas baterías que D — ver PROTOCOLOS abajo)
 
@@ -869,6 +871,102 @@ function render2stepForm(id) {
   h += '</div>';
   return h;
 }
+// ---------- Ishii Test (score de sarcopenia) — fórmula oficial, distinta por sexo ----------
+function gripDeVALD() {
+  // Saca la prensión (Hand Grip) de la evaluación VALD ya traída: mejor mano, en kg.
+  if (!ultimaEvaluacion || !ultimaEvaluacion.datos) return null;
+  const lista = ultimaEvaluacion.datos.fuerza || [];
+  const g = lista.find(f => /prensi|grip|hand/i.test(f.grupo || ''));
+  if (!g) return null;
+  const N_PER_KG = 9.80665;
+  const vals = [g.izquierda_N, g.derecha_N]
+    .filter(x => x != null && x > 0)
+    .map(x => x / N_PER_KG);
+  if (!vals.length) return null;
+  return Math.round(Math.max(...vals) * 10) / 10;   // mejor mano, kg (1 decimal)
+}
+function ishiiScore(sexo, edad, fuerza, cc) {
+  if (!sexo || edad == null || fuerza == null || cc == null
+    || isNaN(edad) || isNaN(fuerza) || isNaN(cc)) return null;
+  if (sexo === 'M') return 0.62 * (edad - 64) - 3.09 * (fuerza - 50) - 4.64 * (cc - 42);
+  return 0.80 * (edad - 64) - 5.09 * (fuerza - 34) - 3.28 * (cc - 42);   // F
+}
+function recalcIshii(id, d) {
+  d.edad = edadActual();
+  d.gripAuto = gripDeVALD();
+  // Fuerza usada: la manual si la cargó; si no, la del Hand Grip (DynaMo).
+  const manual = (d.fuerza != null && !isNaN(d.fuerza));
+  d.fuerzaUsada = manual ? d.fuerza : d.gripAuto;
+  d.fuenteFuerza = manual ? 'manual' : (d.gripAuto != null ? 'VALD' : null);
+  const s = ishiiScore(d.sexo, d.edad, d.fuerzaUsada, d.cc);
+  if (s != null) {
+    d.score = Math.round(s * 10) / 10;
+    d.corte = d.sexo === 'M' ? 105 : 120;
+    d.riesgo = d.score >= d.corte;
+    d.completo = true;
+    if (!tildados[id]) tildados[id] = 'manual';
+    valoresManual[id] = 'score ' + d.score + ' · ' + (d.riesgo ? 'riesgo de sarcopenia' : 'sin sarcopenia probable');
+  } else {
+    d.score = null; d.riesgo = false; d.completo = false;
+    valoresManual[id] = '';
+  }
+  calcData[id] = d;
+}
+function setIshii(id, field, raw) {
+  const d = calcData[id] || { tipo:'ishii', sexo:null };
+  const v = (raw === '' || raw == null) ? null : Number(raw);
+  d[field] = (v == null || isNaN(v)) ? null : v;
+  recalcIshii(id, d);
+}
+function setSexoIshii(id, sexo) {
+  const d = calcData[id] || { tipo:'ishii' };
+  d.sexo = sexo;
+  recalcIshii(id, d);
+  renderChecklist();
+}
+function renderIshiiForm(id) {
+  const d = calcData[id] || {};
+  recalcIshii(id, d);                 // refresca con edad + grip de VALD actuales
+  const edad = edadActual();
+  const sexBtn = (val, lbl) => {
+    const sel = d.sexo === val;
+    return '<button onclick="setSexoIshii(\'' + id + '\',\'' + val + '\')" style="font-size:13px; padding:4px 12px; border-radius:6px; cursor:pointer; border:1px solid ' + (sel ? '#1e9fe0' : '#cbd5e1') + '; background:' + (sel ? '#1e9fe0' : '#fff') + '; color:' + (sel ? '#fff' : '#475569') + ';">' + lbl + '</button>';
+  };
+  const inp = (f, ph) => '<input type="number" step="0.1" min="0" value="' + (d[f] != null ? d[f] : '') + '" placeholder="' + ph + '" '
+    + 'onclick="event.stopPropagation()" oninput="setIshii(\'' + id + '\',\'' + f + '\',this.value)" onchange="renderChecklist()" '
+    + 'style="width:72px; padding:4px 6px; border:1px solid var(--border); border-radius:6px; font-size:12px;">';
+  let h = '<div onclick="event.stopPropagation()" style="margin:0 0 12px 26px; border-left:2px solid #e2e8f0; padding:6px 0 8px 12px; font-size:12px; color:#334155;">';
+  h += '<div style="margin:5px 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">Sexo ' + sexBtn('F','♀ Mujer') + sexBtn('M','♂ Hombre') + ' · Edad <b>' + (edad != null ? edad : '—') + '</b> <span class="hint" style="margin:0;">(del paso 3)</span></div>';
+  // Fuerza (grip): automática desde el Hand Grip del DynaMo, con corrección manual
+  let fuerzaHtml;
+  const manual = (d.fuerza != null && !isNaN(d.fuerza));
+  if (d.gripAuto != null && !manual) {
+    fuerzaHtml = 'Fuerza (grip): <b>' + d.gripAuto + ' kg</b> <span style="color:#16a34a;">✓ del Hand Grip (DynaMo)</span> · corregir a mano ' + inp('fuerza','kg') + ' kg';
+  } else if (d.gripAuto != null && manual) {
+    fuerzaHtml = 'Fuerza (grip): ' + inp('fuerza','kg') + ' kg <span class="hint" style="margin:0;">(manual · el DynaMo trajo ' + d.gripAuto + ' kg)</span>';
+  } else {
+    fuerzaHtml = 'Fuerza (grip): ' + inp('fuerza','kg') + ' kg <span class="hint" style="margin:0;">(todavía no llegó del DynaMo — cargala a mano, o traé la evaluación VALD en el paso 5)</span>';
+  }
+  h += '<div style="margin:5px 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">' + fuerzaHtml + '</div>';
+  h += '<div style="margin:5px 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">Perímetro pantorrilla ' + inp('cc','cm') + ' cm</div>';
+  if (!d.sexo) {
+    h += '<div class="hint" style="margin:3px 0;">Elegí el sexo para calcular.</div>';
+  } else if (edad == null) {
+    h += '<div class="hint" style="margin:3px 0;">Cargá la edad en el paso 3.</div>';
+  } else if (d.score == null) {
+    const falta = [];
+    if (d.fuerzaUsada == null) falta.push('la fuerza (grip)');
+    if (d.cc == null) falta.push('el perímetro de pantorrilla');
+    h += '<div class="hint" style="margin:3px 0;">Falta ' + falta.join(' y ') + '.</div>';
+  } else {
+    const color = d.riesgo ? '#dc2626' : '#16a34a';
+    const icon = d.riesgo ? '🔴' : '🟢';
+    h += '<div style="margin-top:6px; font-size:13px;">Score Ishii: <b>' + d.score + '</b> · corte ' + d.corte + ' (' + (d.sexo === 'F' ? '♀' : '♂') + ') → ' + icon + ' <b style="color:' + color + ';">' + (d.riesgo ? 'riesgo de sarcopenia' : 'sin sarcopenia probable') + '</b>'
+      + '<br><span class="hint" style="margin:0;">edad ' + d.edad + ' · fuerza ' + d.fuerzaUsada + ' kg (' + (d.fuenteFuerza === 'VALD' ? 'DynaMo' : 'manual') + ') · pantorrilla ' + d.cc + ' cm</span></div>';
+  }
+  h += '</div>';
+  return h;
+}
 function renderChecklist() {
   const panel = document.getElementById('protocoloPanel');
   if (!panel || !protocoloItems.length) return;
@@ -899,6 +997,10 @@ function renderChecklist() {
         const d = calcData[it.id];
         const resumen = (d && d.nivel) ? (d.pasos + ' pasos · ' + d.nivel) : 'completá abajo ↓';
         trailing = '<span class="hint" style="margin:0 0 0 auto; font-size:12px;">' + resumen + '</span>';
+      } else if (it.manual && it.calc === 'ishii') {
+        const d = calcData[it.id];
+        const resumen = (d && d.score != null) ? ('score ' + d.score + ' · ' + (d.riesgo ? '🔴 riesgo' : '🟢 ok')) : 'completá abajo ↓';
+        trailing = '<span class="hint" style="margin:0 0 0 auto; font-size:12px;">' + resumen + '</span>';
       } else if (it.manual) {
         trailing = '<span class="hint" style="margin:0 0 0 auto;">✋</span>'
           + '<input type="text" value="' + escapeHtml(valoresManual[it.id] || '') + '" placeholder="resultado / valor" '
@@ -920,6 +1022,7 @@ function renderChecklist() {
       if (it.manual && it.calc === 'sarcf') html += renderSarcfForm(it.id);
       if (it.manual && it.calc === 'sppb') html += renderSppbForm(it.id);
       if (it.manual && it.calc === '2step') html += render2stepForm(it.id);
+      if (it.manual && it.calc === 'ishii') html += renderIshiiForm(it.id);
     }
   }
   // Desplegable para agregar cualquier test del catálogo VALD
