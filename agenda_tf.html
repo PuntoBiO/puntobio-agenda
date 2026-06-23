@@ -1137,6 +1137,41 @@ async function supabaseQuery(tabla, params = '') {
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return res.json();
 }
+// Igual que supabaseQuery PERO pagina de a 1000 filas con el header Range, para no
+// chocar con el tope db_max_rows (1000) de Supabase, que trunca SILENCIOSAMENTE la
+// respuesta y deja días sin cargar (ej: el panel "falta evolucionar del mes" mostraba
+// alumnos ya evolucionados como pendientes porque las evoluciones más nuevas se cortaban).
+// Trae TODAS las filas haciendo varias páginas. `orden` debe ser una columna única/estable
+// (por defecto id.asc) para que el paginado no duplique ni saltee filas en los bordes.
+async function supabaseQueryAll(tabla, params = '', orden = 'id.asc') {
+  // Sacamos cualquier limit del caller (la paginación lo maneja sola)
+  let p = params.replace(/[?&]limit=\d+/g, '');
+  const sep = p.includes('?') ? '&' : '?';
+  if (!/[?&]order=/.test(p)) p = `${p}${sep}order=${orden}`;
+  const PAGE = 1000;
+  let desde = 0;
+  const todo = [];
+  // Tope de seguridad: 50 páginas (50.000 filas) para no quedar en bucle infinito.
+  for (let i = 0; i < 50; i++) {
+    const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}${p}`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Content-Type': 'application/json',
+        'Range-Unit': 'items',
+        'Range': `${desde}-${desde + PAGE - 1}`
+      }
+    });
+    // 416 = pedimos un rango más allá del total (pasa cuando el total es múltiplo
+    // exacto de 1000). No es error: significa que ya no hay más filas.
+    if (res.status === 416) break;
+    if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+    const lote = await res.json();
+    if (Array.isArray(lote) && lote.length) todo.push(...lote);
+    if (!Array.isArray(lote) || lote.length < PAGE) break; // última página
+    desde += PAGE;
+  }
+  return todo;
+}
 // ===== FOTOS DE PERFIL (bucket privado fotos-perfil) =====
 const FOTO_BUCKET = 'fotos-perfil';
 const fotoUrlCache = {};
@@ -1853,11 +1888,14 @@ async function cargarPendientesMes() {
     const pisoSistema = '2026-06-01';
     const desde = dia1 < pisoSistema ? pisoSistema : dia1;
 
+    // PAGINADO (supabaseQueryAll): si un mes tiene >1000 evoluciones/asistencias,
+    // Supabase trunca a 1000 y deja los días más nuevos afuera → alumnos ya
+    // evolucionados aparecían como "sin evolucionar". Paginando se traen TODAS.
     const [asis, evo, agr, cer] = await Promise.all([
-      supabaseQuery('asistencia', `?select=turno_id,fecha,persona_id,estado&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('evoluciones_tf', `?select=turno_id,fecha,persona_id&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`),
-      supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${desde}&fecha=lte.${hoy}&limit=10000`)
+      supabaseQueryAll('asistencia', `?select=id,turno_id,fecha,persona_id,estado&fecha=gte.${desde}&fecha=lte.${hoy}`),
+      supabaseQueryAll('evoluciones_tf', `?select=id,turno_id,fecha,persona_id&fecha=gte.${desde}&fecha=lte.${hoy}`),
+      supabaseQueryAll('turno_agregados', `?select=id,turno_id,persona_id,fecha,tipo&fecha=gte.${desde}&fecha=lte.${hoy}`),
+      supabaseQueryAll('clases_cerradas', `?select=turno_id,fecha,tipo,motivo&fecha=gte.${desde}&fecha=lte.${hoy}`, 'fecha.asc')
     ]);
 
     const asisM = {};
@@ -2874,8 +2912,8 @@ async function cargarEvosPorTurno() {
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const viernesIso = fmt(viernes);
-    const filas = await supabaseQuery('evoluciones_tf',
-      `?select=turno_id,fecha,persona_id&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
+    const filas = await supabaseQueryAll('evoluciones_tf',
+      `?select=id,turno_id,fecha,persona_id&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}`);
     (filas || []).forEach(f => {
       const fd = String(f.fecha).slice(0, 10); // normaliza por si fecha viene como timestamp
       EVO_ALUMNO[`${f.turno_id}-${fd}-${f.persona_id}`] = true;
@@ -2927,8 +2965,8 @@ async function cargarAsistenciaSemana() {
     // IMPORTANTE: filtrar lte al lado del servidor además del gte, sino Supabase
     // corta en 1000 filas y las asistencias de la semana se pierden → el panel
     // "Faltan evolucionar" cuenta a ausentes como pendientes.
-    const filas = await supabaseQuery('asistencia',
-      `?select=turno_id,fecha,persona_id,estado,avisado_en&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}&limit=5000`);
+    const filas = await supabaseQueryAll('asistencia',
+      `?select=id,turno_id,fecha,persona_id,estado,avisado_en&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}`);
     (filas || []).forEach(f => {
       const k = `${f.turno_id}-${f.fecha}-${f.persona_id}`;
       ASISTENCIA_SEMANA[k] = f.estado;
