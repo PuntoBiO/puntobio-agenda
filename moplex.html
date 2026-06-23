@@ -619,8 +619,11 @@ window.enviarFormulario = async () => {
   btn.disabled = true; btn.innerHTML = '<span class="loader"></span> Enviando...';
 
   try {
-    // 1) Crear o actualizar persona
-    let personaId;
+    // Guardado SEGURO vía función SECURITY DEFINER `guardar_moplex_publico`.
+    // Las tablas `personas` y `evaluaciones_moplex` quedan 100% cerradas al rol
+    // anónimo: la función matchea por DNI normalizado (ignora puntos/espacios),
+    // actualiza o crea la persona sin pisar datos viejos, y guarda la evaluación,
+    // todo del lado del servidor. Mismo patrón que registrate.html.
     const personaData = {
       nombre: txtVal('nombre').toUpperCase(),
       dni: dniValidado,
@@ -633,33 +636,7 @@ window.enviarFormulario = async () => {
       codigo_postal: txtVal('codigo_postal'),
       profesion: txtVal('profesion')
     };
-
-    if (existingPerson) {
-      // Paciente que vuelve: actualizamos SOLO lo que escribió (campos con valor).
-      // Lo que dejó vacío no se toca (se conservan los datos viejos).
-      personaId = existingPerson.id;
-      const updateData = {};
-      Object.keys(personaData).forEach(k => {
-        if (k === 'dni') return;
-        if (personaData[k]) {   // solo si escribió algo
-          updateData[k] = personaData[k];
-        }
-      });
-      if (Object.keys(updateData).length > 0) {
-        const { error } = await sb.from('personas').update(updateData).eq('id', personaId);
-        if (error) throw error;
-      }
-    } else {
-      // INSERT nueva persona
-      const { data, error } = await sb.from('personas').insert(personaData).select().single();
-      if (error) throw error;
-      personaId = data.id;
-    }
-
-    // 2) Crear evaluacion_moplex
     const evalData = {
-      persona_id: personaId,
-      dni: dniValidado,
       ip_origen: userIP,
       altura: txtVal('altura'),
       peso: txtVal('peso'),
@@ -671,11 +648,15 @@ window.enviarFormulario = async () => {
       nombre_profesional_derivante: txtVal('nombre_profesional_derivante'),
       como_llego: document.getElementById('como_llego').value
     };
-    const { error: evErr } = await sb.from('evaluaciones_moplex').insert(evalData);
-    if (evErr) throw evErr;
+    const { error: rpcErr } = await sb.rpc('guardar_moplex_publico', {
+      p_persona: personaData,
+      p_eval: evalData
+    });
+    if (rpcErr) throw rpcErr;
 
     // Éxito
-    document.getElementById('finalName').textContent = personaData.nombre.split(' ')[0] || 'paciente';
+    const fname = (personaData.nombre || (existingPerson && existingPerson.nombre) || 'paciente');
+    document.getElementById('finalName').textContent = fname.split(' ')[0] || 'paciente';
     document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
     document.getElementById('stepFinal').classList.add('active');
     document.querySelectorAll('.progress-step').forEach(p => p.classList.add('done'));
