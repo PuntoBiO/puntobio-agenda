@@ -4312,11 +4312,21 @@ async function cargarEquipoDesempeno(mesVer) {
     ;(evoRows || []).forEach(ev => {
       const e = emailAEquipo[String(ev.autor_email || '').toLowerCase().trim()]
       if (!e || !ev.fecha || ev.fecha > corte) return
-      // CAMBIO (devuelve horas): si este autor cubrió un turno del titular ausente,
-      // el alumno va 100% al titular del turno (no al cubridor).
+      // CAMBIO (con devolución de horas). El reparto depende del turno:
+      //  - Turno COMPARTIDO (el que cubre también es titular de ese turno): 50/50.
+      //  - Turno SOLO del titular (el que cubre no está normalmente ahí): 100% al titular
+      //    (le devolverá las horas; cuando se las devuelva, esos alumnos serán del que cubrió).
       const reAus = cambioReatr[ev.fecha + '|' + e]
       if (reAus && ev.turno_id && profesDeTurno[ev.turno_id] && profesDeTurno[ev.turno_id].includes(reAus)) {
-        sumar(st[reAus].tf, ev.fecha, ev.persona_id)
+        if (profesDeTurno[ev.turno_id].includes(e)) {
+          st[e].tf.n += 0.5
+          st[reAus].tf.n += 0.5
+          st[e].tf.fechas[ev.fecha] = (st[e].tf.fechas[ev.fecha] || 0) + 0.5
+          st[reAus].tf.fechas[ev.fecha] = (st[reAus].tf.fechas[ev.fecha] || 0) + 0.5
+          if (ev.persona_id) st[e].tf.personas.add(ev.persona_id)
+        } else {
+          sumar(st[reAus].tf, ev.fecha, ev.persona_id)
+        }
         cambioProd[e] = cambioProd[e] || {}
         cambioProd[e][ev.fecha] = (cambioProd[e][ev.fecha] || 0) + 1
         return
@@ -4634,9 +4644,9 @@ async function cargarEquipoDesempeno(mesVer) {
             cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubriste a ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">${hsCub > 0 ? hsCub + 'h · ' : ''}🙋${ev}${hsCub > 0 ? ' · ' + promDia + '/h' : ''} · para vos</div>`
           }
           else if (estado && estado.tipo === 'cambio') {
-            // CAMBIO (devuelve horas): cubriste el día del titular; esos alumnos van para él
+            // CAMBIO (con devolución): reparto 50/50 si el turno es compartido, 100% al titular si no
             fondo = '#ede9fe'; borde = '#a78bfa55'
-            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cambio con ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">🙋${estado.prod}${estado.prom ? ' · ' + estado.prom + '/h' : ''} → ${estado.a}</div>`
+            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cambio con ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">🙋${estado.prod} alumnos · devuelve hs</div>`
           }
           else if (hs > 0) {
             fondo = '#e6f5fd'; borde = 'var(--turquoise)'
@@ -4731,9 +4741,8 @@ async function cargarEquipoDesempeno(mesVer) {
       (G.admin ? bloqueArea('❔ Sesiones sin práctica identificada', p => p.otras, '#64748b') : '')
 
     body.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:0 4px;">
-        <button onclick="abrirReglasBonos()" style="display:inline-flex; align-items:center; gap:6px; border:1px solid #cbd5e1; background:#fff; color:#0c7bb8; font-weight:700; font-size:11px; padding:5px 11px; border-radius:99px; cursor:pointer; text-transform:none; letter-spacing:0;">📖 Reglas de bonos</button>
-        <span>${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}</span>
+      <div style="display:flex; justify-content:flex-end; font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; padding:0 4px;">
+        ${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}
       </div>
       ${bonoHTML}
       ${(!G.admin && miEmailEq) ? bitacoraDesempenoHTML(miEmailEq) : ''}
@@ -4969,63 +4978,6 @@ window.abrirDetalleProfe = function(email) {
 }
 window.cerrarDetalleProfe = function() {
   const o = document.getElementById('detalle-profe-overlay')
-  if (o) o.remove()
-}
-
-// ======================
-// PANTALLA: REGLAS DE BONOS (referencia para todo el equipo)
-// ======================
-window.abrirReglasBonos = function() {
-  const card = (titulo, cuerpo, color) => `
-    <div style="border:1px solid ${color}33; border-left:4px solid ${color}; border-radius:12px; padding:13px 15px; margin-bottom:12px; background:#fff;">
-      <div style="font-size:13px; font-weight:800; color:${color}; margin-bottom:7px;">${titulo}</div>
-      <div style="font-size:12.5px; line-height:1.5; color:#334155;">${cuerpo}</div>
-    </div>`
-  const li = (t) => `<div style="display:flex; gap:7px; align-items:flex-start; margin:5px 0;"><span style="color:#94a3b8;">•</span><div style="flex:1;">${t}</div></div>`
-
-  const contenido =
-    card('🏆 Bono por desempeño (escalón)',
-      'Se mide por el <b>promedio de alumnos por hora</b> del mes:' +
-      li('<b>≥ 5,0</b> → 🏆 Excelencia · <b>30%</b>') +
-      li('<b>≥ 4,5</b> → 🚀 Crecimiento · <b>20%</b>') +
-      li('<b>≥ 4,0</b> → 🤝 Compromiso · <b>10%</b>') +
-      li('menos de 4,0 → sin bono') +
-      '<div style="margin-top:7px; font-size:11.5px; color:#64748b;">El % se calcula con el <b>sueldo del mes anterior</b>. Como el sueldo puede variar mes a mes, el monto del bono es <b>estimado</b>.</div>', '#0891b2') +
-
-    card('🤒 Cuándo se pierde el premio del mes',
-      'Si el profe <b>falta un día o una hora</b> sin que sea cobertura, queda <b>fuera de todos los premios del mes</b> (escalón, estrella, sala y vacaciones).' +
-      li('<b>Excepción — viernes de hora extra fija (Lean):</b> el 1º viernes que le cubren en el mes se le <b>perdona</b> (no pierde el premio). A partir del <b>2º</b>, sí lo pierde.') +
-      li('El bono de cobertura/horas extra <b>igual se cobra</b> aunque el premio del mes esté caído — eso se gana trabajando.'), '#dc2626') +
-
-    card('🧑‍🤝‍🧑 De quién son los alumnos (según el caso)',
-      '<b>1) Horas compartidas</b> (dos profes dan juntos el mismo turno, ej. Lean+Santi lun–jue, Santi+Lauti mar–jue): los alumnos se reparten <b>50 y 50</b> entre los dos.' +
-      '<div style="height:6px;"></div><b>2) Cobertura sin devolución</b> (cubre el día de otro y no se lo devuelve): los alumnos son <b>100% del que atendió</b>. Cobra hora extra + bono de cobertura.' +
-      '<div style="height:6px;"></div><b>3) Cambio con devolución de horas</b> (lo cubren pero después devuelve las horas otro día, ej. un lunes): los alumnos son <b>100% del titular</b> de esas horas. Queda la <b>deuda de horas pendiente</b> de devolver. Nadie cobra de más.' +
-      '<div style="height:6px;"></div><b>4) Vacaciones</b> (el otro atiende todo mientras uno está de vacaciones): los alumnos van <b>100% al que cubre</b>. El que está de vacaciones <b>solo pierde esos días</b> (el resto del mes le cuenta normal).', '#7c3aed') +
-
-    card('💰 Bono de cobertura · a cobrar de más',
-      li('<b>Cobertura sin horas extra:</b> +5% del sueldo por día cubierto (tope 15% = 3 días).') +
-      li('<b>Cobertura con horas extra:</b> +2% del sueldo por día (tope 6% = 3 días) + las horas extra en $.') +
-      li('<b>Hora extra fija (viernes de Lean):</b> +2% del sueldo <b>por cada viernes</b>, <b>sin tope</b> (5 viernes = 10%) + las 4 h en $.'), '#16a34a')
-
-  const overlay = document.createElement('div')
-  overlay.id = 'reglas-bonos-overlay'
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px;animation:fadeIn 0.2s'
-  overlay.innerHTML = `
-    <div style="background:#f8fafc;border-radius:16px;max-width:560px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);animation:slideUp 0.3s">
-      <div style="padding:18px 22px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:#f8fafc;border-radius:16px 16px 0 0;z-index:1;">
-        <h2 style="margin:0;font-size:17px;color:#0a0a0a;">📖 Reglas de bonos</h2>
-        <button onclick="cerrarReglasBonos()" style="background:none;border:none;font-size:26px;cursor:pointer;color:#999;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center" onmouseover="this.style.background='#eef2f7'" onmouseout="this.style.background='none'">×</button>
-      </div>
-      <div style="padding:16px 20px 22px;">${contenido}
-        <div style="font-size:10.5px; color:#94a3b8; text-align:center; margin-top:4px;">PuntoBiO · Terapia Física</div>
-      </div>
-    </div>`
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) cerrarReglasBonos() })
-  document.body.appendChild(overlay)
-}
-window.cerrarReglasBonos = function() {
-  const o = document.getElementById('reglas-bonos-overlay')
   if (o) o.remove()
 }
 
@@ -5505,9 +5457,14 @@ window.abrirReglasBono = function() {
         </table>
         <p style="margin:0 0 10px;"><b>3 · 🌟 Bono Estrella:</b> el profe que <b>más mejoró su promedio</b> respecto al mes anterior suma un <b>10% extra</b>. No es para el que mejor está, es para el que más se esforzó — el que más remó desde donde venía. Le da chance a todos, sin importar el punto de partida. <b>Junio es el mes base</b> (no se compara con nada todavía); la primera estrella se mide en <b>julio comparando contra junio</b>, y se cobra en <b>agosto</b>. Condición: 70% de horas dadas.</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
-        <p style="margin:0 0 10px;"><b>5 · Coberturas:</b> si te cubre un compañero, cárguenlo <b>antes</b> en el módulo Feriados. El que cubre evoluciona a todos con su propio login, y los alumnos de ese día se reparten <b>mitad y mitad</b> entre los dos. Las horas y cupos de cada uno quedan igual: nadie pierde por tomarse el día. <b>Ojo:</b> esto vale SOLO en días de cobertura — en clases normales cada alumno es 100% de quien lo evolucionó.</p>
+        <p style="margin:0 0 10px;"><b>5 · Coberturas, cambios y faltas:</b> se cargan en el módulo <b>Coberturas y faltas</b>. En clases normales (nadie falta) <b>cada alumno es 100% de quien lo evolucionó</b> — no se reparte nada. El reparto o la atribución especial <b>solo aplica</b> cuando hay falta, cambio o cobertura, según los casos de acá abajo 👇</p>
         <p style="margin:0 0 10px;"><b>5b · Vacaciones:</b> se registran en el sistema con quién queda a cargo. Al que se va, esos días <b>no le cuentan</b> — su mes se mide sobre los días trabajados. El que cubre las vacaciones de un compañero: (1) los alumnos que atienda esos días <b>le suman a su propio promedio</b>, y (2) cobra un <b>Bono de Compensación del 20% de su sueldo</b> por cubrir todo lo agendado de ese profe y ayudar al centro a mantener los cupos activos. Las clases nunca se suspenden por vacaciones del equipo.</p>
-        <p style="margin:0 0 10px;"><b>5c · Falta del profe (enfermedad, imprevisto):</b> si un profe no va, <b>pierde el bono de desempeño de ese mes</b> — cubran su clase o no. Si otro profe lo cubre, esa clase se da igual: los alumnos que el cubridor evolucione <b>le suman a su propio promedio</b>, y además cobra un <b>5% extra por cada día que cubre, con tope del 15% al mes</b>, por bancarse la sala. Si nadie cubre, la clase se cierra y los alumnos recuperan sin gastar cupo. Lo cargan Lu, Jime, Pau o Ale desde la agenda.</p>
+        <p style="margin:0 0 10px;"><b>5c · Falta del profe (no devuelve las horas):</b> si un profe no va y <b>no devuelve esas horas</b>, <b>pierde el bono de desempeño de ese mes</b> — lo cubran o no. Si otro profe lo cubre, esa clase se da igual: los alumnos que atiende ese día son <b>100% del que cubre</b>, y además cobra un <b>5% extra por cada día (tope 15% al mes)</b> — o <b>2% (tope 6%)</b> si genera horas extra — por bancarse la sala. Si nadie cubre, la clase se cierra y los alumnos recuperan sin gastar cupo. Lo cargan Lu, Jime, Pau o Ale.</p>
+        <p style="margin:0 0 10px;"><b>5d · Cambio (devuelve las horas):</b> si lo cubren con el acuerdo de <b>devolver esas horas otro día</b>, <b>no cobra nadie bono</b> y queda la <b>deuda de horas pendiente</b> (con botón saldar). El reparto de alumnos depende del turno:<br>
+        &nbsp;&nbsp;• <b>Turno compartido</b> (los dos están normalmente en esa sala — Santi+Lean a la tarde, Santi+Lauti a la mañana): los alumnos van <b>50% y 50%</b>.<br>
+        &nbsp;&nbsp;• <b>Turno solo del titular</b> (ej. Santi cubre el viernes a la mañana de Lauti): los alumnos van <b>100% al titular</b> (Lauti). Cuando Lauti le devuelva esas horas a Santi cubriéndole un turno, esos alumnos serán de Santi.<br>
+        Se carga en <b>Coberturas y faltas</b>.</p>
+        <p style="margin:0 0 10px;"><b>5e · Horas extra fijas (viernes de Lean):</b> son horas <b>fuera del sueldo</b>. Cada viernes que las hace, cobra las <b>4 h en $ + 2% del sueldo</b> (sin tope: 5 viernes = 10%). Si un viernes lo cubre otro (ej. Santi), esa hora extra y ese 2% los cobra <b>el que la hace</b> (los alumnos son 100% suyos), a Lean <b>no se le descuenta</b> y el <b>1er viernes del mes no le baja el premio</b> (del 2º en adelante sí).</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa. El espacio también es parte del compromiso: <b>la sala se entrega ordenada y en condiciones</b> al cierre de cada turno — las observaciones registradas por orden de sala afectan el escalón del mes.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
         <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000 repartidos entre los tres profes de TF</b> ($50.000 cada uno) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Se cuidan entre todos. <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
