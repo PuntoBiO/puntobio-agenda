@@ -3467,7 +3467,8 @@ function filaCalc(profe, d, sueldo, mesStr) {
   const escSel = (escOverride != null) ? String(escOverride) : 'auto'
   const info = _escInfo(pctEf)
   const manualTag = (escOverride != null) ? ' <span style="color:#9333ea; font-weight:600;">(manual)</span>' : ''
-  const pctCob = Math.min((d.diasCubiertos || 0) * 5, 15)
+  // Usa el % ya calculado por el motor (5% sin horas extra / 2% con, topes 15% y 6%).
+  const pctCob = (d.bonoCobertura != null) ? d.bonoCobertura : Math.min((d.diasCubiertos || 0) * 5, 15)
   const caido = !!d.bonoCaido
   // Vacaciones y estrella: el sistema sugiere (detecta), pero el check manda.
   const vacKey = profe + '|vacaciones', estKey = profe + '|estrella'
@@ -3876,7 +3877,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const esMesActual = mesStr === hoyISO.substring(0, 7)
     const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR, faltaR, faltaCobR] = await Promise.all([
+    const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR, faltaR, faltaCobR, cfR] = await Promise.all([
       supabase.from('turnos').select('id, dia, hora, capacidad, cupo_bono'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
@@ -3890,8 +3891,8 @@ async function cargarEquipoDesempeno(mesVer) {
       supabase.from('turnos_biolab').select('id, practica').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('feriados_cobertura').select('fecha, se_lo_toma, cubre').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('faltas_profe').select('id, profe_ausente, fecha, motivo').gte('fecha', primerDia).lte('fecha', ultDia),
-      supabase.from('faltas_profe_cobertura').select('falta_id, cubridor, hora_desde, hora_hasta')
-
+      supabase.from('faltas_profe_cobertura').select('falta_id, cubridor, hora_desde, hora_hasta'),
+      supabase.from('coberturas_faltas').select('fecha, falta, cubre, tipo, horas_extra').gte('fecha', primerDia).lte('fecha', ultDia)
     ])
 
     const turnosMap = {}
@@ -3965,6 +3966,27 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!eCub) return
       if (!diasCubiertos[eCub]) diasCubiertos[eCub] = new Set()
       diasCubiertos[eCub].add(f.fecha)
+    })
+
+    // COBERTURAS Y FALTAS (tablero nuevo, módulo Coberturas y faltas):
+    // - tipo 'cubre' = falta CON cobertura (no devuelve horas). El ausente pierde el
+    //   bono del mes; el cubridor suma % (5% sin horas extra / 2% con horas extra),
+    //   con topes separados de 15% y 6%. Los alumnos del cubridor le suman natural
+    //   (los firma con su login). 'cambio' (devuelve horas) es neutral → se ignora acá.
+    const cobDias5 = {}, cobDias2 = {}, cobFaltoEmail = {}, cobCubriEmail = {}
+    ;((cfR && cfR.data) || []).forEach(c => {
+      if (c.tipo !== 'cubre') return
+      const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
+      const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
+      if (eAus) {
+        bonoCaidoPorFalta.add(eAus)
+        ;(cobFaltoEmail[eAus] = cobFaltoEmail[eAus] || new Set()).add(c.fecha)
+      }
+      if (eCub) {
+        if (c.horas_extra) (cobDias2[eCub] = cobDias2[eCub] || new Set()).add(c.fecha)
+        else (cobDias5[eCub] = cobDias5[eCub] || new Set()).add(c.fecha)
+        ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = (eAus ? (NOMBRES_RANKING[eAus] || c.falta) : (c.falta || ''))
+      }
     })
 
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
@@ -4074,11 +4096,14 @@ async function cargarEquipoDesempeno(mesVer) {
             const eAus = emails.find(em => esTurnoDe(aliasPorEmail[em], ff.profe_ausente))
             if (eAus === e) m[ff.fecha] = { tipo: 'falto' }
           })
+          // Coberturas y faltas (tablero nuevo)
+          if (cobFaltoEmail[e]) cobFaltoEmail[e].forEach(f => { m[f] = { tipo: 'falto' } })
+          if (cobCubriEmail[e]) Object.keys(cobCubriEmail[e]).forEach(f => { m[f] = { tipo: 'cubri', a: cobCubriEmail[e][f] } })
           return m
         })(),
         bonoCaido: bonoCaidoPorFalta.has(e),
-        diasCubiertos: diasCubiertos[e] ? diasCubiertos[e].size : 0,
-        bonoCobertura: Math.min((diasCubiertos[e] ? diasCubiertos[e].size : 0) * 5, 15),
+        diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0),
+        bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6),
         evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
@@ -4273,6 +4298,12 @@ async function cargarEquipoDesempeno(mesVer) {
             fondo = '#ede9fe'; borde = '#a78bfa55'
             cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubrió ${estado.por}</div>${ev > 0 ? `<div style="font-size:9px; color:#6d28d9;">🙋${ev}</div>` : '<div style="font-size:9px; color:#6d28d9;">0</div>'}`
           }
+          else if (estado && estado.tipo === 'cubri') {
+            // este profe CUBRIÓ a un compañero ese día (sus alumnos firmados ya le suman)
+            fondo = '#ede9fe'; borde = '#a78bfa55'
+            const promDia = hs > 0 ? Math.round(ev / hs * 10) / 10 : 0
+            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubriste a ${estado.a}</div><div style="font-size:9px; color:#6d28d9;">${hs > 0 ? hs + 'h · ' : ''}🙋${ev}${hs > 0 ? ' · ' + promDia + '/h' : ''}</div>`
+          }
           else if (hs > 0) {
             fondo = '#e6f5fd'; borde = 'var(--turquoise)'
             const promDia = hs > 0 ? Math.round(ev / hs * 10) / 10 : 0
@@ -4289,7 +4320,7 @@ async function cargarEquipoDesempeno(mesVer) {
           <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;">${celdas}</div>
           <div style="font-size:10.5px; color:var(--text-dim); margin-top:10px; line-height:1.5;">
             Cada día muestra: <b>horas dadas</b> · 🙋 <b>alumnos atendidos</b> · y tu <b>promedio de ese día</b> (atendidos ÷ horas).
-            🎉 feriado · 🏖 vacaciones · 🔄 te cubrió un compañero · 🤒 faltaste. Tu promedio del mes es el conjunto de todos tus días.
+            🎉 feriado · 🏖 vacaciones · 🔄 cobertura (te cubrió o cubriste) · 🤒 faltaste. Tu promedio del mes es el conjunto de todos tus días.
           </div>
         </div>`
       }
