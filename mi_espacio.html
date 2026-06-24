@@ -275,6 +275,8 @@
   .cuenta.ok .d{color:var(--verde)}
   .cuenta.warn .d{color:var(--ambar)}
   .cuenta.urge .d{color:var(--rojo)}
+  .recu.nodisp{opacity:.62}
+  .cuenta.nodisp .d{font-size:18px;color:var(--texto-tenue)}
   .badge-fer{font-size:10.5px;font-weight:700;letter-spacing:.5px;color:var(--ambar);background:var(--ambar-soft);padding:3px 8px;border-radius:6px;text-transform:uppercase}
 
   /* Pagos */
@@ -2769,13 +2771,43 @@ function bloqueAsistencia(asis){
 
 function bloqueRecuperatorios(recus){
   const hoy = hoyISO();
+  // Las faltas ahora las leemos de la ASISTENCIA (misma fuente que ve el equipo en
+  // la Agenda y en Administración), no de recuperatorios_tf. Así la alumna ve TODAS
+  // sus faltas, las haya avisado ella o las haya cargado el equipo.
+  const asis = window._asistenciasAlumno || [];
   // Feriados del ciclo que cayeron en tu día fijo (virtuales, todavía sin reservar)
   const feriadosPend = (window._agendaData && window._agendaData.feriadosPendientes) || [];
-  // pendientes: estado pendiente y sin fecha de recupero todavía
-  const pend = recus.filter(r=>{
-    const e=(r.estado||'').toLowerCase();
-    return e==='pendiente' || (e!=='cumplido' && e!=='vencido' && e!=='cancelado' && !r.fecha_recupero);
+
+  // recus puede traer filas CANCELADAS (la query trae todo): las descartamos.
+  const recAct = (recus || []).filter(r => (r.estado||'').toLowerCase() !== 'cancelado');
+  // Faltas YA recuperadas o reprogramadas (tienen fecha_recupero) → no reaparecen.
+  const yaRecuperadas = new Set(recAct.filter(r => r.fecha_recupero).map(r => r.fecha_ausencia));
+  // Clases tomadas COMO recuperatorio (turno+fecha del recupero): esas asistencias
+  // no son faltas nuevas — las salteamos para no ofrecer "recupero del recupero".
+  const clasesRecupe = new Set(recAct.filter(r => r.fecha_recupero).map(r => `${r.turno_recupero_id}|${r.fecha_recupero}`));
+
+  // Recorremos las faltas de la asistencia:
+  //   • CON aviso (ausente-justificada) → DISPONIBLE para recuperar (60 días)
+  //   • SIN aviso (ausente)             → NO recuperable (avisó fuera de término)
+  const disponibles = [];
+  const noRecuperables = [];
+  (asis || []).forEach(a=>{
+    const e = (a.estado||'').toLowerCase();
+    const f = a.fecha;
+    if(!f) return;
+    if(clasesRecupe.has(`${a.turno_id}|${f}`)) return;   // es una clase de recupero, no una falta
+    const transcurridos = diasEntre(f, hoy);             // días desde la falta
+    if(transcurridos > DIAS_PARA_RECUPERAR) return;      // muy vieja: ya no se muestra
+    if(e === 'ausente-justificada'){
+      if(yaRecuperadas.has(f)) return;                   // ya la recuperó / reprogramó
+      disponibles.push({ fecha: f, dias: DIAS_PARA_RECUPERAR - transcurridos });
+    } else if(e === 'ausente'){
+      noRecuperables.push({ fecha: f });
+    }
   });
+  disponibles.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
+  noRecuperables.sort((a,b)=> a.fecha < b.fecha ? 1 : -1);   // más recientes primero
+
   // Tarjetas de feriado (van arriba): no gastan cupo, disponibles todo el ciclo
   let ferRows='';
   feriadosPend.forEach(f=>{
@@ -2794,34 +2826,53 @@ function bloqueRecuperatorios(recus){
       </div>
     </div>`;
   });
+
+  // Tarjetas de faltas DISPONIBLES para recuperar (avisadas con anticipación)
+  let dispRows='';
+  disponibles.forEach(r=>{
+    const dias = r.dias;
+    let cls='ok';
+    if(dias<=10){ cls='urge'; } else if(dias<=25){ cls='warn'; }
+    const dnum = dias<=0 ? '0' : dias;
+    const lblTxt = dias<=0 ? 'vencido' : (dias===1?'día':'días');
+    dispRows += `<div class="recu">
+      <div class="info">
+        <div class="fa">Falta del ${fmtFecha(r.fecha)}</div>
+        <div class="sub">Podés recuperarla coordinando con el centro.</div>
+      </div>
+      <div class="cuenta ${cls}">
+        <div class="d">${dnum}</div>
+        <div class="l">${lblTxt}</div>
+      </div>
+    </div>`;
+  });
+
+  // Tarjetas de faltas NO recuperables (avisó con menos de 2 horas / sin aviso)
+  let noRows='';
+  noRecuperables.forEach(r=>{
+    noRows += `<div class="recu nodisp">
+      <div class="info">
+        <div class="fa">Falta del ${fmtFecha(r.fecha)}</div>
+        <div class="sub">Avisaste con menos de 2 horas de anticipación: esta clase no se puede recuperar.</div>
+      </div>
+      <div class="cuenta nodisp">
+        <div class="d">✕</div>
+        <div class="l">no recup.</div>
+      </div>
+    </div>`;
+  });
+
+  const totalDisp = disponibles.length + feriadosPend.length;
   let rows='';
-  if(pend.length===0 && feriadosPend.length===0){
+  if(totalDisp===0 && noRecuperables.length===0){
     rows = `<p class="empty">No tenés clases pendientes de recuperar. ¡Al día! 🎉</p>`;
   } else {
-    rows += ferRows;
-    pend.forEach(r=>{
-      const dias = DIAS_PARA_RECUPERAR - diasEntre(r.fecha_ausencia, hoy);
-      const esFeriado = (r.tipo||'').toLowerCase().includes('feriado');
-      let cls='ok', lbl='días';
-      if(dias<=0){ cls='urge'; }
-      else if(dias<=10){ cls='urge'; }
-      else if(dias<=25){ cls='warn'; }
-      const dnum = dias<=0 ? '0' : dias;
-      const lblTxt = dias<=0 ? 'vencido' : (dias===1?'día':'días');
-      rows += `<div class="recu">
-        <div class="info">
-          <div class="fa">Falta del ${fmtFecha(r.fecha_ausencia)} ${esFeriado?'<span class="badge-fer">Feriado</span>':''}</div>
-          <div class="sub">${esFeriado?'Se repone sin gastar cupo.':'Podés recuperarla coordinando con el centro.'}</div>
-        </div>
-        <div class="cuenta ${cls}">
-          <div class="d">${dnum}</div>
-          <div class="l">${lblTxt}</div>
-        </div>
-      </div>`;
-    });
+    rows = ferRows + dispRows;
+    if(noRecuperables.length){
+      rows += `<div style="margin:12px 0 6px;font-size:11.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--texto-tenue)">No recuperables</div>` + noRows;
+    }
   }
-  const _totalRec = pend.length + feriadosPend.length;
-  const _resRec = _totalRec ? `${_totalRec} ${_totalRec===1?'pendiente':'pendientes'}` : 'Al día 🎉';
+  const _resRec = totalDisp ? `${totalDisp} ${totalDisp===1?'pendiente':'pendientes'}` : 'Al día 🎉';
   return colapsable('Recuperatorios pendientes', _resRec,
     `${rows}
     <div class="nota">Tenés ${DIAS_PARA_RECUPERAR} días desde la falta para recuperar la clase. Para reprogramar, coordiná con el centro.</div>`, 'd3', '', true);
