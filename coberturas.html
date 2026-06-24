@@ -232,6 +232,25 @@
   const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
   const TARIFA_DEFAULT={Santiago:7300,Lean:7300,Lautaro:7300,Male:16500};
   const sueldoKey=p=>p==='Santiago'?'Santi':p; // el sueldo se guarda con 'Santi'
+  // Días enteros FUERA DEL SUELDO por profe (debe coincidir con HORAS_EXTRA_FIJAS de app.html).
+  // En esos días, faltar NO descuenta la jornada (no era parte del sueldo) y se perdona 1 vez al mes.
+  // El que los trabaja/cubre cobra hora extra + 2% (aunque no se tilde "horas extra"). { DIA: horas }
+  const DIAS_FUERA_SUELDO={ 'Lean':{ 'VIERNES':4 } };
+  function diaSemanaNorm(fecha){
+    const p=(fecha||'').split('-').map(Number);
+    if(!p[0])return '';
+    return new Date(p[0],p[1]-1,p[2]).toLocaleDateString('es-AR',{weekday:'long'}).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  }
+  function esDiaFueraSueldo(nombreFalta,fecha){
+    const pr=profeDelUsuario(nombreFalta); if(!pr)return false;
+    const dias=DIAS_FUERA_SUELDO[pr]; if(!dias)return false;
+    return dias[diaSemanaNorm(fecha)]!=null;
+  }
+  function horasFueraSueldo(nombreFalta,fecha){
+    const pr=profeDelUsuario(nombreFalta); if(!pr)return 0;
+    const dias=DIAS_FUERA_SUELDO[pr]; if(!dias)return 0;
+    return dias[diaSemanaNorm(fecha)]||0;
+  }
   function profeDelUsuario(nombre){
     const first=(nombre||'').toLowerCase().trim().split(/\s+/)[0];
     if(!first)return null;
@@ -246,10 +265,13 @@
   }
   function bonoCobInfo(r){
     const sueldo=sueldoDeCobertura(r.cubre,r.fecha);
-    const pct=r.horas_extra?2:5, bono=sueldo*pct/100;
-    const tarifa=TARIFA_DE[r.cubre]||0, cant=Number(r.horas_extra_cant||0);
-    const ot=r.horas_extra?cant*tarifa:0;
-    return {sueldo,pct,bono,tarifa,cant,ot,total:bono+ot};
+    const fueraSueldo=esDiaFueraSueldo(r.falta,r.fecha);
+    const conExtra=!!r.horas_extra||fueraSueldo;  // viernes de Lean = siempre hora extra + 2%
+    const pct=conExtra?2:5, bono=sueldo*pct/100;
+    const tarifa=TARIFA_DE[r.cubre]||0;
+    const cant=fueraSueldo?(Number(r.horas_extra_cant)||horasFueraSueldo(r.falta,r.fecha)):Number(r.horas_extra_cant||0);
+    const ot=conExtra?cant*tarifa:0;
+    return {sueldo,pct,bono,tarifa,cant,ot,total:bono+ot,conExtra};
   }
   function breakdownHTML(r){
     let rows='';
@@ -259,11 +281,17 @@
         rows+='<div class="cf-calc-row"><span>Bono de '+r.cubre+'</span><b>Cargá su sueldo en Bonos</b></div>';
       }else{
         rows+='<div class="cf-calc-row"><span>Bono cobertura ('+i.pct+'% de '+fmtPeso(i.sueldo)+')</span><b>'+fmtPeso(i.bono)+'</b></div>';
-        if(r.horas_extra)rows+='<div class="cf-calc-row"><span>Horas extra ('+i.cant+' h \u00d7 '+fmtPeso(i.tarifa)+')</span><b>'+fmtPeso(i.ot)+'</b></div>';
+        if(i.conExtra)rows+='<div class="cf-calc-row"><span>Horas extra ('+i.cant+' h \u00d7 '+fmtPeso(i.tarifa)+')</span><b>'+fmtPeso(i.ot)+'</b></div>';
         rows+='<div class="cf-calc-row total"><span>Total a pagarle de m\u00e1s a '+r.cubre+'</span><b>'+fmtPeso(i.total)+'</b></div>';
       }
     }
-    if(r.falta)rows+='<div class="cf-calc-row falta"><span>\u{1F912} '+r.falta+': se descuenta la jornada</span><b>fuera del premio del mes</b></div>';
+    if(r.falta){
+      if(esDiaFueraSueldo(r.falta,r.fecha)){
+        rows+='<div class="cf-calc-row" style="color:#b45309"><span>\u2b50 '+r.falta+': es su hora extra fija \u00b7 no se le descuenta'+(r.cubre?' (la hizo '+r.cubre+')':'')+'</span><b>1 viernes/mes no pierde el premio</b></div>';
+      }else{
+        rows+='<div class="cf-calc-row falta"><span>\u{1F912} '+r.falta+': se descuenta la jornada</span><b>fuera del premio del mes</b></div>';
+      }
+    }
     return rows?'<div class="cf-calc">'+rows+'</div>':'';
   }
   // Vista del propio profe: solo lo suyo, % y horas (el monto en $ va por RPC, en el motor)
@@ -274,7 +302,10 @@
       if(r.horas_extra&&r.horas_extra_cant)t+=' + '+r.horas_extra_cant+' h extra';
       return '<div class="cf-calc"><div class="cf-calc-row total"><span>'+t+'</span><b></b></div></div>';
     }
-    if(MI_PROFE&&r.falta===MI_PROFE)return '<div class="cf-calc cf-calc-warn">\u{1F912} Faltaste ese día.</div>';
+    if(MI_PROFE&&r.falta===MI_PROFE){
+      if(esDiaFueraSueldo(r.falta,r.fecha))return '<div class="cf-calc"><div class="cf-calc-row total"><span>\u2b50 Era tu hora extra del viernes \u00b7 no se te descuenta. 1 al mes no afecta el premio.</span><b></b></div></div>';
+      return '<div class="cf-calc cf-calc-warn">\u{1F912} Faltaste ese día.</div>';
+    }
     return '';
   }
 
@@ -412,7 +443,7 @@
                 <div class="cf-line"><b>${r.falta||'?'}</b> falta${r.cubre?` · cubre <b>${r.cubre}</b>`:' · sin cubrir'}
                   <span class="badge ${esCambio?'badge-cambio':'badge-cubre'}">${esCambio?'Cambio':'Cobertura'}</span>
                   ${esCambio&&r.horas?`<span class="badge badge-horas">${r.horas} h</span>`:''}
-                  ${(!esCambio&&r.horas_extra)?`<span class="badge badge-extra">⏰ Horas extra · 2%</span>`:''}
+                  ${(!esCambio&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
                   ${r.devuelto?`<span class="badge badge-done">Saldado ✓</span>`:''}
                 </div>
                 ${r.nota?`<div class="cf-nota">${(r.nota||'').replace(/</g,'&lt;')}</div>`:''}
