@@ -3974,10 +3974,21 @@ async function cargarEquipoDesempeno(mesVer) {
     //   con topes separados de 15% y 6%. Los alumnos del cubridor le suman natural
     //   (los firma con su login). 'cambio' (devuelve horas) es neutral → se ignora acá.
     const cobDias5 = {}, cobDias2 = {}, cobFaltoEmail = {}, cobCubriEmail = {}
+    const cambioReatr = {}, cambioCubriEmail = {}, cambioProd = {}
     ;((cfR && cfR.data) || []).forEach(c => {
-      if (c.tipo !== 'cubre') return
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
       const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
+      if (c.tipo === 'cambio') {
+        // CAMBIO (devuelve horas): NEUTRAL. Los alumnos que evoluciona el cubridor en
+        // los turnos del titular ausente se acreditan 100% al titular (día completo).
+        // Nadie pierde bono ni cobra %; la deuda de horas se lleva en el tablero.
+        if (eAus && eCub) {
+          cambioReatr[c.fecha + '|' + eCub] = eAus
+          ;(cambioCubriEmail[eCub] = cambioCubriEmail[eCub] || {})[c.fecha] = eAus
+        }
+        return
+      }
+      // tipo 'cubre' (cobertura, no devuelve horas)
       if (eAus) {
         bonoCaidoPorFalta.add(eAus)
         ;(cobFaltoEmail[eAus] = cobFaltoEmail[eAus] || new Set()).add(c.fecha)
@@ -4036,6 +4047,15 @@ async function cargarEquipoDesempeno(mesVer) {
     ;(evoRows || []).forEach(ev => {
       const e = emailAEquipo[String(ev.autor_email || '').toLowerCase().trim()]
       if (!e || !ev.fecha || ev.fecha > corte) return
+      // CAMBIO (devuelve horas): si este autor cubrió un turno del titular ausente,
+      // el alumno va 100% al titular del turno (no al cubridor).
+      const reAus = cambioReatr[ev.fecha + '|' + e]
+      if (reAus && ev.turno_id && profesDeTurno[ev.turno_id] && profesDeTurno[ev.turno_id].includes(reAus)) {
+        sumar(st[reAus].tf, ev.fecha, ev.persona_id)
+        cambioProd[e] = cambioProd[e] || {}
+        cambioProd[e][ev.fecha] = (cambioProd[e][ev.fecha] || 0) + 1
+        return
+      }
       const ausente = cubreA[ev.fecha + '|' + e]
       if (ausente) {
         // Día de cobertura: el cubridor evoluciona con su login, pero la mitad
@@ -4099,6 +4119,12 @@ async function cargarEquipoDesempeno(mesVer) {
           // Coberturas y faltas (tablero nuevo)
           if (cobFaltoEmail[e]) cobFaltoEmail[e].forEach(f => { m[f] = { tipo: 'falto' } })
           if (cobCubriEmail[e]) Object.keys(cobCubriEmail[e]).forEach(f => { m[f] = { tipo: 'cubri', a: cobCubriEmail[e][f] } })
+          if (cambioCubriEmail[e]) Object.keys(cambioCubriEmail[e]).forEach(f => {
+            const eAus = cambioCubriEmail[e][f]
+            const prod = (cambioProd[e] && cambioProd[e][f]) || 0
+            const hsAus = (st[eAus] && st[eAus].horasPorFecha[f]) || 0
+            m[f] = { tipo: 'cambio', a: NOMBRES_RANKING[eAus] || eAus, prod: prod, prom: hsAus > 0 ? Math.round(prod / hsAus * 10) / 10 : 0 }
+          })
           return m
         })(),
         bonoCaido: bonoCaidoPorFalta.has(e),
@@ -4304,6 +4330,11 @@ async function cargarEquipoDesempeno(mesVer) {
             const promDia = hs > 0 ? Math.round(ev / hs * 10) / 10 : 0
             cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubriste a ${estado.a}</div><div style="font-size:9px; color:#6d28d9;">${hs > 0 ? hs + 'h · ' : ''}🙋${ev}${hs > 0 ? ' · ' + promDia + '/h' : ''}</div>`
           }
+          else if (estado && estado.tipo === 'cambio') {
+            // CAMBIO (devuelve horas): cubriste el día del titular; esos alumnos van para él
+            fondo = '#ede9fe'; borde = '#a78bfa55'
+            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cambio con ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">🙋${estado.prod}${estado.prom ? ' · ' + estado.prom + '/h' : ''} → ${estado.a}</div>`
+          }
           else if (hs > 0) {
             fondo = '#e6f5fd'; borde = 'var(--turquoise)'
             const promDia = hs > 0 ? Math.round(ev / hs * 10) / 10 : 0
@@ -4320,7 +4351,7 @@ async function cargarEquipoDesempeno(mesVer) {
           <div style="display:grid; grid-template-columns:repeat(7, 1fr); gap:4px;">${celdas}</div>
           <div style="font-size:10.5px; color:var(--text-dim); margin-top:10px; line-height:1.5;">
             Cada día muestra: <b>horas dadas</b> · 🙋 <b>alumnos atendidos</b> · y tu <b>promedio de ese día</b> (atendidos ÷ horas).
-            🎉 feriado · 🏖 vacaciones · 🔄 cobertura (te cubrió o cubriste) · 🤒 faltaste. Tu promedio del mes es el conjunto de todos tus días.
+            🎉 feriado · 🏖 vacaciones · 🔄 cobertura/cambio · 🤒 faltaste. Tu promedio del mes es el conjunto de todos tus días.
           </div>
         </div>`
       }
