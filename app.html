@@ -4135,20 +4135,6 @@ async function cargarEquipoDesempeno(mesVer) {
       }
     })
 
-    // ===== BITÁCORA de faltas y horas (registro + descuento de sueldo) =====
-    const bitacoraPorEmail = {}
-    const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
-    ;((cfR && cfR.data) || []).forEach(c => {
-      if (c.tipo === 'cambio') return  // cambio devuelve horas → no pierde premio, fuera de la bitácora
-      const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
-      if (eAus) pushBita(eAus, { fecha: c.fecha, tipo: 'dia', motivo: c.nota || '', cubierto: !!c.cubre })
-    })
-    ;((ahR && ahR.data) || []).forEach(a => {
-      const em = a.profe ? emails.find(x => esTurnoDe(aliasPorEmail[x], a.profe)) : null
-      if (em) pushBita(em, { fecha: a.fecha, tipo: 'horas', horas: Number(a.horas) || 0, motivo: a.motivo || '' })
-    })
-    Object.keys(bitacoraPorEmail).forEach(em => bitacoraPorEmail[em].sort((x, y) => (y.fecha || '').localeCompare(x.fecha || '')))
-
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
     const nuevaArea = () => ({ n: 0, personas: new Set(), fechas: {} })
     const st = {}
@@ -4189,6 +4175,25 @@ async function cargarEquipoDesempeno(mesVer) {
         })
       })
     })
+
+    // ===== BITÁCORA de faltas y horas (registro + descuento de sueldo) =====
+    // Las horas de una falta de día completo salen de la grilla (horasPorFecha):
+    // son las horas fijas que ese profe tenía que cumplir ese día.
+    const bitacoraPorEmail = {}
+    const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
+    ;((cfR && cfR.data) || []).forEach(c => {
+      if (c.tipo === 'cambio') return  // cambio devuelve horas → no pierde premio, fuera de la bitácora
+      const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
+      if (eAus) {
+        const hsDia = (st[eAus] && st[eAus].horasPorFecha[c.fecha]) || 0
+        pushBita(eAus, { fecha: c.fecha, tipo: 'dia', motivo: c.nota || '', cubierto: !!c.cubre, horas: hsDia })
+      }
+    })
+    ;((ahR && ahR.data) || []).forEach(a => {
+      const em = a.profe ? emails.find(x => esTurnoDe(aliasPorEmail[x], a.profe)) : null
+      if (em) pushBita(em, { fecha: a.fecha, tipo: 'horas', horas: Number(a.horas) || 0, motivo: a.motivo || '' })
+    })
+    Object.keys(bitacoraPorEmail).forEach(em => bitacoraPorEmail[em].sort((x, y) => (y.fecha || '').localeCompare(x.fecha || '')))
 
     // ALUMNOS ATENDIDOS (TF): por EVOLUCIÓN, con el login de cada profe.
     const emailAEquipo = {}
@@ -4612,7 +4617,7 @@ function bitacoraDesempenoHTML(email) {
     if (ev.tipo === 'dia') {
       return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
         <span style="font-size:11px; font-weight:800; min-width:42px; color:#b91c1c;">${fmtF(ev.fecha)}</span>
-        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo${ev.horas ? ' (' + ev.horas + ' h)' : ''}</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.horas ? ' · <span style="color:#d97706;">a descontar del sueldo</span>' : ''}${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
       </div>`
     }
     return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
@@ -4620,7 +4625,7 @@ function bitacoraDesempenoHTML(email) {
       <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">${ev.horas || '?'} h que no asistió</b> · a descontar del sueldo${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
     </div>`
   }).join('')
-  const totalHoras = b.filter(e => e.tipo === 'horas').reduce((a, e) => a + (e.horas || 0), 0)
+  const totalHoras = b.reduce((a, e) => a + (e.horas || 0), 0)
   return `
     <div style="background:#fff; border:1px solid #fca5a5; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
       <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#b91c1c;">🗒️ Bitácora de faltas y horas del mes</div>
