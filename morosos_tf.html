@@ -190,10 +190,23 @@
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => '$' + Math.round(n).toLocaleString('es-AR');
 
-  let inscripciones = [], pagos = [], tarifario = {};
+  let inscripciones = [], pagos = [], tarifario = {}, tarifarioVig = {};
   let descSorteo = new Set();   // 'persona_id|YYYY-MM' de ganadores del sorteo con 25% OFF
   let filtroActivo = 'todos', mesActual, inscripcionEnAccion = null;
   let busquedaTexto = '';
+
+  // Precio (plan+actividad) para un MES dado (YYYY-MM), según la vigencia del tarifario.
+  function valorPlanMesKey(key, mes) {
+    const rows = tarifarioVig[key];
+    if (!rows || !rows.length) return 0;
+    const ref = (mes && mes.length === 7) ? mes + '-01' : new Date().toISOString().slice(0, 10);
+    const cand = rows.filter(r =>
+      (!r.vigente_desde || r.vigente_desde <= ref) &&
+      (!r.vigente_hasta || r.vigente_hasta >= ref)
+    );
+    const row = cand.length ? cand[cand.length - 1] : rows[rows.length - 1];
+    return Number(row.valor_lista) || 0;
+  }
 
   function calcMesActual() {
     const hoy = new Date();
@@ -250,7 +263,7 @@
     const [insR, pagR, tarR, sorR] = await Promise.all([
       supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
       supa.from('pagos_tf').select('id, fecha, inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
-      supa.from('tarifario_tf').select('plan, actividad, valor_lista'),
+      supa.from('tarifario_tf').select('plan, actividad, valor_lista, vigente_desde, vigente_hasta'),
       // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF en estos meses
       supa.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO').in('mes_descuento', [mesActual, mesAnt])
     ]);
@@ -262,7 +275,15 @@
     inscripciones = insR.data || [];
     pagos = pagR.data || [];
     tarifario = {};
-    (tarR.data || []).forEach(t => { tarifario[`${t.plan}__${t.actividad}`] = Number(t.valor_lista); });
+    tarifarioVig = {};
+    (tarR.data || []).forEach(t => {
+      const k = `${t.plan}__${t.actividad}`;
+      (tarifarioVig[k] = tarifarioVig[k] || []).push(t);
+    });
+    Object.keys(tarifarioVig).forEach(k => {
+      tarifarioVig[k].sort((a, b) => ((a.vigente_desde || '') < (b.vigente_desde || '') ? -1 : 1));
+      tarifario[k] = valorPlanMesKey(k, mesActual);   // precio del mes en pantalla
+    });
 
     // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
     // Si un alumno tiene un cambio programado (plan_futuro + mes_aplica_plan) y ya llegó
@@ -375,16 +396,22 @@
   }
 
   function clasificar(insc) {
-    const precio = tarifario[`${insc.plan}__${insc.actividad}`] || 0;
+    const _key = `${insc.plan}__${insc.actividad}`;
+    const precio = tarifario[_key] || 0;
     const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
+    // Base del mes según vigencia: junio paga junio aunque se cobre en julio.
+    function montoMesBase(mesStr) {
+      return Math.max(0, valorPlanMesKey(_key, mesStr) - Number(insc.descuento_libre || 0));
+    }
 
     // 🎰 GANADORES DEL SORTEO DE CUMPLEAÑOS: si la persona ganó el 25% OFF
     // para un mes (premio del sorteo de fin de mes), su cuota efectiva de ese
     // mes es el 75%. Así, el que pagó su 75% NO figura como deudor del resto.
     function cuotaEfectiva(mesStr) {
+      const base = montoMesBase(mesStr);
       return descSorteo.has(insc.persona_id + '|' + mesStr)
-        ? Math.round(montoMensual * 0.75)
-        : montoMensual;
+        ? Math.round(base * 0.75)
+        : base;
     }
 
     const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;
