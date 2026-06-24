@@ -4011,7 +4011,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const esMesActual = mesStr === hoyISO.substring(0, 7)
     const corte = esMesActual ? hoyISO : ultDia
 
-    const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR, faltaR, faltaCobR, cfR] = await Promise.all([
+    const [tR, tpR, ferR, cerR, evoRows, presRows, vacR, sesRows, tratR, pracR, tbR, cobR, faltaR, faltaCobR, cfR, ahR] = await Promise.all([
       supabase.from('turnos').select('id, dia, hora, capacidad, cupo_bono'),
       supabase.from('turno_profes').select('turno_id, nombre_profe'),
       supabase.from('feriados').select('fecha').gte('fecha', primerDia).lte('fecha', ultDia),
@@ -4026,7 +4026,8 @@ async function cargarEquipoDesempeno(mesVer) {
       supabase.from('feriados_cobertura').select('fecha, se_lo_toma, cubre').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('faltas_profe').select('id, profe_ausente, fecha, motivo').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('faltas_profe_cobertura').select('falta_id, cubridor, hora_desde, hora_hasta'),
-      supabase.from('coberturas_faltas').select('fecha, falta, cubre, tipo, horas_extra').gte('fecha', primerDia).lte('fecha', ultDia)
+      supabase.from('coberturas_faltas').select('fecha, falta, cubre, tipo, horas_extra, nota').gte('fecha', primerDia).lte('fecha', ultDia),
+      supabase.from('ausencias_horas').select('profe, fecha, horas, motivo').gte('fecha', primerDia).lte('fecha', ultDia)
     ])
 
     const turnosMap = {}
@@ -4133,6 +4134,20 @@ async function cargarEquipoDesempeno(mesVer) {
         ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = { aus: eAus || null, nombre: (eAus ? (NOMBRES_RANKING[eAus] || c.falta) : (c.falta || '')) }
       }
     })
+
+    // ===== BITÁCORA de faltas y horas (registro + descuento de sueldo) =====
+    const bitacoraPorEmail = {}
+    const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
+    ;((cfR && cfR.data) || []).forEach(c => {
+      if (c.tipo === 'cambio') return  // cambio devuelve horas → no pierde premio, fuera de la bitácora
+      const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
+      if (eAus) pushBita(eAus, { fecha: c.fecha, tipo: 'dia', motivo: c.nota || '', cubierto: !!c.cubre })
+    })
+    ;((ahR && ahR.data) || []).forEach(a => {
+      const em = a.profe ? emails.find(x => esTurnoDe(aliasPorEmail[x], a.profe)) : null
+      if (em) pushBita(em, { fecha: a.fecha, tipo: 'horas', horas: Number(a.horas) || 0, motivo: a.motivo || '' })
+    })
+    Object.keys(bitacoraPorEmail).forEach(em => bitacoraPorEmail[em].sort((x, y) => (y.fecha || '').localeCompare(x.fecha || '')))
 
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
     const nuevaArea = () => ({ n: 0, personas: new Set(), fechas: {} })
@@ -4280,6 +4295,7 @@ async function cargarEquipoDesempeno(mesVer) {
     emails.forEach(e => { EQUIPO_DETALLE.porEmail[e] = st[e] })
     EQUIPO_DETALLE.resumen = {}
     equipo.forEach(p => { EQUIPO_DETALLE.resumen[p.email] = p })
+    EQUIPO_DETALLE.bitacora = bitacoraPorEmail
 
     // ===== BONO DE DESEMPEÑO (jornada 78) =====
     const G = gruposVisiblesEquipo()
@@ -4571,6 +4587,7 @@ async function cargarEquipoDesempeno(mesVer) {
         ${esMesActual ? 'Mes en curso · datos hasta hoy' : 'Mes completo'}
       </div>
       ${bonoHTML}
+      ${(!G.admin && miEmailEq) ? bitacoraDesempenoHTML(miEmailEq) : ''}
       ${auditHTML}
       ${typeof refsEquipoHTML !== 'undefined' ? refsEquipoHTML : ''}
       ${(G.tf && tf.length) ? `
@@ -4587,6 +4604,30 @@ async function cargarEquipoDesempeno(mesVer) {
 // EQUIPO: MODAL DE DETALLE POR PROFE
 // ======================
 let EQUIPO_DETALLE = null
+function bitacoraDesempenoHTML(email) {
+  const b = (EQUIPO_DETALLE && EQUIPO_DETALLE.bitacora && EQUIPO_DETALLE.bitacora[email]) || []
+  if (!b.length) return ''
+  const fmtF = f => { const p = (f || '').split('-'); return p[2] ? p[2] + '/' + p[1] : (f || '') }
+  const filas = b.map(ev => {
+    if (ev.tipo === 'dia') {
+      return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+        <span style="font-size:11px; font-weight:800; min-width:42px; color:#b91c1c;">${fmtF(ev.fecha)}</span>
+        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+      </div>`
+    }
+    return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+      <span style="font-size:11px; font-weight:800; min-width:42px; color:#d97706;">${fmtF(ev.fecha)}</span>
+      <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">${ev.horas || '?'} h que no asistió</b> · a descontar del sueldo${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+    </div>`
+  }).join('')
+  const totalHoras = b.filter(e => e.tipo === 'horas').reduce((a, e) => a + (e.horas || 0), 0)
+  return `
+    <div style="background:#fff; border:1px solid #fca5a5; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
+      <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#b91c1c;">🗒️ Bitácora de faltas y horas del mes</div>
+      ${filas}
+      ${totalHoras > 0 ? `<div style="margin-top:8px; font-size:12.5px; font-weight:800; color:#d97706;">Total de horas a descontar este mes: ${totalHoras} h</div>` : ''}
+    </div>`
+}
 window.abrirDetalleProfe = function(email) {
   if (!EQUIPO_DETALLE || !EQUIPO_DETALLE.porEmail[email]) return
   const s = EQUIPO_DETALLE.porEmail[email]
@@ -4692,6 +4733,7 @@ window.abrirDetalleProfe = function(email) {
         ${filasSem ? `
         <div style="font-size:12px; font-weight:800; margin-bottom:6px;">📈 Actividad semana a semana</div>
         ${filasSem}` : ''}
+        ${bitacoraDesempenoHTML(email)}
       </div>
     </div>`
   overlay.addEventListener('click', (e) => { if (e.target === overlay) cerrarDetalleProfe() })

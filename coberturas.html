@@ -226,6 +226,7 @@
       <div class="tag">${esPasado?'Pasado':'🔒 Cerrado'}</div></div>`;}
 
   let FERIADOS_FUTUROS=[];
+  let AH_DATA=[];
   let COB_ADMIN=false, COB_VE_TODO=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
   const ADMIN_EMAILS=['liclucianavelaz@gmail.com','jimenahllorente@gmail.com'];
   const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
@@ -296,6 +297,7 @@
     if(!COB_OK){box.innerHTML='';return;}
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
+    try{const{data}=await sb.from('ausencias_horas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});AH_DATA=data||[];}catch(e){AH_DATA=[];}
     COB_ADMIN=false; COB_VE_TODO=false; MI_PROFE=null;
     try{
       const{data:{session}}=await sb.auth.getSession();
@@ -374,6 +376,29 @@
         <div class="full"><label>Nota (opcional)</label><input id="cf-nota" maxlength="120" placeholder="Ej: Lean falta el viernes, lo cubre Santi…"></div>
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
       </div>`;
+
+    html+=`<div class="cf-sub" style="margin-top:26px">🗒️ Horas sueltas que no asistió — para descontar del sueldo</div>
+      <div class="cf-form">
+        <div><label>Profe</label><select id="ah-profe">${profeOpts('')}</select></div>
+        <div><label>Día</label><input type="date" id="ah-fecha"></div>
+        <div><label>Horas que no asistió</label><input type="number" id="ah-horas" min="0" step="0.5" placeholder="Ej: 1"></div>
+        <div class="full"><label>Motivo</label><input id="ah-motivo" maxlength="160" placeholder="Ej: no fue a las 15h, se quedó encerrado"></div>
+        <div class="full"><button class="btn" id="ah-add">➕ Agregar a la bitácora</button></div>
+      </div>`;
+    {
+      const ahVis = COB_VE_TODO ? AH_DATA : (MI_PROFE ? AH_DATA.filter(r=>r.profe===MI_PROFE) : []);
+      if(ahVis && ahVis.length){
+        html+=`<div class="cf-list" style="margin-top:10px">`;
+        ahVis.slice(0,20).forEach(r=>{const fch=parseFecha(r.fecha);
+          html+=`<div class="cf-item">
+            <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
+            <div class="cf-main"><div class="cf-line"><b>${r.profe||'?'}</b> · <span class="badge badge-extra">${r.horas||'?'} h no asistió</span></div>
+              ${r.motivo?`<div class="cf-nota">📝 ${(r.motivo||'').replace(/</g,'&lt;')}</div>`:''}</div>
+            <div class="cf-actions"><button class="btn-del" data-ahdel="${r.id}" title="Borrar">✕</button></div>
+          </div>`;});
+        html+=`</div>`;
+      }
+    }
 
     html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — ${COB_VE_TODO?'lo último arriba':'tus faltas y coberturas · lo último arriba'}</div>`;
     if(CF_DATA.length){
@@ -485,6 +510,25 @@
         await cargarCobertura();
       }catch(e){alert('No se pudo guardar: '+(e.message||e));addBtn.disabled=false;addBtn.textContent='➕ Agregar';}
     });
+
+    const ahBtn=document.getElementById('ah-add');
+    if(ahBtn)ahBtn.addEventListener('click',async()=>{
+      const profe=document.getElementById('ah-profe').value;
+      const fecha=document.getElementById('ah-fecha').value;
+      const horas=document.getElementById('ah-horas').value;
+      const motivo=document.getElementById('ah-motivo').value.trim();
+      if(!profe||!fecha||!horas){alert('Poné el profe, el día y cuántas horas no asistió.');return;}
+      ahBtn.disabled=true;ahBtn.textContent='Guardando…';
+      try{
+        const{error}=await sb.from('ausencias_horas').insert({profe,fecha,horas:Number(horas),motivo:motivo||null,creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()});
+        if(error)throw error;
+        await cargarCobertura();
+      }catch(e){alert('No se pudo guardar: '+(e.message||e));ahBtn.disabled=false;ahBtn.textContent='➕ Agregar a la bitácora';}
+    });
+    box.querySelectorAll('[data-ahdel]').forEach(b=>b.addEventListener('click',async()=>{
+      if(!confirm('¿Borrar esta hora de la bitácora?'))return;
+      try{await sb.from('ausencias_horas').delete().eq('id',b.dataset.ahdel);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
+    }));
 
     box.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{
       if(!confirm('¿Borrar este registro?'))return;
