@@ -444,12 +444,14 @@
           <option value="cubre">Cobertura (no devuelve horas)</option>
           <option value="cambio">Cambio (devuelve horas)</option>
           <option value="devolucion">↩️ Devolución de horas (salda un cambio)</option>
+          <option value="falta_sc">🚫 Falta sin cobertura (descuenta horas)</option>
         </select></div>
         <div><label>Falta</label><select id="cf-falta">${profeOpts('')}</select></div>
         <div><label>Cubre</label><select id="cf-cubre">${profeOpts('')}</select></div>
         <div id="cf-horas-wrap" class="full" style="display:none"><label>Horas que va a devolver</label><input type="number" id="cf-horas" min="0" step="0.5" placeholder="Ej: 3"></div>
         <div id="cf-devol-wrap" class="full" style="display:none"><label>¿Qué cambio salda?</label><select id="cf-devol">${devolOpts()}</select></div>
         <div id="cf-extra-wrap" class="full"><label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;letter-spacing:0;color:var(--txt);font-weight:600;font-size:13.5px"><input type="checkbox" id="cf-extra" style="width:17px;height:17px;cursor:pointer;flex:0 0 auto">⏰ Genera horas extra (cubre un día que no es suyo) → bono 2% en vez de 5%</label></div>
+        <div id="cf-enf-wrap" class="full" style="display:none"><label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;letter-spacing:0;color:var(--txt);font-weight:600;font-size:13.5px"><input type="checkbox" id="cf-enf" style="width:17px;height:17px;cursor:pointer;flex:0 0 auto">🤒 Es por enfermedad (pierde el premio igual, pero NO se le descuentan las horas)</label></div>
         <div id="cf-extra-cant-wrap" class="full" style="display:none"><label>¿Cuántas horas extra?</label><input type="number" id="cf-extra-cant" min="0" step="0.5" placeholder="Ej: 4"></div>
         <div class="full"><label>Nota (opcional)</label><input id="cf-nota" maxlength="120" placeholder="Ej: Lean falta el viernes, lo cubre Santi…"></div>
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
@@ -460,6 +462,9 @@
         <div><label>Profe</label><select id="ah-profe">${profeOpts('')}</select></div>
         <div><label>Día</label><input type="date" id="ah-fecha"></div>
         <div><label>Horas que no asistió</label><input type="number" id="ah-horas" min="0" step="0.5" placeholder="Ej: 1"></div>
+        <div><label>¿A qué hora? (opcional)</label><input type="number" id="ah-hora" min="0" max="23" step="1" placeholder="Ej: 15"></div>
+        <div><label>¿Lo cubre alguien? (opcional)</label><select id="ah-cubre"><option value="">— nadie —</option>${PROFES_BONO.map(p=>`<option value="${p}">${p}</option>`).join('')}</select></div>
+        <div class="full" style="font-size:11.5px;color:var(--muted);font-weight:600">Si alguien lo cubre es un favor: <b>no cobra bono</b>. Si lo cubre <b>fuera de su horario</b>, el sistema le paga esa <b>hora extra en $</b> (poné la hora para que la detecte).</div>
         <div class="full"><label>Motivo</label><input id="ah-motivo" maxlength="160" placeholder="Ej: no fue a las 15h, se quedó encerrado"></div>
         <div class="full"><button class="btn" id="ah-add">➕ Agregar a la bitácora</button></div>
       </div>`;
@@ -523,7 +528,7 @@
           if(it.kind==='ah'){
             html+=`<div class="cf-item">
               <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
-              <div class="cf-main"><div class="cf-line"><b>${r.profe||'?'}</b> · <span class="badge badge-extra">${r.horas||'?'} h no asistió</span></div>
+              <div class="cf-main"><div class="cf-line"><b>${r.profe||'?'}</b> · <span class="badge badge-extra">${r.horas||'?'} h no asistió${r.hora!=null?` (${r.hora}h)`:''}</span>${r.cubre?` · lo cubre <b>${r.cubre}</b> <span class="badge badge-cambio">favor · sin bono</span>`:''}</div>
                 ${r.motivo?`<div class="cf-nota">📝 ${(r.motivo||'').replace(/</g,'&lt;')}</div>`:''}</div>
               <div class="cf-actions"><button class="btn-del" data-ahdel="${r.id}" title="Borrar">✕</button></div>
             </div>`;
@@ -533,13 +538,15 @@
             const orig=(esDevol&&r.salda_id)?(CF_DATA||[]).find(x=>String(x.id)===String(r.salda_id)):null;
             const origDD=orig?((orig.fecha||'').slice(8,10)+'/'+(orig.fecha||'').slice(5,7)):'';
             const cambioAbierto=esCambio&&!esDevol&&!r.devuelto;
+            const esFaltaSc=(!esCambio&&!esDevol&&!r.cubre);
             html+=`<div class="cf-item ${r.devuelto?'done':''}">
               <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
               <div class="cf-main">
-                <div class="cf-line"><b>${r.falta||'?'}</b> ${esDevol?'recibe devolución':'falta'}${r.cubre?` · ${esDevol?'devuelve':'cubre'} <b>${r.cubre}</b>`:' · sin cubrir'}
-                  <span class="badge ${esDevol?'badge-done':(esCambio?'badge-cambio':'badge-cubre')}">${esDevol?'↩️ Devolución':(esCambio?'Cambio':'Cobertura')}</span>
+                <div class="cf-line"><b>${r.falta||'?'}</b> ${esDevol?'recibe devolución':'falta'}${r.cubre?` · ${esDevol?'devuelve':'cubre'} <b>${r.cubre}</b>`:(esFaltaSc?'':' · sin cubrir')}
+                  <span class="badge ${esDevol?'badge-done':(esCambio?'badge-cambio':(esFaltaSc?'badge-extra':'badge-cubre'))}">${esDevol?'↩️ Devolución':(esCambio?'Cambio':(esFaltaSc?'🚫 Falta sin cobertura':'Cobertura'))}</span>
+                  ${esFaltaSc?(r.enfermedad?'<span class="badge badge-cambio">🤒 enfermedad · no descuenta</span>':'<span class="badge badge-extra">descuenta horas</span>'):''}
                   ${(esCambio&&r.horas)?`<span class="badge badge-horas">${r.horas} h</span>`:''}
-                  ${(!esCambio&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
+                  ${(!esCambio&&!esFaltaSc&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
                   ${r.devuelto&&!esDevol?`<span class="badge badge-done">Saldado ✓</span>`:''}
                 </div>
                 ${esDevol&&orig?`<div class="cf-nota">↩️ Saldó el cambio del ${origDD} (${orig.falta} le debía a ${orig.cubre}).</div>`:''}
@@ -600,17 +607,19 @@
     const tipo=document.getElementById('cf-tipo'),horasWrap=document.getElementById('cf-horas-wrap'),extraWrap=document.getElementById('cf-extra-wrap');
     const extraChk=document.getElementById('cf-extra'),extraCantWrap=document.getElementById('cf-extra-cant-wrap');
     const devolWrap=document.getElementById('cf-devol-wrap');
+    const enfWrap=document.getElementById('cf-enf-wrap');
     const faltaWrap=document.getElementById('cf-falta')?document.getElementById('cf-falta').closest('div'):null;
     const cubreWrap=document.getElementById('cf-cubre')?document.getElementById('cf-cubre').closest('div'):null;
     function syncExtraCant(){const on=extraChk&&extraChk.checked&&tipo.value==='cubre';if(extraCantWrap)extraCantWrap.style.display=on?'':'none';}
     if(tipo)tipo.addEventListener('change',()=>{
-      const v=tipo.value, esCambio=v==='cambio', esDevol=v==='devolucion';
+      const v=tipo.value, esCambio=v==='cambio', esDevol=v==='devolucion', esFaltaSc=v==='falta_sc';
       horasWrap.style.display=esCambio?'':'none';
       if(extraWrap)extraWrap.style.display=(v==='cubre')?'':'none';
       if(devolWrap)devolWrap.style.display=esDevol?'':'none';
-      // En devolución no se eligen falta/cubre (salen del cambio elegido)
+      if(enfWrap)enfWrap.style.display=esFaltaSc?'':'none';
+      // En devolución no se eligen falta/cubre; en falta sin cobertura no hay cubridor
       if(faltaWrap)faltaWrap.style.display=esDevol?'none':'';
-      if(cubreWrap)cubreWrap.style.display=esDevol?'none':'';
+      if(cubreWrap)cubreWrap.style.display=(esDevol||esFaltaSc)?'none':'';
       syncExtraCant();
     });
     if(extraChk)extraChk.addEventListener('change',syncExtraCant);
@@ -661,15 +670,20 @@
       const horasExtra=(tp==='cubre'&&extraEl&&extraEl.checked);
       const extraCantEl=document.getElementById('cf-extra-cant');
       const horasExtraCant=horasExtra&&extraCantEl&&extraCantEl.value?Number(extraCantEl.value):null;
+      // FALTA SIN COBERTURA: se guarda como falta sin cubridor; el motor descuenta las horas de la grilla (salvo enfermedad)
+      const esFaltaSc=(tp==='falta_sc');
+      const enfEl=document.getElementById('cf-enf');
+      const enfermedad=esFaltaSc&&enfEl&&enfEl.checked;
       if(!fecha||!falta){alert('Poné al menos el día y quién falta.');return;}
-      if(cubre&&falta===cubre){alert('El que falta y el que cubre no pueden ser el mismo.');return;}
+      if(!esFaltaSc&&cubre&&falta===cubre){alert('El que falta y el que cubre no pueden ser el mismo.');return;}
       addBtn.disabled=true;addBtn.textContent='Guardando…';
       try{
         const{error}=await sb.from('coberturas_faltas').insert({
-          fecha,falta,cubre:cubre||null,tipo:tp,
+          fecha,falta,cubre:esFaltaSc?null:(cubre||null),tipo:'cubre',
           horas:(tp==='cambio'&&horas)?Number(horas):null,
           horas_extra:horasExtra,
           horas_extra_cant:horasExtraCant,
+          enfermedad:!!enfermedad,
           nota:nota||null,creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()
         });
         if(error)throw error;
@@ -682,11 +696,15 @@
       const profe=document.getElementById('ah-profe').value;
       const fecha=document.getElementById('ah-fecha').value;
       const horas=document.getElementById('ah-horas').value;
+      const horaEl=document.getElementById('ah-hora');
+      const hora=horaEl&&horaEl.value!==''?parseInt(horaEl.value,10):null;
+      const cubreEl=document.getElementById('ah-cubre');
+      const cubre=cubreEl&&cubreEl.value?cubreEl.value:null;
       const motivo=document.getElementById('ah-motivo').value.trim();
       if(!profe||!fecha||!horas){alert('Poné el profe, el día y cuántas horas no asistió.');return;}
       ahBtn.disabled=true;ahBtn.textContent='Guardando…';
       try{
-        const{error}=await sb.from('ausencias_horas').insert({profe,fecha,horas:Number(horas),motivo:motivo||null,creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()});
+        const{error}=await sb.from('ausencias_horas').insert({profe,fecha,horas:Number(horas),hora,cubre,motivo:motivo||null,creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()});
         if(error)throw error;
         await cargarCobertura();
       }catch(e){alert('No se pudo guardar: '+(e.message||e));ahBtn.disabled=false;ahBtn.textContent='➕ Agregar a la bitácora';}
