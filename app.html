@@ -4026,7 +4026,7 @@ async function cargarEquipoDesempeno(mesVer) {
       supabase.from('feriados_cobertura').select('fecha, se_lo_toma, cubre').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('faltas_profe').select('id, profe_ausente, fecha, motivo').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('faltas_profe_cobertura').select('falta_id, cubridor, hora_desde, hora_hasta'),
-      supabase.from('coberturas_faltas').select('fecha, falta, cubre, tipo, horas_extra, nota').gte('fecha', primerDia).lte('fecha', ultDia),
+      supabase.from('coberturas_faltas').select('fecha, falta, cubre, tipo, horas_extra, horas_extra_cant, nota').gte('fecha', primerDia).lte('fecha', ultDia),
       supabase.from('ausencias_horas').select('profe, fecha, horas, motivo').gte('fecha', primerDia).lte('fecha', ultDia)
     ])
 
@@ -4182,12 +4182,15 @@ async function cargarEquipoDesempeno(mesVer) {
     const bitacoraPorEmail = {}
     const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
     ;((cfR && cfR.data) || []).forEach(c => {
-      if (c.tipo === 'cambio') return  // cambio devuelve horas → no pierde premio, fuera de la bitácora
+      if (c.tipo === 'cambio') return  // cambio devuelve horas → neutral, fuera de la bitácora
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
       if (eAus) {
         const hsDia = (st[eAus] && st[eAus].horasPorFecha[c.fecha]) || 0
         pushBita(eAus, { fecha: c.fecha, tipo: 'dia', motivo: c.nota || '', cubierto: !!c.cubre, horas: hsDia })
       }
+      // lado positivo: el que cubre (cobertura sin devolución) cobra de más
+      const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
+      if (eCub) pushBita(eCub, { fecha: c.fecha, tipo: 'cobertura', ausente: c.falta || '', conExtra: !!c.horas_extra, horasExtra: Number(c.horas_extra_cant) || 0 })
     })
     ;((ahR && ahR.data) || []).forEach(a => {
       const em = a.profe ? emails.find(x => esTurnoDe(aliasPorEmail[x], a.profe)) : null
@@ -4301,6 +4304,23 @@ async function cargarEquipoDesempeno(mesVer) {
     EQUIPO_DETALLE.resumen = {}
     equipo.forEach(p => { EQUIPO_DETALLE.resumen[p.email] = p })
     EQUIPO_DETALLE.bitacora = bitacoraPorEmail
+    // Sueldo y tarifa para el desglose en $ de la bitácora de coberturas.
+    // Privacidad: el admin trae todos; un profe trae SOLO el suyo (no ve sueldos ajenos).
+    try {
+      const _G0 = gruposVisiblesEquipo()
+      const _miNom = NOMBRES_RANKING[miEmailEq] || ''
+      const _miSueldoKey = _miNom === 'Lauti' ? 'Lautaro' : _miNom
+      const _miTarifaKey = _miNom === 'Santi' ? 'Santiago' : (_miNom === 'Lauti' ? 'Lautaro' : _miNom)
+      let _suQ = supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
+      let _taQ = supabase.from('tarifas_hora_extra').select('profe, monto')
+      if (!_G0.admin) { _suQ = _suQ.eq('profe', _miSueldoKey || '__none__'); _taQ = _taQ.eq('profe', _miTarifaKey || '__none__') }
+      const [_suR, _taR] = await Promise.all([_suQ, _taQ])
+      const _sueldoEmail = {}, _tarifaEmail = {}
+      ;((_suR && _suR.data) || []).forEach(x => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Lauti' ? 'Lautaro' : n) === x.profe }); if (em) _sueldoEmail[em] = Number(x.sueldo_bolsillo) || 0 })
+      ;((_taR && _taR.data) || []).forEach(t => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Santi' ? 'Santiago' : (n === 'Lauti' ? 'Lautaro' : n)) === t.profe }); if (em) _tarifaEmail[em] = Number(t.monto) || 0 })
+      EQUIPO_DETALLE.sueldos = _sueldoEmail
+      EQUIPO_DETALLE.tarifas = _tarifaEmail
+    } catch (_) { EQUIPO_DETALLE.sueldos = {}; EQUIPO_DETALLE.tarifas = {} }
 
     // ===== BONO DE DESEMPEÑO (jornada 78) =====
     const G = gruposVisiblesEquipo()
@@ -4613,25 +4633,63 @@ function bitacoraDesempenoHTML(email) {
   const b = (EQUIPO_DETALLE && EQUIPO_DETALLE.bitacora && EQUIPO_DETALLE.bitacora[email]) || []
   if (!b.length) return ''
   const fmtF = f => { const p = (f || '').split('-'); return p[2] ? p[2] + '/' + p[1] : (f || '') }
-  const filas = b.map(ev => {
-    if (ev.tipo === 'dia') {
+  const fmtD = n => '$' + Math.round(n || 0).toLocaleString('es-AR')
+  const sueldo = (EQUIPO_DETALLE.sueldos && EQUIPO_DETALLE.sueldos[email]) || 0
+  const tarifa = (EQUIPO_DETALLE.tarifas && EQUIPO_DETALLE.tarifas[email]) || 0
+  const bonoCobPct = (EQUIPO_DETALLE.resumen && EQUIPO_DETALLE.resumen[email] && EQUIPO_DETALLE.resumen[email].bonoCobertura) || 0
+  const conPlata = sueldo > 0
+
+  // --- FALTAS / HORAS (descuentos, rojo) ---
+  const faltas = b.filter(e => e.tipo !== 'cobertura')
+  let faltasHTML = ''
+  if (faltas.length) {
+    const filas = faltas.map(ev => {
+      if (ev.tipo === 'dia') {
+        return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:11px; font-weight:800; min-width:42px; color:#b91c1c;">${fmtF(ev.fecha)}</span>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo${ev.horas ? ' (' + ev.horas + ' h)' : ''}</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.horas ? ' · <span style="color:#d97706;">a descontar del sueldo</span>' : ''}${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+        </div>`
+      }
       return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
-        <span style="font-size:11px; font-weight:800; min-width:42px; color:#b91c1c;">${fmtF(ev.fecha)}</span>
-        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo${ev.horas ? ' (' + ev.horas + ' h)' : ''}</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.horas ? ' · <span style="color:#d97706;">a descontar del sueldo</span>' : ''}${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+        <span style="font-size:11px; font-weight:800; min-width:42px; color:#d97706;">${fmtF(ev.fecha)}</span>
+        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">${ev.horas || '?'} h que no asistió</b> · a descontar del sueldo${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
       </div>`
-    }
-    return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
-      <span style="font-size:11px; font-weight:800; min-width:42px; color:#d97706;">${fmtF(ev.fecha)}</span>
-      <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">${ev.horas || '?'} h que no asistió</b> · a descontar del sueldo${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
-    </div>`
-  }).join('')
-  const totalHoras = b.reduce((a, e) => a + (e.horas || 0), 0)
-  return `
-    <div style="background:#fff; border:1px solid #fca5a5; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
+    }).join('')
+    const totalHoras = faltas.reduce((a, e) => a + (e.horas || 0), 0)
+    faltasHTML = `<div style="background:#fff; border:1px solid #fca5a5; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
       <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#b91c1c;">🗒️ Bitácora de faltas y horas del mes</div>
       ${filas}
       ${totalHoras > 0 ? `<div style="margin-top:8px; font-size:12.5px; font-weight:800; color:#d97706;">Total de horas a descontar este mes: ${totalHoras} h</div>` : ''}
     </div>`
+  }
+
+  // --- COBERTURAS (a cobrar de más, verde) ---
+  const cobs = b.filter(e => e.tipo === 'cobertura')
+  let cobsHTML = ''
+  if (cobs.length) {
+    let totalOt = 0
+    const filas = cobs.map(ev => {
+      const ot = conPlata ? (ev.horasExtra || 0) * tarifa : 0
+      totalOt += ot
+      let extraTxt
+      if (ev.conExtra) extraTxt = ev.horasExtra ? `⏰ ${ev.horasExtra} h extra${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''}` : '⏰ con horas extra'
+      else extraTxt = 'sin horas extra'
+      return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+        <span style="font-size:11px; font-weight:800; min-width:42px; color:#16a34a;">${fmtF(ev.fecha)}</span>
+        <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#16a34a;">Cubrió a ${ev.ausente || '?'}</b> · ${extraTxt}</div>
+      </div>`
+    }).join('')
+    const cobBonus = conPlata ? Math.round(sueldo * bonoCobPct / 100) : 0
+    const totalMas = totalOt + cobBonus
+    cobsHTML = `<div style="background:#fff; border:1px solid #86efac; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
+      <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#15803d;">🟢 Coberturas que hizo este mes${conPlata ? ' · a cobrar de más' : ''}</div>
+      ${filas}
+      ${(conPlata && bonoCobPct > 0) ? `<div style="margin-top:6px; font-size:11.5px; line-height:1.35;"><b style="color:#15803d;">Bono cobertura del mes:</b> ${bonoCobPct}% de ${fmtD(sueldo)} = <b>${fmtD(cobBonus)}</b></div>` : ''}
+      ${conPlata ? `<div style="margin-top:8px; font-size:12.5px; font-weight:800; color:#15803d;">Total a cobrar de más este mes: ${fmtD(totalMas)}</div>` : ''}
+    </div>`
+  }
+
+  return faltasHTML + cobsHTML
 }
 window.abrirDetalleProfe = function(email) {
   if (!EQUIPO_DETALLE || !EQUIPO_DETALLE.porEmail[email]) return
