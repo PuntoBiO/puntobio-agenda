@@ -43,6 +43,8 @@ h1{font-size:24px;margin:0 0 4px;display:flex;align-items:center;gap:10px}
 .det summary{cursor:pointer;font-size:13.5px;font-weight:700;color:var(--turquoise-dim);list-style:none}
 .det summary::-webkit-details-marker{display:none}
 .lista{margin-top:10px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.lista-scroll{max-height:360px;overflow:auto}
+.fila .idx{color:var(--text-faint);font-variant-numeric:tabular-nums;margin-right:8px}
 .fila{display:flex;justify-content:space-between;gap:8px;padding:9px 14px;font-size:13px;border-bottom:1px solid #f1f5f9}
 .fila:last-child{border-bottom:none}
 .fila .r{color:var(--text-dim)}
@@ -108,19 +110,35 @@ async function cargarEstado(){
   const lista = Object.values(porPersona).map(c => {
     const p = perById[c.persona_id] || {}
     const email = (p.email && String(p.email).trim()) || (p.mail && String(p.mail).trim()) || ''
-    return { ...c, nombre:p.nombre || '(sin nombre)', email, emailOk: email.includes('@'), enviado: !!p.aviso_aumento_jul26_mail }
+    return { ...c, nombre:p.nombre || '(sin nombre)', email, emailOk: email.includes('@'), enviado: !!p.aviso_aumento_jul26_mail, mailAt: p.aviso_aumento_jul26_mail || null }
   })
 
   const conMail   = lista.filter(c => c.emailOk)
-  const enviados  = conMail.filter(c => c.enviado)
+  const enviados  = conMail.filter(c => c.enviado).sort((a,b) => new Date(b.mailAt||0) - new Date(a.mailAt||0))
   const pendientes= conMail.filter(c => !c.enviado).sort((a,b) => a.dia - b.dia)
-  const sinEmail  = lista.filter(c => !c.emailOk)
-  return { total: conMail.length, enviados: enviados.length, pendientes, sinEmail }
+  const sinEmail  = lista.filter(c => !c.emailOk).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
+  return { total: conMail.length, enviados, pendientes, sinEmail }
+}
+
+function fmtFechaCorta(ts){
+  if(!ts) return ''
+  try {
+    const d = new Date(ts)
+    return d.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'}) + ' ' + d.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'})
+  } catch(_){ return '' }
+}
+
+function filaPersona(c, i, derecha){
+  return `<div class="fila"><span><span class="idx">${i}.</span>${esc(c.nombre)} · <span class="r">${esc(c.plan)} · ${fmt$(c.precio)}</span></span><span class="r">${derecha}</span></div>`
+}
+
+function listaCompleta(items, derechaFn, vacio){
+  if(!items.length) return `<div class="lista"><div class="fila"><span class="r">${vacio}</span></div></div>`
+  return `<div class="lista"><div class="lista-scroll">${items.map((c,idx)=>filaPersona(c, idx+1, derechaFn(c))).join('')}</div></div>`
 }
 
 function render(est){
-  const pct = est.total ? Math.round(est.enviados / est.total * 100) : 0
-  const proximos = est.pendientes.slice(0, 12)
+  const pct = est.total ? Math.round(est.enviados.length / est.total * 100) : 0
   $('app').innerHTML = `
     <div class="card">
       <div class="card-top">
@@ -132,7 +150,7 @@ function render(est){
       </div>
 
       <div class="kpis">
-        <div class="kpi ok"><div class="n">${est.enviados}</div><div class="l">Enviados</div></div>
+        <div class="kpi ok"><div class="n">${est.enviados.length}</div><div class="l">Enviados</div></div>
         <div class="kpi pend"><div class="n">${est.pendientes.length}</div><div class="l">Faltan</div></div>
         <div class="kpi"><div class="n">${est.total}</div><div class="l">Total con mail</div></div>
       </div>
@@ -149,13 +167,19 @@ function render(est){
 
       <div class="res" id="res"></div>
 
-      ${est.sinEmail.length ? `<div class="warn">⚠️ ${est.sinEmail.length} alumno/s sin email cargado no van a recibir el mail. Conviene avisarles por otro medio o cargarles el mail en el Padrón.</div>` : ''}
+      <details class="det" open>
+        <summary>✅ Ya recibieron el mail (${est.enviados.length})</summary>
+        ${listaCompleta(est.enviados, c => 'enviado ' + (fmtFechaCorta(c.mailAt) || ''), 'Todavía no se envió a nadie.')}
+      </details>
 
-      <details class="det" ${proximos.length ? 'open' : ''}>
-        <summary>Próximos en la fila (${est.pendientes.length})</summary>
-        <div class="lista">
-          ${proximos.map(c => `<div class="fila"><span>${esc(c.nombre)} · <span class="r">${esc(c.plan)} · ${fmt$(c.precio)}</span></span><span class="r">vence día ${c.dia===99?'—':c.dia}</span></div>`).join('') || '<div class="fila"><span class="r">No quedan pendientes.</span></div>'}
-        </div>
+      <details class="det" ${est.pendientes.length ? 'open' : ''}>
+        <summary>⏳ Todavía falta enviarles (${est.pendientes.length})</summary>
+        ${listaCompleta(est.pendientes, c => 'vence día ' + (c.dia===99?'—':c.dia), 'No quedan pendientes. 🎉')}
+      </details>
+
+      <details class="det">
+        <summary>⚠️ Sin email cargado (${est.sinEmail.length})</summary>
+        ${listaCompleta(est.sinEmail, () => 'sin mail', 'Todos tienen mail cargado. 👍')}
       </details>
 
       <details class="det">
