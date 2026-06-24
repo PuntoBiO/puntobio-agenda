@@ -269,8 +269,19 @@
     }catch(e){COB_OK=false;}
     if(!COB_OK){box.innerHTML='';return;}
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
-    try{const{data}=await sb.from('coberturas_faltas').select('*').order('fecha',{ascending:true});CF_DATA=data||[];}catch(e){CF_DATA=[];}
-    COB_ADMIN=!!(COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase()));
+    try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
+    COB_ADMIN=false;
+    try{
+      const{data:{session}}=await sb.auth.getSession();
+      if(session&&session.user){
+        const{data:persona}=await sb.from('personas').select('id, es_equipo').eq('auth_user_id',session.user.id).maybeSingle();
+        if(persona&&persona.es_equipo){
+          const{data:perm}=await sb.from('permisos_equipo').select('admin_total').eq('persona_id',persona.id).maybeSingle();
+          COB_ADMIN=!!(perm&&perm.admin_total);
+        }
+      }
+    }catch(e){}
+    if(!COB_ADMIN&&COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase()))COB_ADMIN=true;
     if(COB_ADMIN){
       try{
         const{data:su}=await sb.from('sueldos_profes_tf').select('profe, mes, sueldo_bolsillo');
@@ -311,27 +322,7 @@
     const box=document.getElementById('cobertura');
     let html=`<div class="cov-wrap">`;
 
-    if(FERIADOS_FUTUROS.length){
-      html+=`<div class="cf-sub">🗓️ Feriados con puente — ¿quién se lo toma y quién cubre?</div>`;
-      FERIADOS_FUTUROS.forEach(f=>{
-        const fch=parseFecha(f.fecha),r=FC_MAPA[f.fecha]||{},op=oportunidad(f.fecha);
-        html+=`<div class="cov-card" data-fecha="${f.fecha}">
-          <div class="cov-top">
-            <div class="db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
-            <div class="mot">${f.motivo||'Feriado'}<small>${DIAS[fch.getDay()]}${op?' · '+op:''}</small></div>
-            <span class="cov-status">Guardado ✓</span>
-          </div>
-          <div class="cov-fields">
-            <div><label>Se lo toma</label><select class="f-toma">${opts(r.se_lo_toma)}</select></div>
-            <div><label>Cubre</label><select class="f-cubre">${opts(r.cubre)}</select></div>
-            <div class="full"><label>Nota (opcional)</label><input class="f-nota" maxlength="120" placeholder="Ej: cambio con Vero, salgo 13hs…" value="${(r.nota||'').replace(/"/g,'&quot;')}"></div>
-          </div>
-          <div class="cov-edited">${r.actualizado_por?('Última edición: '+r.actualizado_por):''}</div>
-        </div>`;
-      });
-    }
-
-    html+=`<div class="cf-sub" style="margin-top:30px">🔄 Faltas y cambios — cualquier día</div>
+    html+=`<div class="cf-sub">🔄 Faltas y cambios — cualquier día</div>
       ${COB_ADMIN?`<div class="cf-tarifas">
         <div class="cf-tarifas-t">⏰ Tarifa de hora extra (por hora) — editable</div>
         <div class="cf-tarifas-grid">${PROFES_BONO.map(p=>`<label>${p}<input type="number" min="0" step="100" data-tarifa="${p}" value="${TARIFA_DE[p]||0}"></label>`).join('')}</div>
@@ -352,6 +343,7 @@
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
       </div>`;
 
+    html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — lo último arriba</div>`;
     if(CF_DATA.length){
       html+=`<div class="cf-list">`;
       CF_DATA.forEach(r=>{
@@ -455,7 +447,7 @@
           horas:(tp==='cambio'&&horas)?Number(horas):null,
           horas_extra:horasExtra,
           horas_extra_cant:horasExtraCant,
-          nota:nota||null,creado_por:COB_EMAIL||'equipo'
+          nota:nota||null,creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()
         });
         if(error)throw error;
         await cargarCobertura();
