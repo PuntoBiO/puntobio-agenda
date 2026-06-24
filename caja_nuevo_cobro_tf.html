@@ -376,7 +376,7 @@
     try {
       const [inscR, tarR, sorR] = await Promise.all([
         sb.from('inscripciones_tf').select('id, plan, actividad, descuento_libre, dia_vencimiento, estado, persona_id'),
-        sb.from('tarifario_tf').select('plan, actividad, valor_lista'),
+        sb.from('tarifario_tf').select('plan, actividad, valor_lista, valor_nuevo, aumento_desde'),
         // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF (todos: la tabla es chica)
         sb.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO')
       ]);
@@ -393,7 +393,11 @@
 
       // Tarifario map
       const tarMap = {};
-      tarR.data.forEach(t => tarMap[`${t.plan}|${t.actividad}`] = parseFloat(t.valor_lista));
+      tarR.data.forEach(t => tarMap[`${t.plan}|${t.actividad}`] = {
+        valor_lista: parseFloat(t.valor_lista),
+        valor_nuevo: t.valor_nuevo != null ? parseFloat(t.valor_nuevo) : null,
+        aumento_desde: t.aumento_desde || null
+      });
       planes_tarifario = tarR.data
         .filter(t => t.actividad === 'TERAPIA_FISICA')
         .map(t => ({plan: t.plan, valor_lista: parseFloat(t.valor_lista)}))
@@ -407,7 +411,9 @@
         plan: i.plan,
         actividad: i.actividad,
         descuento_libre: parseFloat(i.descuento_libre) || 0,
-        valor_lista: tarMap[`${i.plan}|${i.actividad}`] || 0,
+        valor_lista: tarMap[`${i.plan}|${i.actividad}`]?.valor_lista || 0,
+        valor_nuevo: tarMap[`${i.plan}|${i.actividad}`]?.valor_nuevo ?? null,
+        aumento_desde: tarMap[`${i.plan}|${i.actividad}`]?.aumento_desde || null,
         dia_vencimiento: i.dia_vencimiento,
         estado: i.estado
       })).sort((a,b) => a.nombre.localeCompare(b.nombre, 'es'));
@@ -449,8 +455,11 @@
       if (i === 0) opt.selected = true;
       sel.appendChild(opt);
     }
-    // Si cambia el mes a imputar, re-evaluar el 25% OFF del sorteo
-    sel.addEventListener('change', aplicarDescuentoSorteo);
+    // Si cambia el mes a imputar, recalcular precio del mes (junio/julio) y re-evaluar el 25% OFF
+    sel.addEventListener('change', () => {
+      if (alumnoSel) seleccionar(alumnoSel);
+      else aplicarDescuentoSorteo();
+    });
   }
 
   // === Búsqueda ===
@@ -476,7 +485,7 @@
         matches.forEach(a => {
           const div = document.createElement('div');
           div.className = 'result-item';
-          const monto = a.valor_lista - a.descuento_libre;
+          const monto = precioBaseMes(a, mesImputadoSel()) - a.descuento_libre;
           div.innerHTML = `
             <div class="result-id">${a.persona_id}</div>
             <div class="result-info">
@@ -507,9 +516,9 @@
     document.getElementById('al-nombre').textContent = a.nombre;
     document.getElementById('al-id').textContent = a.persona_id;
     document.getElementById('al-plan').textContent = a.plan;
-    document.getElementById('al-valor').textContent = fmt(a.valor_lista);
+    document.getElementById('al-valor').textContent = fmt(precioBaseMes(a, mesImputadoSel()));
     document.getElementById('al-desc').textContent = a.descuento_libre > 0 ? '-' + fmt(a.descuento_libre) : 'Sin descuento';
-    const monto = a.valor_lista - a.descuento_libre;
+    const monto = precioBaseMes(a, mesImputadoSel()) - a.descuento_libre;
     document.getElementById('al-monto').textContent = fmt(monto);
     document.getElementById('al-venc').textContent = a.dia_vencimiento ? `Día ${a.dia_vencimiento}` : '—';
     const est = document.getElementById('al-estado');
@@ -568,9 +577,18 @@
     const cb = document.getElementById('es_parcial');
     return !!(cb && cb.checked);
   }
+  // Precio del plan según el mes que se imputa: desde el mes del aumento usa el nuevo; antes, el de lista.
+  function mesImputadoSel(){
+    const el = document.getElementById('mes_imputado');
+    return el ? el.value : '';
+  }
+  function precioBaseMes(a, mes){
+    if (a && a.valor_nuevo != null && a.aumento_desde && mes && (mes + '-01') >= a.aumento_desde) return a.valor_nuevo;
+    return a ? (a.valor_lista || 0) : 0;
+  }
   function montoAlumno(){
     if (!alumnoSel) return 0;
-    return Math.max(0, (alumnoSel.valor_lista || 0) - (alumnoSel.descuento_libre || 0));
+    return Math.max(0, precioBaseMes(alumnoSel, mesImputadoSel()) - (alumnoSel.descuento_libre || 0));
   }
   // Muestra cuánto queda debiendo (sólo en modo parcial)
   function actualizarParcialHint(){
