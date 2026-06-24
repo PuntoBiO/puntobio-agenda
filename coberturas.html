@@ -141,6 +141,18 @@
   .badge-cambio{background:var(--warn-dim);color:var(--warn);border-color:rgba(255,178,77,.3)}
   .badge-horas{background:#161616;color:var(--muted);border-color:var(--line)}
   .badge-extra{background:rgba(255,178,77,.16);color:var(--warn);border-color:rgba(255,178,77,.35)}
+  .cf-calc{margin-top:8px;padding:8px 11px;background:#0d1922;border:1px solid rgba(30,159,224,.25);border-radius:10px;font-size:12.5px}
+  .cf-calc-row{display:flex;justify-content:space-between;gap:12px;color:var(--muted);padding:2px 0}
+  .cf-calc-row b{color:var(--txt)}
+  .cf-calc-row.total{margin-top:4px;padding-top:6px;border-top:1px solid var(--line);color:var(--txt);font-weight:700}
+  .cf-calc-row.total b{color:var(--blue)}
+  .cf-calc-warn{color:var(--muted);background:#161616;border-color:var(--line)}
+  .cf-tarifas{margin-bottom:14px;padding:12px 14px;background:#0d1922;border:1px solid rgba(30,159,224,.22);border-radius:12px}
+  .cf-tarifas-t{font-weight:700;font-size:13px;color:var(--txt);margin-bottom:9px}
+  .cf-tarifas-grid{display:flex;flex-wrap:wrap;gap:12px}
+  .cf-tarifas-grid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);font-weight:600}
+  .cf-tarifas-grid input{width:108px;padding:6px 8px;background:#111;border:1px solid var(--line);border-radius:7px;color:var(--txt);font-size:13px}
+  .cf-tarifas-hint{margin-top:8px;font-size:11px;color:var(--muted)}
   .badge-done{background:rgba(62,207,142,.12);color:var(--ok);border-color:rgba(62,207,142,.3)}
   .cf-actions{display:flex;align-items:center;gap:7px;flex:0 0 auto}
   .btn-mini{background:#161616;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 10px;
@@ -212,6 +224,32 @@
       <div class="tag">${esPasado?'Pasado':'🔒 Cerrado'}</div></div>`;}
 
   let FERIADOS_FUTUROS=[];
+  let COB_ADMIN=false, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
+  const ADMIN_EMAILS=['liclucianavelaz@gmail.com','jimenahllorente@gmail.com'];
+  const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
+  const TARIFA_DEFAULT={Santiago:7300,Lean:7300,Lautaro:7300,Male:16500};
+  const sueldoKey=p=>p==='Santiago'?'Santi':p; // el sueldo se guarda con 'Santi'
+  const fmtPeso=n=>'$'+Math.round(n||0).toLocaleString('es-AR');
+  function sueldoDeCobertura(cubre,fecha){
+    const k=sueldoKey(cubre),m=SUELDO_DE[k];
+    if(m&&m[(fecha||'').slice(0,7)]!=null)return m[fecha.slice(0,7)];
+    return SUELDO_LATEST[k]?SUELDO_LATEST[k].monto:0;
+  }
+  function bonoCobInfo(r){
+    const sueldo=sueldoDeCobertura(r.cubre,r.fecha);
+    const pct=r.horas_extra?2:5, bono=sueldo*pct/100;
+    const tarifa=TARIFA_DE[r.cubre]||0, cant=Number(r.horas_extra_cant||0);
+    const ot=r.horas_extra?cant*tarifa:0;
+    return {sueldo,pct,bono,tarifa,cant,ot,total:bono+ot};
+  }
+  function breakdownHTML(r){
+    const i=bonoCobInfo(r);
+    if(!i.sueldo)return '<div class="cf-calc cf-calc-warn">\u{1F4A1} Carg\u00e1 el sueldo de <b>'+r.cubre+'</b> en el Calculador de Bonos para ver el monto.</div>';
+    let rows='<div class="cf-calc-row"><span>Bono cobertura ('+i.pct+'% de '+fmtPeso(i.sueldo)+')</span><b>'+fmtPeso(i.bono)+'</b></div>';
+    if(r.horas_extra)rows+='<div class="cf-calc-row"><span>Horas extra ('+i.cant+' h \u00d7 '+fmtPeso(i.tarifa)+')</span><b>'+fmtPeso(i.ot)+'</b></div>';
+    rows+='<div class="cf-calc-row total"><span>Total a pagarle de m\u00e1s a '+r.cubre+'</span><b>'+fmtPeso(i.total)+'</b></div>';
+    return '<div class="cf-calc">'+rows+'</div>';
+  }
 
   async function cargarFeriados(){
     try{
@@ -232,6 +270,20 @@
     if(!COB_OK){box.innerHTML='';return;}
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('fecha',{ascending:true});CF_DATA=data||[];}catch(e){CF_DATA=[];}
+    COB_ADMIN=!!(COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase()));
+    if(COB_ADMIN){
+      try{
+        const{data:su}=await sb.from('sueldos_profes_tf').select('profe, mes, sueldo_bolsillo');
+        SUELDO_DE={};SUELDO_LATEST={};
+        (su||[]).forEach(x=>{const p=x.profe,mes=x.mes,monto=Number(x.sueldo_bolsillo)||0;
+          (SUELDO_DE[p]=SUELDO_DE[p]||{})[mes]=monto;
+          if(!SUELDO_LATEST[p]||mes>SUELDO_LATEST[p].mes)SUELDO_LATEST[p]={mes,monto};});
+      }catch(e){SUELDO_DE={};SUELDO_LATEST={};}
+      try{const{data:ta}=await sb.from('tarifas_hora_extra').select('profe, monto');
+        TARIFA_DE={};(ta||[]).forEach(t=>{TARIFA_DE[t.profe]=Number(t.monto)||0;});
+      }catch(e){TARIFA_DE={};}
+      PROFES_BONO.forEach(p=>{if(TARIFA_DE[p]==null)TARIFA_DE[p]=TARIFA_DEFAULT[p]||0;});
+    }
     renderCobertura();
   }
 
@@ -280,6 +332,11 @@
     }
 
     html+=`<div class="cf-sub" style="margin-top:30px">🔄 Faltas y cambios — cualquier día</div>
+      ${COB_ADMIN?`<div class="cf-tarifas">
+        <div class="cf-tarifas-t">⏰ Tarifa de hora extra (por hora) — editable</div>
+        <div class="cf-tarifas-grid">${PROFES_BONO.map(p=>`<label>${p}<input type="number" min="0" step="100" data-tarifa="${p}" value="${TARIFA_DE[p]||0}"></label>`).join('')}</div>
+        <div class="cf-tarifas-hint">Si cambia el mes que viene, editá el monto acá y el sistema recalcula solo. Solo lo ven Lu y Jime.</div>
+      </div>`:''}
       <div class="cf-form">
         <div><label>Día</label><input type="date" id="cf-fecha"></div>
         <div><label>Tipo</label><select id="cf-tipo">
@@ -290,6 +347,7 @@
         <div><label>Cubre</label><select id="cf-cubre">${profeOpts('')}</select></div>
         <div id="cf-horas-wrap" class="full" style="display:none"><label>Horas que va a devolver</label><input type="number" id="cf-horas" min="0" step="0.5" placeholder="Ej: 3"></div>
         <div id="cf-extra-wrap" class="full"><label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;letter-spacing:0;color:var(--txt);font-weight:600;font-size:13.5px"><input type="checkbox" id="cf-extra" style="width:17px;height:17px;cursor:pointer;flex:0 0 auto">⏰ Genera horas extra (cubre un día que no es suyo) → bono 2% en vez de 5%</label></div>
+        <div id="cf-extra-cant-wrap" class="full" style="display:none"><label>¿Cuántas horas extra?</label><input type="number" id="cf-extra-cant" min="0" step="0.5" placeholder="Ej: 4"></div>
         <div class="full"><label>Nota (opcional)</label><input id="cf-nota" maxlength="120" placeholder="Ej: Lean falta el viernes, lo cubre Santi…"></div>
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
       </div>`;
@@ -308,6 +366,7 @@
               ${r.devuelto?`<span class="badge badge-done">Saldado ✓</span>`:''}
             </div>
             ${r.nota?`<div class="cf-nota">${(r.nota||'').replace(/</g,'&lt;')}</div>`:''}
+            ${(COB_ADMIN&&!esCambio&&r.cubre&&PROFES_BONO.includes(r.cubre))?breakdownHTML(r):''}
           </div>
           <div class="cf-actions">
             ${esCambio&&!r.devuelto?`<button class="btn-mini" data-saldar="${r.id}">Saldar</button>`:''}
@@ -358,11 +417,22 @@
     });
 
     const tipo=document.getElementById('cf-tipo'),horasWrap=document.getElementById('cf-horas-wrap'),extraWrap=document.getElementById('cf-extra-wrap');
+    const extraChk=document.getElementById('cf-extra'),extraCantWrap=document.getElementById('cf-extra-cant-wrap');
+    function syncExtraCant(){const on=extraChk&&extraChk.checked&&tipo.value!=='cambio';if(extraCantWrap)extraCantWrap.style.display=on?'':'none';}
     if(tipo)tipo.addEventListener('change',()=>{
       const esCambio=tipo.value==='cambio';
       horasWrap.style.display=esCambio?'':'none';
       if(extraWrap)extraWrap.style.display=esCambio?'none':'';
+      syncExtraCant();
     });
+    if(extraChk)extraChk.addEventListener('change',syncExtraCant);
+    document.querySelectorAll('[data-tarifa]').forEach(inp=>inp.addEventListener('change',async()=>{
+      const p=inp.dataset.tarifa,monto=Number(inp.value||0);
+      TARIFA_DE[p]=monto;
+      try{await sb.from('tarifas_hora_extra').upsert({profe:p,monto,actualizado_en:new Date().toISOString()},{onConflict:'profe'});
+        renderCobertura();
+      }catch(e){alert('No se pudo guardar la tarifa: '+(e.message||e));}
+    }));
 
     const addBtn=document.getElementById('cf-add');
     if(addBtn)addBtn.addEventListener('click',async()=>{
@@ -373,6 +443,8 @@
       const horas=document.getElementById('cf-horas').value;
       const extraEl=document.getElementById('cf-extra');
       const horasExtra=(tp==='cubre'&&extraEl&&extraEl.checked);
+      const extraCantEl=document.getElementById('cf-extra-cant');
+      const horasExtraCant=horasExtra&&extraCantEl&&extraCantEl.value?Number(extraCantEl.value):null;
       const nota=document.getElementById('cf-nota').value.trim();
       if(!fecha||!falta){alert('Poné al menos el día y quién falta.');return;}
       if(cubre&&falta===cubre){alert('El que falta y el que cubre no pueden ser el mismo.');return;}
@@ -382,6 +454,7 @@
           fecha,falta,cubre:cubre||null,tipo:tp,
           horas:(tp==='cambio'&&horas)?Number(horas):null,
           horas_extra:horasExtra,
+          horas_extra_cant:horasExtraCant,
           nota:nota||null,creado_por:COB_EMAIL||'equipo'
         });
         if(error)throw error;
