@@ -369,12 +369,47 @@
     renderCobertura();
   }
 
+  // ===== Vencimiento de los cambios: 60 días desde el día del favor para devolver =====
+  const DIAS_TOPE_DEVOL = 60;
+  function vencDeCambio(fechaISO){
+    const f = parseFecha(fechaISO); if(isNaN(f)) return null;
+    f.setDate(f.getDate() + DIAS_TOPE_DEVOL); f.setHours(0,0,0,0); return f;
+  }
+  function diasParaVencer(venc){
+    if(!venc) return null;
+    const hoy = new Date(); hoy.setHours(0,0,0,0);
+    return Math.round((venc - hoy) / 86400000);
+  }
+  function vencTxt(fechaISO){
+    const venc = vencDeCambio(fechaISO); if(!venc) return '';
+    const d = diasParaVencer(venc);
+    const dd = String(venc.getDate()).padStart(2,'0')+'/'+String(venc.getMonth()+1).padStart(2,'0');
+    if(d < 0)  return `<span style="color:var(--danger,#e5484d);font-weight:700">⚠️ venció hace ${-d} día${-d===1?'':'s'} (${dd})</span>`;
+    if(d <= 10) return `<span style="color:var(--warn)">⏳ vence en ${d} día${d===1?'':'s'} (${dd})</span>`;
+    return `<span style="color:var(--muted)">vence ${dd} · en ${d} días</span>`;
+  }
+  // Cambios pendientes (para el desplegable de Devolución): tipo cambio, sin saldar, no devoluciones.
+  function cambiosPendientes(){
+    return (CF_DATA||[]).filter(r=> r.tipo==='cambio' && !r.devuelto && !r.es_devolucion && r.horas && r.falta && r.cubre);
+  }
+  function devolOpts(){
+    const ps = cambiosPendientes();
+    if(!ps.length) return '<option value="">— no hay cambios pendientes —</option>';
+    return '<option value="">Elegí el cambio a saldar…</option>' + ps.map(r=>{
+      const venc = vencDeCambio(r.fecha), d = venc ? diasParaVencer(venc) : null;
+      const dd = (r.fecha||'').slice(8,10)+'/'+(r.fecha||'').slice(5,7);
+      const vtxt = (d==null)?'':(d<0?` · ⚠️ vencido`:` · vence en ${d}d`);
+      return `<option value="${r.id}">${r.falta} le debe ${r.horas} h a ${r.cubre} · favor del ${dd}${vtxt}</option>`;
+    }).join('');
+  }
+
   function calcDeudas(){
-    const net={};
+    const net={}, desde={};
     CF_DATA.forEach(r=>{
-      if(r.tipo!=='cambio'||r.devuelto||!r.horas||!r.falta||!r.cubre)return;
+      if(r.tipo!=='cambio'||r.devuelto||r.es_devolucion||!r.horas||!r.falta||!r.cubre)return;
       const key=r.falta+'|'+r.cubre;
       net[key]=(net[key]||0)+Number(r.horas);
+      if(!desde[key]||(r.fecha||'')<desde[key])desde[key]=r.fecha||'';
     });
     const vistos=new Set(),out=[];
     Object.keys(net).forEach(k=>{
@@ -383,8 +418,8 @@
       const ab=net[k]||0,ba=net[opp]||0;
       vistos.add(k);vistos.add(opp);
       const dif=Math.round((ab-ba)*10)/10;
-      if(dif>0)out.push({deudor:a,acreedor:b,horas:dif});
-      else if(dif<0)out.push({deudor:b,acreedor:a,horas:-dif});
+      if(dif>0)out.push({deudor:a,acreedor:b,horas:dif,desde:desde[k]});
+      else if(dif<0)out.push({deudor:b,acreedor:a,horas:-dif,desde:desde[opp]});
     });
     return out;
   }
@@ -404,10 +439,12 @@
         <div><label>Tipo</label><select id="cf-tipo">
           <option value="cubre">Cobertura (no devuelve horas)</option>
           <option value="cambio">Cambio (devuelve horas)</option>
+          <option value="devolucion">↩️ Devolución de horas (salda un cambio)</option>
         </select></div>
         <div><label>Falta</label><select id="cf-falta">${profeOpts('')}</select></div>
         <div><label>Cubre</label><select id="cf-cubre">${profeOpts('')}</select></div>
         <div id="cf-horas-wrap" class="full" style="display:none"><label>Horas que va a devolver</label><input type="number" id="cf-horas" min="0" step="0.5" placeholder="Ej: 3"></div>
+        <div id="cf-devol-wrap" class="full" style="display:none"><label>¿Qué cambio salda?</label><select id="cf-devol">${devolOpts()}</select></div>
         <div id="cf-extra-wrap" class="full"><label style="display:flex;align-items:center;gap:9px;cursor:pointer;text-transform:none;letter-spacing:0;color:var(--txt);font-weight:600;font-size:13.5px"><input type="checkbox" id="cf-extra" style="width:17px;height:17px;cursor:pointer;flex:0 0 auto">⏰ Genera horas extra (cubre un día que no es suyo) → bono 2% en vez de 5%</label></div>
         <div id="cf-extra-cant-wrap" class="full" style="display:none"><label>¿Cuántas horas extra?</label><input type="number" id="cf-extra-cant" min="0" step="0.5" placeholder="Ej: 4"></div>
         <div class="full"><label>Nota (opcional)</label><input id="cf-nota" maxlength="120" placeholder="Ej: Lean falta el viernes, lo cubre Santi…"></div>
@@ -456,22 +493,28 @@
             </div>`;
           } else {
             const esCambio=r.tipo==='cambio';
+            const esDevol=!!r.es_devolucion;
+            const orig=(esDevol&&r.salda_id)?(CF_DATA||[]).find(x=>String(x.id)===String(r.salda_id)):null;
+            const origDD=orig?((orig.fecha||'').slice(8,10)+'/'+(orig.fecha||'').slice(5,7)):'';
+            const cambioAbierto=esCambio&&!esDevol&&!r.devuelto;
             html+=`<div class="cf-item ${r.devuelto?'done':''}">
               <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
               <div class="cf-main">
-                <div class="cf-line"><b>${r.falta||'?'}</b> falta${r.cubre?` · cubre <b>${r.cubre}</b>`:' · sin cubrir'}
-                  <span class="badge ${esCambio?'badge-cambio':'badge-cubre'}">${esCambio?'Cambio':'Cobertura'}</span>
-                  ${esCambio&&r.horas?`<span class="badge badge-horas">${r.horas} h</span>`:''}
+                <div class="cf-line"><b>${r.falta||'?'}</b> ${esDevol?'recibe devolución':'falta'}${r.cubre?` · ${esDevol?'devuelve':'cubre'} <b>${r.cubre}</b>`:' · sin cubrir'}
+                  <span class="badge ${esDevol?'badge-done':(esCambio?'badge-cambio':'badge-cubre')}">${esDevol?'↩️ Devolución':(esCambio?'Cambio':'Cobertura')}</span>
+                  ${(esCambio&&r.horas)?`<span class="badge badge-horas">${r.horas} h</span>`:''}
                   ${(!esCambio&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
-                  ${r.devuelto?`<span class="badge badge-done">Saldado ✓</span>`:''}
+                  ${r.devuelto&&!esDevol?`<span class="badge badge-done">Saldado ✓</span>`:''}
                 </div>
+                ${esDevol&&orig?`<div class="cf-nota">↩️ Saldó el cambio del ${origDD} (${orig.falta} le debía a ${orig.cubre}).</div>`:''}
+                ${cambioAbierto?`<div class="cf-nota">${vencTxt(r.fecha)}</div>`:''}
                 ${r.nota?`<div class="cf-nota">${(r.nota||'').replace(/</g,'&lt;')}</div>`:''}
                 ${(!esCambio)?(COB_VE_TODO?((r.falta||(r.cubre&&PROFES_BONO.includes(r.cubre)))?breakdownHTML(r):''):breakdownProfe(r)):''}
               </div>
               <div class="cf-actions">
-                ${esCambio&&!r.devuelto?`<button class="btn-mini" data-saldar="${r.id}">Saldar</button>`:''}
-                ${esCambio&&r.devuelto?`<button class="btn-mini" data-reabrir="${r.id}">Reabrir</button>`:''}
-                <button class="btn-del" data-del="${r.id}" title="Borrar">✕</button>
+                ${cambioAbierto?`<button class="btn-mini" data-saldar="${r.id}">Saldar</button>`:''}
+                ${esCambio&&!esDevol&&r.devuelto?`<button class="btn-mini" data-reabrir="${r.id}">Reabrir</button>`:''}
+                <button class="btn-del" data-del="${r.id}" ${esDevol?`data-esdevol="${r.salda_id||''}"`:''} title="Borrar">✕</button>
               </div>
             </div>`;
           }
@@ -484,8 +527,8 @@
 
     const deudas=calcDeudas();
     if(deudas.length){
-      html+=`<div class="cf-sub" style="margin-top:30px">⏳ Horas que se deben (cambios sin saldar)</div><div class="debt-grid">`;
-      deudas.forEach(d=>{html+=`<div class="debt-card"><b>${d.deudor}</b> le debe <span class="debt-h">${d.horas} h</span> a <b>${d.acreedor}</b></div>`;});
+      html+=`<div class="cf-sub" style="margin-top:30px">⏳ Horas que se deben (cambios sin saldar) · tope ${DIAS_TOPE_DEVOL} días para devolver</div><div class="debt-grid">`;
+      deudas.forEach(d=>{html+=`<div class="debt-card"><b>${d.deudor}</b> le debe <span class="debt-h">${d.horas} h</span> a <b>${d.acreedor}</b>${d.desde?`<div style="font-weight:600;font-size:12px;margin-top:3px">${vencTxt(d.desde)}</div>`:''}</div>`;});
       html+=`</div>`;
     }
 
@@ -520,11 +563,18 @@
 
     const tipo=document.getElementById('cf-tipo'),horasWrap=document.getElementById('cf-horas-wrap'),extraWrap=document.getElementById('cf-extra-wrap');
     const extraChk=document.getElementById('cf-extra'),extraCantWrap=document.getElementById('cf-extra-cant-wrap');
-    function syncExtraCant(){const on=extraChk&&extraChk.checked&&tipo.value!=='cambio';if(extraCantWrap)extraCantWrap.style.display=on?'':'none';}
+    const devolWrap=document.getElementById('cf-devol-wrap');
+    const faltaWrap=document.getElementById('cf-falta')?document.getElementById('cf-falta').closest('div'):null;
+    const cubreWrap=document.getElementById('cf-cubre')?document.getElementById('cf-cubre').closest('div'):null;
+    function syncExtraCant(){const on=extraChk&&extraChk.checked&&tipo.value==='cubre';if(extraCantWrap)extraCantWrap.style.display=on?'':'none';}
     if(tipo)tipo.addEventListener('change',()=>{
-      const esCambio=tipo.value==='cambio';
+      const v=tipo.value, esCambio=v==='cambio', esDevol=v==='devolucion';
       horasWrap.style.display=esCambio?'':'none';
-      if(extraWrap)extraWrap.style.display=esCambio?'none':'';
+      if(extraWrap)extraWrap.style.display=(v==='cubre')?'':'none';
+      if(devolWrap)devolWrap.style.display=esDevol?'':'none';
+      // En devolución no se eligen falta/cubre (salen del cambio elegido)
+      if(faltaWrap)faltaWrap.style.display=esDevol?'none':'';
+      if(cubreWrap)cubreWrap.style.display=esDevol?'none':'';
       syncExtraCant();
     });
     if(extraChk)extraChk.addEventListener('change',syncExtraCant);
@@ -539,15 +589,42 @@
     const addBtn=document.getElementById('cf-add');
     if(addBtn)addBtn.addEventListener('click',async()=>{
       const fecha=document.getElementById('cf-fecha').value;
+      const tp=document.getElementById('cf-tipo').value;
+      const nota=document.getElementById('cf-nota').value.trim();
+
+      // ===== DEVOLUCIÓN DE HORAS: salda un cambio pendiente =====
+      if(tp==='devolucion'){
+        const origId=document.getElementById('cf-devol').value;
+        if(!fecha){alert('Poné el día en que devolvió las horas.');return;}
+        if(!origId){alert('Elegí qué cambio salda esta devolución.');return;}
+        const orig=(CF_DATA||[]).find(x=>String(x.id)===String(origId));
+        if(!orig){alert('No encontré ese cambio. Recargá la página.');return;}
+        addBtn.disabled=true;addBtn.textContent='Guardando…';
+        try{
+          // La devolución es la cobertura inversa: el deudor (orig.falta) ahora cubre al acreedor (orig.cubre).
+          const{error}=await sb.from('coberturas_faltas').insert({
+            fecha, falta:orig.cubre, cubre:orig.falta, tipo:'cambio',
+            horas:orig.horas?Number(orig.horas):null,
+            horas_extra:false, horas_extra_cant:null,
+            es_devolucion:true, salda_id:String(orig.id), devuelto:true,
+            nota:nota||('Devolución del cambio del '+(orig.fecha||'')),
+            creado_por:COB_EMAIL||'equipo', creado_en:new Date().toISOString()
+          });
+          if(error)throw error;
+          // Marcar el cambio original como saldado
+          await sb.from('coberturas_faltas').update({devuelto:true}).eq('id',orig.id);
+          await cargarCobertura();
+        }catch(e){alert('No se pudo guardar la devolución: '+(e.message||e));addBtn.disabled=false;addBtn.textContent='➕ Agregar';}
+        return;
+      }
+
       const falta=document.getElementById('cf-falta').value;
       const cubre=document.getElementById('cf-cubre').value;
-      const tp=document.getElementById('cf-tipo').value;
       const horas=document.getElementById('cf-horas').value;
       const extraEl=document.getElementById('cf-extra');
       const horasExtra=(tp==='cubre'&&extraEl&&extraEl.checked);
       const extraCantEl=document.getElementById('cf-extra-cant');
       const horasExtraCant=horasExtra&&extraCantEl&&extraCantEl.value?Number(extraCantEl.value):null;
-      const nota=document.getElementById('cf-nota').value.trim();
       if(!fecha||!falta){alert('Poné al menos el día y quién falta.');return;}
       if(cubre&&falta===cubre){alert('El que falta y el que cubre no pueden ser el mismo.');return;}
       addBtn.disabled=true;addBtn.textContent='Guardando…';
@@ -584,8 +661,14 @@
     }));
 
     box.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{
-      if(!confirm('¿Borrar este registro?'))return;
-      try{await sb.from('coberturas_faltas').delete().eq('id',b.dataset.del);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
+      const esDevol=b.hasAttribute('data-esdevol');
+      if(!confirm(esDevol?'¿Borrar esta devolución? El cambio que saldaba vuelve a quedar pendiente.':'¿Borrar este registro?'))return;
+      try{
+        await sb.from('coberturas_faltas').delete().eq('id',b.dataset.del);
+        const origId=b.getAttribute('data-esdevol');
+        if(esDevol&&origId)await sb.from('coberturas_faltas').update({devuelto:false}).eq('id',origId);
+        await cargarCobertura();
+      }catch(e){alert('No se pudo borrar.');}
     }));
     box.querySelectorAll('[data-saldar]').forEach(b=>b.addEventListener('click',async()=>{
       try{await sb.from('coberturas_faltas').update({devuelto:true}).eq('id',b.dataset.saldar);await cargarCobertura();}catch(e){alert('No se pudo.');}
