@@ -3372,9 +3372,8 @@ async function cargarCalculadorBonos(mesVer) {
   const mesSueldoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() - 1, 1))
   const mesPagoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() + 1, 1))
   try {
-    if (!window.BONO_DATOS_MES || window.BONO_DATOS_MES.mesStr !== mesStr) {
-      await cargarEquipoDesempeno(mesVer)
-    }
+    // Reconstruimos siempre para reflejar coberturas/faltas recién cargadas en el tablero
+    await cargarEquipoDesempeno(mesVer)
     const datos = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
     const { data: sueldos } = await supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
     const sueldoDe = {}
@@ -3601,6 +3600,9 @@ function renderSueldosTarifas() {
       <div class="hero-tag">Sistema</div>
       <h1>💰 Sueldos y tarifas</h1>
       <p class="hero-sub">El único lugar para cargar el <b>sueldo de bolsillo</b> y la <b>tarifa de hora extra</b>. El Calculador de Bonos y el tablero de Coberturas los leen de acá (allá no se editan).</p>
+    </div>
+    <div style="margin:0 0 16px; padding:11px 15px; background:#eff6ff; border:1px solid #bfdbfe; border-radius:12px; font-size:12.5px; color:#1e40af; line-height:1.5;">
+      ⏳ <b>Ojo con el mes:</b> el bono de un mes se calcula con el <b>sueldo del mes anterior</b>. O sea: el sueldo que cargás para un mes se usa en el bono del mes siguiente, así que conviene cargarlo apenas lo tengas. La tarifa de hora extra es el valor vigente (si cambia, lo actualizás y se usa de ahí en más).
     </div>
     <div class="panel" style="margin-bottom:16px;">
       <div class="panel-body" id="syt-sueldos"><div class="empty-state"><span class="empty-state-icon">⏳</span>Cargando…</div></div>
@@ -3996,8 +3998,10 @@ window.equipoCambiarMes = function(delta) {
   renderEquipo()
 }
 async function cargarEquipoDesempeno(mesVer) {
-  const body = document.getElementById('equipo-dash-body')
-  if (!body) return
+  let body = document.getElementById('equipo-dash-body')
+  // Si se llama desde el Calculador (sin la vista de Desempeño en pantalla), usamos un
+  // contenedor descartable: igual computamos los datos y dejamos fresco BONO_DATOS_MES.
+  if (!body) body = document.createElement('div')
   try {
     const y = mesVer.getFullYear(), m = mesVer.getMonth()
     const mesStr = y + '-' + String(m + 1).padStart(2, '0')
@@ -4126,7 +4130,7 @@ async function cargarEquipoDesempeno(mesVer) {
       if (eCub) {
         if (c.horas_extra) (cobDias2[eCub] = cobDias2[eCub] || new Set()).add(c.fecha)
         else (cobDias5[eCub] = cobDias5[eCub] || new Set()).add(c.fecha)
-        ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = (eAus ? (NOMBRES_RANKING[eAus] || c.falta) : (c.falta || ''))
+        ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = { aus: eAus || null, nombre: (eAus ? (NOMBRES_RANKING[eAus] || c.falta) : (c.falta || '')) }
       }
     })
 
@@ -4248,7 +4252,11 @@ async function cargarEquipoDesempeno(mesVer) {
           })
           // Coberturas y faltas (tablero nuevo)
           if (cobFaltoEmail[e]) cobFaltoEmail[e].forEach(f => { m[f] = { tipo: 'falto' } })
-          if (cobCubriEmail[e]) Object.keys(cobCubriEmail[e]).forEach(f => { m[f] = { tipo: 'cubri', a: cobCubriEmail[e][f] } })
+          if (cobCubriEmail[e]) Object.keys(cobCubriEmail[e]).forEach(f => {
+            const info = cobCubriEmail[e][f]
+            const hsAus = (info.aus && st[info.aus]) ? (st[info.aus].horasPorFecha[f] || 0) : 0
+            m[f] = { tipo: 'cubri', a: info.nombre, hsAus: hsAus }
+          })
           if (cambioCubriEmail[e]) Object.keys(cambioCubriEmail[e]).forEach(f => {
             const eAus = cambioCubriEmail[e][f]
             const prod = (cambioProd[e] && cambioProd[e][f]) || 0
@@ -4379,7 +4387,7 @@ async function cargarEquipoDesempeno(mesVer) {
         const etiqueta = yo.bonoCaido ? '🤒 Bono caído este mes' : (esCero ? 'En camino a Compromiso' : b.label)
         const extraCob = yo.bonoCobertura > 0 ? `<br>🔄 <b>+${yo.bonoCobertura}% por cubrir ${yo.diasCubiertos} día(s)</b> de un compañero. ¡Gracias por bancar la sala!` : ''
         const mensaje = yo.bonoCaido
-          ? `Faltaste un día este mes sin que cuente como cobertura, así que el bono de desempeño no aplica. El próximo mes arranca de nuevo. 💛`
+          ? `Faltaste un día este mes sin que cuente como cobertura, así que quedás fuera de los premios por desempeño del mes (escalón, vacaciones, estrella y sala). Eso sí: si cubrís a un compañero generando horas extra, ese bono de cobertura igual lo cobrás —se gana trabajando—. El próximo mes arranca de nuevo. 💛`
           : (falta !== null
             ? `Tu promedio: <b style="color:${colorCard};">${yo.alxh}</b> alumnos por hora · estás a <b>${falta}</b> del ${esCero ? 'primer' : 'próximo'} escalón. Cada alumno que atendés bien te acerca. 💪${extraCob}`
             : `Tu promedio: <b style="color:${colorCard};">${yo.alxh}</b> alumnos por hora · ¡escalón máximo! Tu trabajo se nota.${extraCob}`)
@@ -4447,7 +4455,7 @@ async function cargarEquipoDesempeno(mesVer) {
           }
           else if (estado && estado.tipo === 'falto') {
             fondo = '#fee2e2'; borde = '#fca5a5'
-            cuerpo = '<div style="font-size:9px; color:#b91c1c; font-weight:700;">🤒 faltó</div>'
+            cuerpo = '<div style="font-size:9px; color:#b91c1c; font-weight:700; line-height:1.15;">🤒 faltó</div><div style="font-size:7.5px; color:#b91c1c; line-height:1.1;">no suma · pierde premio</div>'
           }
           else if (estado && estado.tipo === 'cubierto') {
             // ese día lo cubrió otro; si le tocó la mitad de alumnos (sala compartida) se ve en ev
@@ -4455,10 +4463,11 @@ async function cargarEquipoDesempeno(mesVer) {
             cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubrió ${estado.por}</div>${ev > 0 ? `<div style="font-size:9px; color:#6d28d9;">🙋${ev}</div>` : '<div style="font-size:9px; color:#6d28d9;">0</div>'}`
           }
           else if (estado && estado.tipo === 'cubri') {
-            // este profe CUBRIÓ a un compañero ese día (sus alumnos firmados ya le suman)
+            // COBERTURA sin devolución: cubriste a un compañero; esos alumnos cuentan PARA VOS.
             fondo = '#ede9fe'; borde = '#a78bfa55'
-            const promDia = hs > 0 ? Math.round(ev / hs * 10) / 10 : 0
-            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubriste a ${estado.a}</div><div style="font-size:9px; color:#6d28d9;">${hs > 0 ? hs + 'h · ' : ''}🙋${ev}${hs > 0 ? ' · ' + promDia + '/h' : ''}</div>`
+            const hsCub = hs > 0 ? hs : (estado.hsAus || 0)
+            const promDia = hsCub > 0 ? Math.round(ev / hsCub * 10) / 10 : 0
+            cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cubriste a ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">${hsCub > 0 ? hsCub + 'h · ' : ''}🙋${ev}${hsCub > 0 ? ' · ' + promDia + '/h' : ''} · para vos</div>`
           }
           else if (estado && estado.tipo === 'cambio') {
             // CAMBIO (devuelve horas): cubriste el día del titular; esos alumnos van para él
