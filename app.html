@@ -4082,7 +4082,7 @@ async function cargarEquipoDesempeno(mesVer) {
       supabase.from('clases_cerradas').select('turno_id, fecha').eq('tipo', 'centro').gte('fecha', primerDia).lte('fecha', ultDia),
       fetchTodo(() => supabase.from('evoluciones_tf').select('fecha, persona_id, autor_email, turno_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('asistencia').select('fecha, persona_id').ilike('estado', 'presente').gte('fecha', primerDia).lte('fecha', ultDia)),
-      supabase.from('vacaciones_profes').select('profe, cubre, desde, hasta').lte('desde', ultDia).gte('hasta', primerDia),
+      supabase.from('vacaciones_profes').select('profe, cubre, desde, hasta, franja').lte('desde', ultDia).gte('hasta', primerDia),
       fetchTodo(() => supabase.from('sesiones').select('fecha, profesional, tratamiento_id, turno_biolab_id, turno_maso_id').gte('fecha', primerDia).lte('fecha', ultDia)),
       fetchTodo(() => supabase.from('tratamientos').select('id, practica_codigo, persona_id')),
       supabase.from('practicas').select('codigo, area'),
@@ -4119,7 +4119,10 @@ async function cargarEquipoDesempeno(mesVer) {
     // VACACIONES DE PROFES (jornada 78): al que se va, esos días no le cuentan
     // para nada; cada clase y cada alumno pasan COMPLETOS al que queda a cargo.
     // Mapa: 'fecha|emailAusente' -> emailCubridor
-    const vacaCubre = {}
+    // VACACIONES (se cargan en Coberturas y faltas): un profe puede tener VARIOS cubridores
+    // por franja (mañana / tarde) o el día entero. vacaCubreDia['fecha|emailAusente'] = [{eA, franja}].
+    const MANANA_HASTA = 14   // hora < 14 = mañana ; hora >= 14 = tarde
+    const vacaCubreDia = {}
     ;((vacR && vacR.data) || []).forEach(v => {
       if (!v.desde || !v.hasta || !v.profe || !v.cubre) return
       const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], v.profe))
@@ -4127,8 +4130,28 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!eDe || !eA || eDe === eA) return
       const ini = v.desde < primerDia ? primerDia : v.desde
       const fin = v.hasta > ultDia ? ultDia : v.hasta
-      listaDiasISO(ini, fin).forEach(d => { vacaCubre[d.fecha + '|' + eDe] = eA })
+      const franja = (v.franja || 'dia')
+      listaDiasISO(ini, fin).forEach(d => {
+        const k = d.fecha + '|' + eDe
+        ;(vacaCubreDia[k] = vacaCubreDia[k] || []).push({ eA, franja })
+      })
     })
+    // ¿Quién cubre el slot (hora) del ausente "e" ese día? (según la franja cargada)
+    function cubridorDeSlot(fecha, e, horaRaw) {
+      const arr = vacaCubreDia[fecha + '|' + e]; if (!arr) return null
+      const h = parseInt(String(horaRaw || ''), 10)
+      const m = arr.find(c => c.franja === 'dia' || (c.franja === 'manana' && h < MANANA_HASTA) || (c.franja === 'tarde' && h >= MANANA_HASTA))
+      return m ? m.eA : null
+    }
+    // Slots fijos de cada profe (día normalizado | hora) según la grilla, para detectar
+    // cuándo un cubridor cubre FUERA de su horario = hora extra de vacaciones (en $).
+    const slotsDe = {}
+    Object.keys(profesDeTurno).forEach(tid => {
+      const t = turnosMap[tid]; if (!t) return
+      profesDeTurno[tid].forEach(e => { (slotsDe[e] = slotsDe[e] || new Set()).add(t.dia + '|' + String(t.hora)) })
+    })
+    const vacaExtra = {}     // email cubridor -> { fecha: horas extra de vacaciones }
+    const vacaExtraAus = {}  // email cubridor -> { fecha: nombre del que está de vacaciones }
 
     // COBERTURAS PACTADAS (módulo Feriados) — regla acordada (jornada 78):
     // ese día las HORAS y CUPOS de cada uno quedan como están en la grilla
@@ -4141,7 +4164,7 @@ async function cargarEquipoDesempeno(mesVer) {
       if (!c.fecha || !c.se_lo_toma || !c.cubre) return
       const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], c.se_lo_toma))
       const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre))
-      if (vacaCubre[c.fecha + '|' + eDe]) return // ese día rige la regla de vacaciones, no el 50/50
+      if (vacaCubreDia[c.fecha + '|' + eDe]) return // ese día rige la regla de vacaciones, no el 50/50
       if (eDe && eA && eDe !== eA) cubreA[c.fecha + '|' + eA] = eDe
     })
 
@@ -4271,8 +4294,9 @@ async function cargarEquipoDesempeno(mesVer) {
         if (cancelada.has(tid + '|' + d.fecha)) return
         const profes = profesDeTurno[tid]
         profes.forEach(e => {
-          // VACACIONES: la parte del ausente pasa entera (horas + cupos) al que queda a cargo
-          const destino = vacaCubre[d.fecha + '|' + e] || e
+          // VACACIONES: la parte del ausente pasa al cubridor de esa franja (mañana/tarde/día)
+          const cub = cubridorDeSlot(d.fecha, e, t.hora)
+          const destino = cub || e
           st[destino].horasPrev++
           if (d.fecha <= corte) {
             st[destino].horas++
@@ -4280,6 +4304,12 @@ async function cargarEquipoDesempeno(mesVer) {
             // ¿esta hora es una hora extra fija del profe? (viernes/miérc de Lean) → se cobra aparte
             if (esHoraExtraFija(destino, d.dia, t.hora)) {
               st[destino].extraFijaPorFecha[d.fecha] = (st[destino].extraFijaPorFecha[d.fecha] || 0) + 1
+            }
+            // VACACIONES · hora extra: si el cubridor cubre un slot que NO es suyo (fuera de
+            // su grilla) → esa hora es hora extra de vacaciones, se le paga en $ (sin 2%).
+            if (cub && cub !== e && !(slotsDe[cub] && slotsDe[cub].has(d.dia + '|' + String(t.hora)))) {
+              ;(vacaExtra[cub] = vacaExtra[cub] || {})[d.fecha] = ((vacaExtra[cub] || {})[d.fecha] || 0) + 1
+              ;(vacaExtraAus[cub] = vacaExtraAus[cub] || {})[d.fecha] = NOMBRES_RANKING[e] || e
             }
             // Cupo de referencia del bono: en turnos de baja demanda el centro fija
             // un cupo_bono realista; si no está definido, vale la capacidad normal.
@@ -4349,6 +4379,12 @@ async function cargarEquipoDesempeno(mesVer) {
     Object.keys(extraGanadas).forEach(em => {
       Object.keys(extraGanadas[em]).forEach(f => {
         if (extraGanadas[em][f] > 0) pushBita(em, { fecha: f, tipo: 'extra_fija', horas: extraGanadas[em][f], bono2: !!(dias2pct[em] && dias2pct[em].has(f)) })
+      })
+    })
+    // GANANCIAS de horas extra por cubrir VACACIONES fuera del horario propio ($ sin 2%)
+    Object.keys(vacaExtra).forEach(em => {
+      Object.keys(vacaExtra[em]).forEach(f => {
+        if (vacaExtra[em][f] > 0) pushBita(em, { fecha: f, tipo: 'extra_vacaciones', horas: vacaExtra[em][f], aus: (vacaExtraAus[em] && vacaExtraAus[em][f]) || '' })
       })
     })
     // COBERTURAS COMUNES (no extra-fija): el cubridor cobra de más, como siempre
@@ -4441,7 +4477,7 @@ async function cargarEquipoDesempeno(mesVer) {
             const [f, emCub] = k.split('|')
             if (cubreA[k] === e) m[f] = { tipo: 'cubierto', por: NOMBRES_RANKING[emCub] || emCub }
           })
-          Object.keys(vacaCubre).forEach(k => {
+          Object.keys(vacaCubreDia).forEach(k => {
             const [f, emAus] = k.split('|')
             if (emAus === e) m[f] = { tipo: 'vacaciones' }
           })
@@ -4525,7 +4561,7 @@ async function cargarEquipoDesempeno(mesVer) {
     // Exponer los datos del bono para el Calculador de Bonos TF (mismo motor → nunca discrepa).
     // ¿Este profe cubrió vacaciones de alguien este mes? (para el bono del 20%)
     const cubrioVacasSet = new Set()
-    Object.keys(vacaCubre).forEach(k => { cubrioVacasSet.add(vacaCubre[k]) })
+    Object.keys(vacaCubreDia).forEach(k => { vacaCubreDia[k].forEach(c => cubrioVacasSet.add(c.eA)) })
     window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
       nombre: p.nombre, email: p.email, alxh: p.alxh,
       bonoCaido: !!p.bonoCaido, faltasSala: p.faltasSala || 0, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0, diasExtraFija: p.diasExtraFija || 0,
@@ -4594,8 +4630,7 @@ async function cargarEquipoDesempeno(mesVer) {
       bonoHTML = `
         <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 4px 4px;">
           <span style="font-size:10.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">💰 Bono de desempeño · cómo vienen este mes${esMesActual ? ' (si cerrara hoy)' : ''}</span>
-          <button onclick="abrirVacasProfes()" style="border:1px solid var(--turquoise); color:var(--turquoise); background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700;">🏖 Vacaciones de profes</button>
-          <button onclick="abrirReportesSala()" style="border:1px solid #d97706; color:#d97706; background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700; margin-left:6px;">🧹 Orden de sala</button>
+          <button onclick="abrirReportesSala()" style="border:1px solid #d97706; color:#d97706; background:#fff; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:12px; font-weight:700;">🧹 Orden de sala</button>
         </div>
         <div style="background:#fff; border:1px solid rgba(0,0,0,0.07); border-radius:14px; padding:6px 14px; margin:0 4px 6px;">${filasBono}
           <div style="font-size:11px; color:var(--text-dim); padding:8px 4px 6px;">Promedio de alumnos por hora (no depende de cuántas horas trabaje) · % sobre sueldo neto de bolsillo · falta sin cobertura registrada = bono del mes caído · cierre: último día 23:59 · pago: a partir del 15 del mes siguiente.</div>
@@ -4837,6 +4872,7 @@ function bitacoraDesempenoHTML(email) {
   let hsExtraTot = 0
   b.forEach(ev => {
     if (ev.tipo === 'extra_fija') hsExtraTot += (ev.horas || 0)
+    else if (ev.tipo === 'extra_vacaciones') hsExtraTot += (ev.horas || 0)
     else if (ev.tipo === 'cobertura' && ev.conExtra) hsExtraTot += (ev.horasExtra || 0)
   })
   let hsExtraHTML = ''
@@ -4888,12 +4924,20 @@ function bitacoraDesempenoHTML(email) {
   }
 
   // --- HORAS EXTRA y COBERTURAS (a cobrar de más, verde) ---
-  const cobs = b.filter(e => e.tipo === 'cobertura' || e.tipo === 'extra_fija')
+  const cobs = b.filter(e => e.tipo === 'cobertura' || e.tipo === 'extra_fija' || e.tipo === 'extra_vacaciones')
   let cobsHTML = ''
   if (cobs.length) {
     let totalOt = 0
     const dosPctDia = conPlata ? Math.round(sueldo * 0.02) : 0
     const filas = cobs.map(ev => {
+      if (ev.tipo === 'extra_vacaciones') {
+        const ot = conPlata ? (ev.horas || 0) * tarifa : 0
+        totalOt += ot
+        return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:11px; font-weight:800; min-width:42px; color:#0ea5e9;">${fmtF(ev.fecha)}</span>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🏖 Hora extra cubriendo vacaciones${ev.aus ? ' de ' + ev.aus : ''}</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} <span style="color:var(--text-dim);">(fuera de tu horario · sin 2%)</span></div>
+        </div>`
+      }
       if (ev.tipo === 'extra_fija') {
         const ot = conPlata ? (ev.horas || 0) * tarifa : 0
         totalOt += ot

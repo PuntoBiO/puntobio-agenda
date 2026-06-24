@@ -227,6 +227,8 @@
 
   let FERIADOS_FUTUROS=[];
   let AH_DATA=[];
+  let VAC_DATA=[];
+  const VAC_PROFES=['Santi','Lean','Lauti','Male','Lu','Jime']; // quién puede irse de vacaciones / cubrir
   let COB_ADMIN=false, COB_VE_TODO=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
   const ADMIN_EMAILS=['liclucianavelaz@gmail.com','jimenahllorente@gmail.com'];
   const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
@@ -335,6 +337,7 @@
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
     try{const{data}=await sb.from('ausencias_horas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});AH_DATA=data||[];}catch(e){AH_DATA=[];}
+    try{const{data}=await sb.from('vacaciones_profes').select('*').order('desde',{ascending:false});VAC_DATA=data||[];}catch(e){VAC_DATA=[];}
     COB_ADMIN=false; COB_VE_TODO=false; MI_PROFE=null;
     try{
       const{data:{session}}=await sb.auth.getSession();
@@ -353,6 +356,7 @@
     if(!COB_ADMIN&&COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase())){COB_ADMIN=true;COB_VE_TODO=true;}
     // Lu/Jime/Pau/Ale ven TODO (contabilidad). Cada profe ve SOLO lo suyo.
     if(!COB_VE_TODO)CF_DATA=MI_PROFE?CF_DATA.filter(r=>r.falta===MI_PROFE||r.cubre===MI_PROFE):[];
+    if(!COB_VE_TODO)VAC_DATA=MI_PROFE?VAC_DATA.filter(r=>r.profe===MI_PROFE||r.cubre===MI_PROFE):[];
     if(COB_VE_TODO){
       try{
         const{data:su}=await sb.from('sueldos_profes_tf').select('profe, mes, sueldo_bolsillo');
@@ -459,6 +463,38 @@
         <div class="full"><label>Motivo</label><input id="ah-motivo" maxlength="160" placeholder="Ej: no fue a las 15h, se quedó encerrado"></div>
         <div class="full"><button class="btn" id="ah-add">➕ Agregar a la bitácora</button></div>
       </div>`;
+
+    // ===== VACACIONES (doble entrada: un profe lo pueden cubrir varios, por franja) =====
+    if(COB_VE_TODO){
+      const vacOps=VAC_PROFES.map(p=>`<option value="${p}">${p}</option>`).join('');
+      html+=`<div class="cf-sub" style="margin-top:26px">🏖 Vacaciones de profes — cargá una fila por cada cubridor</div>
+        <div class="cov-intro">Al que se va, esos días no le cuentan. Los alumnos van 100% al que firma (no se reparte). Si a un profe lo cubre <b>uno a la mañana y otro a la tarde</b>, cargá <b>dos filas</b> (una por franja). El sistema detecta solo si el cubridor cubre <b>fuera de su horario</b> (eso es hora extra) y le suma el 20% de vacaciones. El detalle en $ sale en <b>Desempeño</b>.</div>
+        <div class="cf-form">
+          <div><label>Se va</label><select id="vac-profe">${vacOps}</select></div>
+          <div><label>Lo cubre</label><select id="vac-cubre">${vacOps}</select></div>
+          <div><label>Franja</label><select id="vac-franja">
+            <option value="dia">Todo el día</option>
+            <option value="manana">Mañana (antes de 14 h)</option>
+            <option value="tarde">Tarde (14 h en adelante)</option>
+          </select></div>
+          <div><label>Desde</label><input type="date" id="vac-desde"></div>
+          <div><label>Hasta</label><input type="date" id="vac-hasta"></div>
+          <div class="full"><button class="btn" id="vac-add">➕ Agregar vacaciones</button></div>
+        </div>`;
+    }
+    if(VAC_DATA && VAC_DATA.length){
+      const FRANJA_TXT={dia:'todo el día',manana:'mañana',tarde:'tarde'};
+      html+=`<div class="cf-sub" style="margin-top:18px">🏖 Vacaciones cargadas</div><div class="cf-list">`;
+      VAC_DATA.forEach(v=>{
+        const dd=s=>(s||'').slice(8,10)+'/'+(s||'').slice(5,7);
+        html+=`<div class="cf-item">
+          <div class="cf-main"><div class="cf-line">🏖 <b>${v.profe}</b> del ${dd(v.desde)} al ${dd(v.hasta)} · lo cubre <b>${v.cubre}</b> <span class="badge badge-cambio">${FRANJA_TXT[v.franja||'dia']}</span></div></div>
+          ${COB_VE_TODO?`<div class="cf-actions"><button class="btn-del" data-vacdel="${v.id}" title="Borrar">✕</button></div>`:''}
+        </div>`;
+      });
+      html+=`</div>`;
+    }
+
     html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — ${COB_VE_TODO?'lo último arriba':'tus faltas, coberturas y horas · lo último arriba'}</div>`;
     {
       const ahVis = COB_VE_TODO ? AH_DATA : (MI_PROFE ? AH_DATA.filter(r=>r.profe===MI_PROFE) : []);
@@ -658,6 +694,28 @@
     box.querySelectorAll('[data-ahdel]').forEach(b=>b.addEventListener('click',async()=>{
       if(!confirm('¿Borrar esta hora de la bitácora?'))return;
       try{await sb.from('ausencias_horas').delete().eq('id',b.dataset.ahdel);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
+    }));
+
+    const vacBtn=document.getElementById('vac-add');
+    if(vacBtn)vacBtn.addEventListener('click',async()=>{
+      const profe=document.getElementById('vac-profe').value;
+      const cubre=document.getElementById('vac-cubre').value;
+      const franja=document.getElementById('vac-franja').value;
+      const desde=document.getElementById('vac-desde').value;
+      const hasta=document.getElementById('vac-hasta').value;
+      if(!profe||!cubre||!desde||!hasta){alert('Completá quién se va, quién cubre, y las fechas.');return;}
+      if(profe===cubre){alert('El que se va y el que cubre no pueden ser el mismo.');return;}
+      if(hasta<desde){alert('La fecha "hasta" no puede ser anterior a "desde".');return;}
+      vacBtn.disabled=true;vacBtn.textContent='Guardando…';
+      try{
+        const{error}=await sb.from('vacaciones_profes').insert({profe,cubre,franja,desde,hasta});
+        if(error)throw error;
+        await cargarCobertura();
+      }catch(e){alert('No se pudo guardar: '+(e.message||e));vacBtn.disabled=false;vacBtn.textContent='➕ Agregar vacaciones';}
+    });
+    box.querySelectorAll('[data-vacdel]').forEach(b=>b.addEventListener('click',async()=>{
+      if(!confirm('¿Borrar estas vacaciones?'))return;
+      try{await sb.from('vacaciones_profes').delete().eq('id',b.dataset.vacdel);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
     }));
 
     box.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',async()=>{
