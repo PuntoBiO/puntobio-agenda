@@ -2446,22 +2446,24 @@ function listaDiasISO(desdeISO, hastaISO) {
 // 'dia' va como lo deja normTexto: MAYÚSCULAS sin acentos (ej 'VIERNES', 'MIERCOLES').
 const HORAS_EXTRA_FIJAS = {
   'leacrespin97@gmail.com': [
-    { dia: 'VIERNES', horas: [15, 16, 17, 18] }  // viernes 15 a 19 hs = 4 h (día entero fuera del sueldo)
+    { dia: 'VIERNES', horas: [15, 16, 17, 18], bono2: true },  // viernes 15-19 = 4 h · día entero fuera del sueldo: hora extra + 2% + perdón del premio
+    { dia: 'MIERCOLES', horas: [20], bono2: false }            // miércoles 20 h = 1 h · hora extra suelta: solo en $ (sin 2%, no perdona falta)
   ]
 }
 function _horaNum(h) { const n = parseInt(String(h || ''), 10); return isNaN(n) ? -1 : n }
-// ¿el turno (día normalizado + hora) es una hora extra fija de ese profe?
+// ¿el turno (día normalizado + hora) es una hora extra fija de ese profe? (cobra hora extra en $)
 function esHoraExtraFija(email, diaNorm, horaRaw) {
   const cfg = HORAS_EXTRA_FIJAS[(email || '').toLowerCase().trim()]
   if (!cfg) return false
   const h = _horaNum(horaRaw)
   return cfg.some(s => normTexto(s.dia) === diaNorm && s.horas.includes(h))
 }
-// ¿ese profe tiene alguna hora extra fija ese día de la semana? (clasifica coberturas)
+// ¿ese día es un DÍA ENTERO FUERA DEL SUELDO (bono2)? → suma 2%, perdona el premio (1/mes)
+// y enruta la cobertura como hora extra fija. (El miércoles 20h NO entra acá.)
 function esDiaExtraFija(email, diaNorm) {
   const cfg = HORAS_EXTRA_FIJAS[(email || '').toLowerCase().trim()]
   if (!cfg) return false
-  return cfg.some(s => normTexto(s.dia) === diaNorm)
+  return cfg.some(s => normTexto(s.dia) === diaNorm && s.bono2)
 }
 // horas de config de ese profe ese día (fallback si la grilla no las tuviera)
 function horasExtraFijaConfig(email, diaNorm) {
@@ -3462,12 +3464,12 @@ async function cargarCalculadorBonos(mesVer) {
             <input type="checkbox" id="calc-sala-ok" ${salaOk ? 'checked' : ''} onchange="toggleSalaOk('${mesStr}', this.checked)" style="width:17px; height:17px; cursor:pointer;">
             🤝 La sala estuvo impecable este mes
           </label>
-          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> ($50.000 c/u) entre <b>Santi, Lautaro y Lean</b>.</span>
+          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> entre <b>Santi, Lautaro y Lean</b>, solo entre los que no faltaron.</span>
         </div>
         <div id="calc-sala-detalle" style="margin-top:8px; font-size:13px; color:#9a3412; ${salaOk ? '' : 'display:none;'}">
           ✅ Santi: <b>$50.000</b> · Lautaro: <b>$50.000</b> · Lean: <b>$50.000</b>
         </div>
-        <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Arranca en agosto.</div>
+        <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Si la sala estuvo bien pero alguno faltó (a un día o a una hora), ese pierde su parte y los $150.000 se reparten entre los que siguen en carrera. Arranca en agosto.</div>
       </div>
       <div id="calc-evidencias-sala" style="margin-top:14px; padding:14px 16px; background:#fef2f2; border:1px solid #fecaca; border-radius:12px;">
         <div class="empty-state" style="padding:10px; font-size:13px;">⏳ Cargando evidencias de sala…</div>
@@ -3599,9 +3601,31 @@ function recalcularTotalGeneral() {
   })
   const el = document.getElementById('calc-total-general')
   if (el) el.textContent = '$' + Math.round(total).toLocaleString('es-AR')
-  // Gran total = desempeño + sala
-  const salaOk = document.getElementById('calc-sala-ok')
-  const sala = (salaOk && salaOk.checked) ? 150000 : 0
+  // ===== BONO DE SALA: $150.000 que se reparte SOLO entre los profes de TF que NO faltaron.
+  // El que faltó (bono caído) pierde su parte y se reparte entre los que siguen en carrera.
+  const salaChk = document.getElementById('calc-sala-ok')
+  const salaOk = !!(salaChk && salaChk.checked)
+  const PROFES_SALA = ['Santi', 'Lautaro', 'Lean']
+  const enCarrera = []
+  document.querySelectorAll('#calc-tbody tr').forEach(tr => {
+    if (PROFES_SALA.includes(tr.dataset.profe) && tr.dataset.caido !== '1') enCarrera.push(tr.dataset.profe)
+  })
+  let sala = 0, salaCadaUno = 0
+  if (salaOk && enCarrera.length > 0) { sala = 150000; salaCadaUno = Math.round(150000 / enCarrera.length) }
+  const det = document.getElementById('calc-sala-detalle')
+  if (det) {
+    if (!salaOk) { det.style.display = 'none' }
+    else {
+      det.style.display = ''
+      const filas = PROFES_SALA.map(p => enCarrera.includes(p)
+        ? `✅ ${p}: <b>$${salaCadaUno.toLocaleString('es-AR')}</b>`
+        : `<span style="color:#b91c1c;">🚫 ${p}: <b>$0</b> (faltó)</span>`).join(' · ')
+      const nota = (enCarrera.length === 0)
+        ? '<div style="margin-top:4px; font-size:11.5px; color:#b91c1c;">Faltaron los tres: el bono de sala no se paga.</div>'
+        : (enCarrera.length < 3 ? `<div style="margin-top:4px; font-size:11.5px;">Se reparten los $150.000 entre los ${enCarrera.length} que siguen en carrera.</div>` : '')
+      det.innerHTML = filas + nota
+    }
+  }
   const gt = document.getElementById('calc-gran-total')
   if (gt) gt.textContent = '$' + Math.round(total + sala).toLocaleString('es-AR')
 }
@@ -4245,11 +4269,17 @@ async function cargarEquipoDesempeno(mesVer) {
     // ===== HORAS EXTRA FIJAS GANADAS (viernes/miérc fuera del sueldo base) =====
     // Punto de partida: lo que cada uno tiene agendado en la grilla.
     const extraGanadas = {}  // email -> { fecha: horas }
+    const dias2pct = {}   // email -> Set de fechas que suman 2% (solo días fuera de sueldo / viernes)
     emails.forEach(e => {
       const m = st[e].extraFijaPorFecha || {}
-      Object.keys(m).forEach(f => { if (m[f] > 0) (extraGanadas[e] = extraGanadas[e] || {})[f] = m[f] })
+      Object.keys(m).forEach(f => {
+        if (m[f] > 0) {
+          ;(extraGanadas[e] = extraGanadas[e] || {})[f] = m[f]
+          if (esDiaExtraFija(e, diaPorFecha[f] || '')) (dias2pct[e] = dias2pct[e] || new Set()).add(f)
+        }
+      })
     })
-    // Coberturas de días extra-fija: la hora extra (y su 2%) pasa del titular al cubridor.
+    // Coberturas de días extra-fija (viernes): la hora extra y su 2% pasan del titular al cubridor.
     Object.keys(extraCubreFechas).forEach(eCub => {
       Object.keys(extraCubreFechas[eCub]).forEach(f => {
         const eAus = extraCubreFechas[eCub][f]
@@ -4257,6 +4287,7 @@ async function cargarEquipoDesempeno(mesVer) {
         if (eAus && extraGanadas[eAus] && extraGanadas[eAus][f]) {
           hs = extraGanadas[eAus][f]
           delete extraGanadas[eAus][f]  // el titular ya no la gana ese día
+          if (dias2pct[eAus]) dias2pct[eAus].delete(f)
         }
         if (!hs && eAus) hs = horasExtraFijaConfig(eAus, diaPorFecha[f] || '')  // fallback por config
         // sacar del promedio del titular las horas que NO trabajó (no le diluye el alxh)
@@ -4264,7 +4295,11 @@ async function cargarEquipoDesempeno(mesVer) {
           st[eAus].horas = Math.max(0, st[eAus].horas - st[eAus].horasPorFecha[f])
           delete st[eAus].horasPorFecha[f]
         }
-        if (hs > 0) (extraGanadas[eCub] = extraGanadas[eCub] || {})[f] = ((extraGanadas[eCub] && extraGanadas[eCub][f]) || 0) + hs
+        if (hs > 0) {
+          (extraGanadas[eCub] = extraGanadas[eCub] || {})[f] = ((extraGanadas[eCub] && extraGanadas[eCub][f]) || 0) + hs
+          // el viernes cubierto suma 2% al cubridor (es día fuera de sueldo del ausente)
+          if (eAus && esDiaExtraFija(eAus, diaPorFecha[f] || '')) (dias2pct[eCub] = dias2pct[eCub] || new Set()).add(f)
+        }
       })
     })
 
@@ -4289,7 +4324,7 @@ async function cargarEquipoDesempeno(mesVer) {
     // GANANCIAS de horas extra fijas (propias o por cubrir la de otro)
     Object.keys(extraGanadas).forEach(em => {
       Object.keys(extraGanadas[em]).forEach(f => {
-        if (extraGanadas[em][f] > 0) pushBita(em, { fecha: f, tipo: 'extra_fija', horas: extraGanadas[em][f] })
+        if (extraGanadas[em][f] > 0) pushBita(em, { fecha: f, tipo: 'extra_fija', horas: extraGanadas[em][f], bono2: !!(dias2pct[em] && dias2pct[em].has(f)) })
       })
     })
     // COBERTURAS COMUNES (no extra-fija): el cubridor cobra de más, como siempre
@@ -4407,9 +4442,9 @@ async function cargarEquipoDesempeno(mesVer) {
           return m
         })(),
         bonoCaido: bonoCaidoPorFalta.has(e),
-        diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0) + (extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0),
-        diasExtraFija: (extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0),
-        bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6) + ((extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0) * 2),
+        diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0) + (dias2pct[e] ? dias2pct[e].size : 0),
+        diasExtraFija: (dias2pct[e] ? dias2pct[e].size : 0),
+        bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6) + ((dias2pct[e] ? dias2pct[e].size : 0) * 2),
         evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
@@ -4837,9 +4872,10 @@ function bitacoraDesempenoHTML(email) {
       if (ev.tipo === 'extra_fija') {
         const ot = conPlata ? (ev.horas || 0) * tarifa : 0
         totalOt += ot
+        const dosTxt = ev.bono2 ? (conPlata ? ' · + 2% del sueldo = <b>' + fmtD(dosPctDia) + '</b> al bono' : ' · suma +2% al bono') : ''
         return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
           <span style="font-size:11px; font-weight:800; min-width:42px; color:#16a34a;">${fmtF(ev.fecha)}</span>
-          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#16a34a;">⏰ Hora extra fija</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''}${conPlata ? ' · + 2% del sueldo = <b>' + fmtD(dosPctDia) + '</b> al bono' : ' · suma +2% al bono'}</div>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#16a34a;">⏰ Hora extra fija</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''}${dosTxt}</div>
         </div>`
       }
       const ot = conPlata ? (ev.horasExtra || 0) * tarifa : 0
@@ -5465,10 +5501,12 @@ window.abrirReglasBono = function() {
         &nbsp;&nbsp;• <b>Turno compartido</b> (los dos están normalmente en esa sala — Santi+Lean a la tarde, Santi+Lauti a la mañana): los alumnos van <b>50% y 50%</b>.<br>
         &nbsp;&nbsp;• <b>Turno solo del titular</b> (ej. Santi cubre el viernes a la mañana de Lauti): los alumnos van <b>100% al titular</b> (Lauti). Cuando Lauti le devuelva esas horas a Santi cubriéndole un turno, esos alumnos serán de Santi.<br>
         Se carga en <b>Coberturas y faltas</b>.</p>
-        <p style="margin:0 0 10px;"><b>5e · Horas extra fijas (viernes de Lean):</b> son horas <b>fuera del sueldo</b>. Cada viernes que las hace, cobra las <b>4 h en $ + 2% del sueldo</b> (sin tope: 5 viernes = 10%). Si un viernes lo cubre otro (ej. Santi), esa hora extra y ese 2% los cobra <b>el que la hace</b> (los alumnos son 100% suyos). Ese viernes Lean <b>no cobra esas horas extra</b> (no las hizo, así que no las gana — no es un descuento del sueldo, son horas extra que ese viernes no entran). El <b>1er viernes del mes no le baja el premio</b> (del 2º en adelante sí).</p>
+        <p style="margin:0 0 10px;"><b>5e · Horas extra fijas (Lean):</b> son horas <b>fuera del sueldo</b>.<br>
+        • <b>Viernes (15 a 19 h = 4 h):</b> cada viernes que las hace cobra las <b>4 h en $ + 2% del sueldo</b> (sin tope: 5 viernes = 10%). Si un viernes lo cubre otro (ej. Santi), esa hora extra y ese 2% los cobra <b>el que la hace</b> (los alumnos son 100% suyos). Ese viernes Lean <b>no cobra esas horas extra</b> (no las hizo, así que no las gana — no es un descuento del sueldo, son horas extra que ese viernes no entran). El <b>1er viernes del mes no le baja el premio</b> (del 2º en adelante sí).<br>
+        • <b>Miércoles (20 h = 1 h):</b> cobra esa <b>hora en $</b> (queda a la vista de él y de las admin), pero <b>sin el 2%</b> y sin perdón de premio — es solo una hora extra suelta.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa. El espacio también es parte del compromiso: <b>la sala se entrega ordenada y en condiciones</b> al cierre de cada turno — las observaciones registradas por orden de sala afectan el escalón del mes.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
-        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000 repartidos entre los tres profes de TF</b> ($50.000 cada uno) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Se cuidan entre todos. <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
+        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000</b> para los profes de TF (Santi, Lautaro y Lean) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Si la sala estuvo bien pero <b>alguno faltó</b> (a un día o a una hora), ese <b>pierde su parte</b> y los $150.000 <b>se reparten entre los que siguen en carrera</b> (ej. si queda 1 afuera, los otros dos cobran $75.000 cada uno). La presencia es parte del cuidado del espacio. <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
         <p style="margin:0;"><b>9 · Cierre y pago:</b> el mes cierra el último día a las 23:59. <b>Calendario:</b> el bono por promedio arranca en junio y se paga a partir del 15 de julio; el Bono Estrella (julio vs junio) y el Bono de Equipo de sala se pagan recién a partir de agosto. Todo se paga por separado del sueldo, a partir del 15 del mes siguiente al que se ganó.</p>
       </div>
     </div>`
