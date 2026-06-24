@@ -2436,6 +2436,40 @@ function listaDiasISO(desdeISO, hastaISO) {
   return out
 }
 
+// ===============================================
+// HORAS EXTRA FIJAS (fuera del sueldo base)
+// ===============================================
+// El que TRABAJA estas horas cobra: horas × su tarifa de hora extra ($) + 2% de SU
+// sueldo por día, SIN tope (5 viernes = 10%). Si ese día lo cubre otro (cobertura),
+// la hora extra y el 2% pasan al cubridor (con su tarifa y su sueldo), y al titular se
+// le perdona la falta hasta 1 día extra-fija por mes; con 2+ pierde el premio.
+// 'dia' va como lo deja normTexto: MAYÚSCULAS sin acentos (ej 'VIERNES', 'MIERCOLES').
+const HORAS_EXTRA_FIJAS = {
+  'leacrespin97@gmail.com': [
+    { dia: 'VIERNES', horas: [15, 16, 17, 18] }  // viernes 15 a 19 hs = 4 h (día entero fuera del sueldo)
+  ]
+}
+function _horaNum(h) { const n = parseInt(String(h || ''), 10); return isNaN(n) ? -1 : n }
+// ¿el turno (día normalizado + hora) es una hora extra fija de ese profe?
+function esHoraExtraFija(email, diaNorm, horaRaw) {
+  const cfg = HORAS_EXTRA_FIJAS[(email || '').toLowerCase().trim()]
+  if (!cfg) return false
+  const h = _horaNum(horaRaw)
+  return cfg.some(s => normTexto(s.dia) === diaNorm && s.horas.includes(h))
+}
+// ¿ese profe tiene alguna hora extra fija ese día de la semana? (clasifica coberturas)
+function esDiaExtraFija(email, diaNorm) {
+  const cfg = HORAS_EXTRA_FIJAS[(email || '').toLowerCase().trim()]
+  if (!cfg) return false
+  return cfg.some(s => normTexto(s.dia) === diaNorm)
+}
+// horas de config de ese profe ese día (fallback si la grilla no las tuviera)
+function horasExtraFijaConfig(email, diaNorm) {
+  const cfg = HORAS_EXTRA_FIJAS[(email || '').toLowerCase().trim()]
+  if (!cfg) return 0
+  return cfg.filter(s => normTexto(s.dia) === diaNorm).reduce((a, s) => a + s.horas.length, 0)
+}
+
 // Horas de clase TF que dio UN profe (hoy / semana / mes, hasta hoy) según la
 // grilla turno_profes, descontando feriados y clases canceladas por el centro
 // (tipo 'centro'). Los cierres 'finalizada' y 'auto' son clases que SÍ se dieron.
@@ -4110,6 +4144,11 @@ async function cargarEquipoDesempeno(mesVer) {
     //   (los firma con su login). 'cambio' (devuelve horas) es neutral → se ignora acá.
     const cobDias5 = {}, cobDias2 = {}, cobFaltoEmail = {}, cobCubriEmail = {}
     const cambioReatr = {}, cambioCubriEmail = {}, cambioProd = {}
+    const faltaCount = {}        // email -> { normal, excep }
+    const faltaExcepFechas = {}  // email -> Set de fechas extra-fija (perdonables)
+    const extraCubreFechas = {}  // email cubridor -> { fecha: emailAusente } (cubrió una hora extra fija)
+    const diaPorFecha = {}       // fecha -> día normalizado (LUNES, VIERNES...)
+    listaDiasISO(primerDia, ultDia).forEach(d => { diaPorFecha[d.fecha] = d.dia })
     ;((cfR && cfR.data) || []).forEach(c => {
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
       const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
@@ -4123,16 +4162,33 @@ async function cargarEquipoDesempeno(mesVer) {
         }
         return
       }
-      // tipo 'cubre' (cobertura, no devuelve horas)
+      // tipo 'cubre' (cobertura, no devuelve horas).
+      // ¿el día que faltó el titular es una HORA EXTRA FIJA suya? (viernes/miérc de Lean)
+      // Si sí: la cobertura es de hora extra fija → el cubridor la cobra (hora extra + 2%
+      // sin tope) y al titular se le perdona (1/mes). Si no: cobertura común.
+      const extraFijaDia = eAus ? esDiaExtraFija(eAus, diaPorFecha[c.fecha] || '') : false
       if (eAus) {
-        bonoCaidoPorFalta.add(eAus)
+        const fc = (faltaCount[eAus] = faltaCount[eAus] || { normal: 0, excep: 0 })
+        if (extraFijaDia) { fc.excep++; (faltaExcepFechas[eAus] = faltaExcepFechas[eAus] || new Set()).add(c.fecha) }
+        else { fc.normal++ }
         ;(cobFaltoEmail[eAus] = cobFaltoEmail[eAus] || new Set()).add(c.fecha)
       }
       if (eCub) {
-        if (c.horas_extra) (cobDias2[eCub] = cobDias2[eCub] || new Set()).add(c.fecha)
-        else (cobDias5[eCub] = cobDias5[eCub] || new Set()).add(c.fecha)
+        if (extraFijaDia) {
+          ;(extraCubreFechas[eCub] = extraCubreFechas[eCub] || {})[c.fecha] = eAus || null
+        } else if (c.horas_extra) {
+          (cobDias2[eCub] = cobDias2[eCub] || new Set()).add(c.fecha)
+        } else {
+          (cobDias5[eCub] = cobDias5[eCub] || new Set()).add(c.fecha)
+        }
         ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = { aus: eAus || null, nombre: (eAus ? (NOMBRES_RANKING[eAus] || c.falta) : (c.falta || '')) }
       }
+    })
+    // Regla del premio: una falta NORMAL ya lo voltea. Las faltas de HORA EXTRA FIJA
+    // (viernes/miérc fuera del sueldo) se perdonan hasta UNA por mes; con 2+ también cae.
+    Object.keys(faltaCount).forEach(e => {
+      const fc = faltaCount[e]
+      if (fc.normal >= 1 || fc.excep >= 2) bonoCaidoPorFalta.add(e)
     })
 
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
@@ -4140,7 +4196,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const st = {}
     emails.forEach(e => {
       st[e] = {
-        horas: 0, horasPrev: 0, cuposEq: 0, horasPorFecha: {},
+        horas: 0, horasPrev: 0, cuposEq: 0, horasPorFecha: {}, extraFijaPorFecha: {},
         tf: { n: 0, personas: new Set(), fechas: {} },
         fisioCons: nuevaArea(), espec: nuevaArea(), moplex: nuevaArea(),
         evalIng: nuevaArea(), maso: nuevaArea(), otras: nuevaArea()
@@ -4167,6 +4223,10 @@ async function cargarEquipoDesempeno(mesVer) {
           if (d.fecha <= corte) {
             st[destino].horas++
             st[destino].horasPorFecha[d.fecha] = (st[destino].horasPorFecha[d.fecha] || 0) + 1
+            // ¿esta hora es una hora extra fija del profe? (viernes/miérc de Lean) → se cobra aparte
+            if (esHoraExtraFija(destino, d.dia, t.hora)) {
+              st[destino].extraFijaPorFecha[d.fecha] = (st[destino].extraFijaPorFecha[d.fecha] || 0) + 1
+            }
             // Cupo de referencia del bono: en turnos de baja demanda el centro fija
             // un cupo_bono realista; si no está definido, vale la capacidad normal.
             const cupoRef = (t.cupo_bono !== null && t.cupo_bono !== undefined) ? t.cupo_bono : t.capacidad
@@ -4176,19 +4236,61 @@ async function cargarEquipoDesempeno(mesVer) {
       })
     })
 
-    // ===== BITÁCORA de faltas y horas (registro + descuento de sueldo) =====
-    // Las horas de una falta de día completo salen de la grilla (horasPorFecha):
-    // son las horas fijas que ese profe tenía que cumplir ese día.
+    // ===== HORAS EXTRA FIJAS GANADAS (viernes/miérc fuera del sueldo base) =====
+    // Punto de partida: lo que cada uno tiene agendado en la grilla.
+    const extraGanadas = {}  // email -> { fecha: horas }
+    emails.forEach(e => {
+      const m = st[e].extraFijaPorFecha || {}
+      Object.keys(m).forEach(f => { if (m[f] > 0) (extraGanadas[e] = extraGanadas[e] || {})[f] = m[f] })
+    })
+    // Coberturas de días extra-fija: la hora extra (y su 2%) pasa del titular al cubridor.
+    Object.keys(extraCubreFechas).forEach(eCub => {
+      Object.keys(extraCubreFechas[eCub]).forEach(f => {
+        const eAus = extraCubreFechas[eCub][f]
+        let hs = 0
+        if (eAus && extraGanadas[eAus] && extraGanadas[eAus][f]) {
+          hs = extraGanadas[eAus][f]
+          delete extraGanadas[eAus][f]  // el titular ya no la gana ese día
+        }
+        if (!hs && eAus) hs = horasExtraFijaConfig(eAus, diaPorFecha[f] || '')  // fallback por config
+        // sacar del promedio del titular las horas que NO trabajó (no le diluye el alxh)
+        if (eAus && st[eAus] && st[eAus].horasPorFecha[f]) {
+          st[eAus].horas = Math.max(0, st[eAus].horas - st[eAus].horasPorFecha[f])
+          delete st[eAus].horasPorFecha[f]
+        }
+        if (hs > 0) (extraGanadas[eCub] = extraGanadas[eCub] || {})[f] = ((extraGanadas[eCub] && extraGanadas[eCub][f]) || 0) + hs
+      })
+    })
+
+    // ===== BITÁCORA de faltas y horas (registro + descuento / cobro de más) =====
     const bitacoraPorEmail = {}
     const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
+    // FALTAS del titular
     ;((cfR && cfR.data) || []).forEach(c => {
       if (c.tipo === 'cambio') return  // cambio devuelve horas → neutral, fuera de la bitácora
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
-      if (eAus) {
+      if (!eAus) return
+      const extraFijaDia = esDiaExtraFija(eAus, diaPorFecha[c.fecha] || '')
+      if (extraFijaDia) {
+        // Faltó a su hora extra fija (la cubrió otro): NO se le descuenta del sueldo
+        // (nunca fue parte del sueldo base), simplemente no la cobra ese día.
+        pushBita(eAus, { fecha: c.fecha, tipo: 'dia_excep', motivo: c.nota || '', cubierto: !!c.cubre })
+      } else {
         const hsDia = (st[eAus] && st[eAus].horasPorFecha[c.fecha]) || 0
         pushBita(eAus, { fecha: c.fecha, tipo: 'dia', motivo: c.nota || '', cubierto: !!c.cubre, horas: hsDia })
       }
-      // lado positivo: el que cubre (cobertura sin devolución) cobra de más
+    })
+    // GANANCIAS de horas extra fijas (propias o por cubrir la de otro)
+    Object.keys(extraGanadas).forEach(em => {
+      Object.keys(extraGanadas[em]).forEach(f => {
+        if (extraGanadas[em][f] > 0) pushBita(em, { fecha: f, tipo: 'extra_fija', horas: extraGanadas[em][f] })
+      })
+    })
+    // COBERTURAS COMUNES (no extra-fija): el cubridor cobra de más, como siempre
+    ;((cfR && cfR.data) || []).forEach(c => {
+      if (c.tipo === 'cambio') return
+      const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
+      if (eAus && esDiaExtraFija(eAus, diaPorFecha[c.fecha] || '')) return  // ya contabilizada como hora extra fija
       const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
       if (eCub) pushBita(eCub, { fecha: c.fecha, tipo: 'cobertura', ausente: c.falta || '', conExtra: !!c.horas_extra, horasExtra: Number(c.horas_extra_cant) || 0 })
     })
@@ -4274,7 +4376,7 @@ async function cargarEquipoDesempeno(mesVer) {
             if (eAus === e) m[ff.fecha] = { tipo: 'falto' }
           })
           // Coberturas y faltas (tablero nuevo)
-          if (cobFaltoEmail[e]) cobFaltoEmail[e].forEach(f => { m[f] = { tipo: 'falto' } })
+          if (cobFaltoEmail[e]) cobFaltoEmail[e].forEach(f => { m[f] = { tipo: (faltaExcepFechas[e] && faltaExcepFechas[e].has(f)) ? 'falto_excep' : 'falto' } })
           if (cobCubriEmail[e]) Object.keys(cobCubriEmail[e]).forEach(f => {
             const info = cobCubriEmail[e][f]
             const hsAus = (info.aus && st[info.aus]) ? (st[info.aus].horasPorFecha[f] || 0) : 0
@@ -4289,8 +4391,9 @@ async function cargarEquipoDesempeno(mesVer) {
           return m
         })(),
         bonoCaido: bonoCaidoPorFalta.has(e),
-        diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0),
-        bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6),
+        diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0) + (extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0),
+        diasExtraFija: (extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0),
+        bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6) + ((extraGanadas[e] ? Object.keys(extraGanadas[e]).length : 0) * 2),
         evol: Math.round(s.tf.n * 10) / 10, personasTF: s.tf.personas.size,
         alxh: Math.round(alxh * 10) / 10, ocup: Math.round(ocup),
         fisioCons: s.fisioCons.n, espec: s.espec.n, moplex: s.moplex.n,
@@ -4349,7 +4452,7 @@ async function cargarEquipoDesempeno(mesVer) {
     Object.keys(vacaCubre).forEach(k => { cubrioVacasSet.add(vacaCubre[k]) })
     window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
       nombre: p.nombre, email: p.email, alxh: p.alxh,
-      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0,
+      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0, diasExtraFija: p.diasExtraFija || 0,
       cubrioVacaciones: cubrioVacasSet.has(p.email)
     })) }
 
@@ -4431,7 +4534,12 @@ async function cargarEquipoDesempeno(mesVer) {
         // Si faltó este mes, el bono está caído (rojo), sin importar el promedio
         const colorCard = yo.bonoCaido ? '#dc2626' : (esCero ? '#d97706' : b.color)
         const etiqueta = yo.bonoCaido ? '🤒 Bono caído este mes' : (esCero ? 'En camino a Compromiso' : b.label)
-        const extraCob = yo.bonoCobertura > 0 ? `<br>🔄 <b>+${yo.bonoCobertura}% por cubrir ${yo.diasCubiertos} día(s)</b> de un compañero. ¡Gracias por bancar la sala!` : ''
+        const pctExtraFija = (yo.diasExtraFija || 0) * 2
+        const pctCobReal = Math.max(0, (yo.bonoCobertura || 0) - pctExtraFija)
+        const diasCobReal = Math.max(0, (yo.diasCubiertos || 0) - (yo.diasExtraFija || 0))
+        let extraCob = ''
+        if (pctExtraFija > 0) extraCob += `<br>⏰ <b>+${pctExtraFija}% por tus horas extra</b> (${yo.diasExtraFija} día${yo.diasExtraFija === 1 ? '' : 's'} fuera del sueldo). ¡Eso se suma aparte!`
+        if (pctCobReal > 0) extraCob += `<br>🔄 <b>+${pctCobReal}% por cubrir ${diasCobReal} día(s)</b> de un compañero. ¡Gracias por bancar la sala!`
         const mensaje = yo.bonoCaido
           ? `Faltaste un día este mes sin que cuente como cobertura, así que quedás fuera de los premios por desempeño del mes (escalón, vacaciones, estrella y sala). Eso sí: si cubrís a un compañero generando horas extra, ese bono de cobertura igual lo cobrás —se gana trabajando—. El próximo mes arranca de nuevo. 💛`
           : (falta !== null
@@ -4502,6 +4610,10 @@ async function cargarEquipoDesempeno(mesVer) {
           else if (estado && estado.tipo === 'falto') {
             fondo = '#fee2e2'; borde = '#fca5a5'
             cuerpo = '<div style="font-size:9px; color:#b91c1c; font-weight:700; line-height:1.15;">🤒 faltó</div><div style="font-size:7.5px; color:#b91c1c; line-height:1.1;">no suma · pierde premio</div>'
+          }
+          else if (estado && estado.tipo === 'falto_excep') {
+            fondo = '#fef3c7'; borde = '#fcd34d'
+            cuerpo = '<div style="font-size:9px; color:#b45309; font-weight:700; line-height:1.15;">⭐ faltó · hs extra</div><div style="font-size:7.5px; color:#b45309; line-height:1.1;">la cubrió un compa</div>'
           }
           else if (estado && estado.tipo === 'cubierto') {
             // ese día lo cubrió otro; si le tocó la mitad de alumnos (sala compartida) se ve en ev
@@ -4643,24 +4755,34 @@ function bitacoraDesempenoHTML(email) {
   const tarifa = (EQUIPO_DETALLE.tarifas && EQUIPO_DETALLE.tarifas[email]) || 0
   const bonoCobPct = (EQUIPO_DETALLE.resumen && EQUIPO_DETALLE.resumen[email] && EQUIPO_DETALLE.resumen[email].bonoCobertura) || 0
   const conPlata = sueldo > 0
+  const bonoCaido = !!(EQUIPO_DETALLE.resumen && EQUIPO_DETALLE.resumen[email] && EQUIPO_DETALLE.resumen[email].bonoCaido)
 
   // --- FALTAS / HORAS (descuentos, rojo) ---
-  const faltas = b.filter(e => e.tipo !== 'cobertura')
+  const faltas = b.filter(e => e.tipo === 'dia' || e.tipo === 'dia_excep' || e.tipo === 'horas')
   let faltasHTML = ''
   if (faltas.length) {
+    let totalHoras = 0
     const filas = faltas.map(ev => {
       if (ev.tipo === 'dia') {
+        totalHoras += (ev.horas || 0)
         return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
           <span style="font-size:11px; font-weight:800; min-width:42px; color:#b91c1c;">${fmtF(ev.fecha)}</span>
           <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#b91c1c;">Faltó el día completo${ev.horas ? ' (' + ev.horas + ' h)' : ''}</b>${ev.cubierto ? ' · lo cubrió un compañero' : ''} · <span style="color:#b91c1c;">fuera de premios del mes</span>${ev.horas ? ' · <span style="color:#d97706;">a descontar del sueldo</span>' : ''}${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
         </div>`
       }
+      if (ev.tipo === 'dia_excep') {
+        const premioTxt = bonoCaido ? '<span style="color:#b91c1c;">este mes queda fuera de premios</span>' : '<span style="color:#15803d;">no pierde el premio (1 al mes)</span>'
+        return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:11px; font-weight:800; min-width:42px; color:#d97706;">${fmtF(ev.fecha)}</span>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">⭐ Faltó a su hora extra</b>${ev.cubierto ? ' · la cubrió un compañero' : ''} · no se descuenta del sueldo (no la cobra ese día) · ${premioTxt}${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
+        </div>`
+      }
+      totalHoras += (ev.horas || 0)
       return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
         <span style="font-size:11px; font-weight:800; min-width:42px; color:#d97706;">${fmtF(ev.fecha)}</span>
         <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#d97706;">${ev.horas || '?'} h que no asistió</b> · a descontar del sueldo${ev.motivo ? `<br><span style="color:#888;">📝 ${ev.motivo}</span>` : ''}</div>
       </div>`
     }).join('')
-    const totalHoras = faltas.reduce((a, e) => a + (e.horas || 0), 0)
     faltasHTML = `<div style="background:#fff; border:1px solid #fca5a5; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
       <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#b91c1c;">🗒️ Bitácora de faltas y horas del mes</div>
       ${filas}
@@ -4668,12 +4790,20 @@ function bitacoraDesempenoHTML(email) {
     </div>`
   }
 
-  // --- COBERTURAS (a cobrar de más, verde) ---
-  const cobs = b.filter(e => e.tipo === 'cobertura')
+  // --- HORAS EXTRA y COBERTURAS (a cobrar de más, verde) ---
+  const cobs = b.filter(e => e.tipo === 'cobertura' || e.tipo === 'extra_fija')
   let cobsHTML = ''
   if (cobs.length) {
     let totalOt = 0
     const filas = cobs.map(ev => {
+      if (ev.tipo === 'extra_fija') {
+        const ot = conPlata ? (ev.horas || 0) * tarifa : 0
+        totalOt += ot
+        return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:11px; font-weight:800; min-width:42px; color:#16a34a;">${fmtF(ev.fecha)}</span>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#16a34a;">⏰ Hora extra fija</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} · suma +2% al bono</div>
+        </div>`
+      }
       const ot = conPlata ? (ev.horasExtra || 0) * tarifa : 0
       totalOt += ot
       let extraTxt
@@ -4687,9 +4817,9 @@ function bitacoraDesempenoHTML(email) {
     const cobBonus = conPlata ? Math.round(sueldo * bonoCobPct / 100) : 0
     const totalMas = totalOt + cobBonus
     cobsHTML = `<div style="background:#fff; border:1px solid #86efac; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
-      <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#15803d;">🟢 Coberturas que hizo este mes${conPlata ? ' · a cobrar de más' : ''}</div>
+      <div style="font-size:12px; font-weight:800; margin-bottom:8px; color:#15803d;">🟢 Horas extra y coberturas del mes${conPlata ? ' · a cobrar de más' : ''}</div>
       ${filas}
-      ${(conPlata && bonoCobPct > 0) ? `<div style="margin-top:6px; font-size:11.5px; line-height:1.35;"><b style="color:#15803d;">Bono cobertura del mes:</b> ${bonoCobPct}% de ${fmtD(sueldo)} = <b>${fmtD(cobBonus)}</b></div>` : ''}
+      ${(conPlata && bonoCobPct > 0) ? `<div style="margin-top:6px; font-size:11.5px; line-height:1.35;"><b style="color:#15803d;">Bono por horas extra y coberturas:</b> ${bonoCobPct}% de ${fmtD(sueldo)} = <b>${fmtD(cobBonus)}</b></div>` : ''}
       ${conPlata ? `<div style="margin-top:8px; font-size:12.5px; font-weight:800; color:#15803d;">Total a cobrar de más este mes: ${fmtD(totalMas)}</div>` : ''}
     </div>`
   }
