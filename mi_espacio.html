@@ -1141,7 +1141,7 @@ function hoyISO(){
   // 2) ¿qué persona soy? (RLS Nivel C: solo veo mi propia fila)
   const { data:per, error } = await sb
     .from('personas')
-    .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular, fecha_nacimiento')
+    .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular, fecha_nacimiento, aviso_aumento_jul26_veces')
     .eq('auth_user_id', session.user.id)
     .maybeSingle();
 
@@ -1422,9 +1422,15 @@ async function cargarEspacio(per){
   // Tarifario (valor del plan), mapa de inscripciones y pagos, para armar el PDF.
   let _reciboTar = {};
   try {
-    const tarRes = await sb.from('tarifario_tf').select('plan,valor_lista');
+    const tarRes = await sb.from('tarifario_tf').select('plan,valor_lista,valor_nuevo,aumento_desde');
     (tarRes.data || []).forEach(t => { _reciboTar[t.plan] = t.valor_lista; });
-  } catch (e) { _reciboTar = {}; }
+    // Mapa para el aviso de aumento: precio actual, nuevo y desde cuándo rige.
+    const _info = {};
+    (tarRes.data || []).forEach(t => {
+      _info[t.plan] = { actual: Number(t.valor_lista)||0, nuevo: (t.valor_nuevo!=null?Number(t.valor_nuevo):null), desde: t.aumento_desde||null };
+    });
+    window._tarPlanInfo = _info;
+  } catch (e) { _reciboTar = {}; window._tarPlanInfo = {}; }
   window._reciboTarifario = _reciboTar;
   window._reciboInscMap = {};
   (inscAll.data || []).forEach(i => { window._reciboInscMap[i.id] = i; });
@@ -1661,6 +1667,9 @@ async function cargarEspacio(per){
   const _tieneMoplex = !!(moplex.data && moplex.data.length);
   const _hcCompleta  = HC_EXIGIR_MOPLEX ? (_tieneHC && _tieneMoplex) : _tieneHC;
   if(!_hcCompleta) _iniciarRecordatorioHC();
+
+  // Aviso de aumento de cuota (cartel bloqueante hasta poner "Entendido", hasta el 5/7).
+  if(typeof window._iniciarAvisoAumento === 'function') window._iniciarAvisoAumento(per, inscripcion);
 
   // Tiene la HC completa pero le falta el contacto de urgencia → se lo pedimos (y lo guardamos solos).
   // A los que les falta la HC no los molestamos acá: lo cargan en el formulario, que ya pide el contacto.
@@ -6220,6 +6229,99 @@ window.copiarInstructivo = function(btn){
   window._iniciarRecordatorioHC = function(){
     mostrarBanner();   // banner fijo arriba, siempre visible
     mostrarModal();    // y el cartel grande apenas entra
+  };
+})();
+</script>
+
+<!-- ============================================================
+     AVISO DE AUMENTO DE CUOTA (bloqueante hasta "Entendido", hasta el 5/7)
+     Le muestra a cada alumno cuánto pasa a pagar su plan desde julio.
+     Reusa .hc-modal / .hc-emoji / .hc-btn-primario ya definidos arriba.
+     ============================================================ -->
+<style>
+  #avisoAumOverlay{position:fixed;inset:0;z-index:12100;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.80);backdrop-filter:blur(4px);animation:hcFadeIn .25s ease;}
+  #avisoAumOverlay.open{display:flex}
+  #avisoAumOverlay .aa-precio{font-size:30px;font-weight:800;color:var(--texto);margin:4px 0 2px;line-height:1.1}
+  #avisoAumOverlay .aa-precio small{font-size:14px;font-weight:600;color:var(--texto-tenue)}
+  #avisoAumOverlay .aa-detalle{font-size:13px;color:var(--texto-tenue);margin:0 0 20px;line-height:1.5}
+</style>
+<script>
+// ============================================================
+//  AVISO DE AUMENTO DE CUOTA — cartel que exige "Entendido"
+// ============================================================
+(function(){
+  const AVISO_FECHA_LIMITE   = '2026-07-10'; // hasta cuándo se muestra el cartel
+  const AVISO_MAX_VECES      = 5;            // después de tocar "Entendido" estas veces, no se muestra más
+  const AVISO_SEG_PARA_TOCAR = 3;            // segundos de fricción antes de poder tocar "Entendido"
+  let _per = null;
+
+  const fmt$ = (n) => '$' + Math.round(n).toLocaleString('es-AR');
+
+  function infoDePlan(plan){
+    const m = (window._tarPlanInfo || {})[plan];
+    if(!m || m.nuevo == null || !m.desde) return null;   // su plan no tiene aumento cargado
+    if(/BON/i.test(plan) || m.nuevo <= 0) return null;    // bonificados / sin cuota: no molestar
+    return m;
+  }
+
+  async function registrarEntendido(){
+    try{
+      if(!_per) return;
+      const nuevas = (Number(_per.aviso_aumento_jul26_veces) || 0) + 1;
+      _per.aviso_aumento_jul26_veces = nuevas;
+      await sb.from('personas').update({ aviso_aumento_jul26_veces: nuevas }).eq('id', _per.id);
+    }catch(e){ console.warn('No se pudo registrar el "Entendido" del aviso:', e); }
+  }
+
+  function construirOverlay(plan, info, desc){
+    if(document.getElementById('avisoAumOverlay')) return;
+    const actual = Math.max(0, (info.actual||0) - (desc||0));
+    const nuevo  = Math.max(0, (info.nuevo||0)  - (desc||0));
+    const ov = document.createElement('div');
+    ov.id = 'avisoAumOverlay';
+    ov.innerHTML = `
+      <div class="hc-modal" role="dialog" aria-modal="true">
+        <span class="hc-emoji">📢</span>
+        <h3>Actualización de cuota desde julio</h3>
+        <p>A partir del <b>1 de julio de 2026</b>, la cuota de tu plan <b>${plan}</b> pasa a:</p>
+        <div class="aa-precio">${fmt$(nuevo)} <small>/ mes</small></div>
+        <p class="aa-detalle">Hasta junio: ${fmt$(actual)}. Lo que abones por meses anteriores se mantiene al valor de ese mes.</p>
+        <button class="hc-btn-primario" id="avisoAumBtn" disabled>Entendido</button>
+      </div>`;
+    document.body.appendChild(ov);
+
+    const btn = ov.querySelector('#avisoAumBtn');
+    let seg = AVISO_SEG_PARA_TOCAR;
+    btn.textContent = 'Entendido (' + seg + ')';
+    const cuenta = setInterval(function(){
+      seg--;
+      if(seg <= 0){ clearInterval(cuenta); btn.disabled = false; btn.textContent = 'Entendido'; }
+      else { btn.textContent = 'Entendido (' + seg + ')'; }
+    }, 1000);
+
+    btn.addEventListener('click', async function(){
+      if(btn.disabled) return;
+      btn.disabled = true; btn.textContent = 'Guardando...';
+      await registrarEntendido();
+      const o = document.getElementById('avisoAumOverlay');
+      if(o) o.classList.remove('open');
+    });
+  }
+
+  // Llamada desde cargarEspacio() con la persona y su inscripción activa.
+  window._iniciarAvisoAumento = function(per, insc){
+    try{
+      if(!per || !insc || !insc.plan) return;
+      const hoy = new Date().toISOString().slice(0,10);
+      if(hoy > AVISO_FECHA_LIMITE) return;     // después del 10/7 ya no se muestra
+      if((Number(per.aviso_aumento_jul26_veces) || 0) >= AVISO_MAX_VECES) return; // ya lo aceptó suficientes veces
+      const info = infoDePlan(insc.plan);
+      if(!info) return;
+      _per = per;
+      construirOverlay(insc.plan, info, Number(insc.descuento_libre||0));
+      const o = document.getElementById('avisoAumOverlay');
+      if(o) o.classList.add('open');
+    }catch(e){ console.warn('aviso aumento:', e); }
   };
 })();
 </script>
