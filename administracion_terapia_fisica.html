@@ -955,22 +955,17 @@ let sorteosPorPersona = {}; // persona_id -> [sorteos ganados] (para la ficha)
 function cuotaConSorteo(personaId, mes, cuotaBase) {
   return descSorteo.has(personaId + '|' + mes) ? Math.round(cuotaBase * 0.75) : cuotaBase;
 }
-let tarifario = {};      // plan -> fila vigente HOY (para mostrar precio actual)
-let tarifarioVig = {};   // plan -> [filas con vigencia, ordenadas por vigente_desde]
+let tarifario = {};      // plan -> fila (con valor de HOY ya resuelto en valor_lista)
 let planesUnicos = [];
 
-// Precio del plan para un MES dado (YYYY-MM), según la vigencia del tarifario.
-// Esto hace que, al cobrar/imputar a junio en julio, se use el precio de junio.
+// Precio del plan para un MES dado (YYYY-MM), según el aumento programado.
+// Antes de aumento_desde usa el precio base (junio); desde ahí, valor_nuevo (julio).
 function valorPlanMes(plan, mes) {
-  const rows = tarifarioVig[plan];
-  if (!rows || !rows.length) return (tarifario[plan] && tarifario[plan].valor_lista) || 0;
+  const r = tarifario[plan];
+  if (!r) return 0;
   const ref = (mes && mes.length === 7) ? mes + '-01' : new Date().toISOString().slice(0, 10);
-  const cand = rows.filter(r =>
-    (!r.vigente_desde || r.vigente_desde <= ref) &&
-    (!r.vigente_hasta || r.vigente_hasta >= ref)
-  );
-  const row = cand.length ? cand[cand.length - 1] : rows[rows.length - 1];
-  return Number(row.valor_lista) || 0;
+  if (r._aumentoDesde && r._valorNuevo != null && ref >= r._aumentoDesde) return r._valorNuevo;
+  return (r._valorBase != null) ? r._valorBase : (Number(r.valor_lista) || 0);
 }
 let filtroEstado = 'TODOS';
 let filtroFaltante = 'TODOS';
@@ -1183,24 +1178,22 @@ async function cargarTodo() {
     // Idempotente: una vez efectivizado (campos en NULL), no vuelve a entrar.
     await efectivizarCambiosDePlanPadron(insR.data || []);
 
-    // Tarifario indexado por plan (con vigencia por mes)
+    // Tarifario indexado por plan (una fila por plan; el aumento va en valor_nuevo)
     tarifario = {};
-    tarifarioVig = {};
     planesUnicos = [];
     const _hoyTar = new Date().toISOString().slice(0, 10);
     (tarR.data || []).forEach(t => {
-      (tarifarioVig[t.plan] = tarifarioVig[t.plan] || []).push(t);
-    });
-    Object.keys(tarifarioVig).forEach(plan => {
-      const rows = tarifarioVig[plan].sort((a, b) => ((a.vigente_desde || '') < (b.vigente_desde || '') ? -1 : 1));
-      // Fila vigente HOY (para mostrar el precio actual en altas, fichas y desplegables)
-      const cand = rows.filter(r =>
-        (!r.vigente_desde || r.vigente_desde <= _hoyTar) &&
-        (!r.vigente_hasta || r.vigente_hasta >= _hoyTar)
-      );
-      tarifario[plan] = cand.length ? cand[cand.length - 1] : rows[rows.length - 1];
-      // Solo los planes con alguna fila activa se ofrecen en los desplegables (los dados de baja desaparecen)
-      if (rows.some(r => r.activo !== false) && !planesUnicos.includes(plan)) planesUnicos.push(plan);
+      const base = Number(t.valor_lista) || 0;
+      const nuevo = (t.valor_nuevo != null) ? Number(t.valor_nuevo) : null;
+      const desde = t.aumento_desde || null;
+      const valorHoy = (desde && nuevo != null && _hoyTar >= desde) ? nuevo : base;
+      // valor_lista en memoria = precio de HOY (junio antes del aumento, julio después).
+      // _valorBase / _valorNuevo / _aumentoDesde los usa valorPlanMes para imputar por mes.
+      tarifario[t.plan] = Object.assign({}, t, {
+        _valorBase: base, _valorNuevo: nuevo, _aumentoDesde: desde, valor_lista: valorHoy
+      });
+      // Solo planes activos aparecen en los desplegables (los dados de baja desaparecen)
+      if (t.activo !== false && !planesUnicos.includes(t.plan)) planesUnicos.push(t.plan);
     });
     planesUnicos.sort();
 
