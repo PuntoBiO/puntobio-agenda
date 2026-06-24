@@ -4413,6 +4413,17 @@ async function cargarEquipoDesempeno(mesVer) {
         if (x && x.horas > 0) pushBita(em, { fecha: f, tipo: 'extra_favor', horas: x.horas, aus: x.aus || '' })
       })
     })
+    // 🏖 Resumen de vacaciones cubiertas: muestra el +20% con su rango de fechas
+    ;((vacR && vacR.data) || []).forEach(v => {
+      if (!v.profe || !v.cubre || !v.desde || !v.hasta) return
+      const eDe = emails.find(em => esTurnoDe(aliasPorEmail[em], v.profe))
+      const eA = emails.find(em => esTurnoDe(aliasPorEmail[em], v.cubre))
+      if (!eA || eDe === eA) return
+      const ini = v.desde < primerDia ? primerDia : v.desde
+      const fin = v.hasta > ultDia ? ultDia : v.hasta
+      if (ini > ultDia || fin < primerDia) return
+      pushBita(eA, { fecha: ini, tipo: 'vacaciones_cubre', ausente: NOMBRES_RANKING[eDe] || v.profe, desde: ini, hasta: fin, franja: v.franja || 'dia' })
+    })
     // COBERTURAS COMUNES (no extra-fija): el cubridor cobra de más, como siempre
     ;((cfR && cfR.data) || []).forEach(c => {
       if (c.tipo === 'cambio') return
@@ -4962,18 +4973,27 @@ function bitacoraDesempenoHTML(email) {
   }
 
   // --- HORAS EXTRA y COBERTURAS (a cobrar de más, verde) ---
-  const cobs = b.filter(e => e.tipo === 'cobertura' || e.tipo === 'extra_fija' || e.tipo === 'extra_vacaciones' || e.tipo === 'extra_favor')
+  const cobs = b.filter(e => e.tipo === 'cobertura' || e.tipo === 'extra_fija' || e.tipo === 'extra_vacaciones' || e.tipo === 'extra_favor' || e.tipo === 'vacaciones_cubre')
   let cobsHTML = ''
   if (cobs.length) {
     let totalOt = 0
     const dosPctDia = conPlata ? Math.round(sueldo * 0.02) : 0
     const filas = cobs.map(ev => {
+      if (ev.tipo === 'vacaciones_cubre') {
+        const FR = { dia: 'todo el día', manana: 'mañana', tarde: 'tarde' }
+        const rango = ev.desde === ev.hasta ? ('el ' + fmtF(ev.desde)) : ('del ' + fmtF(ev.desde) + ' al ' + fmtF(ev.hasta))
+        const vintePct = conPlata ? Math.round(sueldo * 0.20) : 0
+        return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
+          <span style="font-size:11px; font-weight:800; min-width:42px; color:#0ea5e9;">${fmtF(ev.desde)}</span>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🏖 Cubrís las vacaciones de ${ev.ausente}</b> ${rango}${ev.franja && ev.franja !== 'dia' ? ' (' + (FR[ev.franja] || ev.franja) + ')' : ''} · <b>+20% al bono</b>${conPlata ? ' = <b>' + fmtD(vintePct) + '</b>' : ''}</div>
+        </div>`
+      }
       if (ev.tipo === 'extra_favor') {
         const ot = conPlata ? (ev.horas || 0) * tarifa : 0
         totalOt += ot
         return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
           <span style="font-size:11px; font-weight:800; min-width:42px; color:#0ea5e9;">${fmtF(ev.fecha)}</span>
-          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🤝 Hora extra cubriendo una hora${ev.aus ? ' de ' + ev.aus : ''}</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} <span style="color:var(--text-dim);">(favor · fuera de tu horario · sin bono)</span></div>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🤝 Hora extra del ${fmtF(ev.fecha)} cubriendo una hora${ev.aus ? ' de ' + ev.aus : ''}</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} <span style="color:var(--text-dim);">(favor · fuera de tu horario · sin bono)</span></div>
         </div>`
       }
       if (ev.tipo === 'extra_vacaciones') {
@@ -4981,7 +5001,7 @@ function bitacoraDesempenoHTML(email) {
         totalOt += ot
         return `<div style="display:flex; gap:8px; align-items:flex-start; padding:6px 0; border-bottom:1px solid rgba(0,0,0,0.05);">
           <span style="font-size:11px; font-weight:800; min-width:42px; color:#0ea5e9;">${fmtF(ev.fecha)}</span>
-          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🏖 Hora extra cubriendo vacaciones${ev.aus ? ' de ' + ev.aus : ''}</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} <span style="color:var(--text-dim);">(fuera de tu horario · sin 2%)</span></div>
+          <div style="flex:1; font-size:11.5px; line-height:1.35;"><b style="color:#0ea5e9;">🏖 Hora extra del ${fmtF(ev.fecha)} cubriendo vacaciones${ev.aus ? ' de ' + ev.aus : ''}</b> · ${ev.horas} h${conPlata ? ' × ' + fmtD(tarifa) + ' = <b>' + fmtD(ot) + '</b>' : ''} <span style="color:var(--text-dim);">(fuera de tu horario · sin 2%)</span></div>
         </div>`
       }
       if (ev.tipo === 'extra_fija') {
