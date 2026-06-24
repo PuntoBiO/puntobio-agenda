@@ -77,8 +77,12 @@ const ADMINS = [
 
 const $ = id => document.getElementById(id)
 let adminEmail = null
+let estActual = null
+const TOPE_DIARIO = 70  // máximo de mails por día (cambiá este número si querés otro tope)
 const fmt$ = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
 const esc = s => String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))
+const fechaAR = d => new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Cordoba',year:'numeric',month:'2-digit',day:'2-digit'}).format(d)
+const esHoyAR = ts => { if(!ts) return false; try { return fechaAR(new Date(ts)) === fechaAR(new Date()) } catch(_){ return false } }
 
 // ── Estado de la campaña "Aumento julio 2026" (se calcula en vivo) ──
 async function cargarEstado(){
@@ -117,7 +121,8 @@ async function cargarEstado(){
   const enviados  = conMail.filter(c => c.enviado).sort((a,b) => new Date(b.mailAt||0) - new Date(a.mailAt||0))
   const pendientes= conMail.filter(c => !c.enviado).sort((a,b) => a.dia - b.dia)
   const sinEmail  = lista.filter(c => !c.emailOk).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
-  return { total: conMail.length, enviados, pendientes, sinEmail }
+  const enviadosHoy = enviados.filter(c => esHoyAR(c.mailAt)).length
+  return { total: conMail.length, enviados, pendientes, sinEmail, enviadosHoy }
 }
 
 function fmtFechaCorta(ts){
@@ -138,7 +143,12 @@ function listaCompleta(items, derechaFn, vacio){
 }
 
 function render(est){
+  estActual = est
   const pct = est.total ? Math.round(est.enviados.length / est.total * 100) : 0
+  const restanteHoy = Math.max(0, TOPE_DIARIO - est.enviadosHoy)
+  const topeAlcanzado = restanteHoy <= 0
+  const puedeEnviar = est.pendientes.length > 0 && !topeAlcanzado
+  const valorLote = Math.min(TOPE_DIARIO, restanteHoy || TOPE_DIARIO, est.pendientes.length || TOPE_DIARIO) || 1
   $('app').innerHTML = `
     <div class="card">
       <div class="card-top">
@@ -158,12 +168,15 @@ function render(est){
 
       <div class="acciones">
         <label>Enviar de a</label>
-        <input id="lote" type="number" min="1" max="100" value="70">
-        <button class="btn" id="btnEnviar" ${est.pendientes.length ? '' : 'disabled'}>Enviar el próximo lote</button>
+        <input id="lote" type="number" min="1" max="${restanteHoy || 1}" value="${valorLote}" ${puedeEnviar ? '' : 'disabled'}>
+        <button class="btn" id="btnEnviar" ${puedeEnviar ? '' : 'disabled'}>Enviar el próximo lote</button>
         <button class="btn sec" id="btnPrueba">✉️ Enviarme una prueba</button>
         <button class="btn sec" id="btnRefrescar">↻ Actualizar</button>
         ${est.pendientes.length ? '' : '<span class="muted">¡Listo! No quedan pendientes 🎉</span>'}
       </div>
+
+      ${topeAlcanzado && est.pendientes.length ? `<div class="warn">🛑 Hoy ya enviaste <b>${est.enviadosHoy}</b> mails (el tope diario es ${TOPE_DIARIO}). Para no caer en spam, seguí <b>mañana</b> con los ${est.pendientes.length} que faltan.</div>` : ''}
+      ${!topeAlcanzado && est.enviadosHoy > 0 ? `<div class="warn" style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;">Hoy llevás <b>${est.enviadosHoy}</b> enviados. Te quedan <b>${restanteHoy}</b> para hoy.</div>` : ''}
 
       <div class="res" id="res"></div>
 
@@ -221,7 +234,14 @@ async function enviarPrueba(){
 }
 
 async function enviarLote(){
-  const n = Math.max(1, Math.min(100, parseInt($('lote').value) || 70))
+  const restanteHoy = estActual ? Math.max(0, TOPE_DIARIO - estActual.enviadosHoy) : TOPE_DIARIO
+  if(restanteHoy <= 0){
+    const res = $('res'); res.className = 'res show err'
+    res.textContent = `🛑 Ya enviaste el tope de ${TOPE_DIARIO} mails por hoy. Seguí mañana.`
+    return
+  }
+  let n = Math.max(1, Math.min(100, parseInt($('lote').value) || TOPE_DIARIO))
+  n = Math.min(n, restanteHoy) // nunca pasarse del tope diario
   const btn = $('btnEnviar'); const res = $('res')
   btn.disabled = true; const txt = btn.textContent; btn.textContent = 'Enviando...'
   res.className = 'res'; res.textContent = ''
