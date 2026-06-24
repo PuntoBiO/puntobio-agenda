@@ -147,11 +147,13 @@
   .cf-calc-row.total{margin-top:4px;padding-top:6px;border-top:1px solid var(--line);color:var(--txt);font-weight:700}
   .cf-calc-row.total b{color:var(--blue)}
   .cf-calc-warn{color:var(--muted);background:#161616;border-color:var(--line)}
+  .cf-calc-row.falta,.cf-calc-row.falta b{color:#f87171}
   .cf-tarifas{margin-bottom:14px;padding:12px 14px;background:#0d1922;border:1px solid rgba(30,159,224,.22);border-radius:12px}
   .cf-tarifas-t{font-weight:700;font-size:13px;color:var(--txt);margin-bottom:9px}
   .cf-tarifas-grid{display:flex;flex-wrap:wrap;gap:12px}
   .cf-tarifas-grid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);font-weight:600}
   .cf-tarifas-grid input{width:108px;padding:6px 8px;background:#111;border:1px solid var(--line);border-radius:7px;color:var(--txt);font-size:13px}
+  .cf-tarifas-grid input:disabled{opacity:.55;cursor:not-allowed}
   .cf-tarifas-hint{margin-top:8px;font-size:11px;color:var(--muted)}
   .badge-done{background:rgba(62,207,142,.12);color:var(--ok);border-color:rgba(62,207,142,.3)}
   .cf-actions{display:flex;align-items:center;gap:7px;flex:0 0 auto}
@@ -224,7 +226,7 @@
       <div class="tag">${esPasado?'Pasado':'🔒 Cerrado'}</div></div>`;}
 
   let FERIADOS_FUTUROS=[];
-  let COB_ADMIN=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
+  let COB_ADMIN=false, COB_VE_TODO=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
   const ADMIN_EMAILS=['liclucianavelaz@gmail.com','jimenahllorente@gmail.com'];
   const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
   const TARIFA_DEFAULT={Santiago:7300,Lean:7300,Lautaro:7300,Male:16500};
@@ -249,12 +251,30 @@
     return {sueldo,pct,bono,tarifa,cant,ot,total:bono+ot};
   }
   function breakdownHTML(r){
-    const i=bonoCobInfo(r);
-    if(!i.sueldo)return '<div class="cf-calc cf-calc-warn">\u{1F4A1} Carg\u00e1 el sueldo de <b>'+r.cubre+'</b> en el Calculador de Bonos para ver el monto.</div>';
-    let rows='<div class="cf-calc-row"><span>Bono cobertura ('+i.pct+'% de '+fmtPeso(i.sueldo)+')</span><b>'+fmtPeso(i.bono)+'</b></div>';
-    if(r.horas_extra)rows+='<div class="cf-calc-row"><span>Horas extra ('+i.cant+' h \u00d7 '+fmtPeso(i.tarifa)+')</span><b>'+fmtPeso(i.ot)+'</b></div>';
-    rows+='<div class="cf-calc-row total"><span>Total a pagarle de m\u00e1s a '+r.cubre+'</span><b>'+fmtPeso(i.total)+'</b></div>';
-    return '<div class="cf-calc">'+rows+'</div>';
+    let rows='';
+    if(r.cubre&&PROFES_BONO.includes(r.cubre)){
+      const i=bonoCobInfo(r);
+      if(!i.sueldo){
+        rows+='<div class="cf-calc-row"><span>Bono de '+r.cubre+'</span><b>Cargá su sueldo en Bonos</b></div>';
+      }else{
+        rows+='<div class="cf-calc-row"><span>Bono cobertura ('+i.pct+'% de '+fmtPeso(i.sueldo)+')</span><b>'+fmtPeso(i.bono)+'</b></div>';
+        if(r.horas_extra)rows+='<div class="cf-calc-row"><span>Horas extra ('+i.cant+' h \u00d7 '+fmtPeso(i.tarifa)+')</span><b>'+fmtPeso(i.ot)+'</b></div>';
+        rows+='<div class="cf-calc-row total"><span>Total a pagarle de m\u00e1s a '+r.cubre+'</span><b>'+fmtPeso(i.total)+'</b></div>';
+      }
+    }
+    if(r.falta)rows+='<div class="cf-calc-row falta"><span>\u{1F912} '+r.falta+': se descuenta la jornada</span><b>fuera del premio del mes</b></div>';
+    return rows?'<div class="cf-calc">'+rows+'</div>':'';
+  }
+  // Vista del propio profe: solo lo suyo, % y horas (el monto en $ va por RPC, en el motor)
+  function breakdownProfe(r){
+    if(MI_PROFE&&r.cubre===MI_PROFE&&PROFES_BONO.includes(MI_PROFE)){
+      const pct=r.horas_extra?2:5;
+      let t='Te corresponde: bono cobertura '+pct+'%';
+      if(r.horas_extra&&r.horas_extra_cant)t+=' + '+r.horas_extra_cant+' h extra';
+      return '<div class="cf-calc"><div class="cf-calc-row total"><span>'+t+'</span><b></b></div></div>';
+    }
+    if(MI_PROFE&&r.falta===MI_PROFE)return '<div class="cf-calc cf-calc-warn">\u{1F912} Faltaste ese día.</div>';
+    return '';
   }
 
   async function cargarFeriados(){
@@ -276,7 +296,7 @@
     if(!COB_OK){box.innerHTML='';return;}
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
-    COB_ADMIN=false; MI_PROFE=null;
+    COB_ADMIN=false; COB_VE_TODO=false; MI_PROFE=null;
     try{
       const{data:{session}}=await sb.auth.getSession();
       if(session&&session.user){
@@ -284,16 +304,17 @@
         if(persona){
           MI_PROFE=profeDelUsuario(persona.nombre);
           if(persona.es_equipo){
-            const{data:perm}=await sb.from('permisos_equipo').select('admin_total').eq('persona_id',persona.id).maybeSingle();
+            const{data:perm}=await sb.from('permisos_equipo').select('admin_total, operativo_general').eq('persona_id',persona.id).maybeSingle();
             COB_ADMIN=!!(perm&&perm.admin_total);
+            COB_VE_TODO=!!(perm&&(perm.admin_total||perm.operativo_general));
           }
         }
       }
     }catch(e){}
-    if(!COB_ADMIN&&COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase()))COB_ADMIN=true;
-    // Cada profe ve SOLO lo suyo (donde figura como falta o como cubre). Lu/Jime ven todo.
-    if(!COB_ADMIN)CF_DATA=MI_PROFE?CF_DATA.filter(r=>r.falta===MI_PROFE||r.cubre===MI_PROFE):[];
-    if(COB_ADMIN){
+    if(!COB_ADMIN&&COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase())){COB_ADMIN=true;COB_VE_TODO=true;}
+    // Lu/Jime/Pau/Ale ven TODO (contabilidad). Cada profe ve SOLO lo suyo.
+    if(!COB_VE_TODO)CF_DATA=MI_PROFE?CF_DATA.filter(r=>r.falta===MI_PROFE||r.cubre===MI_PROFE):[];
+    if(COB_VE_TODO){
       try{
         const{data:su}=await sb.from('sueldos_profes_tf').select('profe, mes, sueldo_bolsillo');
         SUELDO_DE={};SUELDO_LATEST={};
@@ -334,10 +355,10 @@
     let html=`<div class="cov-wrap">`;
 
     html+=`<div class="cf-sub">🔄 Faltas y cambios — cualquier día</div>
-      ${COB_ADMIN?`<div class="cf-tarifas">
-        <div class="cf-tarifas-t">⏰ Tarifa de hora extra (por hora) — editable</div>
-        <div class="cf-tarifas-grid">${PROFES_BONO.map(p=>`<label>${p}<input type="number" min="0" step="100" data-tarifa="${p}" value="${TARIFA_DE[p]||0}"></label>`).join('')}</div>
-        <div class="cf-tarifas-hint">Si cambia el mes que viene, editá el monto acá y el sistema recalcula solo. Solo lo ven Lu y Jime.</div>
+      ${COB_VE_TODO?`<div class="cf-tarifas">
+        <div class="cf-tarifas-t">⏰ Tarifa de hora extra (por hora)${COB_ADMIN?' — editable':''}</div>
+        <div class="cf-tarifas-grid">${PROFES_BONO.map(p=>`<label>${p}<input type="number" min="0" step="100" data-tarifa="${p}" value="${TARIFA_DE[p]||0}" ${COB_ADMIN?'':'disabled'}></label>`).join('')}</div>
+        <div class="cf-tarifas-hint">${COB_ADMIN?'Si cambia el mes que viene, editá el monto acá y el sistema recalcula solo.':'Solo Lu y Jime pueden modificar estos montos.'}</div>
       </div>`:''}
       <div class="cf-form">
         <div><label>Día</label><input type="date" id="cf-fecha"></div>
@@ -354,7 +375,7 @@
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
       </div>`;
 
-    html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — ${COB_ADMIN?'lo último arriba':'tus faltas y coberturas · lo último arriba'}</div>`;
+    html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — ${COB_VE_TODO?'lo último arriba':'tus faltas y coberturas · lo último arriba'}</div>`;
     if(CF_DATA.length){
       html+=`<div class="cf-list">`;
       CF_DATA.forEach(r=>{
@@ -369,7 +390,7 @@
               ${r.devuelto?`<span class="badge badge-done">Saldado ✓</span>`:''}
             </div>
             ${r.nota?`<div class="cf-nota">${(r.nota||'').replace(/</g,'&lt;')}</div>`:''}
-            ${(COB_ADMIN&&!esCambio&&r.cubre&&PROFES_BONO.includes(r.cubre))?breakdownHTML(r):''}
+            ${(!esCambio)?(COB_VE_TODO?((r.falta||(r.cubre&&PROFES_BONO.includes(r.cubre)))?breakdownHTML(r):''):breakdownProfe(r)):''}
           </div>
           <div class="cf-actions">
             ${esCambio&&!r.devuelto?`<button class="btn-mini" data-saldar="${r.id}">Saldar</button>`:''}
@@ -429,7 +450,7 @@
       syncExtraCant();
     });
     if(extraChk)extraChk.addEventListener('change',syncExtraCant);
-    document.querySelectorAll('[data-tarifa]').forEach(inp=>inp.addEventListener('change',async()=>{
+    if(COB_ADMIN)document.querySelectorAll('[data-tarifa]').forEach(inp=>inp.addEventListener('change',async()=>{
       const p=inp.dataset.tarifa,monto=Number(inp.value||0);
       TARIFA_DE[p]=monto;
       try{await sb.from('tarifas_hora_extra').upsert({profe:p,monto,actualizado_en:new Date().toISOString()},{onConflict:'profe'});
