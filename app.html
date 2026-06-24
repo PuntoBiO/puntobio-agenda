@@ -4305,23 +4305,27 @@ async function cargarEquipoDesempeno(mesVer) {
     equipo.forEach(p => { EQUIPO_DETALLE.resumen[p.email] = p })
     EQUIPO_DETALLE.bitacora = bitacoraPorEmail
     // Sueldo y tarifa para el desglose en $ de la bitácora de coberturas.
-    // Privacidad: el admin trae todos; un profe trae SOLO el suyo (no ve sueldos ajenos).
+    // Privacidad: el admin trae todos (puede leer la tabla); un profe trae SOLO
+    // el suyo vía RPC seguro (no puede leer sueldos ajenos ni la tabla directa).
     try {
       const _G0 = gruposVisiblesEquipo()
       const _miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
-      const _miNom = NOMBRES_RANKING[_miEmail] || ''
-      const _miSueldoKey = _miNom === 'Lauti' ? 'Lautaro' : _miNom
-      const _miTarifaKey = _miNom === 'Santi' ? 'Santiago' : (_miNom === 'Lauti' ? 'Lautaro' : _miNom)
-      let _suQ = supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr)
-      let _taQ = supabase.from('tarifas_hora_extra').select('profe, monto')
-      if (!_G0.admin) { _suQ = _suQ.eq('profe', _miSueldoKey || '__none__'); _taQ = _taQ.eq('profe', _miTarifaKey || '__none__') }
-      const [_suR, _taR] = await Promise.all([_suQ, _taQ])
       const _sueldoEmail = {}, _tarifaEmail = {}
-      ;((_suR && _suR.data) || []).forEach(x => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Lauti' ? 'Lautaro' : n) === x.profe }); if (em) _sueldoEmail[em] = Number(x.sueldo_bolsillo) || 0 })
-      ;((_taR && _taR.data) || []).forEach(t => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Santi' ? 'Santiago' : (n === 'Lauti' ? 'Lautaro' : n)) === t.profe }); if (em) _tarifaEmail[em] = Number(t.monto) || 0 })
+      if (_G0.admin) {
+        const [_suR, _taR] = await Promise.all([
+          supabase.from('sueldos_profes_tf').select('profe, sueldo_bolsillo').eq('mes', mesStr),
+          supabase.from('tarifas_hora_extra').select('profe, monto')
+        ])
+        ;((_suR && _suR.data) || []).forEach(x => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Lauti' ? 'Lautaro' : n) === x.profe }); if (em) _sueldoEmail[em] = Number(x.sueldo_bolsillo) || 0 })
+        ;((_taR && _taR.data) || []).forEach(t => { const em = emails.find(e => { const n = NOMBRES_RANKING[e]; return (n === 'Santi' ? 'Santiago' : (n === 'Lauti' ? 'Lautaro' : n)) === t.profe }); if (em) _tarifaEmail[em] = Number(t.monto) || 0 })
+      } else {
+        const { data: _mi } = await supabase.rpc('mi_bono_cobertura_datos', { p_mes: mesStr })
+        const _row = Array.isArray(_mi) ? _mi[0] : _mi
+        if (_row && _miEmail) { _sueldoEmail[_miEmail] = Number(_row.sueldo) || 0; _tarifaEmail[_miEmail] = Number(_row.tarifa) || 0 }
+      }
       EQUIPO_DETALLE.sueldos = _sueldoEmail
       EQUIPO_DETALLE.tarifas = _tarifaEmail
-    } catch (_) { EQUIPO_DETALLE.sueldos = {}; EQUIPO_DETALLE.tarifas = {} }
+    } catch (_) { EQUIPO_DETALLE.sueldos = EQUIPO_DETALLE.sueldos || {}; EQUIPO_DETALLE.tarifas = EQUIPO_DETALLE.tarifas || {} }
 
     // ===== BONO DE DESEMPEÑO (jornada 78) =====
     const G = gruposVisiblesEquipo()
