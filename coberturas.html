@@ -224,11 +224,17 @@
       <div class="tag">${esPasado?'Pasado':'🔒 Cerrado'}</div></div>`;}
 
   let FERIADOS_FUTUROS=[];
-  let COB_ADMIN=false, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
+  let COB_ADMIN=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
   const ADMIN_EMAILS=['liclucianavelaz@gmail.com','jimenahllorente@gmail.com'];
   const PROFES_BONO=['Santiago','Lean','Lautaro','Male']; // ganan bono / cobran hora extra
   const TARIFA_DEFAULT={Santiago:7300,Lean:7300,Lautaro:7300,Male:16500};
   const sueldoKey=p=>p==='Santiago'?'Santi':p; // el sueldo se guarda con 'Santi'
+  function profeDelUsuario(nombre){
+    const first=(nombre||'').toLowerCase().trim().split(/\s+/)[0];
+    if(!first)return null;
+    return PROFES.find(p=>{const lp=p.toLowerCase();
+      return first.startsWith(lp)||lp.startsWith(first)||first.slice(0,4)===lp.slice(0,4);})||null;
+  }
   const fmtPeso=n=>'$'+Math.round(n||0).toLocaleString('es-AR');
   function sueldoDeCobertura(cubre,fecha){
     const k=sueldoKey(cubre),m=SUELDO_DE[k];
@@ -270,18 +276,23 @@
     if(!COB_OK){box.innerHTML='';return;}
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
-    COB_ADMIN=false;
+    COB_ADMIN=false; MI_PROFE=null;
     try{
       const{data:{session}}=await sb.auth.getSession();
       if(session&&session.user){
-        const{data:persona}=await sb.from('personas').select('id, es_equipo').eq('auth_user_id',session.user.id).maybeSingle();
-        if(persona&&persona.es_equipo){
-          const{data:perm}=await sb.from('permisos_equipo').select('admin_total').eq('persona_id',persona.id).maybeSingle();
-          COB_ADMIN=!!(perm&&perm.admin_total);
+        const{data:persona}=await sb.from('personas').select('id, nombre, es_equipo').eq('auth_user_id',session.user.id).maybeSingle();
+        if(persona){
+          MI_PROFE=profeDelUsuario(persona.nombre);
+          if(persona.es_equipo){
+            const{data:perm}=await sb.from('permisos_equipo').select('admin_total').eq('persona_id',persona.id).maybeSingle();
+            COB_ADMIN=!!(perm&&perm.admin_total);
+          }
         }
       }
     }catch(e){}
     if(!COB_ADMIN&&COB_EMAIL&&ADMIN_EMAILS.includes(COB_EMAIL.toLowerCase()))COB_ADMIN=true;
+    // Cada profe ve SOLO lo suyo (donde figura como falta o como cubre). Lu/Jime ven todo.
+    if(!COB_ADMIN)CF_DATA=MI_PROFE?CF_DATA.filter(r=>r.falta===MI_PROFE||r.cubre===MI_PROFE):[];
     if(COB_ADMIN){
       try{
         const{data:su}=await sb.from('sueldos_profes_tf').select('profe, mes, sueldo_bolsillo');
@@ -343,7 +354,7 @@
         <div class="full"><button class="btn" id="cf-add">➕ Agregar</button></div>
       </div>`;
 
-    html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — lo último arriba</div>`;
+    html+=`<div class="cf-sub" style="margin-top:26px">📜 Historial — ${COB_ADMIN?'lo último arriba':'tus faltas y coberturas · lo último arriba'}</div>`;
     if(CF_DATA.length){
       html+=`<div class="cf-list">`;
       CF_DATA.forEach(r=>{
