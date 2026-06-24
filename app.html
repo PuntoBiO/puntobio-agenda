@@ -3464,12 +3464,12 @@ async function cargarCalculadorBonos(mesVer) {
             <input type="checkbox" id="calc-sala-ok" ${salaOk ? 'checked' : ''} onchange="toggleSalaOk('${mesStr}', this.checked)" style="width:17px; height:17px; cursor:pointer;">
             🤝 La sala estuvo impecable este mes
           </label>
-          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> entre <b>Santi, Lautaro y Lean</b>, solo entre los que no faltaron.</span>
+          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> entre <b>Santi, Lautaro y Lean</b>. Se pierde con <b>más de 2 faltas</b> en el mes.</span>
         </div>
         <div id="calc-sala-detalle" style="margin-top:8px; font-size:13px; color:#9a3412; ${salaOk ? '' : 'display:none;'}">
           ✅ Santi: <b>$50.000</b> · Lautaro: <b>$50.000</b> · Lean: <b>$50.000</b>
         </div>
-        <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Si la sala estuvo bien pero alguno faltó (a un día o a una hora), ese pierde su parte y los $150.000 se reparten entre los que siguen en carrera. Arranca en agosto.</div>
+        <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Si la sala estuvo bien, cada profe conserva su parte siempre que no tenga <b>más de 2 faltas</b> (de día u hora) en el mes; con la 3ª pierde su parte y los $150.000 se reparten entre los que siguen en carrera. El 1er viernes cubierto de Lean no cuenta como falta. Arranca en agosto.</div>
       </div>
       <div id="calc-evidencias-sala" style="margin-top:14px; padding:14px 16px; background:#fef2f2; border:1px solid #fecaca; border-radius:12px;">
         <div class="empty-state" style="padding:10px; font-size:13px;">⏳ Cargando evidencias de sala…</div>
@@ -3526,7 +3526,7 @@ function filaCalc(profe, d, sueldo, mesStr) {
        </select>
        <div class="esc-label" style="margin-top:3px; font-weight:700; color:${info.color};">${info.label} · ${pctEf}%${manualTag}</div>`
   return `
-    <tr data-profe="${profe}" data-pct="${pctEf}" data-pctauto="${autoPct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" data-sueldo="${sueldo || 0}" style="border-bottom:1px solid #eef0f3;">
+    <tr data-profe="${profe}" data-pct="${pctEf}" data-pctauto="${autoPct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" data-faltas="${d.faltasSala || 0}" data-sueldo="${sueldo || 0}" style="border-bottom:1px solid #eef0f3;">
       <td style="padding:9px 7px; font-weight:700;">${profe}</td>
       <td style="padding:9px 7px; font-weight:700; color:${info.color};">${alxh}</td>
       <td style="padding:9px 7px; font-size:12px;">${escCell}</td>
@@ -3601,14 +3601,16 @@ function recalcularTotalGeneral() {
   })
   const el = document.getElementById('calc-total-general')
   if (el) el.textContent = '$' + Math.round(total).toLocaleString('es-AR')
-  // ===== BONO DE SALA: $150.000 que se reparte SOLO entre los profes de TF que NO faltaron.
-  // El que faltó (bono caído) pierde su parte y se reparte entre los que siguen en carrera.
+  // ===== BONO DE SALA: $150.000 que se reparte SOLO entre los profes de TF presentes.
+  // Se PIERDE con MÁS de 2 faltas en el mes (día u hora). El que se pasa pierde su parte
+  // y se reparte entre los que siguen en carrera. (La 1ª hora extra fija cubierta de Lean
+  // del mes no cuenta como falta; eso ya viene descontado en data-faltas.)
   const salaChk = document.getElementById('calc-sala-ok')
   const salaOk = !!(salaChk && salaChk.checked)
   const PROFES_SALA = ['Santi', 'Lautaro', 'Lean']
   const enCarrera = []
   document.querySelectorAll('#calc-tbody tr').forEach(tr => {
-    if (PROFES_SALA.includes(tr.dataset.profe) && tr.dataset.caido !== '1') enCarrera.push(tr.dataset.profe)
+    if (PROFES_SALA.includes(tr.dataset.profe) && (Number(tr.dataset.faltas) || 0) <= 2) enCarrera.push(tr.dataset.profe)
   })
   let sala = 0, salaCadaUno = 0
   if (salaOk && enCarrera.length > 0) { sala = 150000; salaCadaUno = Math.round(150000 / enCarrera.length) }
@@ -3617,12 +3619,16 @@ function recalcularTotalGeneral() {
     if (!salaOk) { det.style.display = 'none' }
     else {
       det.style.display = ''
-      const filas = PROFES_SALA.map(p => enCarrera.includes(p)
-        ? `✅ ${p}: <b>$${salaCadaUno.toLocaleString('es-AR')}</b>`
-        : `<span style="color:#b91c1c;">🚫 ${p}: <b>$0</b> (faltó)</span>`).join(' · ')
+      const filas = PROFES_SALA.map(p => {
+        const tr = Array.from(document.querySelectorAll('#calc-tbody tr')).find(x => x.dataset.profe === p)
+        const nf = tr ? (Number(tr.dataset.faltas) || 0) : 0
+        return enCarrera.includes(p)
+          ? `✅ ${p}: <b>$${salaCadaUno.toLocaleString('es-AR')}</b>${nf > 0 ? ` <span style="color:#9a3412;">(${nf} falta${nf > 1 ? 's' : ''})</span>` : ''}`
+          : `<span style="color:#b91c1c;">🚫 ${p}: <b>$0</b> (${nf} faltas)</span>`
+      }).join(' · ')
       const nota = (enCarrera.length === 0)
-        ? '<div style="margin-top:4px; font-size:11.5px; color:#b91c1c;">Faltaron los tres: el bono de sala no se paga.</div>'
-        : (enCarrera.length < 3 ? `<div style="margin-top:4px; font-size:11.5px;">Se reparten los $150.000 entre los ${enCarrera.length} que siguen en carrera.</div>` : '')
+        ? '<div style="margin-top:4px; font-size:11.5px; color:#b91c1c;">Todos se pasaron de 2 faltas: el bono de sala no se paga.</div>'
+        : (enCarrera.length < 3 ? `<div style="margin-top:4px; font-size:11.5px;">Se reparten los $150.000 entre los ${enCarrera.length} que siguen en carrera (2 faltas o menos).</div>` : '')
       det.innerHTML = filas + nota
     }
   }
@@ -4221,6 +4227,24 @@ async function cargarEquipoDesempeno(mesVer) {
       if (em) bonoCaidoPorFalta.add(em)
     })
 
+    // ===== Conteo de faltas del mes (día + hora) para el BONO DE SALA =====
+    // El bono de sala se pierde con MÁS de 2 faltas (3 o más). La 1ª hora extra fija
+    // cubierta de Lean al mes NO cuenta (su perdón); de la 2ª en adelante sí suma.
+    const faltasSala = {}
+    Object.keys(faltaCount).forEach(e => {
+      const fc = faltaCount[e]
+      faltasSala[e] = (faltasSala[e] || 0) + (fc.normal || 0) + Math.max(0, (fc.excep || 0) - 1)
+    })
+    ;((ahR && ahR.data) || []).forEach(a => {
+      if (!a || !(Number(a.horas) > 0)) return
+      const em = a.profe ? emails.find(x => esTurnoDe(aliasPorEmail[x], a.profe)) : null
+      if (em) faltasSala[em] = (faltasSala[em] || 0) + 1
+    })
+    ;((faltaR && faltaR.data) || []).forEach(f => {
+      const eAus = emails.find(em => esTurnoDe(aliasPorEmail[em], f.profe_ausente))
+      if (eAus) faltasSala[eAus] = (faltasSala[eAus] || 0) + 1
+    })
+
     // Estructura por profe: TF + cada área con sesiones/personas/fechas
     const nuevaArea = () => ({ n: 0, personas: new Set(), fechas: {} })
     const st = {}
@@ -4442,6 +4466,7 @@ async function cargarEquipoDesempeno(mesVer) {
           return m
         })(),
         bonoCaido: bonoCaidoPorFalta.has(e),
+        faltasSala: faltasSala[e] || 0,
         diasCubiertos: (diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0) + (cobDias2[e] ? cobDias2[e].size : 0) + (dias2pct[e] ? dias2pct[e].size : 0),
         diasExtraFija: (dias2pct[e] ? dias2pct[e].size : 0),
         bonoCobertura: Math.min(((diasCubiertos[e] ? diasCubiertos[e].size : 0) + (cobDias5[e] ? cobDias5[e].size : 0)) * 5, 15) + Math.min((cobDias2[e] ? cobDias2[e].size : 0) * 2, 6) + ((dias2pct[e] ? dias2pct[e].size : 0) * 2),
@@ -4503,7 +4528,7 @@ async function cargarEquipoDesempeno(mesVer) {
     Object.keys(vacaCubre).forEach(k => { cubrioVacasSet.add(vacaCubre[k]) })
     window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
       nombre: p.nombre, email: p.email, alxh: p.alxh,
-      bonoCaido: !!p.bonoCaido, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0, diasExtraFija: p.diasExtraFija || 0,
+      bonoCaido: !!p.bonoCaido, faltasSala: p.faltasSala || 0, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0, diasExtraFija: p.diasExtraFija || 0,
       cubrioVacaciones: cubrioVacasSet.has(p.email)
     })) }
 
@@ -5506,7 +5531,7 @@ window.abrirReglasBono = function() {
         • <b>Miércoles (20 h = 1 h):</b> cobra esa <b>hora en $</b> (queda a la vista de él y de las admin), pero <b>sin el 2%</b> y sin perdón de premio — es solo una hora extra suelta.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa. El espacio también es parte del compromiso: <b>la sala se entrega ordenada y en condiciones</b> al cierre de cada turno — las observaciones registradas por orden de sala afectan el escalón del mes.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
-        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000</b> para los profes de TF (Santi, Lautaro y Lean) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Si la sala estuvo bien pero <b>alguno faltó</b> (a un día o a una hora), ese <b>pierde su parte</b> y los $150.000 <b>se reparten entre los que siguen en carrera</b> (ej. si queda 1 afuera, los otros dos cobran $75.000 cada uno). La presencia es parte del cuidado del espacio. <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
+        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000</b> para los profes de TF (Santi, Lautaro y Lean) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Aparte, cada profe conserva su parte siempre que no tenga <b>más de 2 faltas en el mes</b> (de día u hora): con la 3ª <b>pierde su parte</b> y los $150.000 <b>se reparten entre los que siguen en carrera</b> (ej. si queda uno afuera, los otros dos cobran $75.000 cada uno). El <b>1er viernes cubierto de Lean</b> del mes no cuenta como falta. <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
         <p style="margin:0;"><b>9 · Cierre y pago:</b> el mes cierra el último día a las 23:59. <b>Calendario:</b> el bono por promedio arranca en junio y se paga a partir del 15 de julio; el Bono Estrella (julio vs junio) y el Bono de Equipo de sala se pagan recién a partir de agosto. Todo se paga por separado del sueldo, a partir del 15 del mes siguiente al que se ganó.</p>
       </div>
     </div>`
