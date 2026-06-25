@@ -14,21 +14,20 @@
 *{box-sizing:border-box}
 body{font-family:'Manrope',system-ui,sans-serif;background:var(--bg-deep);color:var(--text);margin:0;padding:24px 32px 60px;min-height:100vh}
 h1{font-size:24px;margin:0 0 4px;display:flex;align-items:center;gap:10px}
-.sub{color:var(--text-dim);font-size:14px;margin:0 0 18px;max-width:900px}
-.card{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;max-width:1000px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:18px}
-.toolbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px;max-width:1000px}
+.sub{color:var(--text-dim);font-size:14px;margin:0 0 18px;max-width:980px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:20px;max-width:1180px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:18px}
+.toolbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:14px;max-width:1180px}
 .search{flex:1;min-width:200px;padding:10px 13px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:14px;background:#fff}
 .chip{font-size:12.5px;font-weight:700;color:var(--turquoise-dim);background:#eff6fb;border:1px solid #cde8f7;border-radius:99px;padding:6px 12px}
 .tgl{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--text-dim);font-weight:600;cursor:pointer;user-select:none}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 thead th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-faint);padding:9px 10px;border-bottom:1.5px solid var(--border)}
 thead th.c,tbody td.c{text-align:center}
-tbody td{padding:10px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tbody td{padding:10px;border-bottom:1px solid #f1f5f9;vertical-align:top}
 tbody tr:hover{background:var(--bg-soft)}
 .pac{font-weight:700}
-.muted{color:var(--text-faint);font-size:12.5px}
+.muted{color:var(--text-faint);font-size:12px;margin-top:3px}
 .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;display:inline-block}
-.b-ped{background:var(--amber-bg);color:#92400e}
 .b-no{background:#f1f5f9;color:var(--text-faint)}
 .estado{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px}
 .e-SALDADO{background:var(--green-bg);color:#166534}
@@ -41,17 +40,22 @@ tbody tr:hover{background:var(--bg-soft)}
 .sw input:checked + .track{background:var(--turquoise)}
 .sw input:checked + .track:before{transform:translateX(18px)}
 .sw input:disabled + .track{opacity:.5;cursor:not-allowed}
-.res{margin:0 0 14px;font-size:13.5px;padding:11px 14px;border-radius:10px;display:none;max-width:1000px}
+.res{margin:0 0 14px;font-size:13.5px;padding:11px 14px;border-radius:10px;display:none;max-width:1180px}
 .res.show{display:block}
 .res.ok{background:var(--green-bg);color:#166534}
 .res.err{background:var(--red-bg);color:#991b1b}
 .empty{padding:40px;text-align:center;color:var(--text-faint)}
-.plprice{font-weight:700;color:var(--turquoise-dim)}
+.sel{padding:6px 8px;border:1.5px solid var(--border);border-radius:8px;font-family:inherit;font-size:12.5px;background:#fff;max-width:210px;color:var(--text)}
+.sel-sm{max-width:140px}
+.plrow{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.montos{font-size:11.5px;color:var(--text-dim);margin-top:6px;line-height:1.6}
+.montos b{color:var(--text);font-weight:700}
+.montos .mx{color:var(--turquoise-dim)}
 </style>
 </head>
 <body>
   <h1>🦶 MOPLEX</h1>
-  <p class="sub">Consultas MOPLEX cargadas desde cualquier lado (Consultorios, agenda o acá). Marcá <b>“solicita plantillas”</b> y queda registrado para todos. Las plantillas se cobran aparte y las cobra el mismo profesional que hizo el estudio.</p>
+  <p class="sub">Consultas MOPLEX desde cualquier lado. En cada una elegí el <b>tipo de consulta</b> (Nuevo / Control). Si pide plantilla, marcá el interruptor y elegí el <b>tipo</b> y si es <b>Nueva o Rectificación</b>. Abajo de cada selección ves cuánto va al <b>centro</b>, al <b>profesional</b> y a <b>MOPLEX</b>. Las plantillas las cobra el mismo profesional que hizo el estudio.</p>
 
   <div id="msg" class="res"></div>
 
@@ -76,27 +80,57 @@ const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
 const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
 function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r.innerHTML=t; setTimeout(()=>{ r.className='res' }, 4000) }
 
-const state = { ttos: [], personas: {}, sesCount: {}, plantillaPrecio: 0 }
+const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} } }
+
+// ---- cálculo de reparto ----
+function calcConsulta(c){
+  if(!c) return null
+  const precio = Number(c.precio_paciente)||0
+  const moplex = Number(c.costo_moplex)||0
+  const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
+  const centro = precio - moplex - prof
+  return { precio, moplex, prof, centro }
+}
+function calcPlantilla(p, rectif){
+  if(!p) return null
+  if(rectif){
+    const precio = Math.round((Number(p.precio_paciente)||0)/2)  // la mitad
+    const moplex = Math.round(precio*0.85)
+    const prof   = 0
+    const centro = precio - moplex                                // 15%
+    return { precio, moplex, prof, centro, rectif:true }
+  }
+  const precio = Number(p.precio_paciente)||0
+  const moplex = Number(p.costo_moplex)||0
+  const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100)
+  const centro = precio - moplex - prof
+  return { precio, moplex, prof, centro, rectif:false }
+}
+function montosLine(m){
+  if(!m) return ''
+  return `<div class="montos">Paciente <b>${fmt(m.precio)}</b><br>Centro <b>${fmt(m.centro)}</b> · Prof <b>${fmt(m.prof)}</b> · <span class="mx">MOPLEX <b>${fmt(m.moplex)}</b></span></div>`
+}
 
 async function cargar(){
   try{
-    const [ttoR, plR] = await Promise.all([
+    const [ttoR, catR] = await Promise.all([
       sb.from('tratamientos').select('*').eq('practica_codigo','MOPLEX').order('fecha_alta', { ascending: false }),
-      sb.from('tarifario_precios_vigente').select('valor_vigente').eq('practica_codigo','MOPLEX_PLANTILLAS').maybeSingle()
+      sb.from('moplex_catalogo').select('*').eq('activo', true).order('orden')
     ])
     if (ttoR.error) throw ttoR.error
+    if (catR.error) throw catR.error
     state.ttos = ttoR.data || []
-    state.plantillaPrecio = (plR && plR.data && plR.data.valor_vigente != null) ? Number(plR.data.valor_vigente) : 0
+    state.cat = { consultas: [], plantillas: [], byId: {} }
+    ;(catR.data || []).forEach(c => {
+      state.cat.byId[c.id] = c
+      if (c.categoria === 'consulta') state.cat.consultas.push(c)
+      else state.cat.plantillas.push(c)
+    })
 
     const ids = [...new Set(state.ttos.map(t => t.persona_id).filter(Boolean))]
     if (ids.length){
       const { data: per } = await sb.from('personas').select('id, nombre').in('id', ids)
       ;(per || []).forEach(p => { state.personas[p.id] = p.nombre })
-    }
-    const ttoIds = state.ttos.map(t => t.id)
-    if (ttoIds.length){
-      const { data: ses } = await sb.from('sesiones').select('tratamiento_id').in('tratamiento_id', ttoIds)
-      ;(ses || []).forEach(s => { state.sesCount[s.tratamiento_id] = (state.sesCount[s.tratamiento_id]||0) + 1 })
     }
     render()
   } catch(e){
@@ -121,31 +155,48 @@ function render(){
 
   let html = `<table><thead><tr>
     <th>Paciente</th><th>Fecha</th><th>Profesional</th><th>Estado</th>
-    <th class="c">Sesiones</th><th class="c">Solicita plantillas</th><th>Plantilla</th>
+    <th>Consulta</th><th class="c">Pide plantilla</th><th>Plantilla</th>
   </tr></thead><tbody>`
 
   rows.forEach(t => {
-    const pac = state.personas[t.persona_id] || '(sin nombre)'
+    const pac  = state.personas[t.persona_id] || '(sin nombre)'
     const prof = t.profesional || '—'
-    const est = t.estado || '—'
-    const ses = state.sesCount[t.id] || 0
+    const est  = t.estado || '—'
     const pide = !!t.solicita_plantillas
-    const plantillaCol = pide
-      ? `<span class="badge b-ped">solicitada</span> <span class="plprice">${fmt(state.plantillaPrecio)}</span><div class="muted">cobra ${prof}</div>`
-      : `<span class="badge b-no">—</span>`
+
+    // --- Consulta ---
+    const consOpts = state.cat.consultas.map(c =>
+      `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}</option>`).join('')
+    const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
+    const cMon = montosLine(calcConsulta(state.cat.byId[t.moplex_consulta_id]))
+
+    // --- Plantilla ---
+    let plCell
+    if (pide){
+      const rectif = !!t.moplex_plantilla_rectif
+      const plOpts = state.cat.plantillas.map(p =>
+        `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}</option>`).join('')
+      const plSel = `<select class="sel" onchange="setPlantilla(${t.id}, this.value)"><option value="">— tipo —</option>${plOpts}</select>`
+      const rectSel = `<select class="sel sel-sm" onchange="setRectif(${t.id}, this.value)"><option value="0" ${!rectif?'selected':''}>Nueva</option><option value="1" ${rectif?'selected':''}>Rectificación</option></select>`
+      const pMon = montosLine(calcPlantilla(state.cat.byId[t.moplex_plantilla_id], rectif))
+      plCell = `<div class="plrow">${plSel} ${rectSel}</div>${pMon}<div class="muted">cobra ${prof}</div>`
+    } else {
+      plCell = `<span class="badge b-no">—</span>`
+    }
+
     html += `<tr>
       <td class="pac">${pac}</td>
       <td>${t.fecha_alta || '—'}</td>
       <td>${prof}</td>
       <td><span class="estado e-${est}">${est}</span></td>
-      <td class="c">${ses}</td>
+      <td>${consSel}${cMon}</td>
       <td class="c">
         <label class="sw">
           <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
           <span class="track"></span>
         </label>
       </td>
-      <td>${plantillaCol}</td>
+      <td>${plCell}</td>
     </tr>`
   })
   html += `</tbody></table>`
@@ -167,6 +218,36 @@ async function togglePlantilla(id, el){
   } finally {
     el.disabled = false
   }
+}
+
+async function setConsulta(id, val){
+  const v = val ? Number(val) : null
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_consulta_id: v }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_consulta_id = v
+    render()
+  } catch(e){ msg('No se pudo guardar la consulta: ' + (e.message || e), 'err') }
+}
+
+async function setPlantilla(id, val){
+  const v = val ? Number(val) : null
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_plantilla_id: v }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_plantilla_id = v
+    render()
+  } catch(e){ msg('No se pudo guardar la plantilla: ' + (e.message || e), 'err') }
+}
+
+async function setRectif(id, val){
+  const v = (val === '1')
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_plantilla_rectif: v }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_plantilla_rectif = v
+    render()
+  } catch(e){ msg('No se pudo guardar: ' + (e.message || e), 'err') }
 }
 
 cargar()
