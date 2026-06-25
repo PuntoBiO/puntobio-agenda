@@ -479,6 +479,28 @@
         </div>
       </div>
 
+      <div id="moplex-box" style="display:none; background:var(--moplex-soft); border:1px solid #fecaca; border-radius:10px; padding:12px; margin-bottom:12px;">
+        <div style="font-weight:700; color:var(--moplex); margin-bottom:8px;">🦶 Datos MOPLEX</div>
+        <div class="form-row">
+          <label>Tipo de consulta</label>
+          <select id="sel-moplex-consulta" onchange="actualizarMoplexMontos()"><option value="">— elegir —</option></select>
+        </div>
+        <label style="display:flex; align-items:center; gap:7px; font-size:13px; margin:10px 0;"><input type="checkbox" id="chk-moplex-plantilla" onchange="toggleMoplexPlantilla()"> Pide plantilla</label>
+        <div id="moplex-plantilla-box" style="display:none;">
+          <div class="form-row-2">
+            <div class="form-row">
+              <label>Tipo de plantilla</label>
+              <select id="sel-moplex-plantilla" onchange="actualizarMoplexMontos()"><option value="">— tipo —</option></select>
+            </div>
+            <div class="form-row">
+              <label>Nueva / Rectificación</label>
+              <select id="sel-moplex-rectif" onchange="actualizarMoplexMontos()"><option value="0">Nueva</option><option value="1">Rectificación</option></select>
+            </div>
+          </div>
+        </div>
+        <div id="moplex-montos" style="font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.6;"></div>
+      </div>
+
       <div class="form-row">
         <label>Observaciones</label>
         <input type="text" id="inp-obs" placeholder="(opcional)">
@@ -639,6 +661,8 @@ function hMin(h){ const [hh,mm]=h.split(':').map(Number); return hh*60+mm; }
    ════════════════════════════════════════════════════════════════ */
 let semanaActual = lunesDeFecha(new Date());
 let turnosSemana = [];
+let moplexCat = { byId:{}, consultas:[], plantillas:[] };
+let moplexTipoPorTto = {};
 let vistaActual = 'semana';        // 'semana' | 'mes'
 let mesAncla = new Date();         // fecha de referencia del mes mostrado
 let personasCache = [];
@@ -744,6 +768,19 @@ async function cargarTurnos(){
     hora_inicio: typeof t.hora_inicio==='string' ? t.hora_inicio.slice(0,5) : t.hora_inicio,
     hora_fin: typeof t.hora_fin==='string' ? t.hora_fin.slice(0,5) : t.hora_fin
   }));
+  // Tipos MOPLEX por tratamiento (para mostrar Nuevo/Control/Garantía en el chip)
+  try{
+    const ttoIds = [...new Set(turnosSemana.filter(t => t.practica==='MOPLEX' && t.tratamiento_id).map(t => t.tratamiento_id))];
+    moplexTipoPorTto = {};
+    if(ttoIds.length){
+      const { data: tts } = await sb.from('tratamientos').select('codigo_id, moplex_consulta_id').in('codigo_id', ttoIds);
+      (tts||[]).forEach(r => {
+        const c = r.moplex_consulta_id ? moplexCat.byId[r.moplex_consulta_id] : null;
+        const tp = tipoCortoMoplex(c);
+        if(tp) moplexTipoPorTto[r.codigo_id] = tp;
+      });
+    }
+  }catch(e){ /* sin tipos, el chip muestra MOPLEX */ }
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -994,13 +1031,110 @@ function render(){
   });
 }
 
+/* ════════════════════════════════════════════════════════════════
+   MOPLEX · catálogo, cálculo de reparto y selectores del modal
+   ════════════════════════════════════════════════════════════════ */
+async function cargarMoplexCatalogo(){
+  try{
+    const { data } = await sb.from('moplex_catalogo').select('*').eq('activo', true).order('orden');
+    moplexCat = { byId:{}, consultas:[], plantillas:[] };
+    (data||[]).forEach(c => {
+      moplexCat.byId[c.id] = c;
+      if(c.categoria === 'consulta') moplexCat.consultas.push(c);
+      else moplexCat.plantillas.push(c);
+    });
+    const sc = document.getElementById('sel-moplex-consulta');
+    if(sc) sc.innerHTML = '<option value="">— elegir —</option>' + moplexCat.consultas.map(c=>`<option value="${c.id}">${c.nombre}</option>`).join('');
+    const sp = document.getElementById('sel-moplex-plantilla');
+    if(sp) sp.innerHTML = '<option value="">— tipo —</option>' + moplexCat.plantillas.map(p=>`<option value="${p.id}">${p.nombre}</option>`).join('');
+  }catch(e){ /* sin catálogo, los selects quedan vacíos */ }
+}
+function tipoCortoMoplex(c){
+  if(!c) return null;
+  if(c.es_garantia) return 'Garantía';
+  return /control/i.test(c.nombre || '') ? 'Control' : 'Nuevo';
+}
+const fmtMoplex = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR');
+function calcConsultaMoplex(c){
+  if(!c) return null;
+  const precio = Number(c.precio_paciente)||0, moplex = Number(c.costo_moplex)||0;
+  const prof = Math.round(precio * (Number(c.pct_profesional)||0)/100);
+  return { precio, moplex, prof, centro: precio - moplex - prof };
+}
+function calcPlantillaMoplex(p, rectif){
+  if(!p) return null;
+  if(rectif){
+    const precio = Math.round((Number(p.precio_paciente)||0)/2);
+    const moplex = Math.round(precio*0.85);
+    return { precio, moplex, prof: 0, centro: precio - moplex };
+  }
+  const precio = Number(p.precio_paciente)||0, moplex = Number(p.costo_moplex)||0;
+  const prof = Math.round(precio * (Number(p.pct_profesional)||0)/100);
+  return { precio, moplex, prof, centro: precio - moplex - prof };
+}
+function lineaMontosMoplex(titulo, m){
+  if(!m) return '';
+  return `<div><b>${titulo}</b> · Paciente ${fmtMoplex(m.precio)} · Centro ${fmtMoplex(m.centro)} · Prof ${fmtMoplex(m.prof)} · MOPLEX ${fmtMoplex(m.moplex)}</div>`;
+}
+function toggleMoplexPlantilla(){
+  const on = document.getElementById('chk-moplex-plantilla').checked;
+  document.getElementById('moplex-plantilla-box').style.display = on ? 'block' : 'none';
+  actualizarMoplexMontos();
+}
+function resetMoplexBox(){
+  const c = document.getElementById('sel-moplex-consulta'); if(c) c.value = '';
+  const k = document.getElementById('chk-moplex-plantilla'); if(k) k.checked = false;
+  const p = document.getElementById('sel-moplex-plantilla'); if(p) p.value = '';
+  const r = document.getElementById('sel-moplex-rectif'); if(r) r.value = '0';
+  const pb = document.getElementById('moplex-plantilla-box'); if(pb) pb.style.display = 'none';
+  const mb = document.getElementById('moplex-montos'); if(mb) mb.innerHTML = '';
+}
+function actualizarMoplexMontos(){
+  const box = document.getElementById('moplex-montos');
+  if(!box) return;
+  let html = '';
+  const cId = document.getElementById('sel-moplex-consulta').value;
+  html += lineaMontosMoplex('Consulta', calcConsultaMoplex(cId ? moplexCat.byId[cId] : null));
+  if(document.getElementById('chk-moplex-plantilla').checked){
+    const pId = document.getElementById('sel-moplex-plantilla').value;
+    const rectif = document.getElementById('sel-moplex-rectif').value === '1';
+    html += lineaMontosMoplex('Plantilla', calcPlantillaMoplex(pId ? moplexCat.byId[pId] : null, rectif));
+  }
+  box.innerHTML = html;
+}
+// Al elegir un tratamiento MOPLEX existente, precargo lo que ya tenga guardado.
+async function onTratamientoMoplexElegido(){
+  if(document.getElementById('sel-practica').value !== 'MOPLEX') return;
+  const idTto = document.getElementById('inp-tto').value.trim();
+  const setVals = (cId, pide, pId, rectif) => {
+    document.getElementById('sel-moplex-consulta').value = cId || '';
+    document.getElementById('chk-moplex-plantilla').checked = !!pide;
+    document.getElementById('sel-moplex-plantilla').value = pId || '';
+    document.getElementById('sel-moplex-rectif').value = rectif ? '1' : '0';
+    toggleMoplexPlantilla();
+  };
+  if(!idTto){ setVals('', false, '', false); return; }
+  try{
+    const { data } = await sb.from('tratamientos')
+      .select('moplex_consulta_id, solicita_plantillas, moplex_plantilla_id, moplex_plantilla_rectif')
+      .eq('codigo_id', idTto).maybeSingle();
+    if(data) setVals(data.moplex_consulta_id || '', data.solicita_plantillas, data.moplex_plantilla_id || '', data.moplex_plantilla_rectif);
+    else setVals('', false, '', false);
+  }catch(e){ setVals('', false, '', false); }
+}
+
 function crearChipTurno(t){
   const div = document.createElement('div');
   div.className = `turno ${t.practica.toLowerCase()} ${t.estado.toLowerCase()}`;
   const tilde = t.estado === 'PRESENTE' ? '<span class="tilde">✓</span>' : '';
+  let etq = practicaCorta(t.practica);
+  if(t.practica === 'MOPLEX'){
+    const tp = moplexTipoPorTto[t.tratamiento_id];
+    if(tp) etq = tp;
+  }
   div.innerHTML = `
     <div class="turno-paciente">${t.paciente}${tilde}</div>
-    <div class="turno-meta"><span>${practicaCorta(t.practica)} ${t.hora_inicio}</span><span>${t.profesional}</span></div>
+    <div class="turno-meta"><span>${etq} ${t.hora_inicio}</span><span>${t.profesional}</span></div>
   `;
   div.onclick = (ev) => { ev.stopPropagation(); abrirDetalle(t); };
   return div;
@@ -1139,6 +1273,7 @@ function abrirModalNuevo(){
   document.getElementById('alerta-nuevo').innerHTML = '';
   ['busc-paciente','sel-profesional','sel-practica','sel-hora-exacta','inp-tto','inp-obs'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('sel-obra').value = 'PARTICULAR';
+  resetMoplexBox();
   document.getElementById('paciente-results').classList.remove('activo');
   document.getElementById('modal-nuevo').classList.add('activo');
 }
@@ -1154,6 +1289,7 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf, pre
   document.getElementById('sel-obra').value = 'PARTICULAR';
   document.getElementById('sel-hora-exacta').innerHTML = '<option value="">—</option>';
   document.getElementById('sel-practica').value = '';
+  resetMoplexBox();
 
   const selP = document.getElementById('sel-profesional');
   selP.value = '';
@@ -1222,6 +1358,8 @@ function actualizarHorasExactas(){
   const prof = document.getElementById('sel-profesional').value;
   const practica = document.getElementById('sel-practica').value;
   const selH = document.getElementById('sel-hora-exacta');
+  const mb = document.getElementById('moplex-box');
+  if(mb) mb.style.display = (practica === 'MOPLEX') ? 'block' : 'none';
   selH.innerHTML = '<option value="">—</option>';
   // Cargar tratamientos YA creados del paciente para esta práctica (no se inventa nada)
   if(practica){
@@ -1362,6 +1500,7 @@ document.addEventListener('DOMContentLoaded', () => {
   cargarRolUsuario();
   document.getElementById('sel-profesional').addEventListener('change', actualizarPracticasYHoras);
   document.getElementById('sel-practica').addEventListener('change', actualizarHorasExactas);
+  document.getElementById('inp-tto').addEventListener('change', onTratamientoMoplexElegido);
 
   // Buscador paciente
   const inp = document.getElementById('busc-paciente');
@@ -1523,6 +1662,27 @@ async function guardarTurnoNuevo(){
   });
   if(error){ alertaEl.innerHTML = `<div class="err-box">Error: ${error.message}</div>`; return; }
 
+  // MOPLEX: guardar en el tratamiento el tipo de consulta, la plantilla y el
+  // profesional que hizo el estudio (para que el apartado MOPLEX lo muestre).
+  if(practica === 'MOPLEX' && idTto){
+    try{
+      const upd = { profesional: (CODE_TO_NOMBRE[profesional] || profesional) };
+      const cId = document.getElementById('sel-moplex-consulta').value;
+      upd.moplex_consulta_id = cId ? Number(cId) : null;
+      const pide = document.getElementById('chk-moplex-plantilla').checked;
+      upd.solicita_plantillas = pide;
+      if(pide){
+        const pId = document.getElementById('sel-moplex-plantilla').value;
+        upd.moplex_plantilla_id = pId ? Number(pId) : null;
+        upd.moplex_plantilla_rectif = (document.getElementById('sel-moplex-rectif').value === '1');
+      } else {
+        upd.moplex_plantilla_id = null;
+        upd.moplex_plantilla_rectif = false;
+      }
+      await sb.from('tratamientos').update(upd).eq('codigo_id', idTto);
+    }catch(e){ /* el turno ya quedó guardado; esto no lo bloquea */ }
+  }
+
   // Datos para el modal de WhatsApp (igual que en Consultorios)
   let celularPac = null;
   const perCache = personasCache.find(p => Number(p.id) === Number(personaId));
@@ -1552,6 +1712,7 @@ function abrirDetalle(t){
       <div style="color:var(--muted);">Fecha:</div><div>${t.fecha} · <b>${t.hora_inicio}</b> – ${t.hora_fin}</div>
       <div style="color:var(--muted);">Profesional:</div><div>${t.profesional}</div>
       <div style="color:var(--muted);">Práctica:</div><div>${t.practica}</div>
+      ${t.practica==='MOPLEX' && moplexTipoPorTto[t.tratamiento_id] ? `<div style="color:var(--muted);">Tipo:</div><div><b>${moplexTipoPorTto[t.tratamiento_id]}</b></div>` : ''}
       <div style="color:var(--muted);">Tratamiento:</div><div>${t.tratamiento_id || '—'}</div>
       <div style="color:var(--muted);">Obra social:</div><div>${t.obra_social || '—'}</div>
       <div style="color:var(--muted);">Estado:</div><div><span class="estado-pill ${t.estado}">${t.estado}</span></div>
@@ -1943,6 +2104,7 @@ async function iniciarRealtime() {
     await Bloqueos.cargar();
     Bloqueos.escucharCambios(() => render());
   }
+  await cargarMoplexCatalogo();
   await Promise.all([cargarTurnos(), cargarAperturas()]);
   render();
   iniciarRealtime();

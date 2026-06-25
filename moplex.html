@@ -80,7 +80,7 @@ const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
 const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
 function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r.innerHTML=t; setTimeout(()=>{ r.className='res' }, 4000) }
 
-const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} } }
+const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {} }
 
 // ---- cálculo de reparto ----
 function calcConsulta(c){
@@ -132,6 +132,23 @@ async function cargar(){
       const { data: per } = await sb.from('personas').select('id, nombre').in('id', ids)
       ;(per || []).forEach(p => { state.personas[p.id] = p.nombre })
     }
+
+    // Profesional según quién atendió la consulta (del turno BioLab).
+    const codigos = [...new Set(state.ttos.map(t => t.codigo_id).filter(Boolean))]
+    state.profPorTto = {}
+    if (codigos.length){
+      const { data: tb } = await sb.from('turnos_biolab')
+        .select('tratamiento_id, profesional, fecha, hora_inicio')
+        .in('tratamiento_id', codigos).neq('estado', 'CANCELADO')
+      const CODE = { BRUNO:'Bruno', MALE:'Male', LU:'Lu', JIME:'Jime' }
+      const best = {}
+      ;(tb || []).forEach(r => {
+        const k = r.tratamiento_id
+        const key = (r.fecha || '') + (r.hora_inicio || '')
+        if (!best[k] || key > best[k].key) best[k] = { key, prof: r.profesional }
+      })
+      Object.keys(best).forEach(k => { state.profPorTto[k] = CODE[best[k].prof] || best[k].prof })
+    }
     render()
   } catch(e){
     $('app').innerHTML = 'No se pudo cargar: ' + (e.message || e)
@@ -160,7 +177,7 @@ function render(){
 
   rows.forEach(t => {
     const pac  = state.personas[t.persona_id] || '(sin nombre)'
-    const prof = t.profesional || '—'
+    const prof = state.profPorTto[t.codigo_id] || t.profesional || '—'
     const est  = t.estado || '—'
     const pide = !!t.solicita_plantillas
 
