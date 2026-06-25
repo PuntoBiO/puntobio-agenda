@@ -80,7 +80,7 @@ const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
 const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
 function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r.innerHTML=t; setTimeout(()=>{ r.className='res' }, 4000) }
 
-const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {} }
+const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {}, profPorSesion: {} }
 
 // ---- cálculo de reparto ----
 function calcConsulta(c){
@@ -133,21 +133,42 @@ async function cargar(){
       ;(per || []).forEach(p => { state.personas[p.id] = p.nombre })
     }
 
-    // Profesional según quién atendió la consulta (del turno BioLab).
+    // Profesional según quién atendió la consulta.
+    // Fuente principal: la SESIÓN (es de donde sale en el diario). Respaldo: el turno BioLab.
+    const normProf = p => {
+      if (!p) return ''
+      const m = { bruno:'Bruno', male:'Male', lu:'Lu', jime:'Jime', vero:'Vero' }
+      return m[String(p).toLowerCase().trim()] || p
+    }
+    const ttoIds = state.ttos.map(t => t.id)
+    state.profPorSesion = {}
+    if (ttoIds.length){
+      const { data: ses } = await sb.from('sesiones')
+        .select('tratamiento_id, profesional, fecha')
+        .in('tratamiento_id', ttoIds)
+      const bestS = {}
+      ;(ses || []).forEach(r => {
+        if (!r.profesional) return
+        const k = r.tratamiento_id
+        const key = r.fecha || ''
+        if (!bestS[k] || key > bestS[k].key) bestS[k] = { key, prof: r.profesional }
+      })
+      Object.keys(bestS).forEach(k => { state.profPorSesion[k] = normProf(bestS[k].prof) })
+    }
+
     const codigos = [...new Set(state.ttos.map(t => t.codigo_id).filter(Boolean))]
     state.profPorTto = {}
     if (codigos.length){
       const { data: tb } = await sb.from('turnos_biolab')
         .select('tratamiento_id, profesional, fecha, hora_inicio')
         .in('tratamiento_id', codigos).neq('estado', 'CANCELADO')
-      const CODE = { BRUNO:'Bruno', MALE:'Male', LU:'Lu', JIME:'Jime' }
       const best = {}
       ;(tb || []).forEach(r => {
         const k = r.tratamiento_id
         const key = (r.fecha || '') + (r.hora_inicio || '')
         if (!best[k] || key > best[k].key) best[k] = { key, prof: r.profesional }
       })
-      Object.keys(best).forEach(k => { state.profPorTto[k] = CODE[best[k].prof] || best[k].prof })
+      Object.keys(best).forEach(k => { state.profPorTto[k] = normProf(best[k].prof) })
     }
     render()
   } catch(e){
@@ -177,7 +198,7 @@ function render(){
 
   rows.forEach(t => {
     const pac  = state.personas[t.persona_id] || '(sin nombre)'
-    const prof = t.profesional || state.profPorTto[t.codigo_id] || ''
+    const prof = t.profesional || state.profPorSesion[t.id] || state.profPorTto[t.codigo_id] || ''
     const est  = t.estado || '—'
     const pide = !!t.solicita_plantillas
 
