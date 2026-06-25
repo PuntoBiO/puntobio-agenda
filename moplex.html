@@ -51,6 +51,15 @@ tbody tr:hover{background:var(--bg-soft)}
 .montos{font-size:11.5px;color:var(--text-dim);margin-top:6px;line-height:1.6}
 .montos b{color:var(--text);font-weight:700}
 .montos .mx{color:var(--turquoise-dim)}
+.mes-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;
+  background:#eef4f9;border:1px solid #d7e6f2;border-radius:10px;padding:11px 15px;margin:14px 0 8px;font-weight:800;color:var(--turquoise-dim)}
+.mes-head:hover{background:#e3eef7}
+.mes-tit{font-size:14.5px;letter-spacing:.01em}
+.mes-cant{font-size:12px;font-weight:700;color:var(--text-dim);background:#fff;border:1px solid var(--border);border-radius:99px;padding:3px 10px}
+.mes-body{margin-bottom:6px}
+.est2{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;display:inline-block}
+.est2.ok{background:var(--green-bg);color:#166534}
+.est2.pend{background:var(--amber-bg);color:#92400e}
 </style>
 </head>
 <body>
@@ -80,7 +89,7 @@ const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
 const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
 function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r.innerHTML=t; setTimeout(()=>{ r.className='res' }, 4000) }
 
-const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {}, profPorSesion: {} }
+const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {}, profPorSesion: {}, realizado: {}, mesAbierto: null }
 
 // ---- cálculo de reparto ----
 function calcConsulta(c){
@@ -142,12 +151,14 @@ async function cargar(){
     }
     const ttoIds = state.ttos.map(t => t.id)
     state.profPorSesion = {}
+    state.realizado = {}
     if (ttoIds.length){
       const { data: ses } = await sb.from('sesiones')
         .select('tratamiento_id, profesional, fecha')
         .in('tratamiento_id', ttoIds)
       const bestS = {}
       ;(ses || []).forEach(r => {
+        state.realizado[r.tratamiento_id] = true
         if (!r.profesional) return
         const k = r.tratamiento_id
         const key = r.fecha || ''
@@ -176,6 +187,68 @@ async function cargar(){
   }
 }
 
+function mesLabel(ym){
+  if(ym === 'sin-fecha') return 'Sin fecha'
+  const [y,m] = ym.split('-')
+  const M=['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre']
+  return `${M[Number(m)]||m} ${y}`
+}
+function toggleMes(ym){ state.mesAbierto[ym] = !state.mesAbierto[ym]; render() }
+
+function filaTto(t){
+  const pac  = state.personas[t.persona_id] || '(sin nombre)'
+  const prof = t.profesional || state.profPorSesion[t.id] || state.profPorTto[t.codigo_id] || ''
+  const realiz = !!state.realizado[t.id]
+  const estTxt = realiz ? 'Realizado' : 'Pendiente'
+  const estCls = realiz ? 'ok' : 'pend'
+  const pide = !!t.solicita_plantillas
+
+  // --- Consulta ---
+  const consOpts = state.cat.consultas.map(c =>
+    `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}</option>`).join('')
+  const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
+  const cMon = montosLine(calcConsulta(state.cat.byId[t.moplex_consulta_id]))
+
+  // --- Plantilla ---
+  let plCell
+  if (pide){
+    const rectif = !!t.moplex_plantilla_rectif
+    const plOpts = state.cat.plantillas.map(p =>
+      `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}</option>`).join('')
+    const plSel = `<select class="sel" onchange="setPlantilla(${t.id}, this.value)"><option value="">— tipo —</option>${plOpts}</select>`
+    const rectSel = `<select class="sel sel-sm" onchange="setRectif(${t.id}, this.value)"><option value="0" ${!rectif?'selected':''}>Nueva</option><option value="1" ${rectif?'selected':''}>Rectificación</option></select>`
+    const pMon = montosLine(calcPlantilla(state.cat.byId[t.moplex_plantilla_id], rectif))
+    plCell = `<div class="plrow">${plSel} ${rectSel}</div>${pMon}<div class="muted">cobra ${prof || '—'}</div>`
+  } else {
+    plCell = `<span class="badge b-no">—</span>`
+  }
+
+  const profOpts = ['Bruno','Male','Lu','Jime'].map(n => `<option ${prof===n?'selected':''}>${n}</option>`).join('')
+  const profSel = `<select class="sel sel-sm" onchange="setProf(${t.id}, this.value)"><option value="">—</option>${profOpts}</select>`
+
+  return `<tr>
+    <td class="pac">${pac}</td>
+    <td>${t.fecha_alta || '—'}</td>
+    <td>${profSel}</td>
+    <td><span class="est2 ${estCls}">${estTxt}</span></td>
+    <td>${consSel}${cMon}</td>
+    <td class="c">
+      <label class="sw">
+        <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
+        <span class="track"></span>
+      </label>
+    </td>
+    <td>${plCell}</td>
+  </tr>`
+}
+
+function tablaMes(lista){
+  return `<table><thead><tr>
+    <th>Paciente</th><th>Fecha</th><th>Profesional</th><th>Estado</th>
+    <th>Consulta</th><th class="c">Pide plantilla</th><th>Plantilla</th>
+  </tr></thead><tbody>${lista.map(filaTto).join('')}</tbody></table>`
+}
+
 function render(){
   const q = norm($('q').value)
   const soloPed = $('soloPed').checked
@@ -191,56 +264,33 @@ function render(){
 
   if (!rows.length){ $('app').innerHTML = '<div class="empty">No hay consultas MOPLEX para mostrar.</div>'; return }
 
-  let html = `<table><thead><tr>
-    <th>Paciente</th><th>Fecha</th><th>Profesional</th><th>Estado</th>
-    <th>Consulta</th><th class="c">Pide plantilla</th><th>Plantilla</th>
-  </tr></thead><tbody>`
-
+  // Agrupar por mes (de fecha_alta), más reciente arriba
+  const groups = {}
   rows.forEach(t => {
-    const pac  = state.personas[t.persona_id] || '(sin nombre)'
-    const prof = t.profesional || state.profPorSesion[t.id] || state.profPorTto[t.codigo_id] || ''
-    const est  = t.estado || '—'
-    const pide = !!t.solicita_plantillas
-
-    // --- Consulta ---
-    const consOpts = state.cat.consultas.map(c =>
-      `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}</option>`).join('')
-    const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
-    const cMon = montosLine(calcConsulta(state.cat.byId[t.moplex_consulta_id]))
-
-    // --- Plantilla ---
-    let plCell
-    if (pide){
-      const rectif = !!t.moplex_plantilla_rectif
-      const plOpts = state.cat.plantillas.map(p =>
-        `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}</option>`).join('')
-      const plSel = `<select class="sel" onchange="setPlantilla(${t.id}, this.value)"><option value="">— tipo —</option>${plOpts}</select>`
-      const rectSel = `<select class="sel sel-sm" onchange="setRectif(${t.id}, this.value)"><option value="0" ${!rectif?'selected':''}>Nueva</option><option value="1" ${rectif?'selected':''}>Rectificación</option></select>`
-      const pMon = montosLine(calcPlantilla(state.cat.byId[t.moplex_plantilla_id], rectif))
-      plCell = `<div class="plrow">${plSel} ${rectSel}</div>${pMon}<div class="muted">cobra ${prof || '—'}</div>`
-    } else {
-      plCell = `<span class="badge b-no">—</span>`
-    }
-
-    html += `<tr>
-      <td class="pac">${pac}</td>
-      <td>${t.fecha_alta || '—'}</td>
-      <td>${(() => {
-        const opts = ['Bruno','Male','Lu','Jime'].map(n => `<option ${prof===n?'selected':''}>${n}</option>`).join('')
-        return `<select class="sel sel-sm" onchange="setProf(${t.id}, this.value)"><option value="">—</option>${opts}</select>`
-      })()}</td>
-      <td><span class="estado e-${est}">${est}</span></td>
-      <td>${consSel}${cMon}</td>
-      <td class="c">
-        <label class="sw">
-          <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
-          <span class="track"></span>
-        </label>
-      </td>
-      <td>${plCell}</td>
-    </tr>`
+    const ym = (t.fecha_alta || '').slice(0,7) || 'sin-fecha'
+    ;(groups[ym] = groups[ym] || []).push(t)
   })
-  html += `</tbody></table>`
+  const meses = Object.keys(groups).sort().reverse()
+
+  // Estado de apertura: arranca con el mes actual abierto (una sola vez)
+  if (state.mesAbierto === null){
+    const now = new Date()
+    const mesActual = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0')
+    state.mesAbierto = {}
+    meses.forEach(ym => { state.mesAbierto[ym] = (ym === mesActual) })
+    if (!meses.includes(mesActual) && meses.length) state.mesAbierto[meses[0]] = true
+  }
+
+  let html = ''
+  meses.forEach(ym => {
+    const lista = groups[ym]
+    const abierto = q ? true : !!state.mesAbierto[ym]   // si hay búsqueda, mostrar todo
+    html += `<div class="mes-head" onclick="toggleMes('${ym}')">
+      <span class="mes-tit">${abierto?'▾':'▸'} ${mesLabel(ym)}</span>
+      <span class="mes-cant">${lista.length} consulta${lista.length!==1?'s':''}</span>
+    </div>`
+    html += `<div class="mes-body" style="display:${abierto?'block':'none'}">${tablaMes(lista)}</div>`
+  })
   $('app').innerHTML = html
 }
 
