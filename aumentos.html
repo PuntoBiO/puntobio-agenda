@@ -146,13 +146,18 @@ function redondear(v, modo){
 }
 
 async function cargar(){
-  const [tfR, coR, usoR] = await Promise.all([
+  const [tfR, coR, usoR, mxR, pqxR] = await Promise.all([
     sb.from('tarifario_tf').select('plan, actividad, valor_lista, valor_nuevo, aumento_desde'),
     sb.from('tarifario_precios').select('practica_codigo, modalidad, obra_social, valor, valor_nuevo, aumento_desde'),
-    sb.rpc('tarifario_en_uso')
+    sb.rpc('tarifario_en_uso'),
+    sb.from('tarifario_splits').select('pct_centro, pct_moplex').eq('practica_codigo','MOPLEX').eq('profesional','Bruno').maybeSingle(),
+    sb.from('precios_config').select('pqx_recargo').eq('id',1).maybeSingle()
   ])
   if (tfR.error) throw tfR.error
   if (coR.error) throw coR.error
+
+  state.moplexSplit = (mxR && mxR.data) ? mxR.data : { pct_centro: 0, pct_moplex: 0 }
+  state.pqxRecargo = (pqxR && pqxR.data && pqxR.data.pqx_recargo != null) ? Number(pqxR.data.pqx_recargo) : 1000
 
   state.tf = (tfR.data || []).sort((a,b) => (a.valor_lista||0) - (b.valor_lista||0))
   state.co = (coR.data || []).filter(r => r.practica_codigo !== 'RPG').sort((a,b) =>
@@ -228,6 +233,36 @@ function render(){
     <p class="hint">Aplicá un % para llenar todo de una, y después ajustá a mano los precios que quieras. El precio actual no se toca hasta la fecha de vigencia.</p>
   </div>`
 
+  // ===== MOPLEX =====
+  const mxRow = state.co.find(r => r.practica_codigo === 'MOPLEX' && r.modalidad === 'Particular')
+  const mxPrecio = mxRow ? (mxRow.valor || 0) : 0
+  const mxC = Number(state.moplexSplit.pct_centro) || 0
+  const mxM = Number(state.moplexSplit.pct_moplex) || 0
+  const mxP = 100 - mxC - mxM
+  html += `<div class="card" style="border-left:4px solid var(--turquoise)">
+    <h3 style="margin:0 0 4px;font-size:16px">🔬 Configurar MOPLEX</h3>
+    <p class="hint" style="margin:0 0 14px">Precio a público y reparto de la evaluación. El <b>% profesional</b> es lo que se lleva quien evalúa (Bruno o Male). Las dueñas (Jime/Lu) van siempre 100% al centro. Aplica a las evaluaciones nuevas desde que guardás.</p>
+    <div class="controls">
+      <div class="fld"><label>Precio a público</label><input type="number" id="mxPrecio" min="0" step="100" value="${mxPrecio}" oninput="calcMoplex()"></div>
+      <div class="sep"></div>
+      <div class="fld"><label>% Centro</label><div class="inwrap"><input type="number" id="mxCentro" min="0" max="100" step="1" value="${mxC}" oninput="calcMoplex()"><span class="sfx">%</span></div></div>
+      <div class="fld"><label>% MOPLEX</label><div class="inwrap"><input type="number" id="mxMoplex" min="0" max="100" step="1" value="${mxM}" oninput="calcMoplex()"><span class="sfx">%</span></div></div>
+      <div class="fld"><label>% Profesional</label><div class="inwrap"><input type="text" id="mxProf" value="${mxP}" readonly style="background:#f1f5f9;color:#475569"><span class="sfx">%</span></div></div>
+      <button class="btn sm" onclick="guardarMoplex()">Guardar MOPLEX</button>
+    </div>
+    <p class="hint" id="mxPreview" style="margin:10px 0 0"></p>
+  </div>`
+
+  // ===== PQX (postquirúrgico) automático =====
+  html += `<div class="card" style="border-left:4px solid var(--turquoise)">
+    <h3 style="margin:0 0 4px;font-size:16px">🩹 Postquirúrgico (PQX)</h3>
+    <p class="hint" style="margin:0 0 14px">El precio de PQX se calcula <b>solo</b>: es el de Fisio más este recargo. No hace falta cargarlo a mano — cuando cambiás un Fisio, su PQX se acomoda solo.</p>
+    <div class="controls">
+      <div class="fld"><label>PQX = Fisio +</label><div class="inwrap"><span class="sfx" style="left:10px;right:auto">$</span><input type="number" id="pqxRec" min="0" step="100" value="${state.pqxRecargo}" style="padding-left:22px"></div></div>
+      <button class="btn sm" onclick="guardarRecargoPqx()">Guardar recargo</button>
+    </div>
+  </div>`
+
   html += `<div class="card"><table><thead><tr>
     <th>Ítem</th><th class="r">Precio actual</th><th class="r">Precio nuevo</th><th></th></tr></thead><tbody>`
 
@@ -254,12 +289,23 @@ function render(){
     }
     const mod = (r.modalidad === 'Particular') ? 'Particular' : (r.obra_social || r.modalidad)
     const pre = (r.aumento_desde && r.aumento_desde > hoy && r.valor_nuevo != null) ? r.valor_nuevo : ''
-    html += `<tr>
-      <td style="padding-left:22px">${mod}</td>
-      <td class="r actual">${fmt(r.valor)}</td>
-      <td class="r"><input class="pn" type="number" id="pnco_${i}" value="${pre}" min="0" oninput="inputCambiado(this, ${r.valor})"> <span class="delta"></span></td>
-      <td class="acc-cell">${celdaAccionCo(r)}</td>
-    </tr>`
+    if (r.practica_codigo === 'FISIO_PQ'){
+      // PQX es automático = Fisio + recargo. No se edita a mano.
+      const nuevoPqx = (r.aumento_desde && r.aumento_desde > hoy && r.valor_nuevo != null) ? r.valor_nuevo : null
+      html += `<tr>
+        <td style="padding-left:22px">${mod}</td>
+        <td class="r actual">${fmt(r.valor)}</td>
+        <td class="r" style="color:var(--text-faint)">${nuevoPqx != null ? fmt(nuevoPqx) + ' ' : ''}<span title="Se calcula solo: Fisio + recargo">🔒 auto</span></td>
+        <td class="acc-cell"></td>
+      </tr>`
+    } else {
+      html += `<tr>
+        <td style="padding-left:22px">${mod}</td>
+        <td class="r actual">${fmt(r.valor)}</td>
+        <td class="r"><input class="pn" type="number" id="pnco_${i}" value="${pre}" min="0" oninput="inputCambiado(this, ${r.valor})"> <span class="delta"></span></td>
+        <td class="acc-cell">${celdaAccionCo(r)}</td>
+      </tr>`
+    }
   })
   html += `</tbody></table></div>`
 
@@ -272,6 +318,7 @@ function render(){
   $('app').innerHTML = html
   state.tf.forEach((r,i)=>{ const el=$('pntf_'+i); if(el) inputCambiado(el, r.valor_lista) })
   state.co.forEach((r,i)=>{ const el=$('pnco_'+i); if(el) inputCambiado(el, r.valor) })
+  calcMoplex()
 }
 
 function aplicarPct(){
@@ -286,6 +333,53 @@ function aplicarPct(){
 function limpiar(){
   state.tf.forEach((r,i)=>{ const el=$('pntf_'+i); if(el){ el.value=''; inputCambiado(el, r.valor_lista) } })
   state.co.forEach((r,i)=>{ const el=$('pnco_'+i); if(el){ el.value=''; inputCambiado(el, r.valor) } })
+}
+
+function calcMoplex(){
+  if (!$('mxCentro')) return
+  const c = Number($('mxCentro').value) || 0
+  const m = Number($('mxMoplex').value) || 0
+  const p = 100 - c - m
+  if ($('mxProf')) $('mxProf').value = p
+  const precio = Number(($('mxPrecio')||{}).value) || 0
+  const f = n => '$' + Math.round(n).toLocaleString('es-AR')
+  if ($('mxPreview')){
+    if (c + m > 100){
+      $('mxPreview').innerHTML = '<span style="color:var(--red)">⚠️ Centro + MOPLEX no puede superar 100%.</span>'
+    } else if (precio > 0){
+      $('mxPreview').innerHTML = `De ${f(precio)}: centro ${f(precio*c/100)} · moplex ${f(precio*m/100)} · profesional ${f(precio*p/100)}.`
+    } else {
+      $('mxPreview').innerHTML = ''
+    }
+  }
+}
+
+async function guardarMoplex(){
+  const precio = Number($('mxPrecio').value) || 0
+  const c = Number($('mxCentro').value) || 0
+  const m = Number($('mxMoplex').value) || 0
+  const p = 100 - c - m
+  if (c + m > 100){ msg('Centro + MOPLEX no puede superar 100%.', 'err'); return }
+  if (precio <= 0){ msg('Poné el precio a público de MOPLEX.', 'err'); return }
+  if (!confirm(`Configurar MOPLEX:\n\nPrecio a público: $${precio.toLocaleString('es-AR')}\nCentro: ${c}%  ·  MOPLEX: ${m}%  ·  Profesional: ${p}%\n\nAplica a las evaluaciones nuevas (Bruno/Male). ¿Confirmás?`)) return
+  try {
+    const { error } = await sb.rpc('configurar_moplex', { p_precio: precio, p_pct_centro: c, p_pct_moplex: m })
+    if (error) throw error
+    msg('✅ MOPLEX configurado. Las evaluaciones nuevas ya reparten así.', 'ok')
+    await cargar()
+  } catch(e){ msg('No se pudo configurar MOPLEX: ' + (e.message || e), 'err') }
+}
+
+async function guardarRecargoPqx(){
+  const rec = Number($('pqxRec').value)
+  if (isNaN(rec) || rec < 0){ msg('Poné un recargo válido (ej. 1000).', 'err'); return }
+  if (!confirm(`PQX = Fisio + $${rec.toLocaleString('es-AR')}.\n\nSe recalculan todos los precios postquirúrgicos. ¿Confirmás?`)) return
+  try {
+    const { error } = await sb.rpc('set_pqx_recargo', { p_recargo: rec })
+    if (error) throw error
+    msg('✅ Recargo guardado. Los PQX ya se acomodaron a Fisio + $' + rec.toLocaleString('es-AR') + '.', 'ok')
+    await cargar()
+  } catch(e){ msg('No se pudo guardar el recargo: ' + (e.message || e), 'err') }
 }
 
 function recolectar(){
