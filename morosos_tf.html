@@ -26,6 +26,8 @@
   .card-value { font-size: 24px; font-weight: 600; color: var(--text); }
   .card.rojo { border-color: var(--rojo); } .card.rojo .card-value { color: var(--rojo); }
   .card.naranja { border-color: var(--naranja); } .card.naranja .card-value { color: var(--naranja); }
+  .card.azul-card { border-color: var(--azul); } .card.azul-card .card-value { color: var(--azul); }
+  .card.total-card { border-color: var(--azul); background: var(--azul-soft); } .card.total-card .card-value { color: var(--azul); }
   .card-sub { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
   .filtros { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
   .filtro-btn { background: var(--bg-card); color: var(--text-dim); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 13px; transition: all 0.15s; }
@@ -111,6 +113,7 @@
   <button class="filtro-btn" data-filtro="primer">🟡 Primer aviso (2-6 días)</button>
   <button class="filtro-btn" data-filtro="segundo">🔴 Segundo aviso (7+ días)</button>
   <button class="filtro-btn" data-filtro="recien">Recién vencidos (0-1 días)</button>
+  <button class="filtro-btn" data-filtro="porvencer">🔵 Por vencer este mes</button>
 </div>
 
 <div style="margin-bottom:12px;">
@@ -452,22 +455,42 @@
     }
     // Resguardo final: nunca mostrar días vencidos negativos (no tiene sentido "vencido hace -N días").
     if (diasVencido < 0) diasVencido = 0;
+    // 🔵 POR VENCER: cuota del mes seleccionado que todavía falta pagar pero cuyo
+    // vencimiento aún no llegó (mes en curso antes del día de vencimiento, o mes futuro).
+    // Si ya venció (o es mes pasado), esto es 0 porque ya cae en la deuda vencida de arriba.
+    const porVencer = !yaVencioMesActual ? deudaActual.debe : 0;
+    let diasParaVencer = null;
+    if (porVencer > 0) {
+      const [yv, mv] = mesActual.split('-').map(Number);
+      let vDate = new Date(yv, mv - 1, Number(insc.dia_vencimiento || 1));
+      if (fechaInicio && fechaInicio > vDate) vDate = fechaInicio;
+      diasParaVencer = Math.ceil((vDate - hoy) / 86400000);
+      if (diasParaVencer < 0) diasParaVencer = 0;
+    }
     let bucket;
     if (diasVencido <= 1) bucket = 'recien';
     else if (diasVencido <= 6) bucket = 'primer_aviso';
     else bucket = 'segundo_aviso';
     const mesAdeudadoMasViejo = debeArrastre > 0 ? mesAnterior(mesActual) : mesActual;
     const montoMesAdeudado = debeArrastre > 0 ? debeArrastre : debeActual;
-    return { ...insc, precio, montoMensual, deudaActual, deudaAnt, debeActual, debeArrastre, debeTotal, yaVencioMesActual, diasVencido, bucket, fechaInicio, mesAdeudadoMasViejo, montoMesAdeudado };
+    return { ...insc, precio, montoMensual, deudaActual, deudaAnt, debeActual, debeArrastre, debeTotal, yaVencioMesActual, diasVencido, bucket, fechaInicio, mesAdeudadoMasViejo, montoMesAdeudado, porVencer, diasParaVencer };
   }
 
   function render() {
-    const clasif = inscripciones.map(clasificar).filter(c => c.debeTotal > 0 && !c._esPrueba);
+    // Clasificación completa de TODOS los activos (no solo los que deben), para poder
+    // separar "vencidos" (morosos) de "por vencer" (cuota del mes que aún no venció).
+    const todosClasif = inscripciones.map(clasificar).filter(c => !c._esPrueba);
+    const clasif = todosClasif.filter(c => c.debeTotal > 0);          // morosos (ya vencidos)
+    const porVencerList = todosClasif.filter(c => c.porVencer > 0);   // falta pagar, aún no vence
+
+    const modoPorVencer = filtroActivo === 'porvencer';
     let visibles;
-    if (filtroActivo === 'todos') visibles = clasif;
+    if (modoPorVencer) visibles = porVencerList.slice();
+    else if (filtroActivo === 'todos') visibles = clasif;
     else if (filtroActivo === 'primer') visibles = clasif.filter(c => c.bucket === 'primer_aviso');
     else if (filtroActivo === 'segundo') visibles = clasif.filter(c => c.bucket === 'segundo_aviso');
     else if (filtroActivo === 'recien') visibles = clasif.filter(c => c.bucket === 'recien');
+    else visibles = clasif;
 
     // Filtro por buscador (nombre o ID de persona)
     const q = (busquedaTexto || '').trim().toLowerCase();
@@ -485,30 +508,83 @@
     const cantRecien = clasif.filter(c => c.bucket === 'recien').length;
     const montoPrimer = clasif.filter(c => c.bucket === 'primer_aviso').reduce((s,c) => s + c.debeTotal, 0);
     const montoSegundo = clasif.filter(c => c.bucket === 'segundo_aviso').reduce((s,c) => s + c.debeTotal, 0);
+    // 🔵 Por vencer: cuotas del mes que faltan pagar pero cuyo vencimiento aún no llegó.
+    const cantPorVencer = porVencerList.length;
+    const totalPorVencer = porVencerList.reduce((s, c) => s + c.porVencer, 0);
+    // 💰 Total a recaudar del mes = lo ya vencido + lo que falta cobrar antes del vencimiento.
+    const totalRecaudarMes = totalAdeudado + totalPorVencer;
 
     $('cards').innerHTML = `
-      <div class="card"><div class="card-label">Total morosos</div><div class="card-value">${totalMorosos}</div><div class="card-sub">${fmt(totalAdeudado)} adeudado total</div></div>
+      <div class="card"><div class="card-label">Total morosos</div><div class="card-value">${totalMorosos}</div><div class="card-sub">${fmt(totalAdeudado)} ya vencido</div></div>
       <div class="card naranja"><div class="card-label">🟡 Primer aviso</div><div class="card-value">${cantPrimer}</div><div class="card-sub">${fmt(montoPrimer)} · vencidos 2-6 días</div></div>
       <div class="card rojo"><div class="card-label">🔴 Segundo aviso</div><div class="card-value">${cantSegundo}</div><div class="card-sub">${fmt(montoSegundo)} · vencidos 7+ días</div></div>
       <div class="card"><div class="card-label">Recién vencidos</div><div class="card-value">${cantRecien}</div><div class="card-sub">0-1 días · no enviar todavía</div></div>
+      <div class="card azul-card"><div class="card-label">🔵 Por vencer este mes</div><div class="card-value">${cantPorVencer}</div><div class="card-sub">${fmt(totalPorVencer)} · aún no vencen</div></div>
+      <div class="card total-card"><div class="card-label">💰 Total a recaudar del mes</div><div class="card-value">${fmt(totalRecaudarMes)}</div><div class="card-sub">${fmt(totalAdeudado)} vencido + ${fmt(totalPorVencer)} por vencer</div></div>
     `;
     $('hoyTexto').textContent = new Date().toLocaleDateString('es-AR');
-    $('resumen').textContent = q
-      ? `Mostrando ${visibles.length} resultado(s) para "${busquedaTexto.trim()}" · ${clasif.length} morosos en total`
-      : `Mostrando ${visibles.length} de ${clasif.length} morosos`;
+    if (modoPorVencer) {
+      $('resumen').textContent = q
+        ? `Mostrando ${visibles.length} resultado(s) para "${busquedaTexto.trim()}" · ${porVencerList.length} por vencer este mes`
+        : `Mostrando ${visibles.length} de ${porVencerList.length} alumnos por vencer este mes · ${fmt(totalPorVencer)} a cobrar`;
+    } else {
+      $('resumen').textContent = q
+        ? `Mostrando ${visibles.length} resultado(s) para "${busquedaTexto.trim()}" · ${clasif.length} morosos en total`
+        : `Mostrando ${visibles.length} de ${clasif.length} morosos`;
+    }
 
     if (visibles.length === 0) {
       const esFuturo = mesActual > calcMesActual();
-      $('tabla-wrap').innerHTML = q
-        ? `<div class="empty">🔍 Ningún moroso coincide con "${busquedaTexto.trim()}"</div>`
-        : (esFuturo
-            ? `<div class="empty">📅 ${nombreMes(mesActual)} todavía no empezó — no hay deuda para reclamar (las cuotas no vencieron aún).</div>`
-            : '<div class="empty">🎉 No hay morosos con este filtro</div>');
+      if (modoPorVencer) {
+        $('tabla-wrap').innerHTML = q
+          ? `<div class="empty">🔍 Nadie por vencer coincide con "${busquedaTexto.trim()}"</div>`
+          : '<div class="empty">✅ No queda nadie por vencer este mes — las cuotas en curso ya están pagas o ya vencieron.</div>';
+      } else {
+        $('tabla-wrap').innerHTML = q
+          ? `<div class="empty">🔍 Ningún moroso coincide con "${busquedaTexto.trim()}"</div>`
+          : (esFuturo
+              ? `<div class="empty">📅 ${nombreMes(mesActual)} todavía no empezó — no hay deuda para reclamar (las cuotas no vencieron aún).</div>`
+              : '<div class="empty">🎉 No hay morosos con este filtro</div>');
+      }
       return;
     }
-    visibles.sort((a, b) => b.diasVencido - a.diasVencido);
+
+    // Cache para los modales de cobro/baja (sirve tanto para morosos como para por-vencer).
     window._morososCache = {};
     visibles.forEach(c => { window._morososCache[c.id] = c; });
+
+    // === MODO POR VENCER: cuotas del mes que faltan pagar pero aún no vencieron ===
+    if (modoPorVencer) {
+      visibles.sort((a, b) => (a.diasParaVencer ?? 9999) - (b.diasParaVencer ?? 9999));
+      const filasPV = visibles.map(c => {
+        const d = c.diasParaVencer;
+        const cuandoTxt = (d === 0) ? '<span class="badge naranja">vence hoy</span>'
+          : (d === 1) ? '<span class="badge gris">vence mañana</span>'
+          : `<span class="badge gris">faltan ${d} días</span>`;
+        return `<tr class="row">
+          <td><strong>${c.nombre}</strong> <span class="alumno-id">#${c.persona_id}</span></td>
+          <td>${c.plan}</td>
+          <td class="right">Día ${c.dia_vencimiento}</td>
+          <td class="right">${cuandoTxt}</td>
+          <td class="right"><strong>${fmt(c.porVencer)}</strong></td>
+          <td><div class="acciones-cell">
+            <button class="btn-accion btn-cobrar" onclick="abrirCobro(${c.id})" title="Registrar cobro">💵 Cobrar</button>
+          </div></td>
+        </tr>`;
+      }).join('');
+      const totalPV = visibles.reduce((s, c) => s + c.porVencer, 0);
+      $('tabla-wrap').innerHTML = `<table>
+        <thead><tr>
+          <th>Alumno</th><th>Plan</th><th class="right">Vencimiento</th><th class="right">Cuándo vence</th>
+          <th class="right">Cuota a cobrar</th><th class="center">Acciones</th>
+        </tr></thead>
+        <tbody>${filasPV}<tr class="total-row"><td colspan="4"><strong>TOTAL POR VENCER</strong></td><td class="right" style="color:var(--azul)">${fmt(totalPV)}</td><td></td></tr></tbody>
+      </table>`;
+      return;
+    }
+
+    // === MODO MOROSOS (ya vencidos) ===
+    visibles.sort((a, b) => b.diasVencido - a.diasVencido);
     window._mensajes = {};
     visibles.forEach(c => { window._mensajes[c.id] = armarMensaje(c); });
 
@@ -577,16 +653,21 @@
     const c = window._morososCache[inscripcionId];
     if (!c) return;
     inscripcionEnAccion = c;
-    const monto = c.montoMesAdeudado;
+    const esPorVencer = (c.debeTotal || 0) <= 0 && (c.porVencer || 0) > 0;
+    const monto = c.montoMesAdeudado || c.porVencer || 0;
     const conRecargo = c.bucket === 'segundo_aviso';
     const sugerencia = conRecargo ? Math.round(monto * 1.10) : monto;
-    $('cobrarInfo').innerHTML = `<strong>${c.nombre}</strong> · ${c.plan}<br>Cuota mensual: ${fmt(c.montoMensual)} · Deuda total: ${fmt(c.debeTotal)} · ${c.diasVencido} días vencido`;
+    $('cobrarInfo').innerHTML = esPorVencer
+      ? `<strong>${c.nombre}</strong> · ${c.plan}<br>Cuota del mes: ${fmt(c.porVencer)} · vence el día ${c.dia_vencimiento} (todavía no vencida)`
+      : `<strong>${c.nombre}</strong> · ${c.plan}<br>Cuota mensual: ${fmt(c.montoMensual)} · Deuda total: ${fmt(c.debeTotal)} · ${c.diasVencido} días vencido`;
     $('cobrarImporte').value = sugerencia;
     if (conRecargo) {
       $('cobrarHint').innerHTML = `Sugerencia: ${fmt(monto)} + 10% recargo por +7 días = <strong>${fmt(sugerencia)}</strong>`;
       $('cobrarHint').className = 'form-hint warning';
     } else {
-      $('cobrarHint').innerHTML = `Sugerencia: cuota del mes adeudado = <strong>${fmt(sugerencia)}</strong>`;
+      $('cobrarHint').innerHTML = esPorVencer
+        ? `Sugerencia: cuota de ${nombreMesSolo(mesActual)} = <strong>${fmt(sugerencia)}</strong>`
+        : `Sugerencia: cuota del mes adeudado = <strong>${fmt(sugerencia)}</strong>`;
       $('cobrarHint').className = 'form-hint';
     }
     const opciones = [];
