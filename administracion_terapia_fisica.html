@@ -872,35 +872,41 @@
 
       <!-- ===== CAMINO 1: PROPORCIONAL + 10% ===== -->
       <div id="reactivarBloqueProp" style="display:none;">
+        <div class="section-title">Turnos fijos que tenía</div>
+        <div id="reactivarTurnosLista" style="font-size:13px;color:var(--text-dim);">Cargando turnos...</div>
+        <div id="reactivarTurnosAviso"></div>
+
         <div class="section-title">Cobro proporcional</div>
+        <div class="modal-info" id="reactivarPropDiaInfo" style="margin-bottom:12px;"></div>
         <div class="form-grid">
-          <div class="form-group"><label>Día de vencimiento (1-31)</label><input type="number" id="reactivarPropDia" min="1" max="31" onchange="recalcReactivarProp()"></div>
+          <div class="form-group">
+            <label>Importe a cobrar (proporcional + 10%)</label>
+            <input type="number" id="reactivarPropImporte" min="0" step="100">
+          </div>
           <div class="form-group"><label>Medio de pago</label><select id="reactivarPropMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
         </div>
-        <div class="form-group">
-          <label>Importe a cobrar (proporcional + 10%)</label>
-          <input type="number" id="reactivarPropImporte" min="0" step="100">
-          <div class="form-hint" id="reactivarPropDetalle"></div>
-        </div>
+        <div class="form-hint" id="reactivarPropDetalle"></div>
         <div class="modal-success" style="margin-top:8px;">
-          <strong>✓ Este camino va a:</strong>
-          1. Cobrar el proporcional + 10% (queda en Caja TF)<br>
-          2. Volver el alumno a <strong style="color:var(--verde)">ACTIVO</strong> manteniendo su día de pago<br>
-          3. <strong>Conservar sus recuperatorios</strong> anteriores
+          <strong>✓ Este camino:</strong>
+          Cobra el proporcional de las clases que se perdió + 10% (queda en Caja TF) · Vuelve a <strong style="color:var(--verde)">ACTIVO</strong> <strong>sin cambiar el día de pago</strong> · <strong>Conserva sus recuperatorios</strong>.
         </div>
       </div>
 
       <!-- ===== CAMINO 2: LIMPIO ===== -->
       <div id="reactivarBloqueLimpio" style="display:none;">
         <div class="section-title">Reingreso limpio</div>
-        <div class="form-group" style="max-width:240px;"><label>Día de vencimiento (1-31)</label><input type="number" id="reactivarLimpioDia" min="1" max="31"></div>
+        <div class="form-group" style="max-width:240px;"><label>Día de vencimiento nuevo (1-31)</label><input type="number" id="reactivarLimpioDia" min="1" max="31"></div>
         <div class="modal-warning" style="margin-top:8px;">
           <strong>⚠️ Arranca limpio</strong>
-          El alumno vuelve a <strong>ACTIVO</strong> con fecha de reingreso de hoy. <strong>Se cortan los recuperatorios viejos</strong> (no podrá usar los que tenía antes de la baja). No se cobra nada.
+          Vuelve a <strong>ACTIVO</strong> con fecha de reingreso de hoy y día de pago nuevo. <strong>Se cortan los recuperatorios viejos</strong> (no podrá usar los que tenía antes). No se cobra nada.
+        </div>
+        <div class="modal-warning" style="margin-top:8px; border-left-color: var(--naranja); background:#fff7ed;">
+          <strong style="color:var(--naranja)">🔒 Recordatorio interno (entre nosotros)</strong>
+          Modo castigo: tratá de <strong>NO asignarle el mismo turno</strong> que tenía antes. Los turnos se cargan a mano en Agenda después de reactivar.
         </div>
       </div>
 
-      <!-- TURNOS (común) -->
+      <!-- TURNOS (solo Camino 2) -->
       <div id="reactivarTurnosBox" style="display:none;">
         <div class="section-title">Turnos fijos</div>
         <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg); border-radius: 8px; border: 1px dashed var(--border);">
@@ -5071,22 +5077,33 @@ window.confirmarBaja = async () => {
 
 // ===== MODAL REACTIVAR (dos caminos) =====
 let caminoReactivar = null; // 'PROP' (proporcional + 10%) | 'LIMPIO' (sin deuda, fecha nueva)
+let reactivarTurnos = [];   // turnos fijos que tenía el alumno (con cupo)
+let reactivarTurnosCargados = false;
+let reactivarDiaVenc = null; // día de vencimiento original (Camino 1 NO lo cambia)
+// Día del turno (texto) → día de la semana JS (0=Dom ... 6=Sáb)
+const DIA_A_DOW = { 'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':0 };
 
 function abrirModalReactivar() {
   const f = alumnoActivo;
   const i = f.inscripcion;
   caminoReactivar = null;
+  reactivarTurnos = [];
+  reactivarTurnosCargados = false;
+  reactivarDiaVenc = i.dia_vencimiento || HOY.getDate();
 
   $('#reactivarInfo').innerHTML = `<strong>${f.persona.nombre}</strong> · #${f.persona.id} · Plan previo: <strong>${i.plan}</strong><br>Estado actual: <strong style="color:var(--rojo)">${f.estadoTF.replace('TF_','')}</strong>`;
 
   // Plan: poblar con el actual pre-seleccionado
   $('#reactivarPlan').innerHTML = planesUnicos.map(pl => `<option value="${pl}"${pl===i.plan?' selected':''}>${pl}${tarifario[pl]?` — ${fmt$(tarifario[pl].valor_lista)}`:''}</option>`).join('');
 
-  // Día: Camino 1 (PROP) mantiene el día original (continuidad); Camino 2 (LIMPIO) arranca con el día de hoy
-  $('#reactivarPropDia').value = i.dia_vencimiento || HOY.getDate();
-  $('#reactivarLimpioDia').value = HOY.getDate();
+  // Defaults
+  $('#reactivarLimpioDia').value = HOY.getDate();   // Camino 2 arranca con el día de hoy (editable)
   $('#reactivarPropMedio').value = 'TRANSFERENCIA';
   $('#reactivarMotivo').value = '';
+  $('#reactivarTurnosLista').innerHTML = 'Cargando turnos...';
+  $('#reactivarTurnosAviso').innerHTML = '';
+  $('#reactivarPropImporte').value = '';
+  $('#reactivarPropDetalle').innerHTML = '';
 
   // Permisos: mostrar/ocultar cada tarjeta de camino según el operador logueado
   const puedeProp = puedeReactivarProp();
@@ -5111,11 +5128,11 @@ function abrirModalReactivar() {
   $('#reactivarMotivoBox').style.display = 'none';
   $('#btnConfirmarReactivar').style.display = 'none';
 
+  $('#modalReactivar').classList.add('activo');
+
   // Si solo puede un camino, lo autoselecciona
   if (puedeProp && !puedeLimpio) setCaminoReactivar('PROP');
   else if (puedeLimpio && !puedeProp) setCaminoReactivar('LIMPIO');
-
-  $('#modalReactivar').classList.add('activo');
 }
 
 window.setCaminoReactivar = (c) => {
@@ -5128,22 +5145,116 @@ window.setCaminoReactivar = (c) => {
   });
   // Bloques comunes
   $('#reactivarPlanBox').style.display = '';
-  $('#reactivarTurnosBox').style.display = '';
   $('#reactivarMotivoBox').style.display = '';
   $('#btnConfirmarReactivar').style.display = '';
   // Bloque del camino elegido
   $('#reactivarBloqueProp').style.display = (c === 'PROP') ? '' : 'none';
   $('#reactivarBloqueLimpio').style.display = (c === 'LIMPIO') ? '' : 'none';
-  if (c === 'PROP') recalcReactivarProp();
+  // El recuadro de "asignar turnos a mano" solo aplica al Camino 2 (limpio)
+  $('#reactivarTurnosBox').style.display = (c === 'LIMPIO') ? '' : 'none';
+  if (c === 'PROP') {
+    if (!reactivarTurnosCargados) cargarTurnosReactivar();
+    else recalcReactivarProp();
+  }
 };
 
-// Proporcional sugerido: clases que quedan hasta el próximo vencimiento × (precio ÷ clases del mes) + 10%. Siempre editable.
+// Carga los turnos fijos que tenía el alumno (incluye inactivos: la baja los desactivó),
+// calcula la ocupación actual de cada uno y muestra aviso si ya no hay lugar.
+async function cargarTurnosReactivar() {
+  const pid = alumnoActivo.persona.id;
+  try {
+    // Asegurar el cache de todos los turnos del sistema
+    if (!fichaTurnosSistema.length) {
+      const { data: ts } = await sb.from('turnos').select('id,dia,hora,servicio,capacidad');
+      if (ts) fichaTurnosSistema = ts;
+    }
+    const turnoMap = {};
+    fichaTurnosSistema.forEach(t => { turnoMap[t.id] = t; });
+
+    // Turnos que tenía el alumno (sin filtrar activo, porque la baja los puso en inactivo)
+    const { data: misT } = await sb.from('turno_alumnos').select('turno_id, activo, fecha_desde').eq('persona_id', pid);
+    const porTurno = {};
+    (misT || []).forEach(r => {
+      const prev = porTurno[r.turno_id];
+      if (!prev || (r.fecha_desde || '') >= (prev.fecha_desde || '')) porTurno[r.turno_id] = r;
+    });
+
+    // Ocupación actual de cada turno (alumnos fijos activos = otros que ocupan el cupo)
+    const { data: ocup } = await sb.from('turno_alumnos').select('turno_id').eq('activo', true);
+    const ocupadosPorTurno = {};
+    (ocup || []).forEach(r => { ocupadosPorTurno[r.turno_id] = (ocupadosPorTurno[r.turno_id] || 0) + 1; });
+
+    reactivarTurnos = Object.keys(porTurno).map(tid => {
+      const t = turnoMap[tid] || {};
+      const ocupados = ocupadosPorTurno[tid] || 0;
+      const lleno = !!(t.capacidad && ocupados >= t.capacidad);
+      return { turno_id: tid, dia: t.dia || '', hora: t.hora || '', servicio: t.servicio || '', capacidad: t.capacidad || 0, ocupados, lleno };
+    }).sort((a, b) => ((ORDEN_DIAS[a.dia] || 99) - (ORDEN_DIAS[b.dia] || 99)) || String(a.hora).localeCompare(String(b.hora)));
+
+    reactivarTurnosCargados = true;
+    renderTurnosReactivar();
+    recalcReactivarProp();
+  } catch (e) {
+    console.error('cargarTurnosReactivar:', e);
+    $('#reactivarTurnosLista').innerHTML = '<span style="color:var(--rojo)">No se pudieron cargar los turnos. El proporcional se calcula por plan.</span>';
+    reactivarTurnosCargados = true;
+    recalcReactivarProp();
+  }
+}
+
+function renderTurnosReactivar() {
+  const cont = $('#reactivarTurnosLista');
+  const aviso = $('#reactivarTurnosAviso');
+  if (!reactivarTurnos.length) {
+    cont.innerHTML = '<span style="color:var(--text-dim)">No tiene turnos fijos guardados. El proporcional se calcula por el plan.</span>';
+    aviso.innerHTML = '';
+    return;
+  }
+  cont.innerHTML = reactivarTurnos.map(t => {
+    const cupoTxt = t.capacidad ? `${t.ocupados}/${t.capacidad}` : `${t.ocupados}`;
+    const badge = t.lleno
+      ? '<span style="background:#fee2e2;color:#b91c1c;border-radius:6px;padding:1px 8px;font-size:11px;font-weight:700;">⚠️ sin lugar</span>'
+      : '<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:1px 8px;font-size:11px;font-weight:700;">✓ con lugar</span>';
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px;">
+      <span>📅 <strong>${t.dia} ${t.hora}</strong> <span style="color:var(--text-dim);font-size:11px;">· cupo ${cupoTxt}</span></span>${badge}</div>`;
+  }).join('');
+  const llenos = reactivarTurnos.filter(t => t.lleno);
+  aviso.innerHTML = llenos.length
+    ? `<div class="modal-warning" style="margin-top:6px;"><strong>⚠️ Ojo con el lugar</strong> ${llenos.map(t=>`${t.dia} ${t.hora}`).join(', ')} ya no tiene${llenos.length>1?'n':''} cupo. Coordiná otro horario con la persona y cargalo en Agenda.</div>`
+    : '';
+}
+
+// Cuenta las clases fijas (según sus turnos) que ya pasaron en el ciclo impago:
+// desde el día de vencimiento (la fecha con ese día-del-mes más reciente <= hoy) hasta hoy.
+function contarClasesPerdidas(diaVenc) {
+  const hoy0 = new Date(HOY.getFullYear(), HOY.getMonth(), HOY.getDate());
+  const ultDiaMes = (y, m) => new Date(y, m + 1, 0).getDate();
+  let inicio = new Date(hoy0.getFullYear(), hoy0.getMonth(), Math.min(diaVenc, ultDiaMes(hoy0.getFullYear(), hoy0.getMonth())));
+  if (inicio > hoy0) { // el vencimiento de este mes todavía no llegó → tomar el del mes pasado
+    let y = hoy0.getFullYear(), m = hoy0.getMonth() - 1;
+    if (m < 0) { m = 11; y--; }
+    inicio = new Date(y, m, Math.min(diaVenc, ultDiaMes(y, m)));
+  }
+  // Días de la semana fijos del alumno (a partir de sus turnos)
+  const dows = new Set(reactivarTurnos.map(t => DIA_A_DOW[t.dia]).filter(d => d !== undefined));
+  let count = 0;
+  const fechas = [];
+  if (dows.size) {
+    for (let d = new Date(inicio); d <= hoy0; d.setDate(d.getDate() + 1)) {
+      if (dows.has(d.getDay())) { count++; fechas.push(new Date(d)); }
+    }
+  }
+  return { count, fechas, inicio, hoy0, porTurnos: dows.size > 0 };
+}
+
+// Proporcional = clases perdidas (las que ya pasaron en el ciclo impago) × (precio ÷ clases del mes) + 10%.
 window.recalcReactivarProp = () => {
   if (caminoReactivar !== 'PROP') return;
   const plan = $('#reactivarPlan').value;
-  const dia = parseInt($('#reactivarPropDia').value) || HOY.getDate();
   const precioMensual = valorPlanMes(plan, MES_ACTUAL) || (tarifario[plan] ? tarifario[plan].valor_lista : 0) || 0;
   const det = $('#reactivarPropDetalle');
+  const diaVenc = reactivarDiaVenc || HOY.getDate();
+  $('#reactivarPropDiaInfo').innerHTML = `Día de pago: <strong>${diaVenc}</strong> · <span style="color:var(--text-dim)">no cambia en este camino</span>`;
 
   if (esPlanPlano(plan)) {
     const total = Math.round(precioMensual * 1.10);
@@ -5158,19 +5269,25 @@ window.recalcReactivarProp = () => {
     det.textContent = 'No se pudo calcular automáticamente. Cargá el importe a mano.';
     return;
   }
-  const prox = cpProxFechaConDia(HOY, dia);
-  const msDia = 24 * 60 * 60 * 1000;
-  const hoy0 = new Date(HOY.getFullYear(), HOY.getMonth(), HOY.getDate());
-  const diasHasta = Math.max(0, Math.round((prox - hoy0) / msDia));
-  const semanasRest = Math.max(1, Math.ceil(diasHasta / 7));
   const clasesMes = clasesSem * 4;
-  let clasesRest = clasesSem * semanasRest;
-  if (clasesRest > clasesMes) clasesRest = clasesMes;
   const precioClase = precioMensual / clasesMes;
-  const subtotal = Math.round(clasesRest * precioClase);
+
+  const r = contarClasesPerdidas(diaVenc);
+  let clasesPerdidas, fuente;
+  if (r.porTurnos) {
+    clasesPerdidas = r.count;
+    fuente = `según sus turnos`;
+  } else {
+    // Sin turnos guardados → estimar por plan: clases/semana × semanas transcurridas desde el vencimiento
+    const msDia = 24 * 60 * 60 * 1000;
+    const semanas = Math.max(0, Math.ceil((r.hoy0 - r.inicio) / msDia / 7));
+    clasesPerdidas = Math.min(clasesSem * semanas, clasesMes);
+    fuente = `estimado por plan`;
+  }
+  const subtotal = Math.round(clasesPerdidas * precioClase);
   const total = Math.round(subtotal * 1.10);
   $('#reactivarPropImporte').value = total;
-  det.innerHTML = `Quedan ~${clasesRest} clase(s) hasta el ${fmtFechaArg(prox.toISOString().slice(0,10))} · ${fmt$(precioClase)}/clase = ${fmt$(subtotal)} + 10% recargo = <strong>${fmt$(total)}</strong>. Editable.`;
+  det.innerHTML = `Se perdió <strong>${clasesPerdidas}</strong> clase(s) desde el ${fmtFechaArg(r.inicio.toISOString().slice(0,10))} (${fuente}) · ${fmt$(precioClase)}/clase = ${fmt$(subtotal)} + 10% recargo = <strong>${fmt$(total)}</strong>. Editable.`;
 };
 
 window.confirmarReactivar = async () => {
@@ -5193,7 +5310,7 @@ window.confirmarReactivar = async () => {
     if (caminoReactivar === 'PROP') {
       const importe = parseFloat($('#reactivarPropImporte').value) || 0;
       const medio = $('#reactivarPropMedio').value;
-      const dia = parseInt($('#reactivarPropDia').value) || i.dia_vencimiento || null;
+      const dia = reactivarDiaVenc || i.dia_vencimiento || null; // Camino 1: día de pago NO cambia
 
       // 1) Cobro del proporcional (si hay importe) → queda en Caja TF
       if (importe > 0) {
