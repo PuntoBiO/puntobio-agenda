@@ -241,7 +241,13 @@
 
   // Precio (plan+actividad) para un MES dado (YYYY-MM), según el aumento programado.
   function valorPlanMesKey(key, mes) {
-    const m = tarifarioMeta[key];
+    let m = tarifarioMeta[key];
+    if (!m) {
+      // Fallback por plan (igual que administración): si la actividad no matchea
+      // exacto con el tarifario, buscamos el precio por el plan solo.
+      const planSolo = String(key).split('__')[0];
+      m = tarifarioMeta[planSolo];
+    }
     if (!m) return 0;
     const ref = (mes && mes.length === 7) ? mes + '-01' : new Date().toISOString().slice(0, 10);
     if (m.desde && m.nuevo != null && ref >= m.desde) return m.nuevo;
@@ -323,7 +329,11 @@
       const base = Number(t.valor_lista) || 0;
       const nuevo = (t.valor_nuevo != null) ? Number(t.valor_nuevo) : null;
       const desde = t.aumento_desde || null;
-      tarifarioMeta[k] = { base, nuevo, desde };
+      const meta = { base, nuevo, desde };
+      tarifarioMeta[k] = meta;
+      // Fallback por plan: guardamos el precio también con la clave del plan solo
+      // (preferimos TERAPIA_FISICA si existe) para los casos donde la actividad no matchea.
+      if (tarifarioMeta[t.plan] == null || t.actividad === 'TERAPIA_FISICA') tarifarioMeta[t.plan] = meta;
       tarifario[k] = valorPlanMesKey(k, mesActual); // precio del mes elegido (para mostrar)
     });
 
@@ -440,7 +450,7 @@
 
   function clasificar(insc) {
     const _key = `${insc.plan}__${insc.actividad}`;
-    const precio = tarifario[_key] || 0;
+    const precio = valorPlanMesKey(_key, mesActual);
     const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
     // Base del mes según vigencia: junio paga junio aunque se cobre en julio.
     function montoMesBase(mesStr) {
