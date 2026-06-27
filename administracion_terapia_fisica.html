@@ -180,6 +180,9 @@
   .btn-confirmar-reactivar { background: var(--verde); color: white; }
   .btn-confirmar-reactivar:hover { background: #1ea14c; }
   .btn-modal:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* La ficha del alumno tiene muchos botones: que floten en varias filas y no se amontonen */
+  #modalVer .modal-footer { flex-wrap: wrap; justify-content: center; gap: 8px; }
+  #modalVer .modal-footer .btn-modal { padding: 9px 14px; font-size: 13.5px; }
   .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg-card); border: 1px solid var(--verde); color: var(--text); padding: 14px 18px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); display: none; z-index: 2000; max-width: 320px; font-size: 14px; }
   .toast.activo { display: block; }
   .toast.error { border-color: var(--rojo); }
@@ -812,16 +815,15 @@
 <div class="modal-backdrop" id="modalExcepcion">
   <div class="modal modal-md">
     <div class="modal-header">
-      <span class="modal-title" style="color:#b45309;">⏳ Excepción / extender días</span>
+      <span class="modal-title" style="color:#b45309;">⏳ Excepción / prórroga de pago</span>
       <button class="modal-close" onclick="cerrarModal('modalExcepcion')">×</button>
     </div>
     <div class="modal-body">
       <div class="modal-info" id="excInfo"></div>
       <div class="modal-info" style="border-left-color:#b45309;background:#fffbeb;">
-        Mientras la prórroga esté vigente, este alumno <strong>no recibe el mail de aviso ni se da de baja automática</strong> por falta de pago.
+        Mientras la prórroga esté vigente, este alumno <strong>no recibe el mail de aviso ni se da de baja automática</strong> por falta de pago. <strong>No cambia su día de pago.</strong>
       </div>
-      <div class="form-group"><label>Extender por (días)</label><input type="number" id="excDias" min="1" max="60" value="7" oninput="actualizarExcFecha()"></div>
-      <div class="modal-info" id="excFecha" style="text-align:center;font-weight:600;"></div>
+      <div class="form-group"><label>Prórroga hasta (este día inclusive)</label><input type="date" id="excHasta"></div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalExcepcion')">Cancelar</button>
@@ -1780,26 +1782,29 @@ window.abrirExcepcion = function() {
   if (!i) { toast('No hay inscripción activa.', true); return; }
   $('#excInfo').innerHTML = `<strong>${p.nombre}</strong> · ${i.plan} · vence día ${i.dia_vencimiento}` +
     (i.pago_excepcion_hasta ? `<br><span style="color:#b45309;">Ya tiene prórroga hasta ${fmtFechaArg(i.pago_excepcion_hasta)}</span>` : '');
-  $('#excDias').value = 7;
-  actualizarExcFecha();
+  // Fecha local (sin desfase de zona horaria)
+  const d = new Date();
+  const hoyISO = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const def = new Date(); def.setDate(def.getDate() + 7);
+  const defISO = `${def.getFullYear()}-${String(def.getMonth()+1).padStart(2,'0')}-${String(def.getDate()).padStart(2,'0')}`;
+  const inp = $('#excHasta');
+  inp.min = hoyISO;
+  // Si ya tiene una prórroga futura cargada, la mostramos; si no, sugerimos hoy + 7 días.
+  inp.value = (i.pago_excepcion_hasta && String(i.pago_excepcion_hasta) >= hoyISO) ? i.pago_excepcion_hasta : defISO;
   cerrarModal('modalVer');
   $('#modalExcepcion').classList.add('activo');
-};
-window.actualizarExcFecha = function() {
-  const dias = parseInt($('#excDias').value || 0, 10);
-  if (!dias || dias < 1) { $('#excFecha').textContent = ''; return; }
-  const h = new Date(); h.setHours(0,0,0,0); h.setDate(h.getDate() + dias);
-  $('#excFecha').innerHTML = `Prórroga hasta <strong>${fmtFechaArg(h.toISOString().slice(0,10))}</strong>`;
 };
 window.confirmarExcepcion = async function() {
   const i = alumnoActivo && alumnoActivo.inscripcion;
   if (!i) { toast('No hay inscripción activa.', true); return; }
-  const dias = parseInt($('#excDias').value || 0, 10);
-  if (!dias || dias < 1) { toast('Poné una cantidad de días válida.', true); return; }
-  const h = new Date(); h.setHours(0,0,0,0); h.setDate(h.getDate() + dias);
-  const hastaISO = h.toISOString().slice(0,10);
+  const hastaISO = $('#excHasta').value;
+  if (!hastaISO) { toast('Elegí la fecha de prórroga.', true); return; }
+  const d = new Date();
+  const hoyISO = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  if (hastaISO < hoyISO) { toast('La fecha no puede ser anterior a hoy.', true); return; }
   const btn = $('#btnConfirmarExc'); btn.disabled = true; btn.textContent = 'Guardando...';
   try {
+    // Solo toca pago_excepcion_hasta. NUNCA cambia dia_vencimiento (la fecha de pago).
     // aviso_baja_ciclo = null: si después de la prórroga sigue sin pagar, recibe un aviso fresco.
     const { error } = await sb.from('inscripciones_tf')
       .update({ pago_excepcion_hasta: hastaISO, aviso_baja_ciclo: null })
