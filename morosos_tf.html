@@ -62,6 +62,9 @@
   .btn-wa:hover { background: var(--azul); color: white; }
   .btn-copy { background: var(--bg-hover); color: var(--text-dim); border: 1px solid var(--border); }
   .btn-copy:hover { background: #e2e8f0; color: var(--text); }
+  .btn-exc { background: #fef3c7; color: #b45309; border: 1px solid #f59e0b; }
+  .btn-exc:hover { background: #f59e0b; color: white; }
+  .badge-prorroga { background:#fef3c7; color:#b45309; border:1px solid #f59e0b; padding:2px 7px; border-radius:10px; font-size:10px; font-weight:700; white-space:nowrap; }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
   .modal-backdrop.activo { display: flex; }
   .modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(15, 23, 42, 0.15); }
@@ -151,6 +154,26 @@
     <div class="modal-footer">
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCobrar')">Cancelar</button>
       <button class="btn-modal btn-confirmar-cobro" id="btnConfirmarCobro" onclick="confirmarCobro()">Confirmar cobro</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modalExcepcionMoroso">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" style="color:#b45309;">⏳ Excepción / prórroga de pago</span>
+      <button class="modal-close" onclick="cerrarModal('modalExcepcionMoroso')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="excmInfo"></div>
+      <div class="modal-info" style="border-left-color:#b45309;background:#fffbeb;">
+        Mientras la prórroga esté vigente, este alumno <strong>no recibe el mail de aviso ni se da de baja automática</strong> por falta de pago. <strong>No cambia su día de pago.</strong>
+      </div>
+      <div class="form-group"><label>Prórroga hasta (este día inclusive)</label><input type="date" id="excmHasta"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalExcepcionMoroso')">Cancelar</button>
+      <button class="btn-modal" style="background:#b45309;color:#fff;" id="btnConfirmarExcM" onclick="confirmarExcepcionMoroso()">Dar prórroga</button>
     </div>
   </div>
 </div>
@@ -279,7 +302,7 @@
     $('tabla-wrap').innerHTML = '<div class="loading">Cargando...</div>';
     const mesAnt = mesAnterior(mesActual);
     const [insR, pagR, tarR, sorR] = await Promise.all([
-      supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
+      supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso, pago_excepcion_hasta').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
       supa.from('pagos_tf').select('id, fecha, inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
       supa.from('tarifario_tf').select('plan, actividad, valor_lista, valor_nuevo, aumento_desde'),
       // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF en estos meses
@@ -616,17 +639,17 @@
       if (c.bucket === 'segundo_aviso') badge = '<span class="badge rojo">🔴 SEGUNDO AVISO</span>';
       else if (c.bucket === 'primer_aviso') badge = '<span class="badge naranja">🟡 PRIMER AVISO</span>';
       else badge = '<span class="badge gris">Recién vencido</span>';
-      const tel = formatearTel(c.telefono);
-      const btnWA = c.bucket === 'recien' ? '' :
-        (tel ? `<button class="btn-accion btn-wa" onclick="abrirWA(${c.id})" title="Enviar a ${c.telefono}">💬 WA</button>` :
-               `<button class="btn-accion btn-copy" onclick="copiarMsg(${c.id})" title="Sin teléfono · copiar mensaje">📋 Copiar</button>`);
+      const prorrogaVig = c.pago_excepcion_hasta && String(c.pago_excepcion_hasta) >= hoyISOlocal();
+      const badgeProrroga = prorrogaVig
+        ? ` <span class="badge-prorroga" title="Prórroga hasta ${new Date(c.pago_excepcion_hasta + 'T00:00:00').toLocaleDateString('es-AR')}">⏳ con prórroga</span>`
+        : '';
       const acciones = `<div class="acciones-cell">
         <button class="btn-accion btn-cobrar" onclick="abrirCobro(${c.id})" title="Registrar cobro">💵 Cobrar</button>
+        <button class="btn-accion btn-exc" onclick="abrirExcepcionMoroso(${c.id})" title="Dar prórroga / excepción">⏳ Excepción</button>
         <button class="btn-accion btn-baja" onclick="abrirBaja(${c.id})" title="Dar de baja al alumno">❌ Dar de baja</button>
-        ${btnWA}
       </div>`;
       return `<tr class="row">
-        <td><strong>${c.nombre}</strong> <span class="alumno-id">#${c.persona_id}</span></td>
+        <td><strong>${c.nombre}</strong>${badgeProrroga} <span class="alumno-id">#${c.persona_id}</span></td>
         <td>${c.plan}</td>
         <td class="right">Día ${c.dia_vencimiento}</td>
         <td class="right"><strong class="${c.bucket === 'segundo_aviso' ? 'monto-rojo' : c.bucket === 'primer_aviso' ? 'monto-naranja' : ''}">${c.diasVencido} días</strong></td>
@@ -819,6 +842,42 @@
     await cargarTodo();
   };
 
+  function hoyISOlocal() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  window.abrirExcepcionMoroso = function(inscripcionId) {
+    const c = window._morososCache[inscripcionId];
+    if (!c) return;
+    inscripcionEnAccion = c;
+    const hoyISO = hoyISOlocal();
+    const tieneProrroga = c.pago_excepcion_hasta && String(c.pago_excepcion_hasta) >= hoyISO;
+    $('excmInfo').innerHTML = `<strong>${c.nombre}</strong> · ${c.plan} · vence día ${c.dia_vencimiento}` +
+      (tieneProrroga ? `<br><span style="color:#b45309;">Ya tiene prórroga hasta ${new Date(c.pago_excepcion_hasta + 'T00:00:00').toLocaleDateString('es-AR')}</span>` : '');
+    const def = new Date(); def.setDate(def.getDate() + 7);
+    const defISO = `${def.getFullYear()}-${String(def.getMonth()+1).padStart(2,'0')}-${String(def.getDate()).padStart(2,'0')}`;
+    const inp = $('excmHasta');
+    inp.min = hoyISO;
+    inp.value = tieneProrroga ? c.pago_excepcion_hasta : defISO;
+    $('modalExcepcionMoroso').classList.add('activo');
+  };
+  window.confirmarExcepcionMoroso = async function() {
+    if (!inscripcionEnAccion) return;
+    const c = inscripcionEnAccion;
+    const hastaISO = $('excmHasta').value;
+    if (!hastaISO) { mostrarToast('Elegí la fecha de prórroga.', 'error'); return; }
+    if (hastaISO < hoyISOlocal()) { mostrarToast('La fecha no puede ser anterior a hoy.', 'error'); return; }
+    const btn = $('btnConfirmarExcM'); btn.disabled = true; btn.textContent = 'Guardando...';
+    // Solo toca pago_excepcion_hasta. NUNCA cambia el día de vencimiento (la fecha de pago).
+    const { error } = await supa.from('inscripciones_tf')
+      .update({ pago_excepcion_hasta: hastaISO, aviso_baja_ciclo: null })
+      .eq('id', c.id);
+    btn.disabled = false; btn.textContent = 'Dar prórroga';
+    if (error) { mostrarToast('❌ Error: ' + error.message, 'error'); return; }
+    cerrarModal('modalExcepcionMoroso');
+    mostrarToast(`✓ Prórroga hasta ${new Date(hastaISO + 'T00:00:00').toLocaleDateString('es-AR')} para ${c.nombre}`);
+    await cargarTodo();
+  };
   window.cerrarModal = function(id) {
     $(id).classList.remove('activo');
     inscripcionEnAccion = null;
