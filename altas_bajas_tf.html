@@ -177,7 +177,7 @@
     try {
       const insc = await queryAll(
         'inscripciones_tf',
-        'id, persona_id, plan, estado, fecha_alta, fecha_baja, motivo_baja, fecha_reingreso, motivo_reingreso'
+        'id, persona_id, plan, estado, fecha_alta, fecha_baja, motivo_baja, fecha_reingreso, motivo_reingreso, clasificacion_ingreso'
       );
 
       // Personas (en tandas de 300 ids para no pasarnos de URL)
@@ -208,12 +208,25 @@
         const nombre = mapPers[i.persona_id] || `(sin nombre #${i.persona_id})`;
         const altaD = i.fecha_alta ? String(i.fecha_alta).slice(0, 10) : null;
         const reingD = i.fecha_reingreso ? String(i.fecha_reingreso).slice(0, 10) : null;
-        // Una persona es reingreso O alta nueva, nunca las dos.
-        // Si tiene reingreso, mostramos SOLO el reingreso (no el alta original).
-        if (reingD) {
-          MOVIMIENTOS.push({ fecha: reingD, tipo: 'REINGRESO', origen: null, persona_id: i.persona_id, nombre, plan: i.plan, motivo: i.motivo_reingreso });
-        } else if (altaD) {
-          MOVIMIENTOS.push({ fecha: altaD, tipo: 'ALTA', origen: null, persona_id: i.persona_id, nombre, plan: i.plan, motivo: null });
+        // Clasificación CONFIABLE: lo que se eligió al dar el alta (NUEVO / REINGRESO_*).
+        // (No mirar las fechas: el alta setea fecha_reingreso aunque sea NUEVO si ya existía la fila.)
+        const clasif = String(i.clasificacion_ingreso || '').toUpperCase();
+        let esReingreso;
+        if (clasif) {
+          esReingreso = clasif.startsWith('REINGRESO');
+        } else {
+          // Dato viejo sin clasificación: reingreso si hay fecha de reingreso distinta del alta.
+          esReingreso = !!(reingD && reingD !== altaD);
+        }
+        // Fecha de la entrada vigente (la más reciente)
+        const entradaFecha = reingD || altaD;
+        if (entradaFecha) {
+          MOVIMIENTOS.push({
+            fecha: entradaFecha,
+            tipo: esReingreso ? 'REINGRESO' : 'ALTA',
+            origen: null, persona_id: i.persona_id, nombre, plan: i.plan,
+            motivo: esReingreso ? i.motivo_reingreso : null
+          });
         }
         if (i.fecha_baja) {
           MOVIMIENTOS.push({ fecha: String(i.fecha_baja).slice(0, 10), tipo: 'BAJA', origen: esBajaAutomatica(i.motivo_baja) ? 'AUTO' : 'MANUAL', persona_id: i.persona_id, nombre, plan: i.plan, motivo: i.motivo_baja });
