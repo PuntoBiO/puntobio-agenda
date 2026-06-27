@@ -244,6 +244,9 @@
     background:linear-gradient(90deg,#7fd4ff,var(--celeste));-webkit-background-clip:text;background-clip:text;color:transparent;
   }
   .plan-act{color:var(--texto-tenue);font-size:14px;margin-top:2px}
+  .aviso-cuota{margin-top:10px;display:inline-block;background:rgba(220,38,38,.12);border:1px solid rgba(220,38,38,.38);color:#fca5a5;padding:6px 12px;border-radius:9px;font-size:13px;font-weight:700}
+  .aviso-cuota.prorroga{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.42);color:#fbbf24}
+  .aviso-cuota b{font-weight:800}
   .pill{
     display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;
     font-size:12.5px;font-weight:600;letter-spacing:.3px;
@@ -1314,7 +1317,7 @@ async function cargarEspacio(per){
   const pid = per.id;
 
   // Primero: TODAS las inscripciones de esta persona (para poder filtrar sus pagos por inscripcion_id)
-  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, fecha_reingreso, dia_vencimiento, descuento_libre').eq('persona_id', pid).order('id', {ascending:false});
+  const inscAll = await sb.from('inscripciones_tf').select('id, plan, actividad, estado, fecha_alta, fecha_baja, fecha_reingreso, dia_vencimiento, descuento_libre, pago_excepcion_hasta').eq('persona_id', pid).order('id', {ascending:false});
   const misInscIds = (inscAll.data||[]).map(r => r.id);
   const inscripcion = (inscAll.data||[]).find(r => r.estado === 'ACTIVO') || null;
   // Inscripción bonificada (para mostrar sus recibos en Mi Espacio aunque no tenga pagos)
@@ -1720,6 +1723,33 @@ function bloquePlan(i){
   const pill = esBonif
     ? `<span class="pill bonif">★ Bonificado</span>`
     : `<span class="pill activo">● Activo</span>`;
+  // ¿La cuota está vencida? Regla conservadora: si hay un pago imputado al mes,
+  // NO se avisa (nunca le decimos "vencida" a alguien que ya pagó). Se borra solo
+  // cuando se registra el pago del mes. Si hay prórroga vigente, se indica hasta cuándo.
+  const avisoCuota = (() => {
+    if (esBonif) return '';
+    const pagos = (window._reciboPagosAll || []).filter(p => p.inscripcion_id === i.id);
+    const hoy = new Date();
+    const yyyy = hoy.getFullYear(), mm = hoy.getMonth()+1, dd = hoy.getDate();
+    const mesHoy = `${yyyy}-${String(mm).padStart(2,'0')}`;
+    let pm = mm-1, py = yyyy; if (pm===0){ pm=12; py--; }
+    const mesPrev = `${py}-${String(pm).padStart(2,'0')}`;
+    const ultDiaMes = (ms) => { const [y,m]=ms.split('-').map(Number); return new Date(y, m, 0); };
+    const inicioStr = i.fecha_reingreso || i.fecha_alta;
+    const inicio = inicioStr ? new Date(inicioStr + 'T00:00:00') : null;
+    const activoEse = (ms) => !inicio || inicio <= ultDiaMes(ms);
+    const pagoEse = (ms) => pagos.some(p => p.mes_imputado === ms);
+    const dv = Number(i.dia_vencimiento || 1);
+    const venceActual = activoEse(mesHoy) && dd > dv && !pagoEse(mesHoy);
+    const vencePrev = activoEse(mesPrev) && !pagoEse(mesPrev);
+    if (!(venceActual || vencePrev)) return '';
+    const hoyISO = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    const exc = i.pago_excepcion_hasta;
+    if (exc && String(exc) >= hoyISO) {
+      return `<div class="aviso-cuota prorroga">⏳ Tu cuota está vencida · prórroga hasta <b>${fmtFecha(exc)}</b></div>`;
+    }
+    return `<div class="aviso-cuota">⚠️ Tu cuota está vencida</div>`;
+  })();
   return `<section class="card reveal d2">
     <h2><span class="dot"></span>Mi plan</h2>
     <div class="plan-top">
@@ -1729,6 +1759,7 @@ function bloquePlan(i){
       </div>
       ${pill}
     </div>
+    ${avisoCuota}
     <div class="plan-meta">
       <div class="meta-box"><div class="l">Alta</div><div class="v">${fmtFecha(i.fecha_alta)}</div></div>
       <div class="meta-box"><div class="l">Vencimiento</div><div class="v">Día ${i.dia_vencimiento||'—'}</div></div>
