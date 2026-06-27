@@ -906,14 +906,20 @@
         </div>
       </div>
 
-      <!-- TURNOS (solo Camino 2) -->
-      <div id="reactivarTurnosBox" style="display:none;">
-        <div class="section-title">Turnos fijos</div>
-        <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg); border-radius: 8px; border: 1px dashed var(--border);">
-          <button class="btn-modal btn-cancelar" disabled style="opacity: 0.6; cursor: not-allowed;">📅 Asignar turnos fijos</button>
-          <span style="font-size: 11px; color: var(--text-dim); font-style: italic;">Próximamente — se integra con Agenda</span>
+      <!-- SELECTOR DE TURNOS (los dos caminos) -->
+      <div id="reactivarSelectorBox" style="display:none;">
+        <div class="section-title">Asignar turnos fijos</div>
+        <div id="reactivarTurnoResumen" style="font-size:12px;color:var(--text-dim);margin-bottom:6px;"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;align-items:center;">
+          <button type="button" class="filtro-turno active" data-rtservicio="todos" onclick="setFiltroTurnoReactivar('servicio','todos',this)">Todos</button>
+          <button type="button" class="filtro-turno" data-rtservicio="Entrenamiento" onclick="setFiltroTurnoReactivar('servicio','Entrenamiento',this)">🏋️ Entrenamiento</button>
+          <button type="button" class="filtro-turno" data-rtservicio="Kinefilaxia" onclick="setFiltroTurnoReactivar('servicio','Kinefilaxia',this)">🧘 Kinefilaxia</button>
+          <span style="width:10px"></span>
+          <button type="button" class="filtro-turno active" data-rtcupo="todos" onclick="setFiltroTurnoReactivar('cupo','todos',this)">Cupo: todos</button>
+          <button type="button" class="filtro-turno" data-rtcupo="vacante" onclick="setFiltroTurnoReactivar('cupo','vacante',this)">Con vacante</button>
         </div>
-        <div style="font-size: 11px; color: var(--text-dim); margin-top: 6px;">Por ahora los turnos se asignan manualmente en Agenda después de reactivar.</div>
+        <div id="reactivarTurnoSelector" style="max-height:42vh;overflow-y:auto;">Cargando turnos...</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:6px;">Tocá los horarios para asignarlos. Es opcional — también podés hacerlo después en Agenda.</div>
       </div>
 
       <!-- MOTIVO (común) -->
@@ -5146,15 +5152,17 @@ window.setCaminoReactivar = (c) => {
   // Bloques comunes
   $('#reactivarPlanBox').style.display = '';
   $('#reactivarMotivoBox').style.display = '';
+  $('#reactivarSelectorBox').style.display = '';
   $('#btnConfirmarReactivar').style.display = '';
   // Bloque del camino elegido
   $('#reactivarBloqueProp').style.display = (c === 'PROP') ? '' : 'none';
   $('#reactivarBloqueLimpio').style.display = (c === 'LIMPIO') ? '' : 'none';
-  // El recuadro de "asignar turnos a mano" solo aplica al Camino 2 (limpio)
-  $('#reactivarTurnosBox').style.display = (c === 'LIMPIO') ? '' : 'none';
   if (c === 'PROP') {
-    if (!reactivarTurnosCargados) cargarTurnosReactivar();
-    else recalcReactivarProp();
+    if (!reactivarTurnosCargados) cargarTurnosReactivar();  // carga "los que tenía" + preselecciona en el selector
+    else { recalcReactivarProp(); cargarSelectorTurnosReactivar(reactivarTurnos.map(t => Number(t.turno_id))); }
+  } else {
+    // Camino 2 (limpio / castigo): selector vacío, que elija de cero
+    cargarSelectorTurnosReactivar([]);
   }
 };
 
@@ -5194,11 +5202,14 @@ async function cargarTurnosReactivar() {
     reactivarTurnosCargados = true;
     renderTurnosReactivar();
     recalcReactivarProp();
+    // Preseleccionar en el selector los turnos que tenía (puede cambiarlos)
+    cargarSelectorTurnosReactivar(reactivarTurnos.map(t => Number(t.turno_id)));
   } catch (e) {
     console.error('cargarTurnosReactivar:', e);
     $('#reactivarTurnosLista').innerHTML = '<span style="color:var(--rojo)">No se pudieron cargar los turnos. El proporcional se calcula por plan.</span>';
     reactivarTurnosCargados = true;
     recalcReactivarProp();
+    cargarSelectorTurnosReactivar([]);
   }
 }
 
@@ -5290,6 +5301,148 @@ window.recalcReactivarProp = () => {
   det.innerHTML = `Se perdió <strong>${clasesPerdidas}</strong> clase(s) desde el ${fmtFechaArg(r.inicio.toISOString().slice(0,10))} (${fuente}) · ${fmt$(precioClase)}/clase = ${fmt$(subtotal)} + 10% recargo = <strong>${fmt$(total)}</strong>. Editable.`;
 };
 
+// ===== SELECTOR DE TURNOS (modal Reactivar, los dos caminos) =====
+let reactivarTurnoSel = new Set();   // ids de turnos elegidos (números)
+let reactivarTurnoCatalogo = [];     // todos los turnos con cupo
+let rtFiltroServicio = 'todos';
+let rtFiltroCupo = 'todos';
+
+async function cargarSelectorTurnosReactivar(preselIds) {
+  $('#reactivarTurnoSelector').innerHTML = '<div class="empty" style="padding:14px;">Cargando turnos...</div>';
+  reactivarTurnoSel = new Set((preselIds || []).map(Number));
+  rtFiltroServicio = 'todos'; rtFiltroCupo = 'todos';
+  try {
+    const [{ data: turnos }, { data: profes }, { data: ocup }] = await Promise.all([
+      sb.from('turnos').select('*').order('dia').order('hora'),
+      sb.from('turno_profes').select('turno_id, nombre_profe'),
+      sb.from('turno_alumnos').select('turno_id').eq('activo', true)
+    ]);
+    const mapaProfe = {}; (profes || []).forEach(p => { (mapaProfe[p.turno_id] = mapaProfe[p.turno_id] || []).push(p.nombre_profe); });
+    const conteo = {}; (ocup || []).forEach(o => { conteo[o.turno_id] = (conteo[o.turno_id] || 0) + 1; });
+    reactivarTurnoCatalogo = (turnos || []).map(t => ({ ...t, profes: mapaProfe[t.id] || [], ocupados: conteo[t.id] || 0 }));
+    document.querySelectorAll('[data-rtservicio]').forEach(b => b.classList.toggle('active', b.dataset.rtservicio === 'todos'));
+    document.querySelectorAll('[data-rtcupo]').forEach(b => b.classList.toggle('active', b.dataset.rtcupo === 'todos'));
+    renderSelectorTurnosReactivar();
+  } catch (e) {
+    console.error('cargarSelectorTurnosReactivar:', e);
+    $('#reactivarTurnoSelector').innerHTML = `<div class="modal-warning">No se pudieron cargar los turnos (${e.message}). Podés reactivar igual y asignarlos en Agenda.</div>`;
+    reactivarTurnoCatalogo = [];
+  }
+}
+
+window.setFiltroTurnoReactivar = (tipo, valor, btn) => {
+  if (tipo === 'servicio') { rtFiltroServicio = valor; document.querySelectorAll('[data-rtservicio]').forEach(b => b.classList.remove('active')); }
+  else { rtFiltroCupo = valor; document.querySelectorAll('[data-rtcupo]').forEach(b => b.classList.remove('active')); }
+  if (btn) btn.classList.add('active');
+  renderSelectorTurnosReactivar();
+};
+
+window.toggleTurnoReactivar = (turnoId) => {
+  turnoId = Number(turnoId);
+  if (reactivarTurnoSel.has(turnoId)) {
+    reactivarTurnoSel.delete(turnoId);
+  } else {
+    const plan = $('#reactivarPlan').value;
+    const max = clasesMaxPlan(plan);
+    if (max > 0 && reactivarTurnoSel.size >= max) {
+      const esBon = String(plan).toUpperCase().includes('BON');
+      toast(`El plan ${plan} permite ${max} turno(s) por semana${esBon ? ' (pase libre)' : ''}. Quitá uno o cambiá de plan.`, true);
+      return;
+    }
+    reactivarTurnoSel.add(turnoId);
+  }
+  renderSelectorTurnosReactivar();
+};
+
+function renderSelectorTurnosReactivar() {
+  const plan = $('#reactivarPlan').value;
+  const maxClases = clasesMaxPlan(plan);
+  const esBon = String(plan).toUpperCase().includes('BON');
+  const sel = reactivarTurnoSel.size;
+  let resumen = `<strong>Plan ${plan || '—'}</strong>`;
+  if (maxClases > 0) {
+    const color = sel > maxClases ? 'var(--rojo)' : (sel === maxClases ? 'var(--naranja)' : 'var(--verde)');
+    resumen += ` · hasta <strong>${maxClases}</strong> turno(s)${esBon ? ' (pase libre)' : ''} · <span style="color:${color}">elegiste ${sel}/${maxClases}</span>`;
+  } else {
+    resumen += ` · ${sel} turno(s) elegido(s)`;
+  }
+  $('#reactivarTurnoResumen').innerHTML = resumen;
+
+  if (!reactivarTurnoCatalogo.length) {
+    $('#reactivarTurnoSelector').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos cargados en la agenda. Podés reactivar y asignarlos después.</div>';
+    return;
+  }
+  let lista = [...reactivarTurnoCatalogo];
+  if (rtFiltroServicio !== 'todos') lista = lista.filter(t => normServicio(t.servicio) === rtFiltroServicio);
+  if (rtFiltroCupo === 'vacante') lista = lista.filter(t => !t.capacidad || t.ocupados < t.capacidad);
+  if (!lista.length) { $('#reactivarTurnoSelector').innerHTML = '<div class="empty" style="padding:14px;">No hay turnos que coincidan con el filtro.</div>'; return; }
+
+  const dias = [...new Set(lista.map(t => t.dia))].sort((a, b) => (ORDEN_DIAS[a] || 9) - (ORDEN_DIAS[b] || 9));
+  const horas = [...new Set(lista.map(t => String(t.hora)))].sort((a, b) => a.localeCompare(b));
+  const idx = {};
+  lista.forEach(t => { const k = `${t.dia}|${t.hora}`; (idx[k] = idx[k] || []).push(t); });
+
+  const leyenda = `<div class="grilla-leyenda">
+    <span><i class="leyenda-box" style="background:#dcfce7"></i> Con lugar</span>
+    <span><i class="leyenda-box" style="background:#fee2e2"></i> Completo</span>
+    <span><i class="leyenda-box" style="background:#bfdbfe;border:2px solid var(--azul)"></i> Elegido</span></div>`;
+
+  let html = leyenda + '<div style="overflow-x:auto;"><table class="grilla-turnos"><thead><tr><th></th>' +
+    dias.map(d => `<th>${d}</th>`).join('') + '</tr></thead><tbody>';
+  horas.forEach(h => {
+    html += `<tr><td class="hora-col">${h}</td>`;
+    dias.forEach(d => {
+      const cell = idx[`${d}|${h}`] || [];
+      if (!cell.length) { html += `<td class="celda"><div class="celda-vacia"></div></td>`; return; }
+      html += '<td class="celda">' + cell.map(t => {
+        const lleno = t.capacidad && t.ocupados >= t.capacidad;
+        const elegido = reactivarTurnoSel.has(Number(t.id));
+        const cupoTxt = t.capacidad ? `${t.ocupados}/${t.capacidad}` : `${t.ocupados}`;
+        const srv = normServicio(t.servicio);
+        const srvIcon = srv === 'Entrenamiento' ? '🏋️' : srv === 'Kinefilaxia' ? '🧘' : '';
+        const srvClass = srv === 'Entrenamiento' ? 'ent' : srv === 'Kinefilaxia' ? 'kine' : '';
+        const cls = `${elegido ? 'sel' : (lleno ? 'lleno' : 'libre')} ${srvClass}`.trim();
+        const onclick = (lleno && !elegido) ? '' : `onclick="toggleTurnoReactivar(${t.id})"`;
+        const profe = t.profes.length ? t.profes.join(', ') : '';
+        return `<div class="turno-cell ${cls}" ${onclick} title="${srv} ${d} ${h} · ${profe || 'Sin profe'} · ${cupoTxt}">
+          <div class="turno-cell-srv">${srvIcon} ${elegido ? '✓' : ''}</div>
+          <div class="turno-cell-cupo">${cupoTxt}${lleno ? ' lleno' : ''}</div>
+          ${profe ? `<div class="turno-cell-profe">${profe}</div>` : ''}
+        </div>`;
+      }).join('') + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  $('#reactivarTurnoSelector').innerHTML = html;
+}
+
+// Guarda los turnos elegidos: reactiva los que ya existían (sin pisar fecha_desde),
+// inserta los nuevos (fecha_desde = hoy) y desactiva los que hayan quedado fuera.
+async function guardarTurnosReactivar() {
+  const personaId = alumnoActivo.persona.id;
+  const turnoIds = [...reactivarTurnoSel];
+  const hoyIso = HOY.toISOString().split('T')[0];
+  const { data: existentes } = await sb.from('turno_alumnos').select('id, turno_id, activo').eq('persona_id', personaId);
+  const exPorTurno = {}; (existentes || []).forEach(r => { exPorTurno[r.turno_id] = r; });
+
+  const idsActivar = turnoIds.filter(tid => exPorTurno[tid]).map(tid => exPorTurno[tid].id);
+  if (idsActivar.length) {
+    const { error } = await sb.from('turno_alumnos').update({ activo: true }).in('id', idsActivar);
+    if (error) throw error;
+  }
+  const nuevos = turnoIds.filter(tid => !exPorTurno[tid]).map(tid => ({ turno_id: tid, persona_id: personaId, activo: true, fecha_desde: hoyIso }));
+  if (nuevos.length) {
+    const { error } = await sb.from('turno_alumnos').insert(nuevos);
+    if (error) throw error;
+  }
+  const idsDesactivar = (existentes || []).filter(r => r.activo && !reactivarTurnoSel.has(Number(r.turno_id))).map(r => r.id);
+  if (idsDesactivar.length) {
+    const { error } = await sb.from('turno_alumnos').update({ activo: false }).in('id', idsDesactivar);
+    if (error) throw error;
+  }
+}
+
 window.confirmarReactivar = async () => {
   if (!alumnoActivo) return;
   if (!caminoReactivar) { toast('Elegí cómo reactivar (las dos tarjetas de arriba)', true); return; }
@@ -5350,8 +5503,12 @@ window.confirmarReactivar = async () => {
         actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (error) throw error;
-      toast(`✓ ${p.nombre} reactivado limpio (arranca de cero). Acordate de asignar turnos en Agenda.`);
+      toast(`✓ ${p.nombre} reactivado limpio (arranca de cero).`);
     }
+
+    // Guardar los turnos fijos elegidos (los dos caminos)
+    try { await guardarTurnosReactivar(); }
+    catch (et) { console.error('guardarTurnosReactivar:', et); toast('Reactivado, pero hubo un problema al guardar los turnos. Revisalos en Agenda.', true); }
 
     cerrarModal('modalReactivar');
     await cargarTodo();
