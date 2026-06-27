@@ -809,6 +809,27 @@
 </div>
 
 <!-- MODAL REACTIVAR -->
+<div class="modal-backdrop" id="modalExcepcion">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title" style="color:#b45309;">⏳ Excepción / extender días</span>
+      <button class="modal-close" onclick="cerrarModal('modalExcepcion')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="excInfo"></div>
+      <div class="modal-info" style="border-left-color:#b45309;background:#fffbeb;">
+        Mientras la prórroga esté vigente, este alumno <strong>no recibe el mail de aviso ni se da de baja automática</strong> por falta de pago.
+      </div>
+      <div class="form-group"><label>Extender por (días)</label><input type="number" id="excDias" min="1" max="60" value="7" oninput="actualizarExcFecha()"></div>
+      <div class="modal-info" id="excFecha" style="text-align:center;font-weight:600;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalExcepcion')">Cancelar</button>
+      <button class="btn-modal" style="background:#b45309;color:#fff;" id="btnConfirmarExc" onclick="confirmarExcepcion()">Dar prórroga</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modalReactivar">
   <div class="modal modal-md">
     <div class="modal-header">
@@ -1720,6 +1741,7 @@ async function abrirModalVer() {
   const btn = (accion, label, bg, color) => `<button class="btn-modal" style="background:${bg};color:${color};" onclick="accionDesdeFicha('${accion}')">${label}</button>`;
   let acc = '';
   if (esActivo) acc += btn('cobrar', '💵 Cobrar', 'var(--verde)', '#fff');
+  if (esActivo) acc += btn('excepcion', '⏳ Excepción', '#fef3c7', '#b45309');
   // Botón especial: cobrar el SALDO PENDIENTE por cambio de fecha (monto exacto guardado)
   const _deuda = deudaCambioDe(i);
   if (esActivo && _deuda) {
@@ -1746,6 +1768,51 @@ window.accionDesdeFicha = (accion) => {
   else if (accion === 'vacaciones') abrirVacacionesAlumno();
   else if (accion === 'altatf') abrirAltaTF();
   else if (accion === 'baja') abrirModalBaja();
+  else if (accion === 'excepcion') abrirExcepcion();
+};
+
+// ===== EXCEPCIÓN / PRÓRROGA DE PAGO =====
+// Setea inscripciones_tf.pago_excepcion_hasta = hoy + N días. Mientras esté vigente,
+// la baja automática por falta de pago NO avisa ni da de baja a este alumno.
+window.abrirExcepcion = function() {
+  const p = alumnoActivo && alumnoActivo.persona;
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  $('#excInfo').innerHTML = `<strong>${p.nombre}</strong> · ${i.plan} · vence día ${i.dia_vencimiento}` +
+    (i.pago_excepcion_hasta ? `<br><span style="color:#b45309;">Ya tiene prórroga hasta ${fmtFechaArg(i.pago_excepcion_hasta)}</span>` : '');
+  $('#excDias').value = 7;
+  actualizarExcFecha();
+  cerrarModal('modalVer');
+  $('#modalExcepcion').classList.add('activo');
+};
+window.actualizarExcFecha = function() {
+  const dias = parseInt($('#excDias').value || 0, 10);
+  if (!dias || dias < 1) { $('#excFecha').textContent = ''; return; }
+  const h = new Date(); h.setHours(0,0,0,0); h.setDate(h.getDate() + dias);
+  $('#excFecha').innerHTML = `Prórroga hasta <strong>${fmtFechaArg(h.toISOString().slice(0,10))}</strong>`;
+};
+window.confirmarExcepcion = async function() {
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  const dias = parseInt($('#excDias').value || 0, 10);
+  if (!dias || dias < 1) { toast('Poné una cantidad de días válida.', true); return; }
+  const h = new Date(); h.setHours(0,0,0,0); h.setDate(h.getDate() + dias);
+  const hastaISO = h.toISOString().slice(0,10);
+  const btn = $('#btnConfirmarExc'); btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    // aviso_baja_ciclo = null: si después de la prórroga sigue sin pagar, recibe un aviso fresco.
+    const { error } = await sb.from('inscripciones_tf')
+      .update({ pago_excepcion_hasta: hastaISO, aviso_baja_ciclo: null })
+      .eq('id', i.id);
+    if (error) throw error;
+    toast(`✓ Prórroga hasta ${fmtFechaArg(hastaISO)} para ${alumnoActivo.persona.nombre}`);
+    cerrarModal('modalExcepcion');
+    await cargarTodo();
+  } catch (e) {
+    toast('Error al guardar la prórroga: ' + (e.message || e), true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Dar prórroga';
+  }
 };
 
 // ===== VACACIONES (marca faltas en lote + crea recuperatorios) =====
