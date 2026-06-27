@@ -190,15 +190,23 @@
         (pers || []).forEach(p => { mapPers[p.id] = p.nombre || `(sin nombre #${p.id})`; });
       }
 
-      // ¿Quién "arrancó"? = pagó al menos una vez O asistió (presente) al menos una vez.
-      // Los que se inscribieron pero nunca arrancaron NO se cuentan como alta/reingreso.
+      // Actividad de cada persona: fecha más temprana en que pagó o asistió (presente).
+      // Sirve para 2 cosas: (1) si nunca tuvo actividad → no se muestra; (2) si una "alta" tiene
+      // actividad de meses anteriores, en realidad es un cambio de plan, no un alta nueva.
       const [pagos, asis] = await Promise.all([
-        queryAll('pagos_tf', 'inscripcion_id'),
-        queryAll('asistencia', 'persona_id', q => q.eq('estado', 'presente'))
+        queryAll('pagos_tf', 'inscripcion_id, fecha'),
+        queryAll('asistencia', 'persona_id, fecha', q => q.eq('estado', 'presente'))
       ]);
-      const inscPagadas = new Set((pagos || []).map(p => p.inscripcion_id));
-      const personasAsistieron = new Set((asis || []).map(a => a.persona_id));
-      const arranco = (i) => inscPagadas.has(i.id) || personasAsistieron.has(i.persona_id);
+      const inscPersona = {}; insc.forEach(i => { inscPersona[i.id] = i.persona_id; });
+      const primeraActividad = {}; // persona_id -> 'YYYY-MM-DD' más temprana
+      const marcar = (pid, fecha) => {
+        if (pid == null || !fecha) return;
+        const f = String(fecha).slice(0, 10);
+        if (!primeraActividad[pid] || f < primeraActividad[pid]) primeraActividad[pid] = f;
+      };
+      (pagos || []).forEach(p => marcar(inscPersona[p.inscripcion_id], p.fecha));
+      (asis || []).forEach(a => marcar(a.persona_id, a.fecha));
+      const arranco = (i) => primeraActividad[i.persona_id] != null;
 
       // Aplanar a eventos
       MOVIMIENTOS = [];
@@ -222,13 +230,17 @@
         const entradaFecha = reingD || altaD;
         // Los bonificados (códigos BON) no cuentan como alta/reingreso.
         const esPlanBon = String(i.plan || '').toUpperCase().includes('BON');
+        // ¿Tenía actividad en un MES ANTERIOR a esta alta? → es cambio de plan, no alta nueva.
+        const actMes = primeraActividad[i.persona_id] ? primeraActividad[i.persona_id].slice(0, 7) : null;
+        const entradaMes = entradaFecha ? entradaFecha.slice(0, 7) : null;
+        const tuvoActividadAntes = actMes && entradaMes && actMes < entradaMes;
         if (entradaFecha && !esPlanBon) {
-          MOVIMIENTOS.push({
-            fecha: entradaFecha,
-            tipo: esReingreso ? 'REINGRESO' : 'ALTA',
-            origen: null, persona_id: i.persona_id, nombre, plan: i.plan,
-            motivo: esReingreso ? i.motivo_reingreso : null
-          });
+          if (esReingreso) {
+            MOVIMIENTOS.push({ fecha: entradaFecha, tipo: 'REINGRESO', origen: null, persona_id: i.persona_id, nombre, plan: i.plan, motivo: i.motivo_reingreso });
+          } else if (!tuvoActividadAntes) {
+            // Alta nueva real (sin actividad previa). Si tuvo actividad antes, es un cambio de plan → se omite.
+            MOVIMIENTOS.push({ fecha: entradaFecha, tipo: 'ALTA', origen: null, persona_id: i.persona_id, nombre, plan: i.plan, motivo: null });
+          }
         }
         if (i.fecha_baja) {
           MOVIMIENTOS.push({ fecha: String(i.fecha_baja).slice(0, 10), tipo: 'BAJA', origen: esBajaAutomatica(i.motivo_baja) ? 'AUTO' : 'MANUAL', persona_id: i.persona_id, nombre, plan: i.plan, motivo: i.motivo_baja });
