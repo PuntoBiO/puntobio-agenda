@@ -1398,6 +1398,19 @@ async function cargarEspacio(per){
       .eq('persona_id', pid)
       .order('creado_en', {ascending:true}),
   ]);
+
+  // === CORTE POR BAJA/REINGRESO ===
+  // Todo lo ANTERIOR al inicio del plan vigente (alta o reingreso) pertenece a una
+  // etapa que se dio de baja: no se arrastra. Faltas, ausencias y recuperatorios
+  // previos se descartan. (La excepción "mantener si pagó el proporcional" se maneja
+  // al reactivar, con el cobro proporcional + recargo.)
+  const _inicioPlanISO = inscripcion ? (inscripcion.fecha_reingreso || inscripcion.fecha_alta) : null;
+  window._inicioPlanTF = _inicioPlanISO;
+  if (_inicioPlanISO) {
+    if (asis && asis.data)   asis.data  = asis.data.filter(r  => !r.fecha          || String(r.fecha)          >= String(_inicioPlanISO));
+    if (recus && recus.data) recus.data = recus.data.filter(r => !r.fecha_ausencia || String(r.fecha_ausencia) >= String(_inicioPlanISO));
+  }
+
   // PROFES POR TURNO (jornada 78): para mostrarle al alumno quién da cada clase.
   // Defensivo: si RLS bloquea la lectura, el mapa queda vacío y no se muestra nada.
   window._profesPorTurno = {};
@@ -1525,6 +1538,7 @@ async function cargarEspacio(per){
       // día, no perdiste ninguna clase → no se recupera.
       const _pisoAlta = diasFijos.get(_diaKey);
       if (_pisoAlta && fIso < _pisoAlta) return;
+      if (_inicioPlanISO && fIso < _inicioPlanISO) return;  // baja/reingreso: lo previo no se arrastra
       feriadosPendientes.push({ fecha: fIso, motivo: f.motivo || 'Feriado' });
     });
     feriadosPendientes.sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
@@ -1962,6 +1976,13 @@ window.refrescarDatosAgenda = async function(){
       sb.from('turno_agregados').select('id, turno_id, fecha, tipo').eq('persona_id', pid).gte('fecha', _desdeISO).lte('fecha', _hastaISO),
       sb.rpc('alumno_agenda_cupos', { p_desde: _desdeISO, p_hasta: _hastaISO }),
     ]);
+
+    // Mismo corte por baja/reingreso que en la carga inicial.
+    const _iniRecarga = window._inicioPlanTF || null;
+    if (_iniRecarga) {
+      if (recus && recus.data) recus.data = recus.data.filter(r => !r.fecha_ausencia || String(r.fecha_ausencia) >= String(_iniRecarga));
+      if (asisR && asisR.data) asisR.data = asisR.data.filter(r => !r.fecha          || String(r.fecha)          >= String(_iniRecarga));
+    }
 
     // Recuperatorios pendientes (mismo filtro de 60 días que la carga inicial)
     data.recuperatoriosPendientes = (recus.data || []).filter(r => {
