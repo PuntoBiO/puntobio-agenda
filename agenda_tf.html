@@ -3087,13 +3087,16 @@ function cupoRecuperatorios(codPlan) {
 async function planDePersona(personaId) {
   try {
     const filas = await supabaseQuery('inscripciones_tf',
-      `?select=plan,estado,dia_vencimiento&persona_id=eq.${personaId}&order=creado_en.desc&limit=1`);
+      `?select=plan,estado,dia_vencimiento,fecha_reingreso,fecha_alta&persona_id=eq.${personaId}&order=creado_en.desc&limit=1`);
     const f = (filas && filas[0]) ? filas[0] : null;
     return {
       plan: f ? (f.plan || '') : '',
-      diaCorte: (f && f.dia_vencimiento) ? parseInt(f.dia_vencimiento, 10) : 1
+      diaCorte: (f && f.dia_vencimiento) ? parseInt(f.dia_vencimiento, 10) : 1,
+      // Inicio de la etapa actual del alumno: si fue reactivado arranca limpio
+      // (mismo criterio que Mi Espacio). Antes de esta fecha no se arrastra nada.
+      inicioISO: f ? (f.fecha_reingreso || f.fecha_alta || null) : null
     };
-  } catch (e) { console.warn('No se pudo leer el plan', e); return { plan:'', diaCorte:1 }; }
+  } catch (e) { console.warn('No se pudo leer el plan', e); return { plan:'', diaCorte:1, inicioISO:null }; }
 }
 // Ciclo personal de una fecha según el día de corte del alumno.
 // Ej: corte 27 → una falta del 28/5 pertenece al ciclo "2026-05-27" (27/5 al 26/6);
@@ -3233,14 +3236,18 @@ function nombreDiaDeFecha(fechaIso) {
 // El "ciclo" es el mes personal según el día de corte del plan (no el mes calendario).
 // Devuelve: { codPlan, diaCorte, cupoMes, recuperables:[{fecha, diasRestantes, mes, tipo}], usadosPorMes:{...} }
 async function estadoRecuperatorios(personaId) {
-  const { plan: codPlan, diaCorte } = await planDePersona(personaId);
+  const { plan: codPlan, diaCorte, inicioISO } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
-  const [ausencias, usados, diasFijos, misTurnosFijos] = await Promise.all([
+  const [_ausenciasRaw, _usadosRaw, diasFijos, misTurnosFijos] = await Promise.all([
     ausenciasConAviso(personaId),
     recuperatoriosDe(personaId),
     diasFijosDePersona(personaId),
     turnosFijosDePersona(personaId)
   ]);
+  // CORTE POR REINGRESO: un alumno reactivado arranca limpio — no se arrastran
+  // faltas ni recuperatorios de su etapa anterior (misma regla que Mi Espacio).
+  const ausencias = inicioISO ? _ausenciasRaw.filter(f => !f || String(f) >= String(inicioISO)) : _ausenciasRaw;
+  const usados    = inicioISO ? _usadosRaw.filter(r => !r.fecha_ausencia || String(r.fecha_ausencia) >= String(inicioISO)) : _usadosRaw;
   const hoy = hoyIso();
   // Último día del MES CALENDARIO actual (para habilitar feriados futuros recién
   // el 1ro de su mes, no por ciclo de facturación).
@@ -3293,6 +3300,7 @@ async function estadoRecuperatorios(personaId) {
     // de alta en ese día, no perdió ninguna clase → no se recupera.
     const _pisoAlta = diasFijos.get(_diaKey);
     if (_pisoAlta && fFer < _pisoAlta) return;
+    if (inicioISO && fFer < inicioISO) return;   // reactivado: no arrastra feriados previos
     const dias = diasEntre(fFer, hoy);
     // FERIADO FUTURO: se habilita recién el 1ro de SU mes calendario (regla unificada
     // con Mi Espacio). Ej: hoy 19/6 → un feriado de julio NO aparece hasta el 1/7.
@@ -3316,6 +3324,7 @@ async function estadoRecuperatorios(personaId) {
     if (!desdePorTurno.has(cc.turno_id)) return;            // no es su turno fijo
     const desde = desdePorTurno.get(cc.turno_id);
     if (desde && cc.fecha < desde) return;                 // todavía no era fijo en esa clase
+    if (inicioISO && cc.fecha < inicioISO) return;         // reactivado: no arrastra cierres previos
     if (cierresYaRecuperados.has(cc.fecha)) return;        // ya lo recuperó
     const dias = diasEntre(cc.fecha, hoy);
     if (dias > 60) return;                                  // venció el plazo de 60 días
