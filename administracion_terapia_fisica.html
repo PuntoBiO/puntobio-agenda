@@ -1681,6 +1681,22 @@ window.enviarReciboUno = async (fila, btnEl) => {
   await cargarTodo();
 };
 
+// Reintento manual de un recibo que falló (desde Cobros anteriores).
+window.reintentarReciboPago = async (pagoId, btnEl) => {
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Enviando…'; }
+  try {
+    const { data, error } = await sb.functions.invoke('enviar_recibo', { body: { pago_id: Number(pagoId), force: true } });
+    if (error) throw error;
+    if (data && data.ok) toast('✓ Recibo enviado por mail');
+    else if (data && data.skipped) toast('No tiene mail cargado — cargalo en Padrón', true);
+    else toast('No se pudo enviar. Probá de nuevo en un rato.', true);
+  } catch (e) {
+    toast('Error al reintentar: ' + (e.message || e), true);
+  } finally {
+    try { await cargarTodo(); } catch (_e) {}
+  }
+};
+
 // ===== MODAL VER DETALLE =====
 async function abrirModalVer() {
   const f = alumnoActivo;
@@ -2513,10 +2529,15 @@ function renderPlanesYCobros(f) {
           // ¿Hubo descuento? Solo lo marcamos para planes seguros (no en la caja de viejos)
           const conDesc = (!esSinPlan && valorLista > 0 && imp > 0 && imp < valorLista && pg.tipo_cobro === 'NORMAL');
           const descTxt = conDesc ? ` · 🏷️ con descuento (lista ${fmt$(valorLista)})` : '';
-          // Indicador de recibo automático enviado por mail (si la columna está marcada).
-          const reciboTxt = pg.recibo_enviado_at
-            ? `<div style="font-size:11px; color:#15803d; margin-top:2px;">✉️ Recibo enviado por mail · ${fmtFechaArg(pg.recibo_enviado_at)}</div>`
-            : '';
+          // Estado del recibo automático: enviado / sin mail / no enviado (con reintento manual).
+          let reciboTxt = '';
+          if (pg.recibo_enviado_at) {
+            reciboTxt = `<div style="font-size:11px; color:#15803d; margin-top:2px;">✉️ Recibo enviado por mail · ${fmtFechaArg(pg.recibo_enviado_at)}</div>`;
+          } else if (pg.recibo_error === 'SIN_MAIL') {
+            reciboTxt = `<div style="font-size:11px; color:#9a3412; margin-top:2px;">📵 Sin mail — cargale el mail en Padrón para enviar el recibo</div>`;
+          } else if (pg.recibo_error) {
+            reciboTxt = `<div style="font-size:11px; color:#b45309; margin-top:2px;">⚠️ Recibo no enviado <button onclick="reintentarReciboPago('${pg.id}', this)" style="margin-left:6px;font-size:10px;font-weight:700;color:#6d28d9;background:#ede9fe;border:1px solid #a78bfa;border-radius:5px;padding:1px 7px;cursor:pointer;">🔄 Reintentar</button></div>`;
+          }
           return `
           <div style="display:flex; justify-content:space-between; align-items:center; padding:9px 14px; border-top:1px solid var(--border);">
             <div>
