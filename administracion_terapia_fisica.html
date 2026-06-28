@@ -853,8 +853,8 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button type="button" class="clasif-card" data-camino="PROP" onclick="setCaminoReactivar('PROP')"
             style="flex:1;min-width:170px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
-            <div style="font-weight:800;font-size:13px;">💳 Cobrar proporcional + 10%</div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Paga lo que va a usar del ciclo + recargo. <strong>Conserva los recuperatorios</strong> que tenía.</div>
+            <div style="font-weight:800;font-size:13px;">💳 Cobrar mes completo + 10%</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Paga la cuota del mes + 10% de recargo. <strong>Conserva los recuperatorios</strong> que tenía.</div>
           </button>
           <button type="button" class="clasif-card" data-camino="LIMPIO" onclick="setCaminoReactivar('LIMPIO')"
             style="flex:1;min-width:170px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
@@ -876,11 +876,11 @@
         <div id="reactivarTurnosLista" style="font-size:13px;color:var(--text-dim);">Cargando turnos...</div>
         <div id="reactivarTurnosAviso"></div>
 
-        <div class="section-title">Cobro proporcional</div>
+        <div class="section-title">Cobro del mes + 10%</div>
         <div class="modal-info" id="reactivarPropDiaInfo" style="margin-bottom:12px;"></div>
         <div class="form-grid">
           <div class="form-group">
-            <label>Importe a cobrar (proporcional + 10%)</label>
+            <label>Importe a cobrar (mes completo + 10%)</label>
             <input type="number" id="reactivarPropImporte" min="0" step="100">
           </div>
           <div class="form-group"><label>Medio de pago</label><select id="reactivarPropMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
@@ -888,7 +888,7 @@
         <div class="form-hint" id="reactivarPropDetalle"></div>
         <div class="modal-success" style="margin-top:8px;">
           <strong>✓ Este camino:</strong>
-          Cobra el proporcional de las clases que se perdió + 10% (queda en Caja TF) · Vuelve a <strong style="color:var(--verde)">ACTIVO</strong> <strong>sin cambiar el día de pago</strong> · <strong>Conserva sus recuperatorios</strong>.
+          Cobra la <strong>cuota completa del mes + 10%</strong> por atraso (queda en Caja TF, el mes queda saldado) · Vuelve a <strong style="color:var(--verde)">ACTIVO</strong> <strong>sin cambiar el día de pago</strong> · <strong>Conserva sus recuperatorios</strong>.
         </div>
       </div>
 
@@ -2096,7 +2096,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
   const f = alumnoActivo;
   const p = f.persona;
   // Corte por reingreso: un alumno reactivado arranca limpio, sin arrastrar recuperatorios
-  // de su etapa anterior. Camino 1 (proporcional) no toca fecha_reingreso → conserva todo;
+  // de su etapa anterior. Camino 1 (cobro del mes) no toca fecha_reingreso → conserva todo;
   // Camino 2 (limpio) sí la mueve → corta. Si nunca reingresó, se usa la fecha de alta.
   const fechaCorte = String(f.inscripcion?.fecha_reingreso || f.inscripcion?.fecha_alta || '').slice(0, 10);
   $('#modalBitacora').classList.add('activo');
@@ -5092,7 +5092,7 @@ window.confirmarBaja = async () => {
 };
 
 // ===== MODAL REACTIVAR (dos caminos) =====
-let caminoReactivar = null; // 'PROP' (proporcional + 10%) | 'LIMPIO' (sin deuda, fecha nueva)
+let caminoReactivar = null; // 'PROP' (mes completo + 10%) | 'LIMPIO' (sin deuda, fecha nueva)
 let reactivarTurnos = [];   // turnos fijos que tenía el alumno (con cupo)
 let reactivarTurnosCargados = false;
 let reactivarDiaVenc = null; // día de vencimiento original (Camino 1 NO lo cambia)
@@ -5277,39 +5277,17 @@ window.recalcReactivarProp = () => {
   const diaVenc = reactivarDiaVenc || HOY.getDate();
   $('#reactivarPropDiaInfo').innerHTML = `Día de pago: <strong>${diaVenc}</strong> · <span style="color:var(--text-dim)">no cambia en este camino</span>`;
 
-  if (esPlanPlano(plan)) {
-    const total = Math.round(precioMensual * 1.10);
-    $('#reactivarPropImporte').value = total;
-    det.innerHTML = `Plan de tarifa plana: se sugiere el mes completo ${fmt$(precioMensual)} + 10% = <strong>${fmt$(total)}</strong>. Editable.`;
-    return;
-  }
-
-  const clasesSem = clasesSemanaPlan(plan) || 0;
-  if (!clasesSem || !precioMensual) {
+  if (!precioMensual) {
     $('#reactivarPropImporte').value = 0;
     det.textContent = 'No se pudo calcular automáticamente. Cargá el importe a mano.';
     return;
   }
-  const clasesMes = clasesSem * 4;
-  const precioClase = precioMensual / clasesMes;
-
-  const r = contarClasesPerdidas(diaVenc);
-  let clasesPerdidas, fuente;
-  if (r.porTurnos) {
-    clasesPerdidas = r.count;
-    fuente = `según sus turnos`;
-  } else {
-    // Sin turnos guardados → estimar por plan: clases/semana × semanas transcurridas desde el vencimiento
-    const msDia = 24 * 60 * 60 * 1000;
-    const semanas = Math.max(0, Math.ceil((r.hoy0 - r.inicio) / msDia / 7));
-    clasesPerdidas = Math.min(clasesSem * semanas, clasesMes);
-    fuente = `estimado por plan`;
-  }
-  const subtotal = Math.round(clasesPerdidas * precioClase);
-  const recargo = Math.round(precioMensual * 0.10); // 10% sobre la cuota del plan completo
-  const total = subtotal + recargo;
+  // Reactivación = cuota COMPLETA del mes que va a usar + 10% de recargo por atraso.
+  // Se da de baja por no pagar, así que al volver debe el mes entero; el mes queda saldado.
+  const recargo = Math.round(precioMensual * 0.10);
+  const total = precioMensual + recargo;
   $('#reactivarPropImporte').value = total;
-  det.innerHTML = `Se perdió <strong>${clasesPerdidas}</strong> clase(s) desde el ${fmtFechaArg(r.inicio.toISOString().slice(0,10))} (${fuente}) · ${fmt$(precioClase)}/clase = ${fmt$(subtotal)} + recargo 10% del plan (${fmt$(recargo)}) = <strong>${fmt$(total)}</strong>. Editable.`;
+  det.innerHTML = `Cuota del mes ${fmt$(precioMensual)} + recargo 10% por atraso (${fmt$(recargo)}) = <strong>${fmt$(total)}</strong>. El mes queda saldado. Editable.`;
 };
 
 // ===== SELECTOR DE TURNOS (modal Reactivar, los dos caminos) =====
@@ -5476,7 +5454,7 @@ window.confirmarReactivar = async () => {
       const medio = $('#reactivarPropMedio').value;
       const dia = reactivarDiaVenc || i.dia_vencimiento || null; // Camino 1: día de pago NO cambia
 
-      // 1) Cobro del proporcional (si hay importe) → queda en Caja TF
+      // 1) Cobro de la cuota del mes + 10% (si hay importe) → queda en Caja TF
       if (importe > 0) {
         const { error: ePago } = await sb.from('pagos_tf').insert({
           inscripcion_id: i.id,
@@ -5485,7 +5463,7 @@ window.confirmarReactivar = async () => {
           importe,
           medio,
           tipo_cobro: 'NORMAL',
-          observaciones: `REINGRESO proporcional + 10% recargo · ${motivo}`,
+          observaciones: `REINGRESO mes completo + 10% recargo · ${motivo}`,
           cargado_por: usuarioId
         });
         if (ePago) throw ePago;
@@ -5504,7 +5482,7 @@ window.confirmarReactivar = async () => {
       }).eq('id', i.id);
       if (error) throw error;
 
-      toast(`✓ ${p.nombre} reactivado · cobrado ${fmt$(importe)} (proporcional + 10%). Conserva sus recuperatorios.`);
+      toast(`✓ ${p.nombre} reactivado · cobrado ${fmt$(importe)} (mes completo + 10%). Conserva sus recuperatorios.`);
     } else {
       // CAMINO LIMPIO: fecha de reingreso = hoy (corta los recuperatorios viejos), día nuevo, sin cobro.
       //    Arranca de cero, así que limpiamos cualquier reactivación proporcional anterior.
@@ -5984,7 +5962,7 @@ let esLu = false; // solo Lu puede borrar pagos / deshacer cambios de plan
 let usuarioEmail = ''; // mail del operador logueado (para permisos de reactivación)
 
 // ===== PERMISOS DE REACTIVACIÓN =====
-// Camino 1 (cobrar proporcional + 10%): Ale, Paula, Jime, Lu
+// Camino 1 (cobrar mes completo + 10%): Ale, Paula, Jime, Lu
 // Camino 2 (sin deuda, fecha nueva): solo Jime y Lu
 // 👇 Para sumar a Ale y Paula: descomentá las líneas y poné sus mails de login.
 const PERM_REACTIVAR_PROP = [
