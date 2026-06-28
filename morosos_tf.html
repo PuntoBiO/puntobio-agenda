@@ -218,6 +218,10 @@
 
   let inscripciones = [], pagos = [], tarifario = {}, tarifarioMeta = {};
   let descSorteo = new Set();   // 'persona_id|YYYY-MM' de ganadores del sorteo con 25% OFF
+  // persona_id de quienes vinieron (presente) o avisaron su ausencia (ausente_just) en
+  // los últimos 7 días. A estos NO se los da de baja automática → se les habilita el
+  // botón de WhatsApp en Morosos para recordarles el pago. Al resto NO se le muestra.
+  let activoReciente = new Set();
   let filtroActivo = 'todos', mesActual, inscripcionEnAccion = null;
   let busquedaTexto = '';
 
@@ -358,6 +362,29 @@
         i.fecha_nacimiento = p.fecha_nacimiento || null;
       });
     }
+
+    // === ACTIVIDAD RECIENTE (para habilitar WhatsApp) ===
+    // Quiénes vinieron (presente) o avisaron su ausencia (ausente_just) en los últimos
+    // 7 días. Se pagina por el límite de 1000 filas de Supabase.
+    activoReciente = new Set();
+    {
+      const hace7 = new Date();
+      hace7.setDate(hace7.getDate() - 7);
+      const cutoff = hace7.toISOString().slice(0, 10);
+      let from = 0; const page = 1000;
+      while (true) {
+        const { data: asis, error: eAsis } = await supa.from('asistencia')
+          .select('persona_id')
+          .in('estado', ['presente', 'ausente_just'])
+          .gte('fecha', cutoff)
+          .range(from, from + page - 1);
+        if (eAsis) break;
+        (asis || []).forEach(a => activoReciente.add(a.persona_id));
+        if (!asis || asis.length < page) break;
+        from += page;
+      }
+    }
+
     render();
     // Avisar al app que refresque el badge del sidebar (por si cobraron o dieron de baja)
     try { window.parent && window.parent.postMessage({ tipo: 'REFRESCAR_BADGE_MOROSOS' }, '*'); } catch(e) {}
@@ -653,8 +680,14 @@
       const badgeProrroga = prorrogaVig
         ? ` <span class="badge-prorroga" title="Prórroga hasta ${new Date(c.pago_excepcion_hasta + 'T00:00:00').toLocaleDateString('es-AR')}">⏳ con prórroga</span>`
         : '';
+      // 📲 WhatsApp: solo se habilita para morosos que vinieron o avisaron su ausencia
+      // en los últimos 7 días (los que NO se dan de baja automática). Al resto no se muestra.
+      const btnWA = activoReciente.has(c.persona_id)
+        ? `<button class="btn-accion btn-wa" onclick="abrirWA(${c.id})" title="Enviar recordatorio por WhatsApp (vino o avisó ausencia)">📲 WhatsApp</button>`
+        : '';
       const acciones = `<div class="acciones-cell">
         <button class="btn-accion btn-cobrar" onclick="abrirCobro(${c.id})" title="Registrar cobro">💵 Cobrar</button>
+        ${btnWA}
         <button class="btn-accion btn-exc" onclick="abrirExcepcionMoroso(${c.id})" title="Dar prórroga / excepción">⏳ Excepción</button>
         <button class="btn-accion btn-baja" onclick="abrirBaja(${c.id})" title="Dar de baja al alumno">❌ Dar de baja</button>
       </div>`;
