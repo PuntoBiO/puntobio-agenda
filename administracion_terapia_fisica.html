@@ -2095,6 +2095,10 @@ window.cancelarVacaciones = async (vacId) => {
 async function abrirBitacoraAlumno(ventana = 60) {
   const f = alumnoActivo;
   const p = f.persona;
+  // Corte por reingreso: un alumno reactivado arranca limpio, sin arrastrar recuperatorios
+  // de su etapa anterior. Camino 1 (proporcional) no toca fecha_reingreso → conserva todo;
+  // Camino 2 (limpio) sí la mueve → corta. Si nunca reingresó, se usa la fecha de alta.
+  const fechaCorte = String(f.inscripcion?.fecha_reingreso || f.inscripcion?.fecha_alta || '').slice(0, 10);
   $('#modalBitacora').classList.add('activo');
   $('#bitacoraMeta').textContent = p.nombre || ('#' + p.id);
   $('#bitacoraBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando bitácora…</div>';
@@ -2183,12 +2187,14 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const pendientes = [];
     (asisRes.data || []).forEach(a => {
       if (a.estado !== 'ausente-justificada' || yaBooked.has(a.fecha)) return;
+      if (fechaCorte && a.fecha < fechaCorte) return;   // de su etapa anterior al reingreso
       const d = diasDesde(a.fecha);
       if (d < 0 || d > ventana) return;
       pendientes.push({ fecha: a.fecha, dias: ventana - d, motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
     });
     (cerradasRes.data || []).forEach(c => {
       if (!misTurnoIds.has(c.turno_id) || yaBooked.has(c.fecha)) return;
+      if (fechaCorte && c.fecha < fechaCorte) return;   // de su etapa anterior al reingreso
       const d = diasDesde(c.fecha);
       if (d > ventana) return;   // permite futuras (d negativo)
       pendientes.push({ fecha: c.fecha, dias: Math.max(0, ventana - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
@@ -2196,6 +2202,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
     (ferRes.data || []).forEach(fe => {
       const fIso = fe.fecha;
       if (!fIso || yaBooked.has(fIso)) return;
+      if (fechaCorte && fIso < fechaCorte) return;   // feriado anterior al reingreso
       const nd = NOMBRE_DIA[new Date(fIso + 'T00:00:00').getDay()];
       if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
       const _piso = _pisoAltaDia(nd);
@@ -2643,10 +2650,13 @@ async function abrirFichaAlumno() {
     const recups = recupRes.data || [];
     // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
     const feriadosYaRecup = new Set(recups.filter(r => r.tipo === 'feriado').map(r => r.fecha_ausencia));
+    // Corte por reingreso: no se arrastran feriados de la etapa anterior al reingreso.
+    const fechaCorteF = String(alumnoActivo.inscripcion?.fecha_reingreso || alumnoActivo.inscripcion?.fecha_alta || '').slice(0, 10);
     let feriadosExtraPend = 0;
     feriados.forEach(f => {
       const fFer = f.fecha;
       if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
+      if (fechaCorteF && fFer < fechaCorteF) return;               // feriado anterior al reingreso
       const nombreDia = nombreDiaDeFechaFicha(fFer);
       if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
       const _pisoF = _desdePorDiaF[nombreDia] || null;
@@ -5481,19 +5491,23 @@ window.confirmarReactivar = async () => {
         if (ePago) throw ePago;
       }
 
-      // 2) Reactivar SIN mover la fecha de reingreso (así conserva sus recuperatorios) y manteniendo el día de pago
+      // 2) Reactivar SIN mover la fecha de reingreso (así conserva sus recuperatorios) y manteniendo el día de pago.
+      //    Registramos fecha_reactivacion_prop para que esta reactivación SÍ figure en Altas/Bajas
+      //    (la fecha_reingreso queda intacta a propósito, por eso hace falta esta columna aparte).
       const { error } = await sb.from('inscripciones_tf').update({
         estado: 'ACTIVO',
         plan: planNuevo,
         dia_vencimiento: dia,
         motivo_reingreso: motivo,
+        fecha_reactivacion_prop: hoyISO,
         actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (error) throw error;
 
       toast(`✓ ${p.nombre} reactivado · cobrado ${fmt$(importe)} (proporcional + 10%). Conserva sus recuperatorios.`);
     } else {
-      // CAMINO LIMPIO: fecha de reingreso = hoy (corta los recuperatorios viejos), día nuevo, sin cobro
+      // CAMINO LIMPIO: fecha de reingreso = hoy (corta los recuperatorios viejos), día nuevo, sin cobro.
+      //    Arranca de cero, así que limpiamos cualquier reactivación proporcional anterior.
       const dia = parseInt($('#reactivarLimpioDia').value) || HOY.getDate();
       const { error } = await sb.from('inscripciones_tf').update({
         estado: 'ACTIVO',
@@ -5501,6 +5515,7 @@ window.confirmarReactivar = async () => {
         dia_vencimiento: dia,
         fecha_reingreso: hoyISO,
         motivo_reingreso: motivo,
+        fecha_reactivacion_prop: null,
         actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (error) throw error;
