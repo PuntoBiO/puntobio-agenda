@@ -1548,6 +1548,10 @@ async function cargarEspacio(per){
   }
 
   // Datos consolidados para pasarle al bloque (sin nombres ni datos personales)
+  // CANDADO ANTI-ABUSO de recuperatorios: solo se pueden usar con plan ACTIVO y la cuota
+  // al día (o con prórroga vigente). Si debe, NO se le ofrece "Programar acá" para recuperar.
+  const _estCuotaRec = estadoCuotaTF(inscripcion, window._reciboPagosAll);
+  const _puedeUsarRecupe = !!inscripcion && (!_estCuotaRec.vencida || _estCuotaRec.prorrogaVigente);
   window._agendaData = {
     turnos: todosTurnosRes.data || [],
     fijosPorTurno,
@@ -1555,6 +1559,11 @@ async function cargarEspacio(per){
     ausentesPorClave,
     actividadAlumno: (inscripcion && inscripcion.actividad) ? inscripcion.actividad : 'AMBOS',
     esBonificado: inscripcion ? /BON/i.test(inscripcion.plan||'') : false,
+    // ¿Puede USAR recuperatorios hoy? (plan activo + cuota al día / con prórroga)
+    puedeUsarRecupe: _puedeUsarRecupe,
+    // Plan del alumno + cupo de recuperatorios por ciclo (para el cartel de vacaciones)
+    planAlumno: inscripcion ? inscripcion.plan : null,
+    cupoRecupePlan: inscripcion ? cupoRecuperatoriosPlan(inscripcion.plan) : null,
     diasHabiles: _diasHabiles,
     hoyISO: _hoyISO,
     // SELF-SERVICE · datos del alumno para mostrar/ocultar botones
@@ -1725,6 +1734,35 @@ function cupoRecuperatoriosPlan(cod){
   return n+2;
 }
 
+// Estado de la cuota TF de una inscripción: ¿está vencida? ¿tiene prórroga vigente?
+// Misma regla CONSERVADORA que el banner de "Mi plan": si hay un pago imputado al mes,
+// NO se considera vencida (nunca tratamos como deudor a alguien que ya pagó). Es la
+// fuente única para: (a) el banner "Tu cuota está vencida" y (b) el candado anti-abuso
+// de recuperatorios. Devuelve { vencida, prorrogaVigente }.
+function estadoCuotaTF(insc, pagosAll){
+  if (!insc) return { vencida: false, prorrogaVigente: false };
+  if (/BON/i.test(insc.plan||'')) return { vencida: false, prorrogaVigente: false };
+  const pagos = (pagosAll || []).filter(p => p.inscripcion_id === insc.id);
+  const hoy = new Date();
+  const yyyy = hoy.getFullYear(), mm = hoy.getMonth()+1, dd = hoy.getDate();
+  const mesHoy = `${yyyy}-${String(mm).padStart(2,'0')}`;
+  let pm = mm-1, py = yyyy; if (pm===0){ pm=12; py--; }
+  const mesPrev = `${py}-${String(pm).padStart(2,'0')}`;
+  const ultDiaMes = (ms) => { const [y,m]=ms.split('-').map(Number); return new Date(y, m, 0); };
+  const inicioStr = insc.fecha_reingreso || insc.fecha_alta;
+  const inicio = inicioStr ? new Date(inicioStr + 'T00:00:00') : null;
+  const activoEse = (ms) => !inicio || inicio <= ultDiaMes(ms);
+  const pagoEse = (ms) => pagos.some(p => p.mes_imputado === ms);
+  const dv = Number(insc.dia_vencimiento || 1);
+  const venceActual = activoEse(mesHoy) && dd > dv && !pagoEse(mesHoy);
+  const vencePrev = activoEse(mesPrev) && !pagoEse(mesPrev);
+  const vencida = venceActual || vencePrev;
+  const hoyISO = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+  const exc = insc.pago_excepcion_hasta;
+  const prorrogaVigente = !!(exc && String(exc) >= hoyISO);
+  return { vencida, prorrogaVigente };
+}
+
 function bloquePlan(i){
   if(!i){
     return `<section class="card reveal d2">
@@ -1741,25 +1779,10 @@ function bloquePlan(i){
   // cuando se registra el pago del mes. Si hay prórroga vigente, se indica hasta cuándo.
   const avisoCuota = (() => {
     if (esBonif) return '';
-    const pagos = (window._reciboPagosAll || []).filter(p => p.inscripcion_id === i.id);
-    const hoy = new Date();
-    const yyyy = hoy.getFullYear(), mm = hoy.getMonth()+1, dd = hoy.getDate();
-    const mesHoy = `${yyyy}-${String(mm).padStart(2,'0')}`;
-    let pm = mm-1, py = yyyy; if (pm===0){ pm=12; py--; }
-    const mesPrev = `${py}-${String(pm).padStart(2,'0')}`;
-    const ultDiaMes = (ms) => { const [y,m]=ms.split('-').map(Number); return new Date(y, m, 0); };
-    const inicioStr = i.fecha_reingreso || i.fecha_alta;
-    const inicio = inicioStr ? new Date(inicioStr + 'T00:00:00') : null;
-    const activoEse = (ms) => !inicio || inicio <= ultDiaMes(ms);
-    const pagoEse = (ms) => pagos.some(p => p.mes_imputado === ms);
-    const dv = Number(i.dia_vencimiento || 1);
-    const venceActual = activoEse(mesHoy) && dd > dv && !pagoEse(mesHoy);
-    const vencePrev = activoEse(mesPrev) && !pagoEse(mesPrev);
-    if (!(venceActual || vencePrev)) return '';
-    const hoyISO = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
-    const exc = i.pago_excepcion_hasta;
-    if (exc && String(exc) >= hoyISO) {
-      return `<div class="aviso-cuota">⏳ Tu cuota está vencida · prórroga hasta <b>${fmtFecha(exc)}</b></div>`;
+    const est = estadoCuotaTF(i, window._reciboPagosAll);
+    if (!est.vencida) return '';
+    if (est.prorrogaVigente) {
+      return `<div class="aviso-cuota">⏳ Tu cuota está vencida · prórroga hasta <b>${fmtFecha(i.pago_excepcion_hasta)}</b></div>`;
     }
     return `<div class="aviso-cuota">⚠️ Tu cuota está vencida</div>`;
   })();
@@ -2731,7 +2754,7 @@ function renderAgendaDia(fechaISO){
       // Mostrar botón "Programar acá" si: NO es mi fijo + NO ya estoy anotada acá + ((recupes + dentro15) O (puede suelta + dentro10Hab)) + cupo + actividad + no bloqueado + +2h
       const yaAnotadaEnTurno = data.misAnotaciones && data.misAnotaciones.has(t.id + '|' + fechaISO);
       const tengoFijoEstaHora = misHorasFijasHoy.has((t.hora||'').slice(0,5));
-      const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15;
+      const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15 && (data.puedeUsarRecupe !== false);
       const puedeSueltaAca = puedeSuelta && actividadOK && dentro10Hab && dentroSemanaRot;
       if (!esMiTurnoFijo && !yaAnotadaEnTurno && !tengoFijoEstaHora && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta10m) {
         botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirProgramar(${t.id}, '${fechaISO}', ${puedeRecuperarAca}, ${puedeSueltaAca})">📅 Programar acá</button>`;
@@ -2981,8 +3004,14 @@ function bloqueRecuperatorios(recus){
     }
   }
   const _resRec = totalDisp ? `${totalDisp} ${totalDisp===1?'pendiente':'pendientes'}` : 'Al día 🎉';
+  // CANDADO: si tiene clases para recuperar pero la cuota está vencida (sin prórroga),
+  // no le aparece "Programar acá". Le explicamos por qué, para que no parezca un error.
+  const _bloqueadoPorDeuda = (window._agendaData && window._agendaData.puedeUsarRecupe === false);
+  const avisoDeudaRecu = (_bloqueadoPorDeuda && totalDisp > 0)
+    ? `<div class="aviso-cuota" style="margin-bottom:10px">⚠️ Para anotarte en un recuperatorio necesitás tener la cuota <b>al día</b>. Regularizá el pago y vas a poder reprogramar tus clases.</div>`
+    : '';
   return colapsable('Recuperatorios pendientes', _resRec,
-    `${rows}
+    `${avisoDeudaRecu}${rows}
     <div class="nota">Tenés ${DIAS_PARA_RECUPERAR} días desde la falta para recuperar la clase. Para reprogramar, coordiná con el centro.</div>`, 'd3', '', true);
 }
 
@@ -5832,11 +5861,30 @@ window.pbVacacionesRefrescar = async function(){
 window.pbVacacionesAbrir = function(){
   const d = new Date(); d.setDate(d.getDate()+1);
   const minISO = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  // Cartel: las vacaciones NO reservan el lugar sin pago. Avisamos cuántas clases
+  // podrá recuperar según su plan (cupo por ciclo: COD3→5, COD2→4, etc.).
+  const _ad = window._agendaData || {};
+  const _esBon = !!_ad.esBonificado;
+  const _cupo = _ad.cupoRecupePlan;
+  const _plan = _ad.planAlumno;
+  let _cupoMsg;
+  if (_esBon) {
+    _cupoMsg = `♻️ Tu plan es <b>bonificado</b>: no usás cupo de recuperatorios, venís cuando quieras.`;
+  } else if (_cupo != null) {
+    _cupoMsg = `♻️ Con tu plan <b>${esc(_plan||'')}</b> podés recuperar hasta <b>${_cupo} clase${_cupo===1?'':'s'}</b> por ciclo — te vayas 10 días o 30, el cupo es el mismo.`;
+  } else {
+    _cupoMsg = `♻️ Vas a poder recuperar las clases según el cupo de tu plan.`;
+  }
+  const _cartel = `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.55;margin-bottom:13px">
+      ⚠️ <b>Importante:</b> programá tus vacaciones <b>solo si vas a seguir abonando el mes</b> para conservar tus turnos. Las vacaciones <b>no congelan ni te reservan el lugar sin pago</b>: lo que hacen es marcar tus clases como <b>falta avisada</b> para que las puedas recuperar.<br><br>
+      ${_cupoMsg}
+    </div>`;
   pbAbrirModal({
     titulo: '🏖️ Me voy de vacaciones',
     subtitulo: 'Elegí el rango y marcamos como <b>falta avisada</b> todas tus clases fijas de esos días, de una sola vez. Cada clase te queda disponible para recuperar hasta <b>60 días después de su fecha</b> — podés recuperarlas antes de irte o a la vuelta.',
     infoBox: '✅ Se carga desde <b>mañana</b> en adelante, hasta 31 días corridos por carga.<br>⚠️ Si tu plan tiene cupo de recuperatorios, estas faltas <b>lo usan</b> (los bonificados no generan recuperatorios).',
     cuerpoHTML: `
+      ${_cartel}
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <label style="flex:1;min-width:130px;font-size:12px;color:#64748b">Desde<br>
           <input type="date" id="vacDesde" min="${minISO}" style="width:100%;padding:9px;border-radius:8px;border:1px solid #cbd5e1;font-size:14px;margin-top:3px">
