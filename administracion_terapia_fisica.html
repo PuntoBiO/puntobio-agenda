@@ -248,6 +248,7 @@
     <select id="filtroDia"><option value="">Todos</option></select>
   </label>
   <button class="filtro-btn" onclick="limpiarFiltros()" style="border-color: var(--azul); color: var(--azul);">Limpiar filtros</button>
+  <button class="filtro-btn" id="btnRecibosMes" onclick="enviarRecibosDelMes()" style="border-color:#7c3aed; color:#7c3aed; font-weight:600;">📧 Enviar recibos pendientes</button>
 </div>
 
 <div class="filtros" id="filtrosEstado">
@@ -264,6 +265,8 @@
   <button class="filtro-btn" data-faltante="SIN_AMBAS">⚠️ Sin HC ni evaluación</button>
   <button class="filtro-btn" data-faltante="SIN_MIESP">📵 Sin entrar a Mi Espacio</button>
   <button class="filtro-btn" data-faltante="CON_MIESP">✅ Ya entró a Mi Espacio</button>
+  <button class="filtro-btn" data-faltante="RECIBO_PEND">📧 Recibo pendiente</button>
+  <button class="filtro-btn" data-faltante="RECIBO_OK">📧 Recibo enviado</button>
 </div>
 
 <div class="resumen" id="resumen"></div>
@@ -850,8 +853,8 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button type="button" class="clasif-card" data-camino="PROP" onclick="setCaminoReactivar('PROP')"
             style="flex:1;min-width:170px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
-            <div style="font-weight:800;font-size:13px;">💳 Cobrar mes completo + 10%</div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Paga la cuota del mes + 10% de recargo. <strong>Conserva los recuperatorios</strong> que tenía.</div>
+            <div style="font-weight:800;font-size:13px;">💳 Cobrar proporcional + 10%</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">Paga lo que va a usar del ciclo + recargo. <strong>Conserva los recuperatorios</strong> que tenía.</div>
           </button>
           <button type="button" class="clasif-card" data-camino="LIMPIO" onclick="setCaminoReactivar('LIMPIO')"
             style="flex:1;min-width:170px;text-align:left;padding:10px 12px;border-radius:9px;border:2px solid var(--border);background:var(--bg-card);cursor:pointer;transition:all .12s;line-height:1.3;">
@@ -873,11 +876,11 @@
         <div id="reactivarTurnosLista" style="font-size:13px;color:var(--text-dim);">Cargando turnos...</div>
         <div id="reactivarTurnosAviso"></div>
 
-        <div class="section-title">Cobro del mes + 10%</div>
+        <div class="section-title">Cobro proporcional</div>
         <div class="modal-info" id="reactivarPropDiaInfo" style="margin-bottom:12px;"></div>
         <div class="form-grid">
           <div class="form-group">
-            <label>Importe a cobrar (mes completo + 10%)</label>
+            <label>Importe a cobrar (proporcional + 10%)</label>
             <input type="number" id="reactivarPropImporte" min="0" step="100">
           </div>
           <div class="form-group"><label>Medio de pago</label><select id="reactivarPropMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
@@ -885,7 +888,7 @@
         <div class="form-hint" id="reactivarPropDetalle"></div>
         <div class="modal-success" style="margin-top:8px;">
           <strong>✓ Este camino:</strong>
-          Cobra la <strong>cuota completa del mes + 10%</strong> por atraso (queda en Caja TF, el mes queda saldado) · Vuelve a <strong style="color:var(--verde)">ACTIVO</strong> <strong>sin cambiar el día de pago</strong> · <strong>Conserva sus recuperatorios</strong>.
+          Cobra el proporcional de las clases que se perdió + 10% (queda en Caja TF) · Vuelve a <strong style="color:var(--verde)">ACTIVO</strong> <strong>sin cambiar el día de pago</strong> · <strong>Conserva sus recuperatorios</strong>.
         </div>
       </div>
 
@@ -1532,8 +1535,9 @@ function renderTabla(lista) {
     const esBajaTF = f.estadoTF === 'TF_BAJA';
     const sinTF = f.estadoTF === 'SIN_TF';
     const puedeAltaTF = sinTF || esBajaTF; // dar alta a quien no está activo
-    // Envío de recibo ahora es automático (trigger en la base) → ya no va botón por fila.
-    const reciboBtn = '';
+    const reciboBtn = f.reciboModo
+      ? `<button class="btn-accion" data-idx="${idx}" data-accion="recibo" title="${f.reciboPendiente ? 'Enviar el recibo de este mes por mail' : 'Recibo ya enviado — tocá para reenviar'}" style="background:${f.reciboPendiente ? '#ede9fe' : '#dcfce7'};color:${f.reciboPendiente ? '#6d28d9' : '#15803d'};border:1px solid ${f.reciboPendiente ? '#a78bfa' : '#86efac'};font-size:11px;padding:4px 8px;white-space:nowrap;">${f.reciboPendiente ? '📧 Enviar recibo' : '📧 Recibo ✓'}</button>`
+      : '';
     const acciones = `
       ${reciboBtn}
       <button class="btn-accion btn-wsp" data-idx="${idx}" data-accion="wsp" title="Enviar WhatsApp" style="background:#25D366;color:#fff;border:none;">📱 WhatsApp</button>
@@ -1679,22 +1683,6 @@ window.enviarReciboUno = async (fila, btnEl) => {
   }
   if (btnEl) { btnEl.disabled = false; btnEl.textContent = txtOrig; }
   await cargarTodo();
-};
-
-// Reintento manual de un recibo que falló (desde Cobros anteriores).
-window.reintentarReciboPago = async (pagoId, btnEl) => {
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = 'Enviando…'; }
-  try {
-    const { data, error } = await sb.functions.invoke('enviar_recibo', { body: { pago_id: Number(pagoId), force: true } });
-    if (error) throw error;
-    if (data && data.ok) toast('✓ Recibo enviado por mail');
-    else if (data && data.skipped) toast('No tiene mail cargado — cargalo en Padrón', true);
-    else toast('No se pudo enviar. Probá de nuevo en un rato.', true);
-  } catch (e) {
-    toast('Error al reintentar: ' + (e.message || e), true);
-  } finally {
-    try { await cargarTodo(); } catch (_e) {}
-  }
 };
 
 // ===== MODAL VER DETALLE =====
@@ -2107,10 +2095,6 @@ window.cancelarVacaciones = async (vacId) => {
 async function abrirBitacoraAlumno(ventana = 60) {
   const f = alumnoActivo;
   const p = f.persona;
-  // Corte por reingreso: un alumno reactivado arranca limpio, sin arrastrar recuperatorios
-  // de su etapa anterior. Camino 1 (cobro del mes) no toca fecha_reingreso → conserva todo;
-  // Camino 2 (limpio) sí la mueve → corta. Si nunca reingresó, se usa la fecha de alta.
-  const fechaCorte = String(f.inscripcion?.fecha_reingreso || f.inscripcion?.fecha_alta || '').slice(0, 10);
   $('#modalBitacora').classList.add('activo');
   $('#bitacoraMeta').textContent = p.nombre || ('#' + p.id);
   $('#bitacoraBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando bitácora…</div>';
@@ -2199,14 +2183,12 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const pendientes = [];
     (asisRes.data || []).forEach(a => {
       if (a.estado !== 'ausente-justificada' || yaBooked.has(a.fecha)) return;
-      if (fechaCorte && a.fecha < fechaCorte) return;   // de su etapa anterior al reingreso
       const d = diasDesde(a.fecha);
       if (d < 0 || d > ventana) return;
       pendientes.push({ fecha: a.fecha, dias: ventana - d, motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
     });
     (cerradasRes.data || []).forEach(c => {
       if (!misTurnoIds.has(c.turno_id) || yaBooked.has(c.fecha)) return;
-      if (fechaCorte && c.fecha < fechaCorte) return;   // de su etapa anterior al reingreso
       const d = diasDesde(c.fecha);
       if (d > ventana) return;   // permite futuras (d negativo)
       pendientes.push({ fecha: c.fecha, dias: Math.max(0, ventana - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
@@ -2214,7 +2196,6 @@ async function abrirBitacoraAlumno(ventana = 60) {
     (ferRes.data || []).forEach(fe => {
       const fIso = fe.fecha;
       if (!fIso || yaBooked.has(fIso)) return;
-      if (fechaCorte && fIso < fechaCorte) return;   // feriado anterior al reingreso
       const nd = NOMBRE_DIA[new Date(fIso + 'T00:00:00').getDay()];
       if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
       const _piso = _pisoAltaDia(nd);
@@ -2529,21 +2510,11 @@ function renderPlanesYCobros(f) {
           // ¿Hubo descuento? Solo lo marcamos para planes seguros (no en la caja de viejos)
           const conDesc = (!esSinPlan && valorLista > 0 && imp > 0 && imp < valorLista && pg.tipo_cobro === 'NORMAL');
           const descTxt = conDesc ? ` · 🏷️ con descuento (lista ${fmt$(valorLista)})` : '';
-          // Estado del recibo automático: enviado / sin mail / no enviado (con reintento manual).
-          let reciboTxt = '';
-          if (pg.recibo_enviado_at) {
-            reciboTxt = `<div style="font-size:11px; color:#15803d; margin-top:2px;">✉️ Recibo enviado por mail · ${fmtFechaArg(pg.recibo_enviado_at)}</div>`;
-          } else if (pg.recibo_error === 'SIN_MAIL') {
-            reciboTxt = `<div style="font-size:11px; color:#9a3412; margin-top:2px;">📵 Sin mail — cargale el mail en Padrón para enviar el recibo</div>`;
-          } else if (pg.recibo_error) {
-            reciboTxt = `<div style="font-size:11px; color:#b45309; margin-top:2px;">⚠️ Recibo no enviado <button onclick="reintentarReciboPago('${pg.id}', this)" style="margin-left:6px;font-size:10px;font-weight:700;color:#6d28d9;background:#ede9fe;border:1px solid #a78bfa;border-radius:5px;padding:1px 7px;cursor:pointer;">🔄 Reintentar</button></div>`;
-          }
           return `
           <div style="display:flex; justify-content:space-between; align-items:center; padding:9px 14px; border-top:1px solid var(--border);">
             <div>
               <div style="font-size:13px;">${fmtFechaArg(pg.fecha)} · ${pg.medio || '—'}</div>
               <div style="font-size:11px; color:var(--text-dim);">Imputado: ${pg.mes_imputado || '—'}${pg.tipo_cobro && pg.tipo_cobro !== 'NORMAL' ? ' · ' + pg.tipo_cobro : ''}${descTxt}</div>
-              ${reciboTxt}
             </div>
             <div style="display:flex; align-items:center; gap:10px;">
               <div style="font-weight:700; color:var(--verde,#166534);">${fmt$(pg.importe)}</div>
@@ -2672,13 +2643,10 @@ async function abrirFichaAlumno() {
     const recups = recupRes.data || [];
     // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
     const feriadosYaRecup = new Set(recups.filter(r => r.tipo === 'feriado').map(r => r.fecha_ausencia));
-    // Corte por reingreso: no se arrastran feriados de la etapa anterior al reingreso.
-    const fechaCorteF = String(alumnoActivo.inscripcion?.fecha_reingreso || alumnoActivo.inscripcion?.fecha_alta || '').slice(0, 10);
     let feriadosExtraPend = 0;
     feriados.forEach(f => {
       const fFer = f.fecha;
       if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
-      if (fechaCorteF && fFer < fechaCorteF) return;               // feriado anterior al reingreso
       const nombreDia = nombreDiaDeFechaFicha(fFer);
       if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
       const _pisoF = _desdePorDiaF[nombreDia] || null;
@@ -3052,13 +3020,8 @@ window.edToggleCorregir = () => {
 window.abrirEnPadron = () => {
   const p = alumnoActivo && alumnoActivo.persona;
   if (!p) return;
-  // app.html escucha ABRIR_EN_PADRON + personaId: navega a Padrón y abre la ficha directo.
-  try {
-    window.parent && window.parent.postMessage({ tipo: 'ABRIR_EN_PADRON', personaId: p.id }, '*');
-    toast(`Abriendo a ${p.nombre} en Padrón…`);
-  } catch (e) {
-    toast(`Abrí "Padrón" en el menú y buscá a ${p.nombre} (#${p.id}).`, true);
-  }
+  try { window.parent && window.parent.postMessage({ tipo: 'IR_A_PADRON', persona_id: p.id, nombre: p.nombre }, '*'); } catch (e) {}
+  toast(`Abrí "Padrón" en el menú de la izquierda y buscá a ${p.nombre} (#${p.id}) para editar sus datos personales.`);
 };
 
 function abrirModalEditar() {
@@ -5119,7 +5082,7 @@ window.confirmarBaja = async () => {
 };
 
 // ===== MODAL REACTIVAR (dos caminos) =====
-let caminoReactivar = null; // 'PROP' (mes completo + 10%) | 'LIMPIO' (sin deuda, fecha nueva)
+let caminoReactivar = null; // 'PROP' (proporcional + 10%) | 'LIMPIO' (sin deuda, fecha nueva)
 let reactivarTurnos = [];   // turnos fijos que tenía el alumno (con cupo)
 let reactivarTurnosCargados = false;
 let reactivarDiaVenc = null; // día de vencimiento original (Camino 1 NO lo cambia)
@@ -5304,17 +5267,38 @@ window.recalcReactivarProp = () => {
   const diaVenc = reactivarDiaVenc || HOY.getDate();
   $('#reactivarPropDiaInfo').innerHTML = `Día de pago: <strong>${diaVenc}</strong> · <span style="color:var(--text-dim)">no cambia en este camino</span>`;
 
-  if (!precioMensual) {
+  if (esPlanPlano(plan)) {
+    const total = Math.round(precioMensual * 1.10);
+    $('#reactivarPropImporte').value = total;
+    det.innerHTML = `Plan de tarifa plana: se sugiere el mes completo ${fmt$(precioMensual)} + 10% = <strong>${fmt$(total)}</strong>. Editable.`;
+    return;
+  }
+
+  const clasesSem = clasesSemanaPlan(plan) || 0;
+  if (!clasesSem || !precioMensual) {
     $('#reactivarPropImporte').value = 0;
     det.textContent = 'No se pudo calcular automáticamente. Cargá el importe a mano.';
     return;
   }
-  // Reactivación = cuota COMPLETA del mes que va a usar + 10% de recargo por atraso.
-  // Se da de baja por no pagar, así que al volver debe el mes entero; el mes queda saldado.
-  const recargo = Math.round(precioMensual * 0.10);
-  const total = precioMensual + recargo;
+  const clasesMes = clasesSem * 4;
+  const precioClase = precioMensual / clasesMes;
+
+  const r = contarClasesPerdidas(diaVenc);
+  let clasesPerdidas, fuente;
+  if (r.porTurnos) {
+    clasesPerdidas = r.count;
+    fuente = `según sus turnos`;
+  } else {
+    // Sin turnos guardados → estimar por plan: clases/semana × semanas transcurridas desde el vencimiento
+    const msDia = 24 * 60 * 60 * 1000;
+    const semanas = Math.max(0, Math.ceil((r.hoy0 - r.inicio) / msDia / 7));
+    clasesPerdidas = Math.min(clasesSem * semanas, clasesMes);
+    fuente = `estimado por plan`;
+  }
+  const subtotal = Math.round(clasesPerdidas * precioClase);
+  const total = Math.round(subtotal * 1.10);
   $('#reactivarPropImporte').value = total;
-  det.innerHTML = `Cuota del mes ${fmt$(precioMensual)} + recargo 10% por atraso (${fmt$(recargo)}) = <strong>${fmt$(total)}</strong>. El mes queda saldado. Editable.`;
+  det.innerHTML = `Se perdió <strong>${clasesPerdidas}</strong> clase(s) desde el ${fmtFechaArg(r.inicio.toISOString().slice(0,10))} (${fuente}) · ${fmt$(precioClase)}/clase = ${fmt$(subtotal)} + 10% recargo = <strong>${fmt$(total)}</strong>. Editable.`;
 };
 
 // ===== SELECTOR DE TURNOS (modal Reactivar, los dos caminos) =====
@@ -5481,7 +5465,7 @@ window.confirmarReactivar = async () => {
       const medio = $('#reactivarPropMedio').value;
       const dia = reactivarDiaVenc || i.dia_vencimiento || null; // Camino 1: día de pago NO cambia
 
-      // 1) Cobro de la cuota del mes + 10% (si hay importe) → queda en Caja TF
+      // 1) Cobro del proporcional (si hay importe) → queda en Caja TF
       if (importe > 0) {
         const { error: ePago } = await sb.from('pagos_tf').insert({
           inscripcion_id: i.id,
@@ -5490,29 +5474,25 @@ window.confirmarReactivar = async () => {
           importe,
           medio,
           tipo_cobro: 'NORMAL',
-          observaciones: `REINGRESO mes completo + 10% recargo · ${motivo}`,
+          observaciones: `REINGRESO proporcional + 10% recargo · ${motivo}`,
           cargado_por: usuarioId
         });
         if (ePago) throw ePago;
       }
 
-      // 2) Reactivar SIN mover la fecha de reingreso (así conserva sus recuperatorios) y manteniendo el día de pago.
-      //    Registramos fecha_reactivacion_prop para que esta reactivación SÍ figure en Altas/Bajas
-      //    (la fecha_reingreso queda intacta a propósito, por eso hace falta esta columna aparte).
+      // 2) Reactivar SIN mover la fecha de reingreso (así conserva sus recuperatorios) y manteniendo el día de pago
       const { error } = await sb.from('inscripciones_tf').update({
         estado: 'ACTIVO',
         plan: planNuevo,
         dia_vencimiento: dia,
         motivo_reingreso: motivo,
-        fecha_reactivacion_prop: hoyISO,
         actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (error) throw error;
 
-      toast(`✓ ${p.nombre} reactivado · cobrado ${fmt$(importe)} (mes completo + 10%). Conserva sus recuperatorios.`);
+      toast(`✓ ${p.nombre} reactivado · cobrado ${fmt$(importe)} (proporcional + 10%). Conserva sus recuperatorios.`);
     } else {
-      // CAMINO LIMPIO: fecha de reingreso = hoy (corta los recuperatorios viejos), día nuevo, sin cobro.
-      //    Arranca de cero, así que limpiamos cualquier reactivación proporcional anterior.
+      // CAMINO LIMPIO: fecha de reingreso = hoy (corta los recuperatorios viejos), día nuevo, sin cobro
       const dia = parseInt($('#reactivarLimpioDia').value) || HOY.getDate();
       const { error } = await sb.from('inscripciones_tf').update({
         estado: 'ACTIVO',
@@ -5520,7 +5500,6 @@ window.confirmarReactivar = async () => {
         dia_vencimiento: dia,
         fecha_reingreso: hoyISO,
         motivo_reingreso: motivo,
-        fecha_reactivacion_prop: null,
         actualizado_en: new Date().toISOString()
       }).eq('id', i.id);
       if (error) throw error;
@@ -5989,9 +5968,7 @@ let esLu = false; // solo Lu puede borrar pagos / deshacer cambios de plan
 let usuarioEmail = ''; // mail del operador logueado (para permisos de reactivación)
 
 // ===== PERMISOS DE REACTIVACIÓN =====
-// Camino 1 (cobrar mes completo + 10%): Ale, Paula, Jime, Lu
-// Camino 2 (sin deuda, fecha nueva): solo Jime y Lu
-// 👇 Para sumar a Ale y Paula: descomentá las líneas y poné sus mails de login.
+// Los DOS caminos (proporcional + 10% y sin deuda/fecha nueva): Ale, Paula, Jime, Lu.
 const PERM_REACTIVAR_PROP = [
   'liclucianavelaz@gmail.com',   // Lu
   'jimenahllorente@gmail.com',   // Jime
@@ -6001,6 +5978,8 @@ const PERM_REACTIVAR_PROP = [
 const PERM_REACTIVAR_LIMPIO = [
   'liclucianavelaz@gmail.com',   // Lu
   'jimenahllorente@gmail.com',   // Jime
+  'alejandraperna@gmail.com',    // Ale
+  'paukappes@gmail.com',         // Paula
 ];
 function puedeReactivarProp() { return PERM_REACTIVAR_PROP.includes(usuarioEmail); }
 function puedeReactivarLimpio() { return PERM_REACTIVAR_LIMPIO.includes(usuarioEmail); }
