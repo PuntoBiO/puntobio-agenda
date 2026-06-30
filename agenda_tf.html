@@ -1783,6 +1783,41 @@ function renderResumen() {
   // Guardar el detalle para el popup
   window._evoPendientesDetalle = diasConPendientes;
 
+  // === ESTADO DE EVOLUCIÓN DEL DÍA SELECCIONADO ===
+  // Misma regla que la semana: solo clases CERRADAS cuentan.
+  //   - Sin clases cerradas todavía (ej. martes que no llegó) → "sin cerrar aún" (neutro)
+  //   - Con cerradas y pendientes → "X falta evolucionar · día"
+  //   - Con cerradas y todas evolucionadas → ✓ "Día evolucionado"
+  const fechaDiaSel = fechaRealDiaActivo();
+  let diaCerradas = 0;
+  if (!feriadoDe(fechaDiaSel) && fechaDiaSel >= pisoSistema) {
+    HORARIOS.filter(t => t.dia === diaActivo && (filtroActivo === 'todos' || t.servicio === filtroActivo))
+      .forEach(t => {
+        if (claseEstaCerrada(t.id, fechaDiaSel) && !cierreCentroDe(t.id, fechaDiaSel)) diaCerradas++;
+      });
+  }
+  const detDia = diasConPendientes.find(d => d.fechaIso === fechaDiaSel);
+  const diaPendientes = detDia ? detDia.turnos.reduce((s, x) => s + x.pendientes.length, 0) : 0;
+  let cardFaltaEvoDia;
+  if (diaCerradas === 0) {
+    // Ninguna clase cerrada todavía: el día aún no se evaluó (futuro o en curso).
+    cardFaltaEvoDia = `<div class="resumen-card falta-evo" style="opacity:.7;cursor:default">
+      <div class="resumen-num" style="color:#94a3b8">—</div>
+      <div class="resumen-label">📌 Día sin cerrar aún</div>
+    </div>`;
+  } else if (diaPendientes > 0) {
+    cardFaltaEvoDia = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo('${fechaDiaSel}')">
+      <div class="resumen-num">${diaPendientes}</div>
+      <div class="resumen-label">⚠️ Falta evolucionar · día</div>
+      <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;text-decoration:underline;">Ver detalle →</div>
+    </div>`;
+  } else {
+    cardFaltaEvoDia = `<div class="resumen-card falta-evo ok">
+      <div class="resumen-num">✓</div>
+      <div class="resumen-label">Día evolucionado</div>
+    </div>`;
+  }
+
   // Card de falta evolución (de la semana visible — solo días pasados + hoy con clase cerrada)
   let cardFaltaEvo;
   if (pendientesTotal > 0) {
@@ -1825,6 +1860,7 @@ function renderResumen() {
     <div class="resumen-card destacado"><div class="resumen-num">${totalOcup}</div><div class="resumen-label">Alumnos anotados</div></div>
     <div class="resumen-card"><div class="resumen-num">${totalCap-totalPresentes}</div><div class="resumen-label">Lugares libres</div></div>
     <div class="resumen-card"><div class="resumen-num">${pct}%</div><div class="resumen-label">Ocupación</div></div>
+    ${cardFaltaEvoDia}
     ${cardFaltaEvo}
     ${cardFaltaEvoMes}
   `;
@@ -1832,8 +1868,9 @@ function renderResumen() {
 
 // Popup con el detalle de pendientes de evolución de TODA LA SEMANA visible.
 // Agrupado por día → dentro por turno. Click en un turno → abre el modal para evolucionar.
-window.mostrarPendientesEvo = function() {
-  const dias = window._evoPendientesDetalle || [];
+window.mostrarPendientesEvo = function(soloFechaIso) {
+  let dias = window._evoPendientesDetalle || [];
+  if (soloFechaIso) dias = dias.filter(d => d.fechaIso === soloFechaIso);
   if (dias.length === 0) { cerrarPendientesEvo(); return; }
   const totalGeneral = dias.reduce((s, d) => s + d.turnos.reduce((ss, x) => ss + x.pendientes.length, 0), 0);
 
