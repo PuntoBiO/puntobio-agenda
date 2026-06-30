@@ -109,7 +109,7 @@
 
 <div class="container">
   <h1>🩹 Alertas Paciente</h1>
-  <p class="subtitle">Cómo se vienen sintiendo los pacientes según lo que cargan en Mi Espacio. Detectá quién viene manifestando dolor o Borg alto.</p>
+  <p class="subtitle">Cómo se vienen sintiendo los pacientes: junta el dolor que cargan ellos en Mi Espacio (👤) con el que cargan ustedes en las evoluciones (🩺), agrupado por persona. Detectá quién viene manifestando dolor o Borg alto.</p>
 
   <div class="stats-row" id="statsRow">
     <div class="stat-card rojo"><div class="label">🩹 Con dolor</div><div class="value" id="stDolor">—</div></div>
@@ -222,7 +222,7 @@ async function recargar() {
   const desde = `${desdeD.getFullYear()}-${String(desdeD.getMonth()+1).padStart(2,'0')}-${String(desdeD.getDate()).padStart(2,'0')}`;
 
   try {
-    // 1) Bitácora del período
+    // 1) Bitácora del período (lo que carga el ALUMNO en Mi Espacio)
     const { data: bit, error: e1 } = await sb.from('bitacora_fatiga')
       .select('persona_id,fecha,sueno,estado_general,dolor_nivel,dolor_zona,entreno_en_pb,fatiga_post_pb,hizo_deporte,fatiga_post_deporte,deporte_descripcion,notas')
       .gte('fecha', desde)
@@ -230,8 +230,17 @@ async function recargar() {
     if (e1) throw e1;
     const filas = bit || [];
 
-    // 2) Nombres de las personas que aparecen
-    const ids = [...new Set(filas.map(f => f.persona_id))];
+    // 2) Dolor cargado por el EQUIPO en las evoluciones TF (dolor = true)
+    const { data: evo, error: eE } = await sb.from('evoluciones_tf')
+      .select('persona_id,fecha,dolor,dolor_nivel,dolor_zona,autor_nombre,modulo,servicio,observacion,notas')
+      .eq('dolor', true)
+      .gte('fecha', desde)
+      .order('fecha', { ascending: false });
+    if (eE) throw eE;
+    const evos = evo || [];
+
+    // 3) Nombres de las personas (unión de las dos fuentes)
+    const ids = [...new Set([...filas.map(f => f.persona_id), ...evos.map(e => e.persona_id)])];
     let personasMap = {};
     if (ids.length) {
       const { data: pers, error: e2 } = await sb.from('personas')
@@ -241,49 +250,63 @@ async function recargar() {
       (pers || []).forEach(p => { personasMap[p.id] = p; });
     }
 
-    // 3) Agregar por persona
+    // 4) Agrupar por persona: alumno + profe JUNTOS, dentro de la misma etiqueta
     const map = {};
-    filas.forEach(b => {
-      const pid = b.persona_id;
+    function ensure(pid) {
       if (!map[pid]) {
         map[pid] = {
           pid,
           nombre: (personasMap[pid] && personasMap[pid].nombre) || 'Paciente',
           foto: (personasMap[pid] && personasMap[pid].foto_perfil) || null,
-          filas: [],
+          bitacora: [], profe: [],
           maxEva: null, zonaEva: null, diasDolor: new Set(),
           maxBorg: null, diasBorgAlto: new Set(),
           minSueno: null, minDia: null,
-          ultimaFecha: b.fecha
+          dolorAlumno: false, dolorProfe: false,
+          ultimaFecha: null
         };
       }
-      const a = map[pid];
-      a.filas.push(b);
-      // Dolor
+      return map[pid];
+    }
+
+    // Fuente ALUMNO (bitácora)
+    filas.forEach(b => {
+      const a = ensure(b.persona_id);
+      a.bitacora.push(b);
       if (b.dolor_nivel != null && b.dolor_nivel > 0) {
+        a.dolorAlumno = true;
         a.diasDolor.add(b.fecha);
         if (a.maxEva == null || b.dolor_nivel > a.maxEva) { a.maxEva = b.dolor_nivel; a.zonaEva = b.dolor_zona || a.zonaEva; }
       }
-      // Borg
       const bf = borgFila(b);
       if (bf != null) {
         if (a.maxBorg == null || bf > a.maxBorg) a.maxBorg = bf;
         if (bf >= BORG_ALTO) a.diasBorgAlto.add(b.fecha);
       }
-      // Bienestar
       if (b.sueno != null && (a.minSueno == null || b.sueno < a.minSueno)) a.minSueno = b.sueno;
       if (b.estado_general != null && (a.minDia == null || b.estado_general < a.minDia)) a.minDia = b.estado_general;
-      // Última fecha (filas vienen ordenadas desc, alcanza la primera)
-      if (b.fecha > a.ultimaFecha) a.ultimaFecha = b.fecha;
+      if (a.ultimaFecha == null || b.fecha > a.ultimaFecha) a.ultimaFecha = b.fecha;
+    });
+
+    // Fuente PROFE (evoluciones TF con dolor). El mismo día cargado por alumno y
+    // profe cuenta como UN día (el Set es sobre la fecha) → sin duplicar.
+    evos.forEach(e => {
+      const a = ensure(e.persona_id);
+      a.profe.push(e);
+      a.dolorProfe = true;
+      a.diasDolor.add(e.fecha);
+      if (e.dolor_nivel != null && (a.maxEva == null || e.dolor_nivel > a.maxEva)) { a.maxEva = e.dolor_nivel; a.zonaEva = e.dolor_zona || a.zonaEva; }
+      if (a.zonaEva == null && e.dolor_zona) a.zonaEva = e.dolor_zona;
+      if (a.ultimaFecha == null || e.fecha > a.ultimaFecha) a.ultimaFecha = e.fecha;
     });
 
     PACIENTES = Object.values(map).map(a => {
-      a.tieneDolor = a.maxEva != null && a.maxEva > 0;
+      a.tieneDolor = a.dolorAlumno || a.dolorProfe;
       a.dolorAlto = a.maxEva != null && a.maxEva >= EVA_ALTO;
       a.borgAlto = a.maxBorg != null && a.maxBorg >= BORG_ALTO;
       a.bienestarBajo = (a.minSueno != null && a.minSueno <= SUENO_BAJO) || (a.minDia != null && a.minDia <= SUENO_BAJO);
       // score para ordenar: dolor manda, después Borg, después recencia
-      a.score = (a.maxEva || 0) * 100 + (a.maxBorg || 0) * 5;
+      a.score = (a.maxEva || 0) * 100 + (a.maxBorg || 0) * 5 + (a.tieneDolor ? 10 : 0);
       return a;
     });
 
@@ -336,9 +359,20 @@ function filtrar() {
 
 function chipDolor(p) {
   if (!p.tieneDolor) return '';
+  if (p.maxEva == null) {
+    // Profe cargó "con dolor" sin EVA numérico
+    return `<span class="chip" style="background:#fee2e2;color:#b91c1c">🩹 Con dolor${p.zonaEva ? ' · ' + esc(p.zonaEva) : ''}</span>`;
+  }
   const c = colorEsc(p.maxEva, 10);
   const z = p.zonaEva ? ' · ' + esc(p.zonaEva) : '';
   return `<span class="chip" style="background:${c}22;color:${c}">🩹 EVA ${p.maxEva}${z}</span>`;
+}
+// Etiquetas de quién reportó el dolor (van juntas en la misma persona)
+function chipsOrigen(p) {
+  const out = [];
+  if (p.dolorAlumno) out.push('<span class="chip" style="background:#ede9fe;color:#6d28d9">👤 Alumno</span>');
+  if (p.dolorProfe) out.push('<span class="chip" style="background:#dbeafe;color:#1e40af">🩺 Profe</span>');
+  return out.join('');
 }
 function chipBorg(p) {
   if (p.maxBorg == null) return '';
@@ -359,11 +393,11 @@ function render() {
     return;
   }
   cont.innerHTML = arr.map(p => {
-    const cls = p.dolorAlto ? 'alerta-roja' : (p.borgAlto ? 'alerta-naranja' : '');
+    const cls = p.dolorAlto ? 'alerta-roja' : ((p.borgAlto || p.tieneDolor) ? 'alerta-naranja' : '');
     const avatar = p.foto
       ? `<div class="avatar" style="background-image:url('${esc(p.foto)}')"></div>`
       : `<div class="avatar">${esc((p.nombre || '?').trim().charAt(0).toUpperCase())}</div>`;
-    const chips = [chipDolor(p), chipBorg(p), chipDias(p)].filter(Boolean).join('') ||
+    const chips = [chipDolor(p), chipsOrigen(p), chipBorg(p), chipDias(p)].filter(Boolean).join('') ||
       '<span class="chip gris">Sin alertas · cargó bitácora</span>';
     return `<div class="card-p ${cls}" onclick="abrirModal(${p.pid})">
       ${avatar}
@@ -393,13 +427,39 @@ function renderTimeline(filas) {
   }).join('');
 }
 
+// Dolor cargado por el equipo (evoluciones TF)
+function renderProfe(evos) {
+  return evos.map(e => {
+    const chips = [];
+    if (e.dolor_nivel != null) { const c = colorEsc(e.dolor_nivel, 10); chips.push(`<span class="chip" style="background:${c}22;color:${c}">🩹 Dolor EVA ${e.dolor_nivel}${e.dolor_zona ? ' · ' + esc(e.dolor_zona) : ''}</span>`); }
+    else chips.push(`<span class="chip" style="background:#fee2e2;color:#b91c1c">🩹 Con dolor${e.dolor_zona ? ' · ' + esc(e.dolor_zona) : ''}</span>`);
+    const quien = [e.modulo || e.servicio, e.autor_nombre].filter(Boolean).join(' · ');
+    return `<div class="dia-card" style="border-left:3px solid #1e40af">
+      <div class="dia-fecha" style="color:#1e40af">${fmtFecha(e.fecha)}${quien ? ` · <span style="font-weight:600;color:#64748b">${esc(quien)}</span>` : ''}</div>
+      <div class="chips" style="margin-top:5px">${chips.join('')}</div>
+      ${e.observacion ? `<div style="font-size:12.5px;color:#0f172a;margin-top:5px;white-space:pre-wrap">${esc(e.observacion)}</div>` : ''}
+      ${e.notas ? `<div style="font-size:12px;color:#64748b;margin-top:4px;font-style:italic;white-space:pre-wrap">${esc(e.notas)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
 function abrirModal(pid) {
   const p = PACIENTES.find(x => String(x.pid) === String(pid));
   if (!p) return;
   modalPid = pid;
   document.getElementById('mNombre').textContent = '💪 ' + p.nombre;
-  document.getElementById('mMeta').textContent = `#${p.pid} · ${p.filas.length} registro${p.filas.length > 1 ? 's' : ''} en el período`;
-  document.getElementById('mBody').innerHTML = renderTimeline(p.filas);
+  const total = p.bitacora.length + p.profe.length;
+  document.getElementById('mMeta').textContent = `#${p.pid} · ${total} registro${total !== 1 ? 's' : ''} en el período`;
+  let html = '';
+  if (p.profe.length) {
+    html += `<div style="font-size:12px;font-weight:800;color:#1e40af;text-transform:uppercase;letter-spacing:.3px;margin:2px 0 8px">🩺 Dolor cargado por el equipo</div>`;
+    html += renderProfe(p.profe);
+  }
+  if (p.bitacora.length) {
+    html += `<div style="font-size:12px;font-weight:800;color:#6d28d9;text-transform:uppercase;letter-spacing:.3px;margin:${p.profe.length ? '14px' : '2px'} 0 8px">👤 Lo que cargó el alumno (Mi Espacio)</div>`;
+    html += renderTimeline(p.bitacora);
+  }
+  document.getElementById('mBody').innerHTML = html || '<div class="empty">Sin registros.</div>';
   document.getElementById('modal').classList.add('open');
 }
 function cerrarModal() { document.getElementById('modal').classList.remove('open'); modalPid = null; }
