@@ -1089,6 +1089,20 @@ async function refrescarToken() {
   return _refrescandoToken;
 }
 
+// Garantiza que haya un access_token de USUARIO antes de disparar consultas a
+// tablas con RLS "authenticated" (evoluciones_tf, asistencia, etc).
+// Por qué: si una consulta sale SIN token (con la key anónima), el servidor NO
+// da error → responde 200 con lista VACÍA. La cache quedaba en cero y todo
+// aparecía como "falta evolución". Si no hay token usable, lo refrescamos antes.
+// Devuelve true si quedó una sesión usable.
+async function asegurarSesion() {
+  try {
+    const t = (typeof obtenerToken === 'function') ? obtenerToken() : '';
+    if (t && t.length > 20) return true;   // hay token (si venció, fetchSupabase lo refresca al 401)
+    return await refrescarToken();          // no hay token todavía → obtenerlo del refresh_token
+  } catch (e) { return false; }
+}
+
 // Wrapper que detecta 401 JWT expired, renueva el token y reintenta UNA vez.
 // Si el refresh falla, abre el overlay de login y propaga el error original.
 async function fetchSupabase(url, opciones = {}, ms = 12000) {
@@ -1751,7 +1765,9 @@ function renderResumen() {
         if (est !== 'presente') return;
         // Evolución matcheada por alumno + día (no atada al turno puntual ni al
         // formato de fecha): si ese día tiene evolución cargada, NO falta.
-        if (!EVO_PF.has(`${a.id}-${fechaIso}`)) {
+        // Solo contamos pendientes si la cache de evoluciones es CONFIABLE; si no
+        // se pudo cargar con sesión, no afirmamos pendientes (evita falsos en masa).
+        if (EVO_CONFIABLE && !EVO_PF.has(`${a.id}-${fechaIso}`)) {
           pendientes.push({ id: a.id, nombre: a.nombre });
         }
       });
@@ -1891,6 +1907,8 @@ async function cargarPendientesMes() {
     // PAGINADO (supabaseQueryAll): si un mes tiene >1000 evoluciones/asistencias,
     // Supabase trunca a 1000 y deja los días más nuevos afuera → alumnos ya
     // evolucionados aparecían como "sin evolucionar". Paginando se traen TODAS.
+    // Aseguramos sesión antes: sin token estas tablas (RLS) devuelven 200 vacío.
+    await asegurarSesion();
     const [asis, evo, agr, cer] = await Promise.all([
       supabaseQueryAll('asistencia', `?select=id,turno_id,fecha,persona_id,estado&fecha=gte.${desde}&fecha=lte.${hoy}`),
       supabaseQueryAll('evoluciones_tf', `?select=id,turno_id,fecha,persona_id&fecha=gte.${desde}&fecha=lte.${hoy}`),
@@ -2144,9 +2162,11 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
     ? ''
     : (ev.presentes === 0
       ? ''
-      : (ev.completa
-        ? `<span class="evo-badge eb-ok" title="Todos los presentes evolucionados">✅ EVOLUCIONADO</span>`
-        : `<span class="evo-badge eb-falta" title="Falta evolución (${ev.evolucionados}/${ev.presentes} presentes)">⚠️ FALTA EVOLUCIÓN</span>`));
+      : (ev.incierto
+        ? ''   // cache de evoluciones no confiable (sesión): no afirmamos nada
+        : (ev.completa
+          ? `<span class="evo-badge eb-ok" title="Todos los presentes evolucionados">✅ EVOLUCIONADO</span>`
+          : `<span class="evo-badge eb-falta" title="Falta evolución (${ev.evolucionados}/${ev.presentes} presentes)">⚠️ FALTA EVOLUCIÓN</span>`)));
   const claseCard = motivoFeriado ? ' card-feriado' : (cerrada?' card-cerrada':'');
   // Clase de fondo según servicio (naranja para Entrenamiento, violeta para Kinefilaxia)
   const claseServicio = motivoFeriado ? '' : (t.servicio === 'Entrenamiento' ? ' es-entrenamiento' : ' es-kinefilaxia');
@@ -2900,9 +2920,15 @@ async function marcarPendientesComoAusentes(t, fecha) {
 // Sirve para saber QUÉ presentes tienen evolución (no solo cuántos).
 let EVO_ALUMNO = {};
 let EVO_PF = new Set(); // evolución por persona+fecha (YYYY-MM-DD), para el panel "falta evolucionar"
+// ¿La última carga de evoluciones es CONFIABLE? Si la consulta falla o sale sin
+// sesión (200 vacío anónimo), queda en false → el badge y el popup no afirman
+// "falta evolución" para no mostrar falsos pendientes en masa.
+let EVO_CONFIABLE = false;
 async function cargarEvosPorTurno() {
-  EVO_ALUMNO = {};
-  EVO_PF = new Set();
+  // RLS authenticated: sin token, el server responde 200 con lista VACÍA (no error).
+  // Aseguramos sesión ANTES de consultar para no traer cero por falta de token.
+  const haySesion = await asegurarSesion();
+  let filas = null;
   try {
     // IMPORTANTE: filtrar gte Y lte al lado del servidor (más limit alto), sino
     // Supabase corta en 1000 filas y las evoluciones recientes quedan afuera →
@@ -2912,14 +2938,27 @@ async function cargarEvosPorTurno() {
     viernes.setDate(lunes.getDate() + 4);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
     const viernesIso = fmt(viernes);
-    const filas = await supabaseQueryAll('evoluciones_tf',
+    filas = await supabaseQueryAll('evoluciones_tf',
       `?select=id,turno_id,fecha,persona_id&fecha=gte.${fmt(lunes)}&fecha=lte.${viernesIso}`);
-    (filas || []).forEach(f => {
-      const fd = String(f.fecha).slice(0, 10); // normaliza por si fecha viene como timestamp
-      EVO_ALUMNO[`${f.turno_id}-${fd}-${f.persona_id}`] = true;
-      EVO_PF.add(`${f.persona_id}-${fd}`);
-    });
-  } catch (e) { EVO_ALUMNO = {}; EVO_PF = new Set(); console.warn('No se pudo cargar evoluciones por turno', e); }
+  } catch (e) {
+    // Falló la consulta: NO pisamos la cache anterior con vacío (evita falsos pendientes).
+    EVO_CONFIABLE = false;
+    console.warn('No se pudo cargar evoluciones por turno', e);
+    return;
+  }
+  // Reconstruimos la cache SOLO con datos en mano.
+  const nuevoAlumno = {};
+  const nuevoPF = new Set();
+  (filas || []).forEach(f => {
+    const fd = String(f.fecha).slice(0, 10); // normaliza por si fecha viene como timestamp
+    nuevoAlumno[`${f.turno_id}-${fd}-${f.persona_id}`] = true;
+    nuevoPF.add(`${f.persona_id}-${fd}`);
+  });
+  EVO_ALUMNO = nuevoAlumno;
+  EVO_PF = nuevoPF;
+  // Confiable si había sesión, o si la consulta trajo al menos una fila (prueba de
+  // que fue autenticada). Un 200 vacío SIN sesión no es de fiar → queda no confiable.
+  EVO_CONFIABLE = haySesion || (filas && filas.length > 0);
 }
 
 // ¿Está cerrada esta clase (turno) en la fecha dada?
@@ -3059,7 +3098,9 @@ function estadoEvoClase(t, fecha) {
     if (EVO_ALUMNO[`${t.id}-${fecha}-${a.id}`]) evolucionados++;
   });
   const completa = presentes > 0 && evolucionados >= presentes;
-  return { presentes, ausentes, evolucionados, completa };
+  // incierto: la cache de evoluciones no se pudo cargar con sesión → no afirmamos
+  // "falta evolución" (evita falsos pendientes en masa por un hipo de sesión).
+  return { presentes, ausentes, evolucionados, completa, incierto: !EVO_CONFIABLE };
 }
 
 // =============================================
