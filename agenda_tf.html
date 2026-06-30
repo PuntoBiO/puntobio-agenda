@@ -1725,14 +1725,15 @@ function renderResumen() {
 
   // === CÁLCULO SEMANAL DE PENDIENTES DE EVOLUCIÓN ===
   // Recorremos los 5 días (Lunes a Viernes) de la semana visible.
-  // CRITERIO: SOLO clases CERRADAS (manual o auto). Una clase abierta o futura
-  // está en curso/no pasó → no se evalúa todavía. Mismo criterio que el badge de
-  // cada tarjeta, así día y semana coinciden. El sistema arrancó en junio 2026:
-  // nunca se cuentan pendientes anteriores.
+  // CRITERIO: SOLO clases CERRADAS se evalúan (una abierta/futura está en curso/no
+  // pasó). Además contamos cuántas clases quedan SIN cerrar (por cerrar), para poder
+  // mostrar "Al día" cuando lo cerrado está OK pero todavía falta cerrar el resto.
+  // El sistema arrancó en junio 2026: nunca se cuentan pendientes anteriores.
   const lunes = getLunes(offsetSemana);
   const hoyIso_ = hoyIso();
   const pisoSistema = '2026-06-01';
   let pendientesTotal = 0;
+  let semanaPorCerrar = 0;  // clases programadas que todavía no se cerraron
   const diasConPendientes = []; // [{ dia, fechaIso, fechaLabel, esHoy, turnos:[{turno,pendientes}] }]
   DIAS.forEach((diaNombre, idx) => {
     const fObj = new Date(lunes); fObj.setDate(lunes.getDate() + idx);
@@ -1740,38 +1741,29 @@ function renderResumen() {
     if (fechaIso < pisoSistema) return; // antes del arranque del sistema: no aplica
     if (feriadoDe(fechaIso)) return;    // feriado: no aplica
     const esHoyDia = (fechaIso === hoyIso_);
-    // Turnos de ESTE día (respetando el filtro Todos/Entrenamiento/Kinefilaxia).
-    // SOLO clases YA CERRADAS cuentan: las abiertas/futuras no se evalúan.
-    const turnosDia = HORARIOS.filter(t => {
-      if (t.dia !== diaNombre) return false;
-      if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
-      if (!claseEstaCerrada(t.id, fechaIso)) return false;
-      return true;
-    });
+    const turnosDelDia = HORARIOS.filter(t =>
+      t.dia === diaNombre && (filtroActivo === 'todos' || t.servicio === filtroActivo));
     const turnosConPendientes = [];
-    turnosDia.forEach(t => {
-      const cerrada = true; // ya filtramos solo cerradas arriba
-      // Si la clase fue CERRADA POR EL CENTRO (decisión nuestra), ese día el turno no
-      // existe: no genera pendientes de evolución para nadie (no figura "sin evolucionar").
+    turnosDelDia.forEach(t => {
+      // Cerrada POR EL CENTRO (cancelada): no genera pendientes ni cuenta por cerrar.
       if (cierreCentroDe(t.id, fechaIso)) return;
+      if (!claseEstaCerrada(t.id, fechaIso)) { semanaPorCerrar++; return; } // todavía por cerrar
+      // Clase cerrada: contamos pendientes de evolución.
       const alumnos = getAlumnos(t, fechaIso);
       const pendientes = [];
       alumnos.forEach(a => {
         const key = `${t.id}-${fechaIso}-${a.id}`;
         const est = ASISTENCIA_SEMANA[key];
         // Cuenta a quien SE ESPERA que venga (no ausente). Mismo criterio que el
-        // badge (estadoEvoClase), así día y semana coinciden. En clases cerradas
-        // todos quedan presente/ausente, así que esto = "presentes sin evolución".
+        // badge (estadoEvoClase). En clases cerradas todos quedan presente/ausente.
         if (_liberaLugarTF(key, est)) return;  // ausente firme → no cuenta
-        // Pendiente si no tiene evolución cargada ese día. Solo contamos si la cache
-        // de evoluciones es CONFIABLE (si no se pudo cargar con sesión, no afirmamos
-        // pendientes → evita falsos en masa).
+        // Pendiente si no tiene evolución cargada ese día. Solo si la cache es CONFIABLE.
         if (EVO_CONFIABLE && !EVO_PF.has(`${a.id}-${fechaIso}`)) {
           pendientes.push({ id: a.id, nombre: a.nombre });
         }
       });
       if (pendientes.length > 0) {
-        turnosConPendientes.push({ turno: t, pendientes, cerrada });
+        turnosConPendientes.push({ turno: t, pendientes, cerrada: true });
         pendientesTotal += pendientes.length;
       }
     });
@@ -1784,16 +1776,19 @@ function renderResumen() {
   window._evoPendientesDetalle = diasConPendientes;
 
   // === ESTADO DE EVOLUCIÓN DEL DÍA SELECCIONADO ===
-  // Misma regla que la semana: solo clases CERRADAS cuentan.
-  //   - Sin clases cerradas todavía (ej. martes que no llegó) → "sin cerrar aún" (neutro)
-  //   - Con cerradas y pendientes → "X falta evolucionar · día"
-  //   - Con cerradas y todas evolucionadas → ✓ "Día evolucionado"
+  // Solo clases CERRADAS se evalúan. Estados:
+  //   - Sin clases cerradas todavía (ej. martes que no llegó) → "sin cerrar aún"
+  //   - Cerradas con pendientes → "X falta evolucionar · día"
+  //   - Cerradas todas OK pero quedan clases por cerrar → "Al día · día"
+  //   - Cerradas todas OK y nada por cerrar → ✓ "Día evolucionado"
   const fechaDiaSel = fechaRealDiaActivo();
-  let diaCerradas = 0;
+  let diaCerradas = 0, diaPorCerrar = 0;
   if (!feriadoDe(fechaDiaSel) && fechaDiaSel >= pisoSistema) {
     HORARIOS.filter(t => t.dia === diaActivo && (filtroActivo === 'todos' || t.servicio === filtroActivo))
       .forEach(t => {
-        if (claseEstaCerrada(t.id, fechaDiaSel) && !cierreCentroDe(t.id, fechaDiaSel)) diaCerradas++;
+        if (cierreCentroDe(t.id, fechaDiaSel)) return;             // cancelada por centro: no cuenta
+        if (claseEstaCerrada(t.id, fechaDiaSel)) diaCerradas++;
+        else diaPorCerrar++;
       });
   }
   const detDia = diasConPendientes.find(d => d.fechaIso === fechaDiaSel);
@@ -1811,6 +1806,13 @@ function renderResumen() {
       <div class="resumen-label">⚠️ Falta evolucionar · día</div>
       <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;text-decoration:underline;">Ver detalle →</div>
     </div>`;
+  } else if (diaPorCerrar > 0) {
+    // Lo cerrado está OK pero todavía quedan clases por cerrar.
+    cardFaltaEvoDia = `<div class="resumen-card falta-evo" style="background:#eff6ff;border-color:#bfdbfe;cursor:default">
+      <div class="resumen-num" style="color:#2563eb">✓</div>
+      <div class="resumen-label">Al día · día</div>
+      <div style="font-size:11px;font-weight:600;color:#2563eb;margin-top:6px">Faltan ${diaPorCerrar} por cerrar</div>
+    </div>`;
   } else {
     cardFaltaEvoDia = `<div class="resumen-card falta-evo ok">
       <div class="resumen-num">✓</div>
@@ -1818,13 +1820,20 @@ function renderResumen() {
     </div>`;
   }
 
-  // Card de falta evolución (de la semana visible — solo días pasados + hoy con clase cerrada)
+  // Card de falta evolución de la SEMANA visible (solo clases cerradas).
   let cardFaltaEvo;
   if (pendientesTotal > 0) {
     cardFaltaEvo = `<div class="resumen-card falta-evo" onclick="mostrarPendientesEvo()">
       <div class="resumen-num">${pendientesTotal}</div>
       <div class="resumen-label">⚠️ Falta evolucionar · semana</div>
       <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;text-decoration:underline;">Ver detalle →</div>
+    </div>`;
+  } else if (semanaPorCerrar > 0) {
+    // Lo cerrado está todo evolucionado, pero todavía quedan clases por cerrar.
+    cardFaltaEvo = `<div class="resumen-card falta-evo" style="background:#eff6ff;border-color:#bfdbfe;cursor:default">
+      <div class="resumen-num" style="color:#2563eb">✓</div>
+      <div class="resumen-label">Al día · semana</div>
+      <div style="font-size:11px;font-weight:600;color:#2563eb;margin-top:6px">Faltan ${semanaPorCerrar} clase${semanaPorCerrar!==1?'s':''} por cerrar</div>
     </div>`;
   } else {
     cardFaltaEvo = `<div class="resumen-card falta-evo ok">
@@ -1847,6 +1856,13 @@ function renderResumen() {
       <div class="resumen-num">${mesData.total}</div>
       <div class="resumen-label">📅 Falta evolucionar · mes (v2)</div>
       <div style="font-size:11px;font-weight:600;color:#a16207;margin-top:6px;text-decoration:underline;">Ver detalle →</div>
+    </div>`;
+  } else if (mesData.porCerrar > 0) {
+    // Lo cerrado del mes está todo evolucionado, pero quedan clases por cerrar.
+    cardFaltaEvoMes = `<div class="resumen-card falta-evo" style="background:#eff6ff;border-color:#bfdbfe;cursor:default" id="card-mes-evo">
+      <div class="resumen-num" style="color:#2563eb">✓</div>
+      <div class="resumen-label">Al día · mes</div>
+      <div style="font-size:11px;font-weight:600;color:#2563eb;margin-top:6px">Faltan ${mesData.porCerrar} clase${mesData.porCerrar!==1?'s':''} por cerrar</div>
     </div>`;
   } else {
     cardFaltaEvoMes = `<div class="resumen-card falta-evo ok" id="card-mes-evo">
@@ -2050,11 +2066,30 @@ async function cargarPendientesMes() {
       }
     }
 
-    window._pendientesMesCache = { total, dias: diasPendientes, mesIso };
+    // Clases del mes que TODAVÍA no se cerraron (deuda de cierre + las que vienen).
+    // Recorre el mes completo (no solo hasta hoy) para avisar "faltan por cerrar".
+    let porCerrar = 0;
+    for (let d = 1; d <= 31; d++) {
+      const fObj = new Date(año, mes - 1, d);
+      if (fObj.getMonth() !== mes - 1) break;
+      const fechaIso = `${año}-${String(mes).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if (fechaIso < desde) continue;
+      if (feriadoDe(fechaIso)) continue;
+      const dow = fObj.getDay();
+      if (dow === 0 || dow === 6) continue; // sin clases en fin de semana
+      const diaNombre = DIAS[dow - 1];
+      HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
+        const cInfo = cerM.get(`${t.id}-${fechaIso}`);
+        if (cInfo && cInfo.tipo === 'centro') return; // cancelada por el centro: no cuenta
+        if (!cInfo) porCerrar++;                        // no cerrada → por cerrar
+      });
+    }
+
+    window._pendientesMesCache = { total, dias: diasPendientes, mesIso, porCerrar };
     renderResumen();
   } catch (e) {
     console.warn('No se pudo cargar pendientes del mes', e);
-    window._pendientesMesCache = { total: 0, dias: [], mesIso: '' };
+    window._pendientesMesCache = { total: 0, dias: [], mesIso: '', porCerrar: 0 };
     renderResumen();
   }
 }
