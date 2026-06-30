@@ -1725,11 +1725,10 @@ function renderResumen() {
 
   // === CÁLCULO SEMANAL DE PENDIENTES DE EVOLUCIÓN ===
   // Recorremos los 5 días (Lunes a Viernes) de la semana visible.
-  // CRITERIO (igual que el badge de cada tarjeta, para que coincidan): cuenta como
-  // pendiente todo alumno que SE ESPERA que venga (no está ausente) y todavía no
-  // tiene evolución cargada. Esto incluye días futuros y clases aún no cerradas:
-  // así la semana que viene PROYECTA cuántos quedarían por evolucionar.
-  // El sistema arrancó en junio 2026: nunca se cuentan pendientes anteriores.
+  // CRITERIO: SOLO clases CERRADAS (manual o auto). Una clase abierta o futura
+  // está en curso/no pasó → no se evalúa todavía. Mismo criterio que el badge de
+  // cada tarjeta, así día y semana coinciden. El sistema arrancó en junio 2026:
+  // nunca se cuentan pendientes anteriores.
   const lunes = getLunes(offsetSemana);
   const hoyIso_ = hoyIso();
   const pisoSistema = '2026-06-01';
@@ -1742,25 +1741,27 @@ function renderResumen() {
     if (feriadoDe(fechaIso)) return;    // feriado: no aplica
     const esHoyDia = (fechaIso === hoyIso_);
     // Turnos de ESTE día (respetando el filtro Todos/Entrenamiento/Kinefilaxia).
-    // Incluimos TODAS las clases (cerradas o no) para proyectar también el futuro.
+    // SOLO clases YA CERRADAS cuentan: las abiertas/futuras no se evalúan.
     const turnosDia = HORARIOS.filter(t => {
       if (t.dia !== diaNombre) return false;
       if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
+      if (!claseEstaCerrada(t.id, fechaIso)) return false;
       return true;
     });
     const turnosConPendientes = [];
     turnosDia.forEach(t => {
+      const cerrada = true; // ya filtramos solo cerradas arriba
       // Si la clase fue CERRADA POR EL CENTRO (decisión nuestra), ese día el turno no
       // existe: no genera pendientes de evolución para nadie (no figura "sin evolucionar").
       if (cierreCentroDe(t.id, fechaIso)) return;
-      const cerrada = claseEstaCerrada(t.id, fechaIso);
       const alumnos = getAlumnos(t, fechaIso);
       const pendientes = [];
       alumnos.forEach(a => {
         const key = `${t.id}-${fechaIso}-${a.id}`;
         const est = ASISTENCIA_SEMANA[key];
-        // Cuenta si SE ESPERA que venga (no ausente): presente o sin marcar todavía.
-        // Mismo criterio que estadoEvoClase, así badge y card coinciden.
+        // Cuenta a quien SE ESPERA que venga (no ausente). Mismo criterio que el
+        // badge (estadoEvoClase), así día y semana coinciden. En clases cerradas
+        // todos quedan presente/ausente, así que esto = "presentes sin evolución".
         if (_liberaLugarTF(key, est)) return;  // ausente firme → no cuenta
         // Pendiente si no tiene evolución cargada ese día. Solo contamos si la cache
         // de evoluciones es CONFIABLE (si no se pudo cargar con sesión, no afirmamos
@@ -2155,8 +2156,9 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
     : (cerrada
       ? `<span class="cierre-badge cb-ok">Clase cerrada</span>`
       : '');
-  // Badge de EVOLUCIÓN: medido sobre los PRESENTES (los ausentes no cuentan).
-  const badgeEvo = motivoFeriado
+  // Badge de EVOLUCIÓN: SOLO en clases CERRADAS (una clase abierta está en curso,
+  // todavía no se le exige evolución). Medido sobre los PRESENTES (ausentes no cuentan).
+  const badgeEvo = (motivoFeriado || !cerrada)
     ? ''
     : (ev.presentes === 0
       ? ''
