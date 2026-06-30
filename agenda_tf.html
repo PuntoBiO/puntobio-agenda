@@ -3047,7 +3047,7 @@ function chequearVueltaDeAusente(t, fecha, personaId) {
 // Un alumno cuenta para evolución solo si NO está ausente.
 // Devuelve: { presentes, ausentes, evolucionados, completa }
 function estadoEvoClase(t, fecha) {
-  const alumnos = getAlumnos(t);            // anotados (fijos + agregados del día)
+  const alumnos = getAlumnos(t, fecha);     // anotados (fijos + agregados) de ESA fecha exacta
   let presentes = 0, ausentes = 0, evolucionados = 0;
   alumnos.forEach(a => {
     const key = `${t.id}-${fecha}-${a.id}`;
@@ -4980,9 +4980,17 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   // Marcar en la grilla que este alumno ya tiene evolución (turno+fecha+persona)
   EVO_ALUMNO[`${t.id}-${fecha}-${personaId}`] = true;
   EVO_PF.add(`${personaId}-${String(fecha).slice(0,10)}`);
-  // REGLA PuntoBiO: la evolución NO marca presente automáticamente.
-  // La asistencia es independiente. Si no está evolucionado, no es presente.
-  // Al cerrar la clase, los sin evolución se preguntan uno por uno: ¿vino o ausente?
+  // REGLA PuntoBiO (jun 2026): al evolucionar, marcamos PRESENTE automáticamente.
+  // Si lo evolucionás, es porque vino → queda en verde y deja asistencia +
+  // evolución consistentes (no quedan "presentes sin marcar").
+  // EXCEPCIÓN: si ya está AUSENTE o ausente-justificada NO lo pisamos, porque ahí
+  // hay una decisión administrativa detrás (recuperatorio, aviso previo, etc).
+  const _estAsis = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${personaId}`];
+  const _esAusente = (_estAsis === 'ausente' || _estAsis === 'ausente-justificada');
+  if (!_esAusente && _estAsis !== 'presente') {
+    try { await guardarAsistencia(t, personaId, 'presente'); }
+    catch (e) { console.warn('No se pudo marcar presente al evolucionar', e); }
+  }
 }
 
 // BORRAR la evolución de hoy de un alumno. SOLO Lu. Borra de la base la fila
