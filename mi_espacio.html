@@ -862,6 +862,9 @@
     </div>
     <input type="file" id="inputFoto" accept="image/*" style="display:none" onchange="subirFoto(event)">
 
+    <!-- Selector de persona (apoderado / uso compartido) — se llena en JS solo si hay a-cargo -->
+    <div id="pb-selector-persona" style="display:none; margin:0 2px 14px;"></div>
+
     <!-- Reglamento desplegable (se llena en JS con bloqueReglamento) -->
     <div id="pb-reglamento-top"></div>
 
@@ -1173,17 +1176,117 @@ function hoyISO(){
   // 2.c) ¿Tiene un plan TF activo? (RPC + fallback a inscripciones_tf)
   const tienePlan = await chequearPlanActivo(per.id);
 
-  // Equipo: si no tiene plan, va al panel del equipo (no es su espacio).
-  //         Si tiene plan (doble rol), sigue y ve su espacio.
-  // Alumno/paciente: sin plan activo NO entra hasta tener uno.
+  // 2.d) Cargar mis personas (yo + a-cargo). Necesario para el selector y para
+  //      decidir el acceso de un apoderado que no es paciente (no tiene plan propio).
+  window._titularPer = per;
+  await montarSelectorPersonas(per);
+  const tieneACargo = (window._misPersonas || []).length > 1;
+
+  // Equipo: sin plan va al panel del equipo (salvo que sea apoderado).
+  // Alumno/paciente: sin plan NO entra... salvo que tenga gente a cargo.
   if(per.es_equipo){
-    if(!tienePlan){ mostrarEquipo(); return; }
+    if(!tienePlan && !tieneACargo){ mostrarEquipo(); return; }
   } else {
-    if(!tienePlan){ mostrarSinPlan(); return; }
+    if(!tienePlan && !tieneACargo){ mostrarSinPlan(); return; }
   }
 
-  await cargarEspacio(per);
+  // Persona inicial: si NO tengo plan propio pero soy apoderado, arranco viendo a mi
+  // primer a-cargo (que es quien tiene la actividad). Si tengo plan, arranco en mí.
+  let perInicial = per;
+  if(!tienePlan && tieneACargo){
+    const primerACargo = (window._misPersonas || []).find(x => !x.es_titular);
+    if(primerACargo){
+      const { data: pa } = await sb.from('personas')
+        .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular, fecha_nacimiento, aviso_aumento_jul26_veces')
+        .eq('id', primerACargo.persona_id).maybeSingle();
+      if(pa){ perInicial = pa; window._personaActivaId = Number(pa.id); window._viendoOtro = true; }
+    }
+  }
+  await cargarEspacio(perInicial);
+  renderSelectorPersonas();
 })();
+
+// ============================================================
+//  SELECTOR DE PERSONA · apoderado / uso compartido de Mi Espacio
+//  Si el usuario tiene personas a cargo, muestra "¿A quién querés ver?"
+//  y al elegir re-corre cargarEspacio() sobre esa persona (modo lectura).
+// ============================================================
+async function montarSelectorPersonas(titular){
+  window._titularPer = titular;
+  window._personaActivaId = Number(titular.id);
+  window._viendoOtro = false;
+  window._misPersonas = [];
+  try {
+    const { data, error } = await sb.rpc('mi_espacio_personas');
+    if (error) { console.warn('mi_espacio_personas', error); return; }
+    window._misPersonas = data || [];
+  } catch(e){ console.warn('mi_espacio_personas', e); }
+  renderSelectorPersonas();
+}
+
+function renderSelectorPersonas(){
+  const cont = document.getElementById('pb-selector-persona');
+  if (!cont) return;
+  const lista = window._misPersonas || [];
+  // Sin gente a cargo (solo yo) → no se muestra nada, cero fricción.
+  if (lista.length <= 1) { cont.style.display='none'; cont.innerHTML=''; return; }
+  const activa = Number(window._personaActivaId);
+  const titularId = Number((window._titularPer||{}).id);
+  const primerNombre = (n) => String(n||'').trim().split(/\s+/)[0] || 'Persona';
+  const chips = lista.map(p => {
+    const act = Number(p.persona_id) === activa;
+    const etiqueta = p.es_titular
+      ? 'Vos'
+      : (primerNombre(p.nombre) + (p.relacion ? ` · ${p.relacion}` : ''));
+    return `<button type="button" onclick="cambiarPersona(${p.persona_id})" style="`
+      + `border:1px solid ${act ? 'var(--celeste,#1e9fe0)' : 'var(--borde,#2a2a2a)'};`
+      + `background:${act ? 'var(--celeste,#1e9fe0)' : 'transparent'};`
+      + `color:${act ? '#04121a' : 'var(--texto,#e8e8e8)'};`
+      + `font-weight:${act ? '700' : '500'}; padding:7px 14px; border-radius:999px;`
+      + `cursor:pointer; font-size:13px; white-space:nowrap;">`
+      + `${(act && !p.es_titular) ? '👁️ ' : ''}${etiqueta}</button>`;
+  }).join('');
+  const viendoOtro = activa !== titularId;
+  const nomActiva = (lista.find(x => Number(x.persona_id) === activa) || {}).nombre || '';
+  const bannerOtro = viendoOtro
+    ? `<div style="margin-top:10px; background:#fff8e1; border:1px solid #f0c000; color:#7a5c00;`
+      + ` border-radius:10px; padding:8px 12px; font-size:13px; display:flex; align-items:center;`
+      + ` gap:8px; flex-wrap:wrap;"><span>👁️ Estás viendo el espacio de <b>${nomActiva}</b> (modo lectura).</span>`
+      + `<button type="button" onclick="cambiarPersona(${titularId})" style="background:#7a5c00; color:#fff;`
+      + ` border:none; border-radius:8px; padding:4px 10px; cursor:pointer; font-size:12px;">Volver a mí</button></div>`
+    : '';
+  cont.innerHTML = `<div style="font-size:12px; color:var(--texto-tenue,#9aa); margin-bottom:6px;">¿A quién querés ver?</div>`
+    + `<div style="display:flex; gap:8px; flex-wrap:wrap;">${chips}</div>${bannerOtro}`;
+  cont.style.display = 'block';
+}
+
+async function cambiarPersona(id){
+  const titular = window._titularPer;
+  if (!titular) return;
+  id = Number(id);
+  if (id === Number(window._personaActivaId)) return; // ya está activa
+  // Reseteo banners para que no queden "pegados" de la persona anterior
+  const bc = document.getElementById('bannerCumple'); if (bc) bc.style.display = 'none';
+  const rc = document.getElementById('resumen-chip'); if (rc) { rc.style.display = 'none'; rc.innerHTML = ''; }
+  let per;
+  if (id === Number(titular.id)) {
+    per = titular;
+    window._viendoOtro = false;
+  } else {
+    const { data: per2, error } = await sb
+      .from('personas')
+      .select('id, nombre, email, mail, dni, es_equipo, bloqueado, auth_user_id, foto_perfil, contacto_urgencia_nombre, contacto_urgencia_celular, fecha_nacimiento, aviso_aumento_jul26_veces')
+      .eq('id', id)
+      .maybeSingle();
+    if (error || !per2) { try{ toast('No pude cargar esa persona.'); }catch(e){} return; }
+    per = per2;
+    window._viendoOtro = true;
+  }
+  window._personaActivaId = id;
+  await cargarEspacio(per);
+  renderSelectorPersonas();
+  try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch(e){}
+}
 
 // ¿La persona tiene un plan TF activo? Usa el RPC y, si falla, mira inscripciones_tf.
 async function chequearPlanActivo(personaId){
