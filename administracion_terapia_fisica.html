@@ -457,8 +457,21 @@
         <div style="font-size:11.5px; color:var(--text-dim); margin-top:8px;">Los datos personales (nombre, DNI, contacto, obra social, etc.) se editan en el <b>Padrón</b>. Acá se gestiona solo lo administrativo de Terapia Física.</div>
         <div style="margin-top:12px; padding-top:12px; border-top:1px dashed var(--border);">
           <label style="display:block; font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">📧 Mail alternativo para recibos/avisos (opcional)</label>
-          <input type="email" id="edMailAlt" placeholder="Ej: mama@gmail.com" style="width:100%;">
-          <span style="display:block; font-size:11px; color:var(--text-dim); margin-top:4px;">Si lo cargás, TODOS los mails automáticos (recibos, recordatorios, cumpleaños, etc.) van <b>solo a este mail</b> en vez del propio. Vacío = usa el mail de siempre.</span>
+          <div style="position:relative;">
+            <input type="text" id="edMailAlt" placeholder="Escribí un nombre (papá/mamá…) o un mail" autocomplete="off" style="width:100%;" oninput="mailAltBuscar('edMailAlt','edMailAltSug')" onblur="setTimeout(()=>{const s=document.getElementById('edMailAltSug'); if(s)s.style.display='none';},200)">
+            <div id="edMailAltSug" style="display:none; position:absolute; z-index:50; left:0; right:0; top:calc(100% + 2px); background:#fff; border:1px solid var(--border,#e5e7eb); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,0.12); max-height:220px; overflow-y:auto;"></div>
+          </div>
+          <div id="edMailAltCats" style="display:none; margin-top:8px; background:#fff; border:1px solid var(--border,#e5e7eb); border-radius:8px; padding:10px 12px;">
+            <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;">¿Qué le mando a ESE mail? <span style="text-transform:none; font-weight:normal;">(lo destildado va al mail propio)</span></div>
+            <div style="display:flex; flex-wrap:wrap; gap:14px;">
+              <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;"><input type="checkbox" class="edMailAltCat" value="recibos" checked style="width:auto;margin:0;"> Recibos</label>
+              <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;"><input type="checkbox" class="edMailAltCat" value="recordatorios" checked style="width:auto;margin:0;"> Recordatorios</label>
+              <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;"><input type="checkbox" class="edMailAltCat" value="cumpleanos" checked style="width:auto;margin:0;"> Cumpleaños</label>
+              <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;"><input type="checkbox" class="edMailAltCat" value="invitacion" checked style="width:auto;margin:0;"> Invitación Mi Espacio</label>
+              <label style="display:flex; align-items:center; gap:5px; font-size:13px; cursor:pointer;"><input type="checkbox" class="edMailAltCat" value="feriados" checked style="width:auto;margin:0;"> Feriados</label>
+            </div>
+          </div>
+          <span style="display:block; font-size:11px; color:var(--text-dim); margin-top:4px;">Buscás por nombre y elegís de la lista, o escribís el mail a mano. Lo tildado va <b>solo a ese mail</b>; lo destildado va al mail propio.</span>
         </div>
       </div>
 
@@ -3122,6 +3135,13 @@ function abrirModalEditar() {
   ].filter(Boolean).join('   ·   ');
   $('#edResDatos').textContent = _edDatos || 'Sin datos de contacto cargados';
   $('#edMailAlt').value = p.mail_alternativo || '';
+  {
+    const cats = Array.isArray(p.mail_alt_categorias) ? p.mail_alt_categorias : null;
+    document.querySelectorAll('.edMailAltCat').forEach(cb => {
+      cb.checked = (cats === null) ? true : cats.includes(cb.value);
+    });
+    if (typeof mailAltToggleCats === 'function') mailAltToggleCats('edMailAlt');
+  }
 
   // Sección TF — siempre visible. Si tiene inscripción, precarga datos; si no, queda vacía para crearla.
   const secInsc = document.getElementById('seccionInscTF');
@@ -3170,6 +3190,49 @@ function abrirModalEditar() {
   $('#modalEditar').classList.add('activo');
 }
 
+// ===== Buscador de mail alternativo (escribís un nombre → elegís de la lista) =====
+function _mailAltNorm(s){ return (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+window.mailAltToggleCats = (inputId) => {
+  const inp = document.getElementById(inputId);
+  const cats = document.getElementById(inputId + 'Cats');
+  if (!inp || !cats) return;
+  cats.style.display = inp.value.trim() ? 'block' : 'none';
+};
+window.mailAltElegir = (inputId, sugId, email) => {
+  const inp = document.getElementById(inputId);
+  const box = document.getElementById(sugId);
+  if (inp) inp.value = email;
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+  mailAltToggleCats(inputId);
+};
+window.mailAltBuscar = (inputId, sugId) => {
+  const inp = document.getElementById(inputId);
+  const box = document.getElementById(sugId);
+  if (!inp || !box) return;
+  mailAltToggleCats(inputId);
+  const val = inp.value.trim();
+  if (val.includes('@') || val.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const q = _mailAltNorm(val);
+  const vistos = new Set();
+  const res = [];
+  for (const f of (personas || [])) {
+    const per = f && f.persona; if (!per) continue;
+    const email = String(per.email || per.mail || '').trim();
+    if (!email) continue;
+    if (!_mailAltNorm(per.nombre).includes(q)) continue;
+    const k = email.toLowerCase();
+    if (vistos.has(k)) continue;
+    vistos.add(k);
+    res.push({ nombre: per.nombre || '(sin nombre)', email });
+    if (res.length >= 8) break;
+  }
+  if (!res.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = res.map(r =>
+    `<div onmousedown="mailAltElegir('${inputId}','${sugId}','${r.email}')" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--border,#e5e7eb); font-size:13px;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#fff'"><strong>${r.nombre}</strong><br><span style="color:var(--text-dim); font-size:12px;">${r.email}</span></div>`
+  ).join('');
+  box.style.display = 'block';
+};
+
 window.confirmarEditar = async () => {
   if (!alumnoActivo) return;
   const btn = $('#btnConfirmarEditar');
@@ -3179,12 +3242,24 @@ window.confirmarEditar = async () => {
     // Los datos personales ya NO se editan acá (se editan en el Padrón).
     // Excepción: el mail alternativo para envíos automáticos sí se puede editar acá.
     const mailAltNuevo = $('#edMailAlt').value.trim() || null;
-    if (mailAltNuevo !== (p.mail_alternativo || null)) {
+    if (mailAltNuevo && !mailAltNuevo.includes('@')) {
+      toast('El mail alternativo no parece válido. Elegí una persona de la lista o escribí un mail con @.', true);
+      btn.disabled = false; btn.textContent = 'Guardar cambios';
+      return;
+    }
+    const catsNuevas = mailAltNuevo
+      ? Array.from(document.querySelectorAll('.edMailAltCat')).filter(cb => cb.checked).map(cb => cb.value)
+      : null;
+    const catsViejas = Array.isArray(p.mail_alt_categorias) ? p.mail_alt_categorias : null;
+    const cambioMailAlt = (mailAltNuevo !== (p.mail_alternativo || null))
+      || (JSON.stringify(catsNuevas) !== JSON.stringify(catsViejas));
+    if (cambioMailAlt) {
       const { error: errMailAlt } = await sb.from('personas')
-        .update({ mail_alternativo: mailAltNuevo, actualizado_en: new Date().toISOString() })
+        .update({ mail_alternativo: mailAltNuevo, mail_alt_categorias: catsNuevas, actualizado_en: new Date().toISOString() })
         .eq('id', p.id);
       if (errMailAlt) throw errMailAlt;
-      p.mail_alternativo = mailAltNuevo; // reflejar en memoria
+      p.mail_alternativo = mailAltNuevo;       // reflejar en memoria
+      p.mail_alt_categorias = catsNuevas;
     }
     // Esta pantalla guarda solo lo administrativo: la inscripción TF.
 
