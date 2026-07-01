@@ -25,11 +25,25 @@
   .btn-crear:hover{ filter:brightness(1.08); }
   .btn-crear:disabled{ opacity:.5; cursor:not-allowed; }
   .lista-tit{ font-size:13px; color:var(--tenue); text-transform:uppercase; letter-spacing:.5px; margin:0 0 10px; }
-  .cierre{ display:flex; align-items:center; justify-content:space-between; gap:10px; background:#0f0f0f; border:1px solid var(--linea); border-radius:10px; padding:12px 14px; margin-bottom:8px; }
+  .cierre{ background:#0f0f0f; border:1px solid var(--linea); border-radius:10px; padding:12px 14px; margin-bottom:8px; }
+  .cierre-top{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .cierre .info b{ font-size:14px; }
   .cierre .info small{ display:block; color:var(--tenue); font-size:12px; margin-top:2px; }
   .btn-del{ background:transparent; color:var(--rojo); border:1.5px solid var(--rojo); padding:8px 12px; font-size:13px; flex-shrink:0; }
   .btn-del:hover{ background:var(--rojo); color:#fff; }
+  .cierre-acc{ display:flex; gap:8px; flex-wrap:wrap; margin-top:11px; }
+  .btn-ver, .btn-avisar{ padding:8px 13px; font-size:13px; border-radius:8px; }
+  .btn-ver{ background:transparent; color:var(--azul); border:1.5px solid var(--azul); }
+  .btn-ver:hover{ background:var(--azul); color:#fff; }
+  .btn-avisar{ background:var(--azul); color:#fff; border:1.5px solid var(--azul); }
+  .btn-avisar:hover{ filter:brightness(1.08); }
+  .cierre-res{ margin-top:11px; font-size:13px; display:none; }
+  .cierre-res.show{ display:block; }
+  .lista-dest{ background:#141414; border:1px solid var(--linea); border-radius:8px; max-height:230px; overflow:auto; margin-top:6px; }
+  .dest{ padding:7px 12px; border-bottom:1px solid var(--linea); display:flex; justify-content:space-between; gap:10px; align-items:center; }
+  .dest:last-child{ border-bottom:none; }
+  .dest .ya{ color:var(--tenue); font-size:12px; flex-shrink:0; }
+  .dest .pend{ color:var(--azul); font-size:12px; font-weight:700; flex-shrink:0; }
   .vacio{ color:var(--tenue); font-size:13px; text-align:center; padding:14px; }
   .msg{ border-radius:10px; padding:11px 14px; font-size:13.5px; line-height:1.5; margin-bottom:14px; display:none; }
   .msg.ok{ background:rgba(35,165,90,.12); border:1px solid var(--verde); color:#7ee2a8; display:block; }
@@ -48,7 +62,7 @@
 
   <div id="app" style="display:none;">
     <h1>Cierres del centro</h1>
-    <p class="desc">Cargá un día en que el centro va a estar cerrado (por reformas, capacitación, etc.). El sistema avisa solo: les muestra el cartel en Mi Espacio, manda el mail 2 días antes a los que tienen clase fija ese día, y les habilita recuperar sin gastar cupo.</p>
+    <p class="desc">Cargá un día en que el centro va a estar cerrado (por reformas, capacitación, etc.). El sistema avisa solo: les muestra el cartel en Mi Espacio, manda el mail 2 días antes a los que tienen clase agendada ese día (fija o agregada), y les habilita recuperar sin gastar cupo. Además, en cada cierre de la lista podés <b style="color:var(--azul)">ver a quién le llega</b> y <b style="color:var(--azul)">mandarlo vos ahora</b> sin esperar los 2 días.</p>
 
     <div class="card">
       <div id="msg" class="msg"></div>
@@ -107,6 +121,55 @@ function bloquear(html){
   b.style.display = 'block';
 }
 
+function esc(s){ return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// 👁️ Ver a quién le llegaría el aviso de ese cierre (no manda nada, es una simulación)
+async function preverCierre(fecha){
+  const res = document.getElementById('res-' + fecha);
+  res.className = 'cierre-res show';
+  res.innerHTML = '<span style="color:var(--tenue)">Consultando a quién le llega…</span>';
+  try{
+    const { data, error } = await sb.functions.invoke('feriado-aviso-mail', { body: { fecha, dry_run: true } });
+    if (error) throw error;
+    // Si esa fecha no es cierre/feriado, cae en finde, etc., la función devuelve {enviados:0, detalle}
+    if (!data || typeof data.total_candidatos === 'undefined'){
+      res.innerHTML = '<span style="color:var(--tenue)">' + esc((data && data.detalle) || 'No hay destinatarios para esa fecha.') + '</span>';
+      return;
+    }
+    const lista = data.lista || [];
+    if (!lista.length){
+      res.innerHTML = '<span style="color:var(--tenue)">Nadie tiene clase agendada ese día.</span>';
+      return;
+    }
+    const pend = lista.filter(x => !x.ya_enviado).length;
+    res.innerHTML =
+      '<div style="margin-bottom:4px;color:var(--texto)"><b>' + lista.length + '</b> con clase ese día · <b>' + pend + '</b> sin avisar todavía</div>'
+      + '<div class="lista-dest">'
+      + lista.map(x => '<div class="dest"><span>' + esc(x.nombre) + ' · <span style="color:var(--tenue)">' + esc(x.mail) + '</span></span>'
+          + (x.ya_enviado ? '<span class="ya">ya avisado</span>' : '<span class="pend">pendiente</span>') + '</div>').join('')
+      + '</div>';
+  }catch(e){
+    res.innerHTML = '<span style="color:var(--rojo)">No se pudo consultar: ' + esc(e.message || e) + '</span>';
+  }
+}
+
+// 📨 Mandar el aviso de cierre AHORA a todos los agendados ese día (a los ya avisados no se les repite)
+async function avisarCierre(fecha){
+  if (!confirm('¿Mandar el aviso de cierre ahora a todos los que tienen clase agendada el ' + fechaLinda(fecha) + '?\n\nA quien ya se le avisó antes no se le repite.')) return;
+  const res = document.getElementById('res-' + fecha);
+  res.className = 'cierre-res show';
+  res.innerHTML = '<span style="color:var(--tenue)">Enviando avisos…</span>';
+  try{
+    const { data, error } = await sb.functions.invoke('feriado-aviso-mail', { body: { fecha } });
+    if (error) throw error;
+    const n = (data && typeof data.enviados !== 'undefined') ? data.enviados : 0;
+    res.innerHTML = '<span style="color:var(--verde)">✅ Avisos enviados ahora: <b>' + n + '</b>.</span>'
+      + (data && data.detalle ? '<br><span style="color:var(--tenue);font-size:12px">' + esc(data.detalle) + '</span>' : '');
+  }catch(e){
+    res.innerHTML = '<span style="color:var(--rojo)">No se pudo enviar: ' + esc(e.message || e) + '</span>';
+  }
+}
+
 async function cargarLista(){
   const cont = $('lista');
   try{
@@ -122,14 +185,27 @@ async function cargarLista(){
     }
     cont.innerHTML = data.map(c => `
       <div class="cierre">
-        <div class="info">
-          <b>${fechaLinda(c.fecha)}</b>
-          <small>${(c.motivo || '').replace(/</g,'&lt;')}</small>
+        <div class="cierre-top">
+          <div class="info">
+            <b>${fechaLinda(c.fecha)}</b>
+            <small>${esc(c.motivo || '')}</small>
+          </div>
+          <button class="btn-del" data-fecha="${c.fecha}">Eliminar</button>
         </div>
-        <button class="btn-del" data-fecha="${c.fecha}">Eliminar</button>
+        <div class="cierre-acc">
+          <button class="btn-ver" data-fecha="${c.fecha}">👁️ Ver a quién le llega</button>
+          <button class="btn-avisar" data-fecha="${c.fecha}">📨 Avisar ahora</button>
+        </div>
+        <div class="cierre-res" id="res-${c.fecha}"></div>
       </div>`).join('');
     cont.querySelectorAll('.btn-del').forEach(btn => {
       btn.addEventListener('click', () => eliminar(btn.dataset.fecha));
+    });
+    cont.querySelectorAll('.btn-ver').forEach(btn => {
+      btn.addEventListener('click', () => preverCierre(btn.dataset.fecha));
+    });
+    cont.querySelectorAll('.btn-avisar').forEach(btn => {
+      btn.addEventListener('click', () => avisarCierre(btn.dataset.fecha));
     });
   }catch(e){
     cont.innerHTML = '<div class="vacio">No se pudo cargar la lista.</div>';
