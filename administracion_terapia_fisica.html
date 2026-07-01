@@ -1021,6 +1021,55 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- MODAL APODERADO (vincular / desvincular a-cargo) -->
+<div class="modal-backdrop" id="modalApoderado">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <span class="modal-title" style="color:#6d28d9;">👨‍👧 Apoderado · <span id="apoNombre">—</span></span>
+      <button class="modal-close" onclick="cerrarModal('modalApoderado')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="apoEstado" style="margin-bottom:16px;"></div>
+      <div style="border-top:1px solid var(--border,#e5e7eb); padding-top:14px;">
+        <div style="font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); margin-bottom:8px;">Agregar un vínculo</div>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <label style="display:flex; align-items:flex-start; gap:8px; font-size:13px; cursor:pointer;">
+            <input type="radio" name="apoDir" value="acargo_de" checked onchange="apoRenderDir()" style="margin-top:3px; width:auto;">
+            <span>Esta persona <b>está a cargo de</b> alguien <span style="color:var(--text-dim)">(ej: su mamá/papá la gestiona)</span></span>
+          </label>
+          <label style="display:flex; align-items:flex-start; gap:8px; font-size:13px; cursor:pointer;">
+            <input type="radio" name="apoDir" value="tiene_acargo" onchange="apoRenderDir()" style="margin-top:3px; width:auto;">
+            <span>Esta persona <b>tiene a cargo</b> a alguien <span style="color:var(--text-dim)">(ej: es la mamá y gestiona a su hijo/a)</span></span>
+          </label>
+        </div>
+        <div style="position:relative; margin-top:12px;">
+          <label id="apoBuscarLbl" style="font-size:12px; color:var(--text-dim); display:block; margin-bottom:4px;">Elegí a la persona…</label>
+          <input type="text" id="apoBuscarInput" autocomplete="off" placeholder="Escribí un nombre…" oninput="apoBuscar()" onblur="setTimeout(function(){var s=document.getElementById('apoSug'); if(s)s.style.display='none';},200)" style="width:100%; padding:10px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px; font-family:inherit;">
+          <div id="apoSug" style="display:none; position:absolute; z-index:60; left:0; right:0; top:calc(100% + 2px); background:#fff; border:1px solid var(--border,#e5e7eb); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.12); max-height:220px; overflow-y:auto;"></div>
+          <input type="hidden" id="apoElegidoId">
+          <div id="apoElegidoNom" style="margin-top:6px; font-size:13px; color:#6d28d9; font-weight:600;"></div>
+        </div>
+        <div style="margin-top:12px;">
+          <label style="font-size:12px; color:var(--text-dim); display:block; margin-bottom:4px;">Relación (opcional)</label>
+          <select id="apoRelacion" style="width:100%; padding:10px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px; font-family:inherit;">
+            <option value="">— sin especificar —</option>
+            <option value="madre">madre</option>
+            <option value="padre">padre</option>
+            <option value="hijo/a">hijo/a</option>
+            <option value="tutor/a">tutor/a</option>
+            <option value="familiar">familiar</option>
+            <option value="otro">otro</option>
+          </select>
+        </div>
+        <button class="btn-modal" style="background:#6d28d9; color:#fff; border:none; margin-top:14px; width:100%;" onclick="apoVincular()">🔗 Vincular</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalApoderado')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
@@ -1840,6 +1889,7 @@ async function abrirModalVer() {
   if (esActivo) acc += '<div style="flex-basis:100%;height:0"></div>'; // salto: arriba Cobrar/Excepción/Editar, abajo el resto
   acc += btn('ficha', '📅 Horarios', 'var(--bg-hover)', 'var(--text)');
   acc += btn('bitacora', '📋 Bitácora', 'var(--bg-hover)', 'var(--text)');
+  acc += `<button class="btn-modal" style="background:#6d28d9;color:#fff;" onclick="abrirApoderado(${alumnoActivo.persona.id}, ${JSON.stringify(alumnoActivo.persona.nombre||'')})">👨‍👧 Apoderado</button>`;
   if (esActivo) acc += btn('vacaciones', '🏖️ Vacaciones', 'var(--bg-hover)', 'var(--text)');
   if (esBaja) acc += btn('reactivar', '↩️ Reactivar', 'var(--verde)', '#fff');
   if (puedeAlta) acc += btn('altatf', '➕ Dar alta TF', 'var(--azul)', '#fff');
@@ -5732,6 +5782,138 @@ window.confirmarReactivar = async () => {
 
 // ===== CERRAR MODALES =====
 window.cerrarModal = (id) => { $('#' + id).classList.remove('activo'); };
+
+// ============================================================
+//  APODERADO · vincular / desvincular a-cargo desde la ficha
+// ============================================================
+window._apoPersona = { id: null, nombre: '' };
+function _apoNorm(s){ return (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+
+window.abrirApoderado = async (personaId, personaNombre) => {
+  window._apoPersona = { id: Number(personaId), nombre: personaNombre || '' };
+  document.getElementById('apoNombre').textContent = personaNombre || ('#' + personaId);
+  const inp = document.getElementById('apoBuscarInput'); if (inp) inp.value = '';
+  const hid = document.getElementById('apoElegidoId'); if (hid) hid.value = '';
+  const nom = document.getElementById('apoElegidoNom'); if (nom) nom.textContent = '';
+  const rel = document.getElementById('apoRelacion'); if (rel) rel.value = '';
+  const rdo = document.querySelector('input[name="apoDir"][value="acargo_de"]'); if (rdo) rdo.checked = true;
+  apoRenderDir();
+  document.getElementById('apoEstado').innerHTML = '<div style="color:var(--text-dim); font-size:13px;">Cargando…</div>';
+  document.getElementById('modalApoderado').classList.add('activo');
+  await apoRefrescarEstado();
+};
+
+window.apoRenderDir = () => {
+  const dir = (document.querySelector('input[name="apoDir"]:checked') || {}).value || 'acargo_de';
+  const lbl = document.getElementById('apoBuscarLbl');
+  if (lbl) lbl.textContent = (dir === 'acargo_de')
+    ? 'Elegí al apoderado (quien la gestiona)…'
+    : 'Elegí a la persona que va a estar a cargo…';
+};
+
+window.apoRefrescarEstado = async () => {
+  const cont = document.getElementById('apoEstado');
+  const pid = window._apoPersona.id;
+  try {
+    const { data, error } = await sb.rpc('apoderado_info', { p_persona_id: pid });
+    if (error) throw error;
+    const ap = data && data.apoderado;
+    const ac = (data && data.a_cargo) || [];
+    let html = '';
+    if (ap) {
+      html += '<div style="background:#fff8e1; border:1px solid #f0c000; border-radius:8px; padding:10px 12px; margin-bottom:10px; font-size:13px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">'
+        + '<span>👤 Está a cargo de <b>' + ap.nombre + '</b>' + (ap.relacion ? ' · ' + ap.relacion : '') + '</span>'
+        + '<button class="btn-modal" style="background:#fff; border:1px solid #dc2626; color:#dc2626; padding:3px 10px; font-size:12px;" onclick="apoDesvincular(' + pid + ')">Desvincular</button></div>';
+    }
+    if (ac.length) {
+      html += '<div style="font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin:4px 0 6px;">Tiene a cargo a:</div>';
+      html += ac.map(function(x){
+        return '<div style="background:#f8fafc; border:1px solid var(--border,#e5e7eb); border-radius:8px; padding:8px 12px; margin-bottom:6px; font-size:13px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">'
+          + '<span>🧒 <b>' + x.nombre + '</b>' + (x.relacion ? ' · ' + x.relacion : '') + '</span>'
+          + '<button class="btn-modal" style="background:#fff; border:1px solid #dc2626; color:#dc2626; padding:3px 10px; font-size:12px;" onclick="apoDesvincular(' + x.id + ')">Desvincular</button></div>';
+      }).join('');
+    }
+    if (!ap && !ac.length) html = '<div style="color:var(--text-dim); font-size:13px;">Sin vínculos de apoderado todavía.</div>';
+    cont.innerHTML = html;
+  } catch (e) {
+    console.error(e);
+    cont.innerHTML = '<div style="color:#dc2626; font-size:13px;">No se pudo cargar el estado de vínculos.</div>';
+  }
+};
+
+window.apoBuscar = () => {
+  const inp = document.getElementById('apoBuscarInput');
+  const box = document.getElementById('apoSug');
+  if (!inp || !box) return;
+  const val = inp.value.trim();
+  document.getElementById('apoElegidoId').value = '';
+  document.getElementById('apoElegidoNom').textContent = '';
+  if (val.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const q = _apoNorm(val);
+  const yo = window._apoPersona.id;
+  const res = [];
+  for (const f of (personas || [])) {
+    const per = f && f.persona; if (!per) continue;
+    if (Number(per.id) === Number(yo)) continue;
+    if (!_apoNorm(per.nombre).includes(q)) continue;
+    res.push({ id: per.id, nombre: per.nombre || '(sin nombre)', dni: per.dni || '' });
+    if (res.length >= 8) break;
+  }
+  if (!res.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = res.map(function(r){
+    return '<div onmousedown="apoElegir(' + r.id + ')" style="padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--border,#e5e7eb); font-size:13px;" onmouseover="this.style.background=&quot;#f1f5f9&quot;" onmouseout="this.style.background=&quot;#fff&quot;"><b>' + r.nombre + '</b>' + (r.dni ? ' <span style="color:var(--text-dim); font-size:12px;">· DNI ' + r.dni + '</span>' : '') + '</div>';
+  }).join('');
+  box.style.display = 'block';
+};
+
+window.apoElegir = (id) => {
+  const f = (personas || []).find(x => x.persona && Number(x.persona.id) === Number(id));
+  const nombre = f ? (f.persona.nombre || '') : ('#' + id);
+  document.getElementById('apoElegidoId').value = id;
+  document.getElementById('apoElegidoNom').textContent = '✓ ' + nombre;
+  document.getElementById('apoBuscarInput').value = nombre;
+  const box = document.getElementById('apoSug'); if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+};
+
+window.apoVincular = async () => {
+  const otroId = Number(document.getElementById('apoElegidoId').value || 0);
+  if (!otroId) { toast('Elegí una persona de la lista.', true); return; }
+  const dir = (document.querySelector('input[name="apoDir"]:checked') || {}).value || 'acargo_de';
+  const rel = document.getElementById('apoRelacion').value || null;
+  const yo = window._apoPersona.id;
+  let apoderadoId, aCargoId;
+  if (dir === 'acargo_de') { apoderadoId = otroId; aCargoId = yo; }
+  else { apoderadoId = yo; aCargoId = otroId; }
+  try {
+    const { error } = await sb.rpc('vincular_a_cargo', {
+      p_apoderado_id: apoderadoId, p_a_cargo_id: aCargoId, p_relacion: rel, p_email: (window._apoEmail || null)
+    });
+    if (error) throw error;
+    toast('✓ Vínculo creado');
+    document.getElementById('apoBuscarInput').value = '';
+    document.getElementById('apoElegidoId').value = '';
+    document.getElementById('apoElegidoNom').textContent = '';
+    document.getElementById('apoRelacion').value = '';
+    await apoRefrescarEstado();
+  } catch (e) {
+    console.error(e);
+    toast((e && e.message) || 'No se pudo vincular.', true);
+  }
+};
+
+window.apoDesvincular = async (aCargoId) => {
+  if (!confirm('¿Quitar este vínculo de apoderado?')) return;
+  try {
+    const { error } = await sb.rpc('desvincular_a_cargo', { p_a_cargo_id: Number(aCargoId) });
+    if (error) throw error;
+    toast('✓ Vínculo quitado');
+    await apoRefrescarEstado();
+  } catch (e) {
+    console.error(e);
+    toast((e && e.message) || 'No se pudo desvincular.', true);
+  }
+};
+
 document.querySelectorAll('.modal-backdrop').forEach(b => {
   b.addEventListener('click', e => { if (e.target === b) b.classList.remove('activo'); });
 });
