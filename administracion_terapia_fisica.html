@@ -704,6 +704,11 @@
         <div class="aviso-amarillo" style="background:#dbeafe;border-color:var(--azul);color:#1e3a5f;">
           📅 Tocá los turnos fijos que va a tener cada semana. <strong>Es opcional</strong> — si no asignás ahora, lo hacés después en la Agenda TF.
         </div>
+        <div class="form-group" style="margin:10px 0;">
+          <label>📅 Los turnos arrancan el (empieza a venir a la agenda):</label>
+          <input type="date" id="altaTurnosDesde">
+          <div style="font-size:11px; color:var(--text-dim); margin-top:3px;">Desde esta fecha figura en la agenda. Puede ser distinta a la fecha de alta del plan — ej: cargás la ficha hoy pero recién arranca el lunes que viene. Así no aparece en clases antes de empezar.</div>
+        </div>
         <div style="display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px;">
           <button type="button" class="filtro-turno active" data-ftservicio="todos" onclick="setFiltroTurno('servicio','todos',this)">Todos</button>
           <button type="button" class="filtro-turno" data-ftservicio="Entrenamiento" onclick="setFiltroTurno('servicio','Entrenamiento',this)">🏋️ Entrenamiento</button>
@@ -2784,11 +2789,26 @@ function formatearFechaFicha(iso) {
 
 // Quitar un horario fijo (desactiva en turno_alumnos)
 window.fichaQuitarHorario = async (turnoId, etiqueta) => {
-  if (!confirm(`¿Sacar a ${alumnoActivo.persona.nombre} del horario ${etiqueta}?\n\nDejará de aparecer todas las semanas. Su historia NO se borra.`)) return;
+  const hoy = _isoLocal(new Date());
+  const manana = _isoLocal(new Date(Date.now() + 86400000));
+  const desde = prompt(
+    `¿A partir de qué fecha ${alumnoActivo.persona.nombre} deja de venir al horario ${etiqueta}?\n\n` +
+    `Formato AAAA-MM-DD.\n` +
+    `Las clases hasta el día ANTERIOR quedan como fijas (no se convierten en recuperatorio).\n` +
+    `Poné HOY (${hoy}) para sacarlo ya (deja de venir desde hoy).`,
+    manana
+  );
+  if (desde === null) return;                       // canceló
+  const iso = (desde || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) { alert('Fecha inválida. Usá el formato AAAA-MM-DD.'); return; }
   try {
-    const { error } = await sb.from('turno_alumnos').update({ activo: false })
-      .eq('persona_id', alumnoActivo.persona.id).eq('turno_id', turnoId);
+    // Si deja de venir hoy o antes → baja inmediata (libera el cupo ya).
+    // Si es a futuro → sigue fijo hasta el día antes; el cron lo da de baja al pasar la fecha.
+    const upd = (iso <= hoy) ? { activo: false } : { fecha_hasta: _diaAnterior(iso) };
+    const { error } = await sb.from('turno_alumnos').update(upd)
+      .eq('persona_id', alumnoActivo.persona.id).eq('turno_id', turnoId).eq('activo', true);
     if (error) throw error;
+    toast(iso <= hoy ? '✓ Horario quitado' : `✓ Deja de venir desde ${fmtFechaArg(iso)}`);
     abrirFichaAlumno();
   } catch (e) { alert('No se pudo quitar: ' + e.message); }
 };
@@ -2798,6 +2818,39 @@ window.fichaAgregarHorario = () => fichaSelectorTurno(null);
 window.fichaCambiarHorario = (turnoViejoId) => fichaSelectorTurno(turnoViejoId);
 
 // Muestra un selector de turno; si viene turnoViejoId, primero saca el viejo (cambiar)
+// ===== Helpers de fecha para vigencia programada (fecha_desde / fecha_hasta) =====
+function _isoLocal(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _diaAnterior(iso) {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  return _isoLocal(d);
+}
+function _diaGetDay(diaNombre) {
+  const m = {'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':0};
+  return (diaNombre != null && m[diaNombre] != null) ? m[diaNombre] : -1;
+}
+// Próxima fecha (YYYY-MM-DD) del día indicado, estrictamente DESPUÉS de hoy (>= mañana).
+// Así la clase de HOY en el horario viejo siempre queda como fija.
+function proximaFechaDeDia(diaNombre) {
+  const idx = _diaGetDay(diaNombre);
+  const base = new Date(); base.setHours(0,0,0,0);
+  if (idx < 0) { base.setDate(base.getDate() + 1); return _isoLocal(base); }
+  for (let i = 1; i <= 7; i++) {
+    const c = new Date(base); c.setDate(c.getDate() + i);
+    if (c.getDay() === idx) return _isoLocal(c);
+  }
+  base.setDate(base.getDate() + 1); return _isoLocal(base);
+}
+window.fichaActualizarFechaSugerida = () => {
+  const sel = document.getElementById('fichaNuevoTurno');
+  const opt = sel && sel.options[sel.selectedIndex];
+  const dia = opt ? opt.getAttribute('data-dia') : null;
+  const inp = document.getElementById('fichaDesdeFecha');
+  if (dia && inp) inp.value = proximaFechaDeDia(dia);
+};
+
 async function fichaSelectorTurno(turnoViejoId) {
   const cont = document.getElementById('fichaHorarios');
 
@@ -2822,18 +2875,26 @@ async function fichaSelectorTurno(turnoViejoId) {
     return;
   }
 
-  const opciones = disponibles
-    .sort((a,b) => ((ORDEN_DIAS[a.dia]||99)-(ORDEN_DIAS[b.dia]||99)) || a.hora.localeCompare(b.hora))
+  const disponiblesOrd = disponibles
+    .sort((a,b) => ((ORDEN_DIAS[a.dia]||99)-(ORDEN_DIAS[b.dia]||99)) || a.hora.localeCompare(b.hora));
+  const opciones = disponiblesOrd
     .map(t => {
       const ocup = ocupadosPorTurno[t.id] || 0;
       const libres = t.capacidad ? (t.capacidad - ocup) : '∞';
-      return `<option value="${t.id}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}</option>`;
+      return `<option value="${t.id}" data-dia="${t.dia}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}</option>`;
     }).join('');
   const titulo = turnoViejoId ? '🔄 Cambiar a este horario:' : '➕ Elegí el horario:';
+  const fechaDefault = proximaFechaDeDia((disponiblesOrd[0] || {}).dia);
+  const notaFecha = turnoViejoId
+    ? 'Arranca el nuevo día desde esta fecha. Las clases anteriores (incluida la de hoy) quedan FIJAS en el horario viejo — no se convierten en recuperatorio.'
+    : 'El alumno empieza a figurar en este horario desde esta fecha.';
   cont.insertAdjacentHTML('afterbegin', `
     <div id="fichaSelectorBox" style="background:#f8fafc;border:1.5px solid var(--azul);border-radius:10px;padding:12px;margin-bottom:10px">
       <div style="font-size:13px;font-weight:600;margin-bottom:8px">${titulo}</div>
-      <select id="fichaNuevoTurno" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:8px">${opciones}</select>
+      <select id="fichaNuevoTurno" onchange="fichaActualizarFechaSugerida()" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:8px">${opciones}</select>
+      <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px">📅 A partir de qué fecha:</label>
+      <input type="date" id="fichaDesdeFecha" value="${fechaDefault}" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;margin-bottom:4px">
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">${notaFecha}</div>
       <div style="display:flex;gap:8px">
         <button onclick="fichaConfirmarHorario(${turnoViejoId||'null'})" style="flex:1;background:var(--verde);color:white;border:none;border-radius:8px;padding:9px;font-size:13px;font-weight:600;cursor:pointer">Confirmar</button>
         <button onclick="document.getElementById('fichaSelectorBox').remove()" style="background:#f1f5f9;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer">Cancelar</button>
@@ -2844,22 +2905,39 @@ async function fichaSelectorTurno(turnoViejoId) {
 window.fichaConfirmarHorario = async (turnoViejoId) => {
   const nuevoId = parseInt(document.getElementById('fichaNuevoTurno').value);
   const pid = alumnoActivo.persona.id;
-  const hoyIso = new Date().toISOString().split('T')[0];
+  const inp = document.getElementById('fichaDesdeFecha');
+  const hoy = _isoLocal(new Date());
+  const desdeIso = (inp && inp.value) ? inp.value : hoy;
+  const futuro = desdeIso > hoy;   // ¿el cambio arranca a futuro? (hay solapamiento con el viejo)
   try {
-    // Si es cambio, sacar el viejo
+    // Si es CAMBIO de día: el horario viejo NO se borra de golpe.
+    //  · Si el cambio es a futuro → sigue FIJO hasta el día ANTES (así la clase de hoy
+    //    y las de esta semana quedan como fijas, no como recuperatorio).
+    //  · Si arranca hoy o antes → baja inmediata (libera el cupo ya).
     if (turnoViejoId) {
-      await sb.from('turno_alumnos').update({ activo: false }).eq('persona_id', pid).eq('turno_id', turnoViejoId);
+      const upd = futuro ? { fecha_hasta: _diaAnterior(desdeIso) } : { activo: false };
+      const { error: eV } = await sb.from('turno_alumnos').update(upd)
+        .eq('persona_id', pid).eq('turno_id', turnoViejoId).eq('activo', true);
+      if (eV) throw eV;
     }
-    // Ver si ya existe (reactivar) o insertar. En ambos casos seteamos fecha_desde = hoy,
-    // para que el alumno NO aparezca anotado en días previos a este momento.
-    const { data: existe } = await sb.from('turno_alumnos').select('turno_id')
+    // Turno NUEVO: arranca (fecha_desde) en la fecha elegida.
+    // En un cambio a futuro lo entramos como "pendiente de fijo" hasta esa fecha para que
+    // el tope del plan no lo rebote mientras el viejo sigue vigente; la agenda lo pasa a
+    // fija sola al llegar la fecha (fija_desde). En un alta suelta / cambio inmediato va como fija normal.
+    const usarPendiente = !!turnoViejoId && futuro;
+    const payloadNuevo = usarPendiente
+      ? { activo: true, fecha_desde: desdeIso, fecha_hasta: null, pendiente_fijo: true, fija_desde: desdeIso }
+      : { activo: true, fecha_desde: desdeIso, fecha_hasta: null, pendiente_fijo: false };
+    const { data: existe } = await sb.from('turno_alumnos').select('id')
       .eq('persona_id', pid).eq('turno_id', nuevoId);
     if (existe && existe.length) {
-      await sb.from('turno_alumnos').update({ activo: true, fecha_desde: hoyIso }).eq('persona_id', pid).eq('turno_id', nuevoId);
+      const { error } = await sb.from('turno_alumnos').update(payloadNuevo).eq('id', existe[0].id);
+      if (error) throw error;
     } else {
-      const { error } = await sb.from('turno_alumnos').insert({ turno_id: nuevoId, persona_id: pid, activo: true, fecha_desde: hoyIso });
+      const { error } = await sb.from('turno_alumnos').insert({ turno_id: nuevoId, persona_id: pid, ...payloadNuevo });
       if (error) throw error;
     }
+    toast(`✓ Horario ${turnoViejoId ? 'cambiado' : 'agregado'} desde ${fmtFechaArg(desdeIso)}`);
     abrirFichaAlumno();
   } catch (e) { alert('No se pudo guardar: ' + e.message); }
 };
@@ -3991,11 +4069,15 @@ window.confirmarCambioPlan = async () => {
     }
 
     // 3) Agregar la(s) clase(s) nueva(s) de la SUBA como "suelta pendiente de fijo".
-    //    Activa desde HOY (la toma ya), y se vuelve fija sola en el vencimiento (fija_desde).
-    //    Marcarla pendiente_fijo evita que el tope la bloquee mientras el plan sigue siendo el viejo.
+    //    Se vuelve fija sola en el vencimiento (fija_desde). pendiente_fijo evita que el
+    //    tope la bloquee mientras el plan sigue siendo el viejo.
+    //    · Cambio A FUTURO (mes que viene) → la clase nueva ARRANCA en la fecha efectiva
+    //      (no antes): el alumno no la toma hasta ese día.
+    //    · Cambio inmediato → la toma desde hoy.
     if (cpTurnosSel.size > 0) {
-      const fechaDesdeExtras = HOY.toISOString().split('T')[0];
       const fijaDesde = $('#cpFecha').value || `${mesQueViene}-01`;
+      const esFuturoCP = String(mesQueViene) > String(MES_ACTUAL);
+      const fechaDesdeExtras = esFuturoCP ? fijaDesde : HOY.toISOString().split('T')[0];
       const turnoIdsExtra = [...cpTurnosSel];
       // Chequear cuáles ya existen para esa persona (reactivar) y cuáles son nuevos (insertar)
       const { data: existExtras } = await sb.from('turno_alumnos')
@@ -4027,10 +4109,17 @@ window.confirmarCambioPlan = async () => {
       }
     }
 
-    // 3-bis) BAJA: sacar (desactivar) la(s) clase(s) que la admin eligió quitar
+    // 3-bis) BAJA: la(s) clase(s) que la admin eligió sacar NO se borran de golpe.
+    //   · Cambio A FUTURO → siguen FIJAS hasta el día ANTES de la fecha efectiva
+    //     (el alumno las sigue teniendo hasta que arranca el plan nuevo). El cron las
+    //     da de baja al pasar la fecha.
+    //   · Cambio inmediato (hoy o antes) → baja inmediata.
     if (cpQuitarSel.size > 0) {
+      const hoyIso = _isoLocal(new Date());
+      const efeBaja = $('#cpFecha').value || `${mesQueViene}-01`;
+      const updBaja = (efeBaja > hoyIso) ? { fecha_hasta: _diaAnterior(efeBaja) } : { activo: false };
       const { error: errQuitar } = await sb.from('turno_alumnos')
-        .update({ activo: false })
+        .update(updBaja)
         .in('id', [...cpQuitarSel]);
       if (errQuitar) throw errQuitar;
     }
@@ -4558,6 +4647,11 @@ window.wizSiguiente = async () => {
 
 // Cargar turnos de la agenda TF (tablas turnos + turno_profes + turno_alumnos)
 async function cargarTurnosWiz() {
+  // Default de la fecha de inicio de turnos = fecha de alta del plan (Paso 1).
+  const _faDefault = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
+    || ($('#altaFecha') && $('#altaFecha').value)
+    || HOY.toISOString().split('T')[0];
+  if ($('#altaTurnosDesde') && !$('#altaTurnosDesde').value) $('#altaTurnosDesde').value = _faDefault;
   $('#altaTurnosList').innerHTML = '<div class="empty" style="padding:14px;">Cargando turnos disponibles...</div>';
   try {
     const [{ data: turnos, error: e1 }, { data: profes, error: e2 }, { data: ocup, error: e3 }] = await Promise.all([
@@ -4726,8 +4820,9 @@ window.toggleTurnoWiz = (turnoId) => {
 async function guardarTurnosWiz() {
   if (wizTurnosSel.size === 0) return; // opcional, no hace nada
   const personaId = alumnoActivo.persona.id;
-  // fecha_desde = fecha_alta del plan (Paso 1). Si está vacía, usa hoy.
-  const fechaDesde = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
+  // fecha_desde = la fecha de inicio elegida en el Paso 2 (si está), o la fecha_alta del plan.
+  const fechaDesde = ($('#altaTurnosDesde') && $('#altaTurnosDesde').value)
+    || (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
     || HOY.toISOString().split('T')[0];
 
   // Antes de insertar, traer los registros que ya existan para esa persona en esos turnos
@@ -5968,7 +6063,9 @@ let esLu = false; // solo Lu puede borrar pagos / deshacer cambios de plan
 let usuarioEmail = ''; // mail del operador logueado (para permisos de reactivación)
 
 // ===== PERMISOS DE REACTIVACIÓN =====
-// Los DOS caminos (proporcional + 10% y sin deuda/fecha nueva): Ale, Paula, Jime, Lu.
+// Camino 1 (cobrar proporcional + 10%): Ale, Paula, Jime, Lu
+// Camino 2 (sin deuda, fecha nueva): solo Jime y Lu
+// 👇 Para sumar a Ale y Paula: descomentá las líneas y poné sus mails de login.
 const PERM_REACTIVAR_PROP = [
   'liclucianavelaz@gmail.com',   // Lu
   'jimenahllorente@gmail.com',   // Jime
@@ -5978,8 +6075,6 @@ const PERM_REACTIVAR_PROP = [
 const PERM_REACTIVAR_LIMPIO = [
   'liclucianavelaz@gmail.com',   // Lu
   'jimenahllorente@gmail.com',   // Jime
-  'alejandraperna@gmail.com',    // Ale
-  'paukappes@gmail.com',         // Paula
 ];
 function puedeReactivarProp() { return PERM_REACTIVAR_PROP.includes(usuarioEmail); }
 function puedeReactivarLimpio() { return PERM_REACTIVAR_LIMPIO.includes(usuarioEmail); }

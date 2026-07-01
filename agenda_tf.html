@@ -1441,7 +1441,7 @@ async function cargarDatos() {
     // ANTES de leer, así esta misma carga ya las muestra como fijas (sin el ⏳).
     await efectivizarSueltasVencidas();
     // Cargar alumnos por turno (incluyendo fecha_desde y pendiente_fijo)
-    const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,pendiente_fijo,personas(id,nombre,foto_perfil)&activo=eq.true');
+    const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,fecha_hasta,pendiente_fijo,personas(id,nombre,foto_perfil)&activo=eq.true');
 
     // Marca de ingreso real (NUEVO / REINGRESO) por persona, desde la inscripción TF (no de baja)
     const MARCA_INGRESO = {};
@@ -1462,6 +1462,7 @@ async function cargarDatos() {
         foto: at.personas.foto_perfil || null,
         estado: 'reservado',
         fecha_desde: at.fecha_desde || null,
+        fecha_hasta: at.fecha_hasta || null,
         pendiente_fijo: at.pendiente_fijo || false,
         clasificacion: MARCA_INGRESO[String(at.personas.id)] || null
       });
@@ -1657,12 +1658,15 @@ async function cargarAgregadosSemana() {
   }
 }
 
-// Devuelve los fijos VIGENTES en una fecha: descarta los que tienen fecha_desde futura.
-// Si fecha_desde es null/vacía, el alumno cuenta como vigente desde siempre (compat con datos viejos).
+// Devuelve los fijos VIGENTES en una fecha: descarta los que tienen fecha_desde futura
+// o fecha_hasta ya pasada. Si fecha_desde/fecha_hasta son null, no acotan por ese lado
+// (compat con datos viejos). fecha_hasta = último día INCLUSIVE en que sigue en el turno.
 function fijosVigentes(key, fechaIso) {
   const todos = ALUMNOS_POR_TURNO[key] || [];
   if (!fechaIso) return todos;
-  return todos.filter(a => !a.fecha_desde || a.fecha_desde <= fechaIso);
+  return todos.filter(a =>
+    (!a.fecha_desde || a.fecha_desde <= fechaIso) &&
+    (!a.fecha_hasta || a.fecha_hasta >= fechaIso));
 }
 
 // Devuelve los alumnos de un turno = fijos vigentes + agregados puntuales de la fecha indicada.
@@ -3301,11 +3305,13 @@ async function recuperatoriosDe(personaId) {
 async function diasFijosDePersona(personaId) {
   try {
     const filas = await supabaseQuery('turno_alumnos',
-      `?select=fecha_desde,turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
+      `?select=fecha_desde,fecha_hasta,turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
+    const _hoy = hoyIso();
     // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
     // Sirve para no ofrecer un feriado anterior al alta del alumno en ese día.
     const m = new Map();
     (filas || []).forEach(f => {
+      if (f.fecha_hasta && f.fecha_hasta < _hoy) return;   // ya dejó ese turno: no cuenta
       const dia = f.turnos && f.turnos.dia;
       if (!dia) return;
       const fd = f.fecha_desde || null;
@@ -3322,8 +3328,11 @@ async function diasFijosDePersona(personaId) {
 async function turnosFijosDePersona(personaId) {
   try {
     const filas = await supabaseQuery('turno_alumnos',
-      `?select=turno_id,fecha_desde&persona_id=eq.${personaId}&activo=eq.true`);
-    return (filas || []).map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null }));
+      `?select=turno_id,fecha_desde,fecha_hasta&persona_id=eq.${personaId}&activo=eq.true`);
+    const _hoy = hoyIso();
+    return (filas || [])
+      .filter(f => !f.fecha_hasta || f.fecha_hasta >= _hoy)   // ya dejó ese turno: no cuenta
+      .map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null }));
   } catch (e) { console.warn('No se pudo leer turnos fijos', e); return []; }
 }
 // Lista de clases CANCELADAS POR EL CENTRO: [{ turno_id, fecha, motivo }]

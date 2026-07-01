@@ -645,6 +645,11 @@
         <div class="aviso-amarillo" style="background:#dbeafe;border-color:var(--azul);color:#1e3a5f;">
           📅 Tocá los turnos fijos que va a tener cada semana. <strong>Es opcional</strong> — si no asignás ahora, lo hacés después en la Agenda TF.
         </div>
+        <div class="form-group" style="margin:10px 0;">
+          <label>📅 Los turnos arrancan el (empieza a venir a la agenda):</label>
+          <input type="date" id="altaTurnosDesde">
+          <div style="font-size:11px; color:var(--text-dim); margin-top:3px;">Desde esta fecha figura en la agenda. Puede ser distinta a la fecha de alta del plan — ej: cargás la ficha hoy pero recién arranca el lunes que viene.</div>
+        </div>
         <div style="display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px;">
           <button type="button" class="filtro-turno active" data-ftservicio="todos" onclick="setFiltroTurno('servicio','todos',this)">Todos</button>
           <button type="button" class="filtro-turno" data-ftservicio="Entrenamiento" onclick="setFiltroTurno('servicio','Entrenamiento',this)">🏋️ Entrenamiento</button>
@@ -2006,7 +2011,9 @@ window.confirmarCambioPlan = async () => {
     }
 
     // 3) Agregar las clases extra elegidas a la agenda (permanentes)
-    // Arrancan el 1ro del mes en que se aplica el plan nuevo
+    // Arrancan el 1ro del mes en que se aplica el plan nuevo. Se entran como "pendiente de fijo"
+    // (con fija_desde) para que el tope del plan no las rebote mientras el plan sigue siendo el viejo;
+    // la agenda las pasa a fijas solas al llegar la fecha.
     if (cpTurnosSel.size > 0) {
       const fechaDesdeExtras = `${mesQueViene}-01`;
       const turnoIdsExtra = [...cpTurnosSel];
@@ -2020,7 +2027,7 @@ window.confirmarCambioPlan = async () => {
       const idsActualizarExtras = (existExtras || []).map(r => r.id);
       if (idsActualizarExtras.length) {
         const { error: errUpdEx } = await sb.from('turno_alumnos')
-          .update({ activo: true, fecha_desde: fechaDesdeExtras })
+          .update({ activo: true, fecha_desde: fechaDesdeExtras, fecha_hasta: null, pendiente_fijo: true, fija_desde: fechaDesdeExtras })
           .in('id', idsActualizarExtras);
         if (errUpdEx) throw errUpdEx;
       }
@@ -2030,7 +2037,9 @@ window.confirmarCambioPlan = async () => {
           turno_id: turnoId,
           persona_id: p.id,
           activo: true,
-          fecha_desde: fechaDesdeExtras
+          fecha_desde: fechaDesdeExtras,
+          pendiente_fijo: true,
+          fija_desde: fechaDesdeExtras
         }));
       if (filasNuevasExtras.length) {
         const { error: errTurnos } = await sb.from('turno_alumnos').insert(filasNuevasExtras);
@@ -2522,6 +2531,11 @@ window.wizSiguiente = async () => {
 
 // Cargar turnos de la agenda TF (tablas turnos + turno_profes + turno_alumnos)
 async function cargarTurnosWiz() {
+  // Default de la fecha de inicio de turnos = fecha de alta del plan (Paso 1).
+  const _faDefault = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
+    || ($('#altaFecha') && $('#altaFecha').value)
+    || HOY.toISOString().split('T')[0];
+  if ($('#altaTurnosDesde') && !$('#altaTurnosDesde').value) $('#altaTurnosDesde').value = _faDefault;
   $('#altaTurnosList').innerHTML = '<div class="empty" style="padding:14px;">Cargando turnos disponibles...</div>';
   try {
     const [{ data: turnos, error: e1 }, { data: profes, error: e2 }, { data: ocup, error: e3 }] = await Promise.all([
@@ -2729,8 +2743,9 @@ async function detectarFechasCompletas(turnoIds, fechaDesde) {
 async function guardarTurnosWiz() {
   if (wizTurnosSel.size === 0) return; // opcional, no hace nada
   const personaId = alumnoActivo.persona.id;
-  // fecha_desde = fecha_alta del plan (Paso 1). Si está vacía, usa hoy.
-  const fechaDesde = (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
+  // fecha_desde = la fecha de inicio elegida en el Paso 2 (si está), o la fecha_alta del plan.
+  const fechaDesde = ($('#altaTurnosDesde') && $('#altaTurnosDesde').value)
+    || (alumnoActivo.inscripcion && alumnoActivo.inscripcion.fecha_alta)
     || HOY.toISOString().split('T')[0];
 
   // Antes de insertar, traer los registros que ya existan para esa persona en esos turnos
