@@ -1216,6 +1216,12 @@ function hoyISO(){
 //  Si el usuario tiene personas a cargo, muestra "¿A quién querés ver?"
 //  y al elegir re-corre cargarEspacio() sobre esa persona (modo lectura).
 // ============================================================
+// ETAPA 4 · En nombre de quién se gestiona: null = yo mismo; id = el a-cargo que estoy viendo.
+window._pidActivo = function(){
+  const act = Number(window._personaActivaId || 0);
+  const tit = Number((window._titularPer || {}).id || 0);
+  return (act && tit && act !== tit) ? act : null;
+};
 async function montarSelectorPersonas(titular){
   window._titularPer = titular;
   window._personaActivaId = Number(titular.id);
@@ -1256,7 +1262,7 @@ function renderSelectorPersonas(){
   const bannerOtro = viendoOtro
     ? `<div style="margin-top:10px; background:#fff8e1; border:1px solid #f0c000; color:#7a5c00;`
       + ` border-radius:10px; padding:8px 12px; font-size:13px; display:flex; align-items:center;`
-      + ` gap:8px; flex-wrap:wrap;"><span>👁️ Estás viendo el espacio de <b>${nomActiva}</b> (modo lectura).</span>`
+      + ` gap:8px; flex-wrap:wrap;"><span>👁️ Estás viendo el espacio de <b>${nomActiva}</b> — podés avisar faltas y reservar en su nombre.</span>`
       + `<button type="button" onclick="cambiarPersona(${titularId})" style="background:#7a5c00; color:#fff;`
       + ` border:none; border-radius:8px; padding:4px 10px; cursor:pointer; font-size:12px;">Volver a mí</button></div>`
     : '';
@@ -1732,7 +1738,7 @@ async function cargarEspacio(per){
 
   // Traer info de cupo de sueltas en paralelo (no bloqueante si falla)
   try {
-    const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas');
+    const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas', { p_persona_id: window._pidActivo() });
     window._agendaData.cupoSueltas = cs || null;
   } catch (e) {
     window._agendaData.cupoSueltas = null;
@@ -1745,7 +1751,7 @@ async function cargarEspacio(per){
   window._agendaData.misTurnosDesde = (misTurnosRes.data || [])
     .map(r => ({ turno_id: r.turno_id, fecha_desde: r.fecha_desde || null }));
   try {
-    const { data: cc } = await sb.rpc('alumno_cierres_centro_recientes');
+    const { data: cc } = await sb.rpc('alumno_cierres_centro_recientes', { p_persona_id: window._pidActivo() });
     window._agendaData.cierresCentro = cc || [];
   } catch (e) {
     window._agendaData.cierresCentro = [];   // si el RPC todavía no existe, no rompe nada
@@ -2164,7 +2170,7 @@ window.refrescarDatosAgenda = async function(){
     );
 
     // Cupo de sueltas (no bloqueante)
-    try { const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas'); data.cupoSueltas = cs || null; } catch(e) {}
+    try { const { data: cs } = await sb.rpc('alumno_info_cupo_sueltas', { p_persona_id: window._pidActivo() }); data.cupoSueltas = cs || null; } catch(e) {}
 
     // Redibujar el día que está viendo
     const cont = document.getElementById('agenda-lista');
@@ -2202,7 +2208,7 @@ window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
   btn.textContent = 'Avisando…';
 
   try {
-    const { data: resAviso, error } = await sb.rpc('alumno_avisar_falta', {
+    const { data: resAviso, error } = await sb.rpc('alumno_avisar_falta', { p_persona_id: window._pidActivo(),
       p_turno_id: turnoId,
       p_fecha: fechaISO
     });
@@ -2266,7 +2272,7 @@ window.deshacerFalta = async function(turnoId, fechaISO){
     // RPC con control de cupo: si tu lugar ya fue ocupado por otro compañero,
     // la base rechaza con 'lugar_ocupado' y la falta queda avisada.
     // (Sin fallback de borrado directo: el cupo se respeta SIEMPRE.)
-    const { error } = await sb.rpc('alumno_deshacer_falta', {
+    const { error } = await sb.rpc('alumno_deshacer_falta', { p_persona_id: window._pidActivo(),
       p_turno_id: turnoId,
       p_fecha: fechaISO
     });
@@ -2468,7 +2474,7 @@ window.pbFaltaAvisarFecha = async function(turnoId, fecha, dia, hora, serv){
     : `⚠️ Estás avisando con menos de 2 horas de anticipación.\n\nTu clase del ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv}) quedará cancelada, pero NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`;
   if (!confirm(msg)) return;
   try {
-    const { error } = await sb.rpc('alumno_avisar_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    const { error } = await sb.rpc('alumno_avisar_falta', { p_persona_id: window._pidActivo(), p_turno_id: turnoId, p_fecha: fecha });
     if (error) throw error;
     await refrescarDatosAgenda();
     pbRenderSelectorFaltaBody(turnoId, dia, hora, serv);
@@ -2482,7 +2488,7 @@ window.pbFaltaAvisarFecha = async function(turnoId, fecha, dia, hora, serv){
 window.pbFaltaDeshacerFecha = async function(turnoId, fecha, dia, hora, serv){
   if (!confirm('¿Deshacer el aviso de falta? Volvés a quedar anotado en esa clase.')) return;
   try {
-    const { error } = await sb.rpc('alumno_deshacer_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    const { error } = await sb.rpc('alumno_deshacer_falta', { p_persona_id: window._pidActivo(), p_turno_id: turnoId, p_fecha: fecha });
     if (error) throw error;
     await refrescarDatosAgenda();
     pbRenderSelectorFaltaBody(turnoId, dia, hora, serv);
@@ -2512,7 +2518,7 @@ window.pbCancelarFijaDesdeAgenda = async function(turnoId, fecha, dia, hora, ser
     : `⚠️ Estás avisando con menos de 2 horas de anticipación.\n\nTu clase del ${fmtFechaCorta(fecha)} (${dia} ${hora} · ${serv}) quedará cancelada, pero NO se va a poder recuperar.\n\n¿Querés cancelarla igual?`;
   if (!confirm(msg)) return;
   try {
-    const { error } = await sb.rpc('alumno_avisar_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    const { error } = await sb.rpc('alumno_avisar_falta', { p_persona_id: window._pidActivo(), p_turno_id: turnoId, p_fecha: fecha });
     if (error) throw error;
     await refrescarDatosAgenda();
     if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
@@ -2525,7 +2531,7 @@ window.pbCancelarFijaDesdeAgenda = async function(turnoId, fecha, dia, hora, ser
 window.pbDeshacerFijaDesdeAgenda = async function(turnoId, fecha){
   if (!confirm('¿Volver a anotarte en esta clase?')) return;
   try {
-    const { error } = await sb.rpc('alumno_deshacer_falta', { p_turno_id: turnoId, p_fecha: fecha });
+    const { error } = await sb.rpc('alumno_deshacer_falta', { p_persona_id: window._pidActivo(), p_turno_id: turnoId, p_fecha: fecha });
     if (error) throw error;
     await refrescarDatosAgenda();
     if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
@@ -5461,7 +5467,7 @@ window.pbConfirmarCambioArea = async function(turnoOrigenId, turnoDestinoId, fec
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_cambio_area', {
+    const { data: res, error } = await sb.rpc('alumno_cambio_area', { p_persona_id: window._pidActivo(),
       p_turno_origen_id: turnoOrigenId,
       p_turno_destino_id: turnoDestinoId,
       p_fecha: fechaISO,
@@ -5549,7 +5555,7 @@ window.pbConfirmarRecupero = async function(recuperatorioId, turnoDestinoId, fec
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_agendar_recupero', {
+    const { data: res, error } = await sb.rpc('alumno_agendar_recupero', { p_persona_id: window._pidActivo(),
       p_recuperatorio_id: recuperatorioId,
       p_turno_destino_id: turnoDestinoId,
       p_fecha_recupero: fechaISO,
@@ -5570,7 +5576,7 @@ window.pbConfirmarRecuperoFeriado = async function(fechaFeriado, turnoDestinoId,
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_agendar_recupero_feriado', {
+    const { data: res, error } = await sb.rpc('alumno_agendar_recupero_feriado', { p_persona_id: window._pidActivo(),
       p_fecha_feriado: fechaFeriado,
       p_turno_destino_id: turnoDestinoId,
       p_fecha_recupero: fechaISO,
@@ -5649,7 +5655,7 @@ window.pbConfirmarClaseSuelta = async function(turnoDestinoId, fechaISO) {
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_clase_suelta', {
+    const { data: res, error } = await sb.rpc('alumno_clase_suelta', { p_persona_id: window._pidActivo(),
       p_turno_destino_id: turnoDestinoId,
       p_fecha: fechaISO,
     });
@@ -5702,7 +5708,7 @@ window.pbConfirmarRevertir = async function(turnoId, fechaISO) {
   const btns = document.querySelectorAll('#pbModal button');
   btns.forEach(b => b.disabled = true);
   try {
-    const { data: res, error } = await sb.rpc('alumno_revertir_anotacion', {
+    const { data: res, error } = await sb.rpc('alumno_revertir_anotacion', { p_persona_id: window._pidActivo(),
       p_turno_id: turnoId,
       p_fecha: fechaISO,
     });
@@ -6107,7 +6113,7 @@ window.pbVacacionesPreview = async function(){
   if(!desde || !hasta){ if(cont) cont.innerHTML = '<div style="color:#dc2626;font-size:13px">Elegí las dos fechas.</div>'; return; }
   if(cont) cont.innerHTML = '<div style="color:#64748b;font-size:13px">⟳ Buscando tus clases en ese rango…</div>';
   try{
-    const { data: res, error } = await sb.rpc('vacaciones_preview', {
+    const { data: res, error } = await sb.rpc('vacaciones_preview', { p_persona_id: window._pidActivo(),
       p_persona_id: window._agendaData.personaId, p_desde: desde, p_hasta: hasta
     });
     if(error) throw error;
