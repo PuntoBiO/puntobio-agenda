@@ -563,6 +563,8 @@
     tratamientos: [],       // todos los del paciente
     ttoSel: null,           // tratamiento seleccionado
     splitCache: null,       // { pct_centro, pct_moplex } actual
+    moplexCat: null,        // { byId } catálogo MOPLEX (cache)
+    moplex: null,           // reparto del tratamiento MOPLEX seleccionado
     profesionales: ['Lu','Jime','Bruno','Male','Vero'],
     todosLosPacientes: [],  // cache liviano para buscador
   };
@@ -600,6 +602,78 @@
 
   function profesionalEsVariable(practicaCodigo) {
     return PRACTICAS_PROFESIONAL_VARIABLE.includes(practicaCodigo);
+  }
+
+  /* ===== MOPLEX: reparto directo desde el catálogo (no usa tarifario) =====
+     Mismas fórmulas que consultas_moplex.html / liquidaciones.html. */
+  const MOPLEX_FACTURA_DESDE = '2026-06';
+  function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_FACTURA_DESDE; }
+  function calcConsultaMoplex(c){
+    if(!c) return null;
+    const precio = Number(c.precio_paciente)||0;
+    const moplex = Number(c.costo_moplex)||0;
+    const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
+    return { precio, moplex, prof, centro: precio - moplex - prof };
+  }
+  function calcPlantillaMoplex(p, rectif){
+    if(!p) return null;
+    if(rectif){
+      const precio = Math.round((Number(p.precio_paciente)||0)/2);
+      const moplex = Math.round(precio*0.85);
+      return { precio, moplex, prof:0, centro: precio - moplex, rectif:true };
+    }
+    const precio = Number(p.precio_paciente)||0;
+    const moplex = Number(p.costo_moplex)||0;
+    const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);
+    return { precio, moplex, prof, centro: precio - moplex - prof, rectif:false };
+  }
+  function splitPortionMoplex(rep, portion, fact){
+    if (!rep || !rep.precio) return { prof:0, moplex:0, centro:portion };
+    if (!fact) return { prof:0, moplex:0, centro:portion };
+    const fr = portion / rep.precio;
+    const prof   = Math.round(rep.prof   * fr);
+    const moplex = Math.round(rep.moplex * fr);
+    return { prof, moplex, centro: portion - prof - moplex };
+  }
+  async function cargarMoplexCat(){
+    if (state.moplexCat) return;
+    try {
+      const { data } = await sb.from('moplex_catalogo').select('*');
+      const byId = {}; (data||[]).forEach(c => { byId[c.id] = c; });
+      state.moplexCat = { byId };
+    } catch (e) {
+      state.moplexCat = { byId:{} };
+      console.warn('No se pudo cargar moplex_catalogo:', e.message);
+    }
+  }
+  // Reparto total del tratamiento MOPLEX según el catálogo (eval + plantilla)
+  function repartoMoplexTto(t){
+    const byId = (state.moplexCat && state.moplexCat.byId) || {};
+    const ev = byId[t.moplex_consulta_id];
+    const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
+    const er = ev ? calcConsultaMoplex(ev) : null;
+    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif) : null;
+    const evalPrecio  = er ? er.precio : 0;
+    const plantPrecio = pr ? pr.precio : 0;
+    return {
+      er, pr, evalPrecio, plantPrecio, total: evalPrecio + plantPrecio,
+      evalNombre: ev ? ev.nombre : null,
+      plantNombre: pl ? pl.nombre : null,
+      rectif: !!t.moplex_plantilla_rectif,
+      sinTipo: (!er && !pr)
+    };
+  }
+  // Split de un importe puntual (cascada: primero evaluación, después plantilla)
+  function splitImporteMoplex(t, importe){
+    const R = state.moplex || repartoMoplexTto(t);
+    const fact = moplexFacturable($('fecha').value || hoy());
+    let a = Number(importe)||0;
+    const eP = Math.min(a, R.evalPrecio);  a -= eP;
+    const pP = Math.min(a, R.plantPrecio); a -= pP;
+    const se = splitPortionMoplex(R.er, eP, fact);
+    const sp = splitPortionMoplex(R.pr, pP, fact);
+    const leftover = a > 0 ? a : 0;
+    return { prof: se.prof + sp.prof, moplex: se.moplex + sp.moplex, centro: se.centro + sp.centro + leftover, R, eP, pP };
   }
 
   /* ===== HELPERS ===== */
@@ -920,6 +994,18 @@
       cargarPagosRecientes(t.id),
     ]);
 
+    // MOPLEX: calcular el reparto desde el catálogo y autocompletar el importe
+    if (t.practica_codigo === 'MOPLEX'){
+      await cargarMoplexCat();
+      const R = repartoMoplexTto(t);
+      state.moplex = R;
+      if (!R.sinTipo && R.total > 0){
+        $('importe').value = R.total.toFixed(2);   // total sugerido (eval + plantilla)
+      }
+    } else {
+      state.moplex = null;
+    }
+
     actualizarPreview();
     setTimeout(() => $('importe').focus(), 50);
   }
@@ -1003,6 +1089,42 @@
     const t = state.ttoSel;
     if (!t) return;
 
+    // ===== MOPLEX: reparto directo del catálogo (no pasa por tarifario) =====
+    if (t.practica_codigo === 'MOPLEX' && state.moplex){
+      const preview = $('preview');
+      const btn = $('btnCobrar');
+      if ($('libreBox')) $('libreBox').style.display = 'none';
+      $('importe').readOnly = false;
+
+      const R = state.moplex;
+      const importe = Number($('importe').value) || 0;
+
+      if (R.sinTipo){
+        $('prevProf').textContent = fmt(0);
+        $('prevCentro').textContent = fmt(0);
+        $('prevMoplex').textContent = fmt(0);
+        preview.classList.add('warn');
+        btn.disabled = true;
+        btn.textContent = 'Falta asignar consulta/plantilla en Consultas MOPLEX';
+        return;
+      }
+
+      const s = splitImporteMoplex(t, importe);
+      $('prevProf').textContent = fmt(s.prof);
+      $('prevCentro').textContent = fmt(s.centro);
+      $('prevMoplex').textContent = fmt(s.moplex);
+
+      let valido = true, motivo = '';
+      const totalCat = R.total;
+      if (importe <= 0){ valido = false; motivo = 'Ingresá un importe mayor a 0'; }
+      else if (totalCat > 0 && importe > totalCat + 0.5){ valido = false; motivo = `Excede el total MOPLEX (${fmt(totalCat)})`; }
+
+      preview.classList.toggle('warn', !valido && importe > 0);
+      btn.disabled = !valido;
+      btn.textContent = valido ? 'Registrar cobro' : (motivo || 'Completá el formulario');
+      return;
+    }
+
     // Si cambió profesional, recargar split
     await cargarSplit();
 
@@ -1075,6 +1197,7 @@
 
     const tipoCobro = $('tipoCobro').value;
     const esLibre = (tipoCobro === 'LIBRE');
+    const esMoplex = (t.practica_codigo === 'MOPLEX');
 
     // Montos según el tipo
     let importe, libreProf = 0, libreCentro = 0;
@@ -1092,18 +1215,28 @@
       toast(esLibre ? 'Cargá cuánto cobra profesional y/o centro' : 'Importe inválido', 'err');
       btn.disabled = false; btn.textContent = 'Registrar cobro'; return;
     }
-    if (importe > saldo && saldo > 0) { toast('No podés cobrar de más', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
+    if (!esMoplex && importe > saldo && saldo > 0) { toast('No podés cobrar de más', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
+    if (esMoplex && state.moplex && state.moplex.total > 0 && importe > state.moplex.total + 0.5) { toast(`Excede el total MOPLEX (${fmt(state.moplex.total)})`, 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
     if (!$('quienCobro').value) { toast('Elegí quién cobró', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
 
     // Cartel de confirmación — que revisen a conciencia antes de cargar
     const pacienteNom = (state.pacienteSel && state.pacienteSel.nombre) ? state.pacienteSel.nombre : 'el paciente';
     const medioLindo = { 'EFECTIVO':'Efectivo', 'DEBITO':'Débito', 'TRANSFERENCIA':'Transferencia' }[$('medio').value] || $('medio').value;
+    let extraMoplex = '';
+    if (esMoplex) {
+      const s = splitImporteMoplex(t, importe);
+      extraMoplex = 'Reparto MOPLEX:\n' +
+        '  Profesional: ' + fmt(s.prof) + '\n' +
+        '  Centro: ' + fmt(s.centro) + '\n' +
+        '  MOPLEX (franquicia): ' + fmt(s.moplex) + '\n\n';
+    }
     const okConfirm = confirm(
       '⚠️ Revisá antes de guardar:\n\n' +
       'Paciente: ' + pacienteNom + '\n' +
       'La sesión la hizo: ' + $('profesional').value + '\n' +
       'La plata la recibió: ' + $('quienCobro').value + '\n' +
       'Importe: ' + fmt(importe) + ' (' + medioLindo + ')\n\n' +
+      extraMoplex +
       '¿Está todo correcto?'
     );
     if (!okConfirm) { btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
@@ -1125,6 +1258,14 @@
       payload.monto_profesional = libreProf;
       payload.monto_centro = libreCentro;
       payload.monto_moplex = 0;
+    } else if (esMoplex) {
+      // MOPLEX: reparto calculado del catálogo, enviado a mano.
+      // tipo_cobro='MANUAL' hace que el trigger NO lo recalcule (mismo mecanismo que LIBRE).
+      const s = splitImporteMoplex(t, importe);
+      payload.tipo_cobro       = 'MANUAL';
+      payload.monto_profesional = s.prof;
+      payload.monto_centro      = s.centro;
+      payload.monto_moplex      = s.moplex;
     }
 
     // Si tu schema NO tiene tipo_cobro / cargado_por, eliminá esas claves del payload.
@@ -1140,7 +1281,7 @@
       if (error) throw error;
 
       // Verificar que guardó los montos correctos (defensa contra bug histórico)
-      if (tipoCobro === 'NORMAL' && importe > 0
+      if (tipoCobro === 'NORMAL' && !esMoplex && importe > 0
           && Number(data.monto_centro || 0) === 0
           && Number(data.monto_profesional || 0) === 0) {
         console.warn('⚠️ Pago guardado con splits en 0. Verificá tarifario_splits para', t.practica_codigo, '+', payload.profesional, data);
