@@ -623,6 +623,22 @@ async function guardarBloqueo() {
         toast(`Se cerraron ${nCerradas} clases de Terapia Física.`, 'success');
       }
     } catch (eP) { console.warn('Propagación TF falló', eP); }
+
+    // === LIBERACIÓN DE TURNOS (Consultorios/Maso) ===
+    // Los turnos YA DADOS que pisa el cierre pasan a CANCELADO: dejan de
+    // consumir sesión del tratamiento y vuelven a "X por agendar".
+    // En una edición primero restauramos (por si cambió el alcance) y
+    // volvemos a liberar con los datos nuevos. BIOLAB no maneja turnos asignados.
+    try {
+      if (editandoId) await sb.rpc('restaurar_turnos_bloqueo', { p_bloqueo_id: bloqueoId });
+      const { data: nLib, error: eLib } = await sb.rpc('liberar_turnos_bloqueo', { p_bloqueo_id: bloqueoId });
+      if (eLib) {
+        console.warn('No se pudieron liberar los turnos', eLib);
+        toast('Bloqueo guardado, pero no se pudieron liberar los turnos ya dados. Avisale a Lu.', 'error');
+      } else if ((nLib || 0) > 0) {
+        toast(`Se liberaron ${nLib} turnos ya dados: las sesiones quedan por reagendar.`, 'success');
+      }
+    } catch (eL) { console.warn('Liberación de turnos falló', eL); }
   }
 
   toast(editandoId ? 'Bloqueo actualizado' : 'Bloqueo creado', 'success');
@@ -647,6 +663,14 @@ async function eliminarBloqueo(id) {
     if (eDes) console.warn('No se pudo reabrir las clases de TF', eDes);
     else if ((nAbiertas || 0) > 0) toast(`Se reabrieron ${nAbiertas} clases de Terapia Física.`, 'success');
   } catch (eD) { console.warn('Des-propagación TF falló', eD); }
+
+  // Y si había liberado turnos de Consultorios/Maso, los restauramos a su
+  // estado original (solo los taggeados por este bloqueo que sigan cancelados).
+  try {
+    const { data: nRest, error: eRes } = await sb.rpc('restaurar_turnos_bloqueo', { p_bloqueo_id: id });
+    if (eRes) console.warn('No se pudieron restaurar los turnos', eRes);
+    else if ((nRest || 0) > 0) toast(`Se restauraron ${nRest} turnos que habían sido liberados.`, 'success');
+  } catch (eR) { console.warn('Restauración de turnos falló', eR); }
 
   toast('Bloqueo eliminado', 'success');
   cargarBloqueos();
