@@ -6198,7 +6198,6 @@ window.pbVacacionesCancelar = async function(vacId){
     if (!session) return;                                  // solo con sesión iniciada
     const hoy = (typeof hoyISO === 'function') ? hoyISO() : new Date().toISOString().slice(0,10);
     const { data: fers } = await sb.from('feriados').select('fecha, motivo, tipo');
-    if (!fers || !fers.length) return;
 
     const DIAS = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
     const addDias = (iso, n) => {
@@ -6207,6 +6206,32 @@ window.pbVacacionesCancelar = async function(vacId){
       const off = d.getTimezoneOffset();
       return new Date(d - off*60000).toISOString().slice(0,10);
     };
+
+    // CIERRES DEL CENTRO cargados en Gestión de Turnos (bloqueos_agenda):
+    // día completo, área TF o TRANSVERSAL. Se suman como avisos tipo 'centro',
+    // expandiendo los rangos de varios días en una entrada por fecha.
+    const eventos = [];
+    const fechasConFeriado = new Set();
+    (fers || []).forEach(f => { if (f && f.fecha) { eventos.push(f); fechasConFeriado.add(f.fecha); } });
+    try {
+      const { data: blq } = await sb.from('bloqueos_agenda')
+        .select('fecha_desde, fecha_hasta, hora_desde, area, motivo, activo')
+        .eq('activo', true)
+        .in('area', ['TF','TRANSVERSAL']);
+      (blq || []).forEach(b => {
+        if (b.hora_desde) return;                       // franja horaria: no cierra el día
+        let f = b.fecha_desde;
+        const hasta = b.fecha_hasta || b.fecha_desde;
+        let guard = 0;
+        while (f && f <= hasta && guard < 62) {         // tope de seguridad: 2 meses
+          if (!fechasConFeriado.has(f)) {               // si esa fecha ya es feriado, gana el feriado
+            eventos.push({ fecha: f, motivo: b.motivo || '', tipo: 'centro' });
+          }
+          f = addDias(f, 1); guard++;
+        }
+      });
+    } catch(_){ /* sin acceso a bloqueos: seguimos solo con feriados */ }
+    if (!eventos.length) return;
     // Desde cuándo se muestra el aviso de cada fecha
     const ventanaDesde = (iso) => {
       const dow = new Date(iso + 'T00:00:00').getDay(); // 0=Dom ... 6=Sab
@@ -6218,7 +6243,7 @@ window.pbVacacionesCancelar = async function(vacId){
     };
 
     // Primera fecha cuya ventana incluye hoy y que el alumno todavía no aceptó
-    const prox = (fers || [])
+    const prox = eventos
       .filter(f => f && f.fecha)
       .sort((a,b) => (a.fecha < b.fecha ? -1 : 1))
       .find(f => {
