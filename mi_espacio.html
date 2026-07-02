@@ -1954,23 +1954,42 @@ const TIMERS_DESHACER = {}; // {turnoId: intervalId}
 // Si hoy es ese día y la clase todavía NO empezó -> hoy (aunque falten menos
 // de 2 hs: se puede cancelar igual, solo que sin recuperatorio).
 // Si la clase de hoy ya empezó/pasó -> la próxima semana.
-function proximaFechaDelTurno(diaSemana, hora){
+function proximaFechaDelTurno(diaSemana, hora, turnoId){
   const ahora = new Date();
   const targetDia = DIAS_SEM_NUM[diaSemana];
   if(targetDia==null) return hoyISO();
   const hoyDia = ahora.getDay();
+  let base;
   if(hoyDia === targetDia){
     const [hh,mm] = String(hora||'00:00').split(':').map(Number);
     const horaTurno = new Date(ahora);
     horaTurno.setHours(hh||0, mm||0, 0, 0);
-    if(horaTurno - ahora > 0) return fechaToISO(ahora);
-    const next = new Date(ahora); next.setDate(next.getDate()+7);
-    return fechaToISO(next);
+    if(horaTurno - ahora > 0) base = new Date(ahora);
+    else { base = new Date(ahora); base.setDate(base.getDate()+7); }
+  } else {
+    let diasFaltan = targetDia - hoyDia;
+    if(diasFaltan <= 0) diasFaltan += 7;
+    base = new Date(ahora); base.setDate(base.getDate() + diasFaltan);
   }
-  let diasFaltan = targetDia - hoyDia;
-  if(diasFaltan <= 0) diasFaltan += 7;
-  const prox = new Date(ahora); prox.setDate(prox.getDate() + diasFaltan);
-  return fechaToISO(prox);
+  // Si esa fecha cae en FERIADO o CIERRE DEL CENTRO, no hay clase:
+  // saltar de a 7 días hasta la próxima fecha real (tope: 8 semanas).
+  for (let i = 0; i < 8; i++) {
+    const iso = fechaToISO(base);
+    const esFeriado = !!((window._feriadosMapAll || {})[iso]);
+    const esCierre = ((window._agendaData && window._agendaData.cierresCentro) || [])
+      .some(cc => cc.fecha === iso && (turnoId == null || String(cc.turno_id) === String(turnoId)));
+    let esBloqueoDia = false;
+    if (!esFeriado && !esCierre && window.Bloqueos && typeof Bloqueos.lista === 'function') {
+      try {
+        esBloqueoDia = Bloqueos.lista().some(b =>
+          (b.area === 'TF' || b.area === 'TRANSVERSAL') &&
+          !b.hora_desde && iso >= b.fecha_desde && iso <= b.fecha_hasta);
+      } catch(e) {}
+    }
+    if (!esFeriado && !esCierre && !esBloqueoDia) return iso;
+    base.setDate(base.getDate() + 7);
+  }
+  return fechaToISO(base);
 }
 function fechaToISO(d){
   const off = d.getTimezoneOffset();
@@ -2430,7 +2449,7 @@ function pbBuildMisClasesRows(){
   });
   let rows = '';
   turnos.forEach(t => {
-    const proxISO = proximaFechaDelTurno(t.dia, t.hora);
+    const proxISO = proximaFechaDelTurno(t.dia, t.hora, t.id);
     const proxLegible = fmtFechaCorta(proxISO);
     const dia = esc(t.dia||''); const hora = esc(t.hora||''); const serv = esc(t.servicio||'');
     const yaAvisada = faltasAvisadas.has(t.id + '|' + proxISO);
