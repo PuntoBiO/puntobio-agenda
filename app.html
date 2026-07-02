@@ -2215,7 +2215,7 @@ async function cargarHomeData() {
   let turnosHoy = []
   try {
     const [consR, bioR, masoR, tfClasesR] = await Promise.all([
-      supabase.from('turnos_consultorio').select('hora_inicio, paciente_nombre, profesional, practica_codigo, estado').eq('fecha', hoyISO),
+      supabase.from('turnos_consultorio').select('hora_inicio, paciente_nombre, persona_id, profesional, practica_codigo, estado').eq('fecha', hoyISO),
       supabase.from('turnos_biolab').select('hora_inicio, paciente, profesional, practica, estado').eq('fecha', hoyISO),
       supabase.from('turnos_masoterapia').select('hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').eq('fecha', hoyISO),
       supabase.from('turnos').select('id, dia, hora, servicio, capacidad')
@@ -2224,9 +2224,17 @@ async function cargarHomeData() {
     const hhmm = t => String(t || '').substring(0, 5)
     let cntCons = 0, cntBio = 0, cntMaso = 0, cntTF = 0
 
+    // Los turnos de consultorio guardan persona_id (no el nombre): lo resolvemos contra personas
+    const idsCons = [...new Set((consR.data || []).map(t => t.persona_id).filter(Boolean))]
+    const nombresCons = {}
+    if (idsCons.length) {
+      const { data: persCons } = await supabase.from('personas').select('id, nombre').in('id', idsCons)
+      ;(persCons || []).forEach(p => { nombresCons[p.id] = p.nombre })
+    }
+
     ;(consR.data || []).filter(t => noCancelado(t.estado)).forEach(t => {
       cntCons++
-      turnosHoy.push({ hora: hhmm(t.hora_inicio), icon: '🩺', quien: t.paciente_nombre || '—', detalle: [t.practica_codigo, t.profesional].filter(Boolean).join(' · ') })
+      turnosHoy.push({ hora: hhmm(t.hora_inicio), icon: '🩺', quien: t.paciente_nombre || nombresCons[t.persona_id] || '—', detalle: [t.practica_codigo, t.profesional].filter(Boolean).join(' · ') })
     })
     ;(bioR.data || []).filter(t => noCancelado(t.estado)).forEach(t => {
       cntBio++
@@ -2756,7 +2764,7 @@ async function cargarHomeDataProfe() {
     const vacio = Promise.resolve({ data: [] })
     const [consR, bioR, masoR] = await Promise.all([
       permisos.ve_consultorios
-        ? supabase.from('turnos_consultorio').select('fecha, hora_inicio, paciente_nombre, profesional, practica_codigo, estado').gte('fecha', desde).lte('fecha', hasta)
+        ? supabase.from('turnos_consultorio').select('fecha, hora_inicio, paciente_nombre, persona_id, profesional, practica_codigo, estado').gte('fecha', desde).lte('fecha', hasta)
         : vacio,
       permisos.ve_biolab
         ? supabase.from('turnos_biolab').select('fecha, hora_inicio, paciente, profesional, practica, estado').gte('fecha', desde).lte('fecha', hasta)
@@ -2765,6 +2773,14 @@ async function cargarHomeDataProfe() {
         ? supabase.from('turnos_masoterapia').select('fecha, hora_inicio, paciente_nombre, profesional, tipo_masaje, estado').gte('fecha', desde).lte('fecha', hasta)
         : vacio
     ])
+
+    // Consultorio guarda persona_id (no el nombre): resolvemos contra personas
+    const idsCons2 = [...new Set((consR.data || []).map(t => t.persona_id).filter(Boolean))]
+    const nombresCons2 = {}
+    if (idsCons2.length) {
+      const { data: persCons2 } = await supabase.from('personas').select('id, nombre').in('id', idsCons2)
+      ;(persCons2 || []).forEach(p => { nombresCons2[p.id] = p.nombre })
+    }
 
     const procesar = (rows, icon, getQuien, getDetalle) => {
       ;(rows || []).filter(t => noCancelado(t.estado) && esMio(t.profesional)).forEach(t => {
@@ -2778,7 +2794,7 @@ async function cargarHomeDataProfe() {
         }
       })
     }
-    procesar(consR.data, '🩺', t => t.paciente_nombre || '—', t => t.practica_codigo || '')
+    procesar(consR.data, '🩺', t => t.paciente_nombre || nombresCons2[t.persona_id] || '—', t => t.practica_codigo || '')
     procesar(bioR.data, '🔬', t => t.paciente || '—', t => t.practica || '')
     procesar(masoR.data, '💆', t => t.paciente_nombre || '—', t => t.tipo_masaje || '')
 
