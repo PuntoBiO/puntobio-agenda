@@ -591,11 +591,13 @@ async function guardarBloqueo() {
     creado_por_nombre: usuario.nombre,
   };
 
-  let res;
+  let res, bloqueoId = editandoId;
   if (editandoId) {
     res = await sb.from('bloqueos_agenda').update(payload).eq('id', editandoId);
   } else {
-    res = await sb.from('bloqueos_agenda').insert(payload);
+    // Pedimos el id de vuelta para poder propagar el cierre a TF
+    res = await sb.from('bloqueos_agenda').insert(payload).select('id').single();
+    if (!res.error && res.data) bloqueoId = res.data.id;
   }
 
   btn.disabled = false;
@@ -603,6 +605,26 @@ async function guardarBloqueo() {
     toast('Error al guardar: ' + res.error.message, 'error');
     return;
   }
+
+  // === PROPAGACIÓN A TERAPIA FÍSICA ===
+  // La Agenda TF no lee bloqueos_agenda: cierra por `clases_cerradas` (tipo
+  // 'centro' = recuperable 60 días sin gastar cupo). Si el bloqueo toca TF
+  // (área TF o TRANSVERSAL), generamos/regeneramos esas filas vía RPC.
+  // En una EDICIÓN primero des-propagamos (por si cambiaron fechas/horas/área)
+  // y después volvemos a propagar con los datos nuevos.
+  if (bloqueoId) {
+    try {
+      if (editandoId) await sb.rpc('despropagar_bloqueo_tf', { p_bloqueo_id: bloqueoId });
+      const { data: nCerradas, error: eProp } = await sb.rpc('propagar_bloqueo_tf', { p_bloqueo_id: bloqueoId });
+      if (eProp) {
+        console.warn('No se pudo propagar el cierre a TF', eProp);
+        toast('Bloqueo guardado, pero no se pudo cerrar la agenda de TF. Avisale a Lu.', 'error');
+      } else if ((area === 'TF' || area === 'TRANSVERSAL') && (nCerradas || 0) > 0) {
+        toast(`Se cerraron ${nCerradas} clases de Terapia Física.`, 'success');
+      }
+    } catch (eP) { console.warn('Propagación TF falló', eP); }
+  }
+
   toast(editandoId ? 'Bloqueo actualizado' : 'Bloqueo creado', 'success');
   cerrarModal();
   cargarBloqueos();
@@ -617,6 +639,15 @@ async function eliminarBloqueo(id) {
   // Soft delete: ponemos activo=false (queda el histórico).
   const { error } = await sb.from('bloqueos_agenda').update({ activo: false }).eq('id', id);
   if (error) { toast('Error al eliminar: ' + error.message, 'error'); return; }
+
+  // Si el bloqueo había cerrado clases de TF, las reabrimos (borra solo las
+  // filas de clases_cerradas taggeadas con este bloqueo, nunca cierres manuales).
+  try {
+    const { data: nAbiertas, error: eDes } = await sb.rpc('despropagar_bloqueo_tf', { p_bloqueo_id: id });
+    if (eDes) console.warn('No se pudo reabrir las clases de TF', eDes);
+    else if ((nAbiertas || 0) > 0) toast(`Se reabrieron ${nAbiertas} clases de Terapia Física.`, 'success');
+  } catch (eD) { console.warn('Des-propagación TF falló', eD); }
+
   toast('Bloqueo eliminado', 'success');
   cargarBloqueos();
 }
