@@ -417,6 +417,13 @@
         </div>
       </div>
 
+      <div id="moplexPlantillaBox" style="display:none; margin-top:10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; background:#e0f1fb; border:1px solid #9fd4f0; border-radius:10px; padding:10px 12px;">
+          <div style="font-size:13.5px; color:#0a4d6e;">🦶 <b>Plantilla:</b> <span id="moplexPlantillaTxt">Ninguna</span></div>
+          <button type="button" id="btnPlantilla" onclick="abrirModalPlantilla()" style="background:#0284c7; color:#fff; border:none; border-radius:8px; padding:7px 12px; font-size:12.5px; font-weight:600; cursor:pointer;">Elegir plantilla</button>
+        </div>
+      </div>
+
       <div class="formGrid">
         <div class="field">
           <label for="importe">Importe a cobrar</label>
@@ -676,6 +683,76 @@
     const leftover = a > 0 ? a : 0;
     return { prof: se.prof + sp.prof, moplex: se.moplex + sp.moplex, centro: se.centro + sp.centro + leftover, R, eP, pP };
   }
+
+  // ===== MOPLEX: elegir plantilla al cobrar (modal) =====
+  function moplexPlantillasCat(){
+    const byId = (state.moplexCat && state.moplexCat.byId) || {};
+    return Object.values(byId)
+      .filter(c => c.activo && !(c.nombre||'').toLowerCase().startsWith('baropod') && !c.es_rectificacion)
+      .sort((a,b) => (a.orden||0) - (b.orden||0));
+  }
+  function actualizarBoxPlantilla(){
+    const box = $('moplexPlantillaBox');
+    const t = state.ttoSel;
+    if (!box) return;
+    if (!t || t.practica_codigo !== 'MOPLEX'){ box.style.display = 'none'; return; }
+    box.style.display = '';
+    const byId = (state.moplexCat && state.moplexCat.byId) || {};
+    const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
+    const rectif = !!t.moplex_plantilla_rectif;
+    const txt = $('moplexPlantillaTxt'), btn = $('btnPlantilla');
+    if (pl){
+      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif).precio) + '</b>';
+      btn.textContent = 'Cambiar';
+    } else {
+      txt.textContent = 'Ninguna';
+      btn.textContent = 'Elegir plantilla';
+    }
+  }
+  window.abrirModalPlantilla = function(){
+    const sel = $('modalPlantillaSel');
+    const lista = moplexPlantillasCat();
+    sel.innerHTML = '<option value="">— Sin plantilla —</option>' +
+      lista.map(p => `<option value="${p.id}">${p.nombre} — ${fmt(Number(p.precio_paciente||0))}</option>`).join('');
+    const t = state.ttoSel;
+    sel.value = (t && t.solicita_plantillas && t.moplex_plantilla_id) ? String(t.moplex_plantilla_id) : '';
+    $('modalPlantillaRectif').checked = !!(t && t.moplex_plantilla_rectif);
+    previewPlantillaModal();
+    $('modalPlantilla').style.display = 'flex';
+  };
+  window.cerrarModalPlantilla = function(){ $('modalPlantilla').style.display = 'none'; };
+  window.previewPlantillaModal = function(){
+    const id = $('modalPlantillaSel').value;
+    const rectif = $('modalPlantillaRectif').checked;
+    const byId = (state.moplexCat && state.moplexCat.byId) || {};
+    const box = $('modalPlantillaPrev');
+    if (!id){ box.innerHTML = 'Sin plantilla — se cobra solo la evaluación.'; return; }
+    const r = calcPlantillaMoplex(byId[id], rectif);
+    box.innerHTML = `Precio plantilla: <b>${fmt(r.precio)}</b><br>Profesional: ${fmt(r.prof)} · Centro: ${fmt(r.centro)} · MOPLEX: ${fmt(r.moplex)}`;
+  };
+  window.confirmarPlantilla = async function(){
+    const t = state.ttoSel; if (!t) return;
+    const id = $('modalPlantillaSel').value;
+    const rectif = $('modalPlantillaRectif').checked;
+    const patch = id
+      ? { solicita_plantillas: true, moplex_plantilla_id: Number(id), moplex_plantilla_rectif: rectif }
+      : { solicita_plantillas: false, moplex_plantilla_id: null, moplex_plantilla_rectif: false };
+    try {
+      const { error } = await sb.from('tratamientos').update(patch).eq('id', t.id);
+      if (error) throw error;
+      Object.assign(t, patch);
+      state.moplex = repartoMoplexTto(t);
+      if (state.moplex && state.moplex.total > 0) $('importe').value = state.moplex.total.toFixed(2);
+      $('resTotal').textContent = fmt(state.moplex.total);
+      $('resSaldo').textContent = fmt(state.moplex.total - Number(t.total_abonado || 0));
+      actualizarBoxPlantilla();
+      actualizarPreview();
+      cerrarModalPlantilla();
+      toast(id ? 'Plantilla agregada' : 'Plantilla quitada', 'ok');
+    } catch (e) {
+      toast('No se pudo guardar la plantilla: ' + (e.message || e), 'err');
+    }
+  };
 
   /* ===== HELPERS ===== */
   const $ = id => document.getElementById(id);
@@ -1032,6 +1109,7 @@
       state.moplex = null;
     }
 
+    actualizarBoxPlantilla();
     actualizarPreview();
     setTimeout(() => $('importe').focus(), 50);
   }
@@ -1337,5 +1415,26 @@
 
   init();
 </script>
+
+<div id="modalPlantilla" style="display:none; position:fixed; inset:0; background:rgba(2,8,23,.55); z-index:9999; align-items:center; justify-content:center; padding:16px;">
+  <div style="background:#fff; border-radius:16px; max-width:460px; width:100%; padding:22px; box-shadow:0 20px 60px rgba(0,0,0,.3);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+      <div style="font-size:18px; font-weight:800; color:#0f172a;">🦶 Plantilla del paciente</div>
+      <button onclick="cerrarModalPlantilla()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b;">✕</button>
+    </div>
+    <div style="font-size:13px; color:#64748b; margin-bottom:14px;">Elegí la plantilla que se lleva (o dejala en ninguna). Se suma al cobro y queda guardada en el tratamiento.</div>
+    <label style="font-size:12px; font-weight:600; color:#475569; text-transform:uppercase; letter-spacing:.04em;">Plantilla</label>
+    <select id="modalPlantillaSel" onchange="previewPlantillaModal()" style="width:100%; padding:10px; border:1px solid #cbd5e1; border-radius:10px; margin:6px 0 12px; font-size:14px;">
+      <option value="">— Sin plantilla —</option>
+    </select>
+    <label style="display:flex; align-items:center; gap:8px; font-size:13.5px; color:#334155; margin-bottom:12px; cursor:pointer;">
+      <input type="checkbox" id="modalPlantillaRectif" onchange="previewPlantillaModal()"> Es rectificación (mitad de precio)
+    </label>
+    <div id="modalPlantillaPrev" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px; font-size:13.5px; color:#334155; margin-bottom:16px;"></div>
+    <div style="display:flex; gap:10px; justify-content:flex-end;">
+      <button onclick="confirmarPlantilla()" style="background:#0284c7; color:#fff; border:none; border-radius:10px; padding:10px 18px; font-weight:700; font-size:14px; cursor:pointer;">Confirmar</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
