@@ -1620,6 +1620,9 @@ async function cargarEspacio(per){
     const _pisoFer = (_hace60 > _PISO_FERIADOS) ? _hace60 : _PISO_FERIADOS;
 
     const { data: feriadosData } = await sb.from('feriados').select('fecha, motivo');
+    // Mapa global fecha -> motivo: lo usa la agenda para marcar/bloquear días feriados.
+    window._feriadosMapAll = {};
+    (feriadosData || []).forEach(f => { if (f.fecha) window._feriadosMapAll[f.fecha] = f.motivo || 'Feriado'; });
     // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
     // Conserva .has() para la lógica de abajo y agrega .get() para el piso de alta.
     const diasFijos = new Map();
@@ -2621,12 +2624,26 @@ function bloqueAgenda(data){
       const dm = `${d}/${m}`;
       const esHoy = (iso === hoyISO);
       const esMiFijo = misDiasFijos.has(dow);
+      // FERIADO / CIERRE de día completo: marca naranja en la pestaña
+      const _esFer = !!((window._feriadosMapAll || {})[iso]);
+      let _esCierreDia = false;
+      if (!_esFer && window.Bloqueos && typeof Bloqueos.lista === 'function') {
+        try {
+          _esCierreDia = Bloqueos.lista().some(b =>
+            (b.area === 'TF' || b.area === 'TRANSVERSAL') &&
+            !b.hora_desde && iso >= b.fecha_desde && iso <= b.fecha_hasta);
+        } catch(e) {}
+      }
       let cls = 'ag-tab';
       if(iso === diaDefault) cls += ' activo';
       if(esHoy) cls += ' hoy';
-      const _fijoStyle = esMiFijo ? ' style="border-color:#1e9fe0;box-shadow:inset 0 0 0 1.5px #1e9fe0"' : '';
-      const _fijoMark = esMiFijo ? '<span style="display:block;font-size:8.5px;color:#1e9fe0;font-weight:800;letter-spacing:.3px;margin-top:2px">● TU CLASE</span>' : '';
-      html += `<button class="${cls}"${_fijoStyle} data-fecha="${iso}" onclick="cambiarDiaAgenda('${iso}')"><span class="ag-tab-dia">${lbl}${esHoy?' · hoy':''}</span><span class="ag-tab-num">${dm}</span>${_fijoMark}</button>`;
+      const _cerradoStyle = (_esFer || _esCierreDia) ? ' style="border-color:#fdba74;background:#fff7ed"' : '';
+      const _fijoStyle = (!_esFer && !_esCierreDia && esMiFijo) ? ' style="border-color:#1e9fe0;box-shadow:inset 0 0 0 1.5px #1e9fe0"' : '';
+      const _cerradoMark = _esFer
+        ? '<span style="display:block;font-size:8.5px;color:#9a3412;font-weight:800;letter-spacing:.3px;margin-top:2px">🟠 FERIADO</span>'
+        : (_esCierreDia ? '<span style="display:block;font-size:8.5px;color:#9a3412;font-weight:800;letter-spacing:.3px;margin-top:2px">🚧 CERRADO</span>' : '');
+      const _fijoMark = (!_cerradoMark && esMiFijo) ? '<span style="display:block;font-size:8.5px;color:#1e9fe0;font-weight:800;letter-spacing:.3px;margin-top:2px">● TU CLASE</span>' : '';
+      html += `<button class="${cls}"${_cerradoStyle}${_fijoStyle} data-fecha="${iso}" onclick="cambiarDiaAgenda('${iso}')"><span class="ag-tab-dia">${lbl}${esHoy?' · hoy':''}</span><span class="ag-tab-num">${dm}</span>${_cerradoMark}${_fijoMark}</button>`;
     });
     html += '</div>';
   });
@@ -2722,6 +2739,16 @@ function renderAgendaDia(fechaISO){
 
   let html = '';
 
+  // FERIADO · si la fecha es feriado, cartel arriba y todos los turnos quedan no disponibles
+  const _motivoFeriadoDia = (window._feriadosMapAll || {})[fechaISO] || null;
+  if (_motivoFeriadoDia) {
+    const fTxtF = fechaISO.split('-').reverse().join('/');
+    html += `<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:#9a3412">
+      <b>🟠 FERIADO ${fTxtF} — ${esc(_motivoFeriadoDia)}</b><br>
+      El centro está cerrado. Si te pisa tu clase fija, la recuperás <b>sin gastar cupo</b> (tenés 30 días).
+    </div>`;
+  }
+
   // BLOQUEOS · banner si hay un bloqueo activo TF/transversal para esta fecha
   if (window.Bloqueos) {
     const bloqsHoy = Bloqueos.lista().filter(b =>
@@ -2763,7 +2790,19 @@ function renderAgendaDia(fechaISO){
       let bloqMark = '';
       let bloqCls = '';
       let estaBloqueado = false;
-      if (window.Bloqueos) {
+      // FERIADO · el día entero queda no disponible
+      if (_motivoFeriadoDia) {
+        estaBloqueado = true;
+        bloqMark = `<span style="display:inline-block;background:#ffedd5;color:#9a3412;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;margin-left:6px">🟠 FERIADO</span>`;
+        bloqCls = 'style="opacity:0.55"';
+      }
+      // CIERRE DEL CENTRO · esta clase puntual está cancelada por el centro (clases_cerradas tipo 'centro')
+      if (!estaBloqueado && (data.cierresCentro || []).some(cc => String(cc.turno_id) === String(t.id) && cc.fecha === fechaISO)) {
+        estaBloqueado = true;
+        bloqMark = `<span style="display:inline-block;background:#ffedd5;color:#9a3412;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;margin-left:6px">🚧 CERRADO POR EL CENTRO</span>`;
+        bloqCls = 'style="opacity:0.55"';
+      }
+      if (!estaBloqueado && window.Bloqueos) {
         const horaIni = (t.hora || '').slice(0,5);
         const horaFin = horaIni ? String(parseInt(horaIni.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
         const b = Bloqueos.queAplica('TF', fechaISO, horaIni, horaFin, null, null);
