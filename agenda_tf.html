@@ -2206,7 +2206,16 @@ function renderTurnos() {
   const bannerFeriado = motivoFeriado
     ? `<div class="feriado-banner">🟠 FERIADO — ${motivoFeriado}. Las clases están cerradas. Las recuperan SIN gastar recuperatorios.</div>`
     : '';
-  container.innerHTML = bannerFeriado + turnos.map(t => cardTurnoHTML(t, fechaGrid, motivoFeriado)).join('');
+  // CIERRE DEL CENTRO de día completo: si TODAS las clases del día están
+  // canceladas por el centro, mismo cartel que feriado (con su motivo y 60 días).
+  let bannerCierre = '';
+  if (!motivoFeriado && turnos.length) {
+    const motivosCierre = turnos.map(t => motivoCierreCentroDe(t.id, fechaGrid));
+    if (motivosCierre.every(m => m)) {
+      bannerCierre = `<div class="feriado-banner">🚧 CIERRE DEL CENTRO — ${motivosCierre[0]}. Las clases están cerradas. Las recuperan SIN gastar recuperatorios (60 días).</div>`;
+    }
+  }
+  container.innerHTML = bannerFeriado + bannerCierre + turnos.map(t => cardTurnoHTML(t, fechaGrid, motivoFeriado)).join('');
 }
 // Genera el HTML de UNA tarjeta de turno completa (la misma para Vista Día y Vista Semana).
 // Recibe la fecha (YYYY-MM-DD) para calcular asistencia/evolución/cierre de ESE día.
@@ -2225,16 +2234,22 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
   // Ícono distintivo: pesa para Entrenamiento, figura estirando (flexibilidad) para Kinefilaxia
   const iconoServicio = t.servicio==='Entrenamiento' ? '🏋️' : '🤸';
   const cerrada = claseEstaCerrada(t.id, fechaIso);
+  // CIERRE DEL CENTRO (clases_cerradas tipo 'centro'): se muestra como el feriado
+  // (falta de servicio nuestra, no del alumno ni del profe).
+  const motivoCierreCentro = motivoFeriado ? null : motivoCierreCentroDe(t.id, fechaIso);
   // FERIADO manda: si el día es feriado, la tarjeta va con estilo feriado y badge naranja
   // Cierre: solo mostramos un cartel claro cuando la clase YA está cerrada. Si no, nada (sin símbolo).
   const badgeCierre = motivoFeriado
     ? `<span class="feriado-badge" title="${motivoFeriado}">🟠 FERIADO</span>`
-    : (cerrada
-      ? `<span class="cierre-badge cb-ok">Clase cerrada</span>`
-      : '');
+    : (motivoCierreCentro
+      ? `<span class="feriado-badge" title="${motivoCierreCentro}">🚧 CIERRE DEL CENTRO</span>`
+      : (cerrada
+        ? `<span class="cierre-badge cb-ok">Clase cerrada</span>`
+        : ''));
   // Badge de EVOLUCIÓN: SOLO en clases CERRADAS (una clase abierta está en curso,
   // todavía no se le exige evolución). Medido sobre los PRESENTES (ausentes no cuentan).
-  const badgeEvo = (motivoFeriado || !cerrada)
+  // En cierre del centro NO aplica: no hubo clase, no hay nada que evolucionar.
+  const badgeEvo = (motivoFeriado || motivoCierreCentro || !cerrada)
     ? ''
     : (ev.presentes === 0
       ? ''
@@ -2243,18 +2258,20 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
         : (ev.completa
           ? `<span class="evo-badge eb-ok" title="Todos los presentes evolucionados">✅ EVOLUCIONADO</span>`
           : `<span class="evo-badge eb-falta" title="Falta evolución (${ev.evolucionados}/${ev.presentes} presentes)">⚠️ FALTA EVOLUCIÓN</span>`)));
-  const claseCard = motivoFeriado ? ' card-feriado' : (cerrada?' card-cerrada':'');
+  const claseCard = (motivoFeriado || motivoCierreCentro) ? ' card-feriado' : (cerrada?' card-cerrada':'');
   // Clase de fondo según servicio (naranja para Entrenamiento, violeta para Kinefilaxia)
-  const claseServicio = motivoFeriado ? '' : (t.servicio === 'Entrenamiento' ? ' es-entrenamiento' : ' es-kinefilaxia');
+  const claseServicio = (motivoFeriado || motivoCierreCentro) ? '' : (t.servicio === 'Entrenamiento' ? ' es-entrenamiento' : ' es-kinefilaxia');
   // En la grilla de la semana, al abrir el modal hay que fijar primero el día de esa columna.
   const abrir = `abrirModalDesde('${t.dia}','${t.hora}','${t.servicio}')`;
-  // Footer: en FERIADO no se habla de ausentes (es falta de servicio nuestra, no del alumno).
+  // Footer: en FERIADO/CIERRE no se habla de ausentes (es falta de servicio nuestra, no del alumno).
   // En día normal: solo el aviso de ausentes (si los hay).
   const footerAusentes = motivoFeriado
     ? `<span style="color:#9a3412;font-weight:600">🟠 Feriado · sin clases</span>`
-    : (ev.ausentes > 0
-      ? `<span class="footer-ausentes">${ev.ausentes} ausente${ev.ausentes !== 1 ? 's' : ''}</span>`
-      : `<span style="color:var(--texto-suave)">Sin ausentes</span>`);
+    : (motivoCierreCentro
+      ? `<span style="color:#9a3412;font-weight:600">🚧 Cierre del centro · sin clases</span>`
+      : (ev.ausentes > 0
+        ? `<span class="footer-ausentes">${ev.ausentes} ausente${ev.ausentes !== 1 ? 's' : ''}</span>`
+        : `<span style="color:var(--texto-suave)">Sin ausentes</span>`));
   return `
     <div class="turno-card${claseCard}${claseServicio}" onclick="${abrir}">
       <div class="turno-header">
@@ -3045,6 +3062,13 @@ function claseEstaCerrada(turnoId, fecha) {
 function cierreCentroDe(turnoId, fecha) {
   const c = CLASES_CERRADAS.get(`${turnoId}-${fecha}`);
   return (c && c.tipo === 'centro') ? c : null;
+}
+// Ídem pero devuelve solo el MOTIVO limpio (sin el tag interno [bloqueo#N]),
+// listo para mostrar en banners y badges. Null si no está cancelada por el centro.
+function motivoCierreCentroDe(turnoId, fecha) {
+  const c = cierreCentroDe(turnoId, fecha);
+  if (!c) return null;
+  return (c.motivo || 'Cierre del centro').replace(/\s*\[bloqueo#\d+\]/, '');
 }
 
 // =============================================
@@ -4469,10 +4493,18 @@ function renderVistaSemana() {
     const turnos = HORARIOS.filter(t => t.dia === dia &&
         (filtroActivo === 'todos' || t.servicio === filtroActivo))
       .sort((a,b) => parseInt(a.hora.replace(':','')) - parseInt(b.hora.replace(':','')));
-    html += `<div class="vs-col${motivo?' feriado-col':''}${esHoyCol?' vs-col-hoy':''}">
-      <div class="vs-col-head${motivo?' feriado':''}${esHoyCol?' hoy':''}">${dia}<small>${fLabel}${esHoyCol?' · HOY':''}${motivo?' 🟠 FERIADO':''}</small></div>`;
+    // CIERRE DEL CENTRO de día completo (todas las clases del día canceladas tipo 'centro')
+    let motivoCierre = null;
+    if (!motivo && turnos.length) {
+      const mc = turnos.map(t => motivoCierreCentroDe(t.id, fechas[i]));
+      if (mc.every(m => m)) motivoCierre = mc[0];
+    }
+    html += `<div class="vs-col${(motivo||motivoCierre)?' feriado-col':''}${esHoyCol?' vs-col-hoy':''}">
+      <div class="vs-col-head${(motivo||motivoCierre)?' feriado':''}${esHoyCol?' hoy':''}">${dia}<small>${fLabel}${esHoyCol?' · HOY':''}${motivo?' 🟠 FERIADO':(motivoCierre?' 🚧 CIERRE':'')}</small></div>`;
     if (motivo) {
       html += `<div class="vs-cerrada">🟠 Clases cerradas<small>Se recuperan sin gastar cupo</small></div>`;
+    } else if (motivoCierre) {
+      html += `<div class="vs-cerrada">🚧 ${motivoCierre}<small>Se recuperan sin gastar cupo (60 días)</small></div>`;
     } else if (!turnos.length) {
       html += `<div style="text-align:center;font-size:11px;color:#cbd5e1;padding:14px 0">Sin turnos</div>`;
     } else {
