@@ -108,7 +108,7 @@
   <div class="controls">
     <div class="control-group">
       <label>Mes</label>
-      <input type="month" id="mes" value="2026-05">
+      <input type="month" id="mes" value="2026-07">
     </div>
     <div class="control-group">
       <label>Profesional</label>
@@ -174,6 +174,135 @@ function practicaLabel(code){
   return map[c] || (code || '—');
 }
 
+// ================= MOPLEX =================
+// MOPLEX empezó a facturar en junio 2026 (abril/mayo no cuentan: van en $0).
+const MOPLEX_FACTURA_DESDE = '2026-06';
+function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_FACTURA_DESDE; }
+
+// Mismas fórmulas que consultas_moplex.html (fuente de verdad del reparto)
+function calcConsultaMoplex(c){
+  if(!c) return null;
+  const precio = Number(c.precio_paciente)||0;
+  const moplex = Number(c.costo_moplex)||0;
+  const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);   // % sobre el precio al paciente
+  const centro = precio - moplex - prof;
+  return { precio, moplex, prof, centro };
+}
+function calcPlantillaMoplex(p, rectif){
+  if(!p) return null;
+  if(rectif){
+    const precio = Math.round((Number(p.precio_paciente)||0)/2);   // la mitad
+    const moplex = Math.round(precio*0.85);
+    const prof   = 0;
+    const centro = precio - moplex;                                 // 15%
+    return { precio, moplex, prof, centro, rectif:true };
+  }
+  const precio = Number(p.precio_paciente)||0;
+  const moplex = Number(p.costo_moplex)||0;
+  const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);   // 10% del precio al paciente
+  const centro = precio - moplex - prof;
+  return { precio, moplex, prof, centro, rectif:false };
+}
+// Reparte 'portion' pesos de un componente (evaluación o plantilla)
+function splitPortionMoplex(rep, portion, fact){
+  if (!rep || !rep.precio) return { prof:0, moplex:0, centro:portion };
+  if (!fact) return { prof:0, moplex:0, centro:portion };   // pre-junio: no factura
+  const fr = portion / rep.precio;
+  const prof   = Math.round(rep.prof   * fr);
+  const moplex = Math.round(rep.moplex * fr);
+  const centro = portion - prof - moplex;
+  return { prof, moplex, centro };
+}
+
+// Recalcula el split de cada cobro MOPLEX leyendo el tratamiento + catálogo,
+// pisando lo que la caja guardó mal. Devuelve el detalle (2 líneas por cobro:
+// evaluación / plantilla) y la lista para la sección de franquicia MOPLEX.
+function prepararMoplex(monthPagos){
+  const byId = (window._moplexCat && window._moplexCat.byId) || {};
+  const out = { detalle:{}, franquicia:[], sinTipo:[], totalMoplex:0 };
+  const cerca = (a,b)=> Math.abs(a-b) < 1;
+
+  for (const p of monthPagos){
+    const t = p.tratamientos || {};
+    if ((t.practica_codigo||'') !== 'MOPLEX') continue;
+
+    const fact = moplexFacturable(p.fecha);
+    const evalItem  = byId[t.moplex_consulta_id];
+    const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
+    const rectif    = !!t.moplex_plantilla_rectif;
+    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem)          : null;
+    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif) : null;
+    const evalPrecio  = evalRep  ? evalRep.precio  : 0;
+    const plantPrecio = plantRep ? plantRep.precio : 0;
+    const importe  = Number(p.importe)||0;
+    const paciente = (t.personas && t.personas.nombre) || '—';
+    const prof     = normProf(p.profesional);
+
+    // Cobro MOPLEX sin tipo asignado en "Consultas MOPLEX" → no se puede repartir bien
+    if (!evalRep && !plantRep){
+      out.sinTipo.push({ fecha:p.fecha, paciente, prof, importe, tratId:p.tratamiento_id });
+      p._moplexInfo = { evalPortion:0, plantPortion:0, sinTipo:true };
+      p.monto_profesional = 0;
+      p.monto_centro = importe;
+      p._monto_moplex = 0;
+      continue;
+    }
+
+    // A qué componente corresponde este cobro (por importe; con fallback en cascada)
+    let evalPortion = 0, plantPortion = 0;
+    if (evalRep && cerca(importe, evalPrecio)) { evalPortion = importe; }
+    else if (plantRep && cerca(importe, plantPrecio)) { plantPortion = importe; }
+    else if (evalRep && plantRep && cerca(importe, evalPrecio+plantPrecio)) { evalPortion = evalPrecio; plantPortion = plantPrecio; }
+    else { // fallback: primero evaluación, después plantilla
+      let a = importe;
+      evalPortion  = Math.min(a, evalPrecio);  a -= evalPortion;
+      plantPortion = Math.min(a, plantPrecio);
+    }
+
+    const se = splitPortionMoplex(evalRep,  evalPortion,  fact);
+    const sp = splitPortionMoplex(plantRep, plantPortion, fact);
+    const leftover = importe - evalPortion - plantPortion;
+
+    // Pisar el split del pago con lo correcto
+    p.monto_profesional = se.prof + sp.prof;
+    p.monto_centro      = se.centro + sp.centro + (leftover>0?leftover:0);
+    p._monto_moplex     = se.moplex + sp.moplex;
+    p._moplexInfo       = { evalPortion, plantPortion };
+
+    // Detalle por profesional — dos líneas con descripción
+    if (evalPortion > 0){
+      const lbl = 'MOPLEX · Eval. — ' + ((evalItem&&evalItem.nombre)||'');
+      const k = prof + '||' + lbl;
+      if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
+      out.detalle[k].cobrado += evalPortion; out.detalle[k].mProf += se.prof; out.detalle[k].centro += se.centro;
+      out.franquicia.push({ tratId:p.tratamiento_id, fecha:p.fecha, paciente, prof, tipo:'Evaluación', desc:(evalItem&&evalItem.nombre)||'', montoMoplex:0 });
+    }
+    if (plantPortion > 0){
+      const lbl = 'MOPLEX · Plantilla — ' + ((rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''));
+      const k = prof + '||' + lbl;
+      if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
+      out.detalle[k].cobrado += plantPortion; out.detalle[k].mProf += sp.prof; out.detalle[k].centro += sp.centro;
+      out.franquicia.push({ tratId:p.tratamiento_id, fecha:p.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:sp.moplex });
+      out.totalMoplex += sp.moplex;
+    }
+  }
+  return out;
+}
+
+// Marcar/desmarcar una plantilla como saldada con la franquicia MOPLEX
+async function toggleMoplexSaldado(tratId, val){
+  try{
+    const { error } = await sb.from('moplex_franquicia_saldos')
+      .upsert({ tratamiento_id: tratId, saldado: val, actualizado_en: new Date().toISOString() }, { onConflict: 'tratamiento_id' });
+    if (error) throw error;
+    window._moplexSaldos = window._moplexSaldos || {};
+    window._moplexSaldos[tratId] = val;
+    cargar();
+  }catch(e){
+    alert('No se pudo guardar el estado con MOPLEX.\n¿Ya creaste la tabla moplex_franquicia_saldos?\n\n' + (e.message||e));
+  }
+}
+
 async function cargar(){
   const mes = document.getElementById('mes').value; // "2026-05"
   const filtroProf = document.getElementById('filtroProf').value;
@@ -190,6 +319,7 @@ async function cargar(){
       monto_centro, monto_profesional, monto_moplex, tratamiento_id,
       tratamientos (
         id, codigo_id, practica_codigo, modalidad, obra_social,
+        moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, solicita_plantillas,
         personas ( id, nombre )
       )
     `)
@@ -275,12 +405,39 @@ async function cargar(){
   }
   window._pagosOS = pagosOS;
 
+  // ===== MOPLEX: catálogo (montos fijos) + estados de saldo con la franquicia =====
+  try {
+    const { data: cat } = await sb.from('moplex_catalogo').select('*');
+    const byId = {}; (cat||[]).forEach(c=>{ byId[c.id] = c; });
+    window._moplexCat = { byId };
+  } catch (e) {
+    window._moplexCat = { byId:{} };
+    console.warn('No se pudo cargar moplex_catalogo:', e.message);
+  }
+  try {
+    const moplexTratIds = [...new Set((data||[])
+      .filter(p => ((p.tratamientos||{}).practica_codigo||'') === 'MOPLEX')
+      .map(p => p.tratamiento_id).filter(x => x != null))];
+    window._moplexSaldos = {};
+    if (moplexTratIds.length){
+      const { data: sal } = await sb.from('moplex_franquicia_saldos')
+        .select('tratamiento_id, saldado').in('tratamiento_id', moplexTratIds);
+      (sal||[]).forEach(r => { window._moplexSaldos[r.tratamiento_id] = !!r.saldado; });
+    }
+  } catch (e) {
+    window._moplexSaldos = {};
+    console.warn('No se pudieron cargar saldos MOPLEX (falta tabla moplex_franquicia_saldos?):', e.message);
+  }
+
   render(data || [], sesionesData, filtroProf);
 }
 
 function render(pagos, sesiones, filtroProf){
   filtroProf = filtroProf || '';
   sesiones = sesiones || [];
+  // MOPLEX: recalcular el split de cada cobro MOPLEX desde el catálogo (pisa lo que la caja guardó mal).
+  // Debe correr ANTES del loop: deja monto_profesional/monto_centro correctos en cada pago MOPLEX.
+  const MPX = prepararMoplex(pagos);
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien atendió)
   const porMedio = {};       // cobros por medio de cada profesional
@@ -337,14 +494,20 @@ function render(pagos, sesiones, filtroProf){
     }
 
     // BLOQUE 5 — detalle por profesional + práctica
-    const t = p.tratamientos || {};
-    const prac = practicaLabel(t.practica_codigo);
-    const dk = prof + '||' + prac;
-    if (!detalle[dk]) detalle[dk] = {prof, prac, cobrado:0, mProf:0, centro:0};
-    detalle[dk].cobrado += importe;
-    detalle[dk].mProf += mProf;
-    detalle[dk].centro += mCentro;
+    // (MOPLEX se arma aparte, en dos líneas con descripción: eval / plantilla)
+    if (!p._moplexInfo){
+      const t = p.tratamientos || {};
+      const prac = practicaLabel(t.practica_codigo);
+      const dk = prof + '||' + prac;
+      if (!detalle[dk]) detalle[dk] = {prof, prac, cobrado:0, mProf:0, centro:0};
+      detalle[dk].cobrado += importe;
+      detalle[dk].mProf += mProf;
+      detalle[dk].centro += mCentro;
+    }
   }
+
+  // Sumar las líneas MOPLEX (eval/plantilla con descripción) al detalle
+  Object.assign(detalle, MPX.detalle);
 
   // La parte profesional REAL de cada tratamiento sale de las SESIONES (lo trabajado),
   // no de los pagos. Sumamos monto_profesional de las sesiones por tratamiento.
@@ -544,6 +707,47 @@ function render(pagos, sesiones, filtroProf){
     html += `</tbody></table>`;
   }
 
+  // ===== BLOQUE MOPLEX (franquicia) — como una "parte" más =====
+  // Aviso: cobros MOPLEX sin tipo asignado (no se pueden repartir bien)
+  if (MPX.sinTipo.length > 0){
+    html += `<div class="resumen-cruces" style="background:#fee2e2;border-color:#fca5a5">
+      <div class="rc-tit-cruces" style="color:#991b1b">⚠️ ${MPX.sinTipo.length} cobro${MPX.sinTipo.length>1?'s':''} MOPLEX sin tipo asignado</div>`;
+    for (const s of MPX.sinTipo){
+      html += `<div class="cruce-linea"><b>${s.paciente}</b> (${s.fecha}) — ${fmt(s.importe)}. Asigná la consulta/plantilla en <b>Consultas MOPLEX</b> y recalculá, si no no se reparte bien.</div>`;
+    }
+    html += `</div>`;
+  }
+
+  const franqVista = MPX.franquicia.filter(f => !filtroProf || f.prof === filtroProf);
+  let moplexPend = 0, moplexSald = 0, moplexTotalVista = 0;
+  if (franqVista.length > 0){
+    const saldos = window._moplexSaldos || {};
+    html += `<h2 class="bloque-tit">🦶 MOPLEX (franquicia)</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Lo que el centro le paga a MOPLEX por las <b>plantillas</b> (las evaluaciones no pagan a MOPLEX). Marcá cada plantilla como saldada a medida que vas arreglando con ellos. Solo cuenta desde junio 2026.</p>
+      <table style="margin-bottom:8px;"><thead><tr>
+        <th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Tipo</th><th>Descripción</th><th class="num">$ a MOPLEX</th><th>Estado</th>
+      </tr></thead><tbody>`;
+    franqVista.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    for (const f of franqVista){
+      const esPlant = (f.tipo === 'Plantilla' && f.montoMoplex > 0.5);
+      const saldado = !!saldos[f.tratId];
+      if (esPlant){ moplexTotalVista += f.montoMoplex; if (saldado) moplexSald += f.montoMoplex; else moplexPend += f.montoMoplex; }
+      let estadoCell = '<span style="color:#999">—</span>';
+      if (esPlant){
+        estadoCell = saldado
+          ? `<button class="btn" style="background:#10b981;padding:5px 10px;font-size:12px" onclick="toggleMoplexSaldado(${f.tratId}, false)">✅ Saldado</button>`
+          : `<button class="btn" style="background:#f59e0b;padding:5px 10px;font-size:12px" onclick="toggleMoplexSaldado(${f.tratId}, true)">⏳ Pendiente</button>`;
+      }
+      html += `<tr${esPlant&&saldado?' style="opacity:.5"':''}>
+        <td>${f.fecha}</td><td>${f.paciente}</td><td>${badge(f.prof)}</td>
+        <td>${f.tipo}</td><td>${f.desc}</td>
+        <td class="num">${fmt(f.montoMoplex)}</td><td>${estadoCell}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td colspan="5">Pendiente de pagar a MOPLEX</td><td class="num">${fmt(moplexPend)}</td><td></td></tr>`;
+    if (moplexSald > 0.5) html += `<tr style="font-weight:700;background:#d1fae5;color:#065f46;"><td colspan="5">Ya saldado con MOPLEX</td><td class="num">${fmt(moplexSald)}</td><td></td></tr>`;
+    html += `</tbody></table>`;
+  }
+
   // ===== BLOQUE PRODUCTIVIDAD: cuánto GENERÓ cada profesional (independiente de cuánto se lleva) =====
   html += `<h2 class="bloque-tit">📈 Productividad por profesional</h2>
     <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Cuánto facturó cada uno por atender, sin importar cuánto se lleva. Para las dueñas (Jime y Lu) todo queda en el centro, pero igual cuenta su producción.</p>`;
@@ -582,6 +786,16 @@ function render(pagos, sesiones, filtroProf){
         <div class="rc-fila"><span>Ya cobró él/ella</span><b>${fmt(r.cobroProf)}</b></div>
         <div class="rc-fila"><span>Cobró PuntoBiO</span><b>${fmt(r.cobroPB)}</b></div>
         <div class="rc-estado">${iconoEstado} ${estadoTxt}</div>
+      </div>`;
+  }
+  // MOPLEX como una "parte" más en el resumen final
+  if (moplexTotalVista > 0.5){
+    html += `
+      <div class="resumen-card" style="border-top-color:#0d9488">
+        <div class="rc-nombre">🦶 MOPLEX (franquicia)</div>
+        <div class="rc-fila"><span>Total del período</span><b>${fmt(moplexTotalVista)}</b></div>
+        <div class="rc-fila"><span>Ya saldado</span><b>${fmt(moplexSald)}</b></div>
+        <div class="rc-estado" style="background:${moplexPend>0.5?'#fef3c7':'#d1fae5'};color:${moplexPend>0.5?'#92400e':'#065f46'}">${moplexPend>0.5?('Pendiente pagar '+fmt(moplexPend)):'Todo saldado ✅'}</div>
       </div>`;
   }
   html += `</div>`;
@@ -666,7 +880,7 @@ function render(pagos, sesiones, filtroProf){
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
-  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
+  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista, moplex: MPX, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
 }
 
 function toggleDetalle(prof){
@@ -783,6 +997,19 @@ function exportarPDF(){
       theme:'grid', headStyles:{fillColor:[120,120,120],fontSize:8}, bodyStyles:{fontSize:8}, margin:{left:14,right:14} });
     y = doc.lastAutoTable.finalY + 6;
     if (y > 260){ doc.addPage(); y = 20; }
+  }
+
+  // BLOQUE MOPLEX (franquicia)
+  const MPX = L.moplex;
+  if (MPX && MPX.franquicia && MPX.franquicia.length){
+    if (y > 230){ doc.addPage(); y = 20; }
+    const saldos = window._moplexSaldos || {};
+    const bM = MPX.franquicia.map(f=>{
+      const est = (f.tipo==='Plantilla' && f.montoMoplex>0.5) ? (saldos[f.tratId]?'Saldado':'Pendiente') : '—';
+      return [f.fecha, f.paciente, f.prof, f.tipo, f.desc, fmtP(f.montoMoplex), est];
+    });
+    tabla('MOPLEX (franquicia) — plantillas a pagar',
+      ['Fecha','Paciente','Prof','Tipo','Descripción','$ MOPLEX','Estado'], bM);
   }
 
   // BLOQUE PRODUCTIVIDAD
