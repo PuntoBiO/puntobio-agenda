@@ -377,21 +377,31 @@ async function refrescarCampanias(){
     sb.from('comunicados').select('id, asunto, cuerpo, audiencia, persona_ids, creado_en, cerrado').eq('cerrado', false).order('creado_en', { ascending: false }),
     sb.from('comunicados_enviados').select('comunicado_id, persona_id, enviado_en')
   ])
+  const act = await cargarActivos()
+  const nomPor = {}; act.forEach(p => nomPor[p.id] = p)
   const envs = envRes.data || []
   comsHoy = envs.filter(e => esHoyAR(e.enviado_en)).length
   renderTope()
   const porCom = {}
-  envs.forEach(e => { (porCom[e.comunicado_id] = porCom[e.comunicado_id] || new Set()).add(e.persona_id) })
+  envs.forEach(e => { (porCom[e.comunicado_id] = porCom[e.comunicado_id] || new Map()).set(e.persona_id, e.enviado_en) })
 
   const coms = comsRes.data || []
   $('campanias').innerHTML = coms.map(c => {
     const total = (c.persona_ids || []).length
-    const hechos = (porCom[c.id] ? porCom[c.id].size : 0)
+    const envMap = porCom[c.id] || new Map()
+    const hechos = envMap.size
     const faltan = Math.max(0, total - hechos)
     const pct = total ? Math.round(hechos / total * 100) : 0
     const rest = restanteHoy()
     const puede = faltan > 0 && rest > 0
     const valorLote = Math.max(1, Math.min(rest || 1, faltan || 1))
+    const nom = id => (nomPor[id] && nomPor[id].nombre) || ('#' + id)
+    const mailDe = id => (nomPor[id] && nomPor[id].email) || ''
+    const listaEnv = Array.from(envMap.entries())
+      .sort((a,b) => new Date(b[1]||0) - new Date(a[1]||0))
+      .map(([pid, ts], i) => `<div class="fila"><span><span class="idx">${i+1}.</span>${esc(nom(pid))} · <span class="r">${esc(mailDe(pid))}</span></span><span class="r">enviado ${fmtFechaCorta(ts)}</span></div>`).join('')
+    const listaPend = (c.persona_ids || []).filter(pid => !envMap.has(pid))
+      .map((pid, i) => `<div class="fila"><span><span class="idx">${i+1}.</span>${esc(nom(pid))}</span><span class="r">${esc(mailDe(pid)) || 'sin mail'}</span></div>`).join('')
     return `
     <div class="card">
       <div class="card-top">
@@ -415,6 +425,12 @@ async function refrescarCampanias(){
         ${faltan === 0 ? `<button class="btn sec" data-cerrar="${c.id}">✔ Dar por terminado</button>` : `<button class="btn danger" data-cerrar="${c.id}">Archivar</button>`}
       </div>
       <div class="res" id="res-${c.id}"></div>
+      <details class="det"><summary>✅ Ya lo recibieron (${hechos})</summary>
+        <div class="lista"><div class="lista-scroll">${listaEnv || '<div class="fila"><span class="r">Todavía no se envió a nadie.</span></div>'}</div></div>
+      </details>
+      <details class="det"><summary>⏳ Todavía falta enviarles (${faltan})</summary>
+        <div class="lista"><div class="lista-scroll">${listaPend || '<div class="fila"><span class="r">No quedan pendientes. 🎉</span></div>'}</div></div>
+      </details>
       <details class="det"><summary>Ver el texto que se envía</summary>
         <div class="preview"><b>Asunto:</b> ${esc(c.asunto)}<br><br>${esc(c.cuerpo).replace(/\n/g,'<br>')}</div>
       </details>
