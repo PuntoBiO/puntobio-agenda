@@ -112,12 +112,25 @@ const fmtDMA = iso => iso ? iso.split('-').reverse().join('/') : ''
 // ─────────────────────────────────────────────────────────────
 function enviadosHoyTotal(){ return (estActual ? estActual.enviadosHoy : 0) + comsHoy }
 function restanteHoy(){ return Math.max(0, TOPE_DIARIO - enviadosHoyTotal()) }
+let mailsHoyInfo = null   // desglose total del día (RPC mails_enviados_hoy)
 function renderTope(){
   const tot = enviadosHoyTotal(), rest = restanteHoy()
-  $('tope-global').innerHTML = tot > 0
+  // Desglose de TODO lo que salió hoy (incluye automáticos: recibos, cumples, feriados)
+  let desglose = ''
+  if (mailsHoyInfo && typeof mailsHoyInfo.total === 'number') {
+    const m = mailsHoyInfo
+    const partes = []
+    if (m.comunicados) partes.push(`${m.comunicados} comunicados`)
+    if (m.aumento) partes.push(`${m.aumento} aumento`)
+    if (m.recibos) partes.push(`${m.recibos} recibos`)
+    if (m.cumpleanos) partes.push(`${m.cumpleanos} cumpleaños`)
+    if (m.feriados) partes.push(`${m.feriados} avisos de feriado/cierre`)
+    desglose = `📬 Hoy salieron <b>${m.total}</b> mails en total del centro${partes.length ? ' (' + partes.join(' · ') + ')' : ''}.<br>`
+  }
+  $('tope-global').innerHTML = (tot > 0 || desglose)
     ? `<div class="warn" style="max-width:760px;background:${rest>0?'#eff6ff':'var(--amber-bg)'};color:${rest>0?'#1e40af':'#92400e'};border:1px solid ${rest>0?'#bfdbfe':'#fde68a'}">
-        ${rest>0 ? `📮 Hoy llevás <b>${tot}</b> mails enviados (entre todas las campañas). Te quedan <b>${rest}</b>.`
-                 : `🛑 Ya llegaste al tope diario de <b>${TOPE_DIARIO}</b> mails. Seguí mañana para no caer en spam.`}
+        ${desglose}${rest>0 ? `Para campañas llevás <b>${tot}</b> de ${TOPE_DIARIO}: te quedan <b>${rest}</b>.`
+                 : `🛑 Llegaste al tope diario de <b>${TOPE_DIARIO}</b> para campañas. Seguí mañana para no caer en spam.`}
       </div>`
     : ''
 }
@@ -379,6 +392,11 @@ async function refrescarCampanias(){
   ])
   const act = await cargarActivos()
   const nomPor = {}; act.forEach(p => nomPor[p.id] = p)
+  // Desglose total del día (todas las fuentes de mail del centro)
+  try {
+    const { data: mh } = await sb.rpc('mails_enviados_hoy')
+    mailsHoyInfo = mh || null
+  } catch(_) { mailsHoyInfo = null }
   const envs = envRes.data || []
   comsHoy = envs.filter(e => esHoyAR(e.enviado_en)).length
   renderTope()
