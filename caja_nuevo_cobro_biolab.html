@@ -624,10 +624,12 @@
     const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof };
   }
-  function calcPlantillaMoplex(p, rectif){
+  function calcPlantillaMoplex(p, rectif, montoCustom){
     if(!p) return null;
     if(rectif){
-      const precio = Math.round((Number(p.precio_paciente)||0)/2);
+      // El monto de la rectificación se puede editar (se sabe al cargar el pedido).
+      // Si no se editó, por defecto sugiere la mitad del precio de la plantilla.
+      const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2);
       const moplex = Math.round(precio*0.85);
       return { precio, moplex, prof:0, centro: precio - moplex, rectif:true };
     }
@@ -671,7 +673,7 @@
     const ev = byId[t.moplex_consulta_id];
     const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const er = ev ? calcConsultaMoplex(ev) : null;
-    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif) : null;
+    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0) : null;
     const evalPrecio  = er ? er.precio : 0;
     const plantPrecio = pr ? pr.precio : 0;
     return {
@@ -720,7 +722,7 @@
     const rectif = !!t.moplex_plantilla_rectif;
     const txt = $('moplexPlantillaTxt'), btn = $('btnPlantilla');
     if (pl){
-      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif).precio) + '</b>';
+      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, Number(t.moplex_rectif_monto)||0).precio) + '</b>';
       btn.textContent = 'Cambiar';
     } else {
       txt.textContent = 'Ninguna';
@@ -735,26 +737,41 @@
     const t = state.ttoSel;
     sel.value = (t && t.solicita_plantillas && t.moplex_plantilla_id) ? String(t.moplex_plantilla_id) : '';
     $('modalPlantillaRectif').checked = !!(t && t.moplex_plantilla_rectif);
-    previewPlantillaModal();
+    $('modalRectifMonto').value = (t && t.moplex_rectif_monto) ? Number(t.moplex_rectif_monto) : '';
+    onRectifToggle();
     $('modalPlantilla').style.display = 'flex';
   };
   window.cerrarModalPlantilla = function(){ $('modalPlantilla').style.display = 'none'; };
+  window.onRectifToggle = function(){
+    const rectif = $('modalPlantillaRectif').checked;
+    $('modalRectifMontoBox').style.display = rectif ? '' : 'none';
+    if (rectif){
+      const id = $('modalPlantillaSel').value;
+      const byId = (state.moplexCat && state.moplexCat.byId) || {};
+      const pl = byId[id];
+      const inp = $('modalRectifMonto');
+      if (pl && (!inp.value || Number(inp.value) <= 0)) inp.value = Math.round((Number(pl.precio_paciente)||0)/2);
+    }
+    previewPlantillaModal();
+  };
   window.previewPlantillaModal = function(){
     const id = $('modalPlantillaSel').value;
     const rectif = $('modalPlantillaRectif').checked;
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
     const box = $('modalPlantillaPrev');
     if (!id){ box.innerHTML = 'Sin plantilla — se cobra solo la evaluación.'; return; }
-    const r = calcPlantillaMoplex(byId[id], rectif);
+    const custom = rectif ? (Number($('modalRectifMonto').value)||0) : 0;
+    const r = calcPlantillaMoplex(byId[id], rectif, custom);
     box.innerHTML = `Precio plantilla: <b>${fmt(r.precio)}</b><br>Profesional: ${fmt(r.prof)} · Centro: ${fmt(r.centro)} · MOPLEX: ${fmt(r.moplex)}`;
   };
   window.confirmarPlantilla = async function(){
     const t = state.ttoSel; if (!t) return;
     const id = $('modalPlantillaSel').value;
     const rectif = $('modalPlantillaRectif').checked;
+    const rectifMonto = (id && rectif) ? (Number($('modalRectifMonto').value)||0) : null;
     const patch = id
-      ? { solicita_plantillas: true, moplex_plantilla_id: Number(id), moplex_plantilla_rectif: rectif }
-      : { solicita_plantillas: false, moplex_plantilla_id: null, moplex_plantilla_rectif: false };
+      ? { solicita_plantillas: true, moplex_plantilla_id: Number(id), moplex_plantilla_rectif: rectif, moplex_rectif_monto: rectifMonto }
+      : { solicita_plantillas: false, moplex_plantilla_id: null, moplex_plantilla_rectif: false, moplex_rectif_monto: null };
     try {
       const { error } = await sb.from('tratamientos').update(patch).eq('id', t.id);
       if (error) throw error;
@@ -1457,8 +1474,13 @@
       <option value="">— Sin plantilla —</option>
     </select>
     <label style="display:flex; align-items:center; gap:8px; font-size:13.5px; color:#334155; margin-bottom:12px; cursor:pointer;">
-      <input type="checkbox" id="modalPlantillaRectif" onchange="previewPlantillaModal()"> Es rectificación (mitad de precio)
+      <input type="checkbox" id="modalPlantillaRectif" onchange="onRectifToggle()"> Es rectificación
     </label>
+    <div id="modalRectifMontoBox" style="display:none; margin-bottom:12px;">
+      <label style="font-size:12px; font-weight:600; color:#475569; text-transform:uppercase; letter-spacing:.04em;">Monto de la rectificación ($)</label>
+      <input type="number" id="modalRectifMonto" step="100" min="0" oninput="previewPlantillaModal()" style="width:100%; padding:10px; border:1px solid #cbd5e1; border-radius:10px; margin-top:6px; font-size:14px;">
+      <div style="font-size:11.5px; color:#94a3b8; margin-top:4px;">Editable — se sabe al cargar el pedido. Por defecto sugiere la mitad del precio de la plantilla.</div>
+    </div>
     <div id="modalPlantillaPrev" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px; font-size:13.5px; color:#334155; margin-bottom:16px;"></div>
     <div style="display:flex; gap:10px; justify-content:flex-end;">
       <button onclick="confirmarPlantilla()" style="background:#0284c7; color:#fff; border:none; border-radius:10px; padding:10px 18px; font-weight:700; font-size:14px; cursor:pointer;">Confirmar</button>
