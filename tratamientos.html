@@ -401,6 +401,11 @@ tbody tr:last-child td { border-bottom: 0; }
         <select id="nuevo-practica" class="form-select"></select>
       </div>
 
+      <div class="form-field span-2" id="nuevo-moplex-field" style="display:none;">
+        <label class="form-label">Tipo de baropodometría <span style="color:var(--text-faint);font-weight:400;text-transform:none;letter-spacing:0;">— fija el valor de la evaluación (la plantilla se asigna después en Consultas MOPLEX)</span></label>
+        <select id="nuevo-moplex-consulta" class="form-select" onchange="onMoplexConsultaChange()"><option value="">— elegí tipo —</option></select>
+      </div>
+
       <div class="form-field">
         <label class="form-label">Modalidad</label>
         <select id="nuevo-modalidad" class="form-select">
@@ -1326,6 +1331,7 @@ window.abrirNuevo = function() {
   $('paciente-resultados').style.display = 'none'
   $('paciente-resultados').innerHTML = ''
   renderPickerPaciente()
+  const mc = $('nuevo-moplex-consulta'); if (mc) mc.value = ''
   poblarPracticasSelect()
   autocompletarPrecioNuevo() // pre-carga el valor por sesión de la práctica/modalidad por defecto
   $('modal-nuevo').classList.add('is-open')
@@ -1437,6 +1443,48 @@ function poblarPracticasSelect() {
   select.innerHTML = filtradas.map(p =>
     `<option value="${p.codigo}">${p.label}</option>`
   ).join('')
+  toggleMoplexConsulta()
+}
+
+// ===== MOPLEX: sub-selector de tipo de baropodometría (fija el valor del eval) =====
+let MOPLEX_CONSULTAS = []   // baropodometrías del catálogo (Nuevo / Control / Garantía)
+async function cargarMoplexConsultasCat() {
+  try {
+    const { data } = await sb.from('moplex_catalogo')
+      .select('id, nombre, precio_paciente, activo, orden').eq('activo', true).order('orden')
+    MOPLEX_CONSULTAS = (data || []).filter(c => (c.nombre || '').toLowerCase().startsWith('baropod'))
+  } catch (e) {
+    MOPLEX_CONSULTAS = []
+    console.warn('No se pudo cargar moplex_catalogo (consultas):', e.message)
+  }
+  poblarMoplexConsultas()
+}
+function poblarMoplexConsultas() {
+  const sel = $('nuevo-moplex-consulta')
+  if (!sel) return
+  sel.innerHTML = `<option value="">— elegí tipo —</option>` +
+    MOPLEX_CONSULTAS.map(c => `<option value="${c.id}">${c.nombre} — $${Number(c.precio_paciente||0).toLocaleString('es-AR')}</option>`).join('')
+}
+function esMoplexNuevo() {
+  return $('nuevo-area')?.value === 'biolab' && $('nuevo-practica')?.value === 'MOPLEX'
+}
+function toggleMoplexConsulta() {
+  const field = $('nuevo-moplex-field')
+  if (!field) return
+  if (esMoplexNuevo()) {
+    field.style.display = ''
+    $('nuevo-sesiones').value = 1   // un MOPLEX es una sola sesión (el eval)
+  } else {
+    field.style.display = 'none'
+  }
+}
+window.onMoplexConsultaChange = function() {
+  const id = $('nuevo-moplex-consulta').value
+  const c = MOPLEX_CONSULTAS.find(x => String(x.id) === String(id))
+  const precio = c ? Number(c.precio_paciente || 0) : 0
+  $('nuevo-sesiones').value = 1
+  $('nuevo-valor-sesion').value = precio
+  $('nuevo-total').value = precio
 }
 
 $('nuevo-area').addEventListener('change', () => { poblarPracticasSelect(); autocompletarPrecioNuevo() })
@@ -1485,6 +1533,12 @@ window.crearTratamiento = async function() {
     diagnostico: ($('nuevo-diagnostico')?.value || '').trim() || null,
     estado: 'Pendiente',
     fecha_alta: (($('nuevo-fecha-alta')?.value || '').trim()) || new Date().toISOString().slice(0, 10),
+  }
+
+  // MOPLEX: dejar taggeado el tipo de baropodometría (lo lee Consultas MOPLEX / caja / liquidaciones)
+  if (practicaCod === 'MOPLEX') {
+    const mc = $('nuevo-moplex-consulta')?.value
+    if (mc) payload.moplex_consulta_id = Number(mc)
   }
 
   try {
@@ -1578,6 +1632,8 @@ async function autocompletarPrecioNuevo() {
   const tipoCobro = $('nuevo-tipo-cobro')?.value
   // Si es manual o cortesía, no pisar el valor (el usuario lo carga a mano)
   if (tipoCobro === 'MANUAL' || tipoCobro === 'CORTESIA') return
+  // MOPLEX: el valor del eval sale del sub-selector (catálogo), no del tarifario
+  if (esMoplexNuevo()) { onMoplexConsultaChange(); return }
   const practica = $('nuevo-practica')?.value
   const modalidad = $('nuevo-modalidad')?.value
   const obraSocial = $('nuevo-obra')?.value
@@ -1638,7 +1694,7 @@ function actualizarPreviaCobro(tipoCobroSelId, previaId) {
 
 $('nuevo-modalidad').addEventListener('change', () => { toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'); autocompletarPrecioNuevo() })
 $('ed-modalidad').addEventListener('change', () => { toggleObraSocial('ed-modalidad', 'ed-obra-field'); autocompletarPrecioEd() })
-$('nuevo-practica').addEventListener('change', autocompletarPrecioNuevo)
+$('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); autocompletarPrecioNuevo() })
 $('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
 $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
@@ -1647,6 +1703,7 @@ const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEvent
 // Init
 poblarPracticasSelect()
 cargarObrasSociales()
+cargarMoplexConsultasCat()
 toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field')
 toggleObraSocial('ed-modalidad', 'ed-obra-field')
 actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa')
