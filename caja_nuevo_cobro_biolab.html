@@ -573,6 +573,7 @@
     splitCache: null,       // { pct_centro, pct_moplex } actual
     moplexCat: null,        // { byId } catálogo MOPLEX (cache)
     moplex: null,           // reparto del tratamiento MOPLEX seleccionado
+    moplexAbonado: 0,       // lo realmente cobrado del tratamiento MOPLEX (de pagos)
     profesionales: ['Lu','Jime','Bruno','Male','Vero'],
     todosLosPacientes: [],  // cache liviano para buscador
   };
@@ -654,6 +655,16 @@
       console.warn('No se pudo cargar moplex_catalogo:', e.message);
     }
   }
+  // Suma lo realmente cobrado de un tratamiento (de pagos_consultorio), no el total_abonado
+  async function cargarAbonadoMoplex(tratamientoId){
+    try {
+      const { data } = await sb.from('pagos_consultorio').select('importe').eq('tratamiento_id', tratamientoId);
+      return (data || []).reduce((s, p) => s + (Number(p.importe) || 0), 0);
+    } catch (e) {
+      console.warn('No se pudo sumar cobros del tratamiento:', e.message);
+      return 0;
+    }
+  }
   // Reparto total del tratamiento MOPLEX según el catálogo (eval + plantilla)
   function repartoMoplexTto(t){
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
@@ -675,9 +686,9 @@
   function splitImporteMoplex(t, importe){
     const R = state.moplex || repartoMoplexTto(t);
     const fact = moplexFacturable($('fecha').value || hoy());
-    // Lo ya abonado se consume primero (eval, después plantilla): así este cobro
-    // solo reparte sobre lo que FALTA. Si el eval ya está pago, va todo a plantilla.
-    let ya = Number(t.total_abonado || 0);
+    // Lo ya abonado (sumado de los cobros REALES del tratamiento) se consume primero
+    // (eval, después plantilla): así este cobro solo reparte sobre lo que FALTA.
+    let ya = Number(state.moplexAbonado || 0);
     const evalYa  = Math.min(ya, R.evalPrecio);  ya -= evalYa;
     const plantYa = Math.min(ya, R.plantPrecio); ya -= plantYa;
     const evalRestante  = Math.max(0, R.evalPrecio  - evalYa);
@@ -749,12 +760,14 @@
       if (error) throw error;
       Object.assign(t, patch);
       state.moplex = repartoMoplexTto(t);
+      const abon = Number(state.moplexAbonado || 0);
       if (state.moplex && state.moplex.total > 0){
-        const saldo = Math.max(0, state.moplex.total - Number(t.total_abonado || 0));
+        const saldo = Math.max(0, state.moplex.total - abon);
         $('importe').value = saldo.toFixed(2);
       }
       $('resTotal').textContent = fmt(state.moplex.total);
-      $('resSaldo').textContent = fmt(state.moplex.total - Number(t.total_abonado || 0));
+      $('resAbonado').textContent = fmt(abon);
+      $('resSaldo').textContent = fmt(Math.max(0, state.moplex.total - abon));
       actualizarBoxPlantilla();
       actualizarPreview();
       cerrarModalPlantilla();
@@ -1110,14 +1123,19 @@
     // MOPLEX: calcular el reparto desde el catálogo y autocompletar el importe
     if (t.practica_codigo === 'MOPLEX'){
       await cargarMoplexCat();
+      state.moplexAbonado = await cargarAbonadoMoplex(t.id);   // lo realmente cobrado (de pagos)
       const R = repartoMoplexTto(t);
       state.moplex = R;
       if (!R.sinTipo && R.total > 0){
-        const saldo = Math.max(0, R.total - Number(t.total_abonado || 0));
+        const saldo = Math.max(0, R.total - state.moplexAbonado);
         $('importe').value = saldo.toFixed(2);   // lo que falta cobrar (no el total entero)
       }
+      // Reflejar abonado/saldo REALES en el resumen (el total_abonado del tto puede estar en 0)
+      $('resAbonado').textContent = fmt(state.moplexAbonado);
+      $('resSaldo').textContent = fmt(Math.max(0, R.total - state.moplexAbonado));
     } else {
       state.moplex = null;
+      state.moplexAbonado = 0;
     }
 
     actualizarBoxPlantilla();
