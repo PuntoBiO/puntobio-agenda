@@ -135,11 +135,12 @@
     display: grid; grid-template-columns: 110px 1fr auto auto; gap: 14px;
     align-items: center; transition: border-color 0.1s;
   }
+  .ttosList li > * { min-width: 0; }
   .ttosList li:hover { border-color: var(--turq-dark); }
   .ttosList li.selected { border-color: var(--turq); background: #0f2540; }
   .ttoId {
     font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
-    color: var(--turq);
+    color: var(--turq); word-break: break-all; overflow-wrap: anywhere; line-height: 1.25;
   }
   .ttoMid { display: flex; flex-direction: column; gap: 2px; }
   .ttoPractica { font-weight: 600; font-size: 14px; }
@@ -842,6 +843,10 @@
 
       if (error) throw error;
       state.tratamientos = (data || []).filter(t => PRACTICAS_AREA.includes(t.practica_codigo));
+      // Si hay MOPLEX, precargar el catálogo para clasificar/mostrar montos correctos
+      if (state.tratamientos.some(t => t.practica_codigo === 'MOPLEX')) {
+        await cargarMoplexCat();
+      }
       pintarTratamientos();
     } catch (err) {
       console.error('Error cargando tratamientos:', err);
@@ -853,6 +858,13 @@
   }
 
   function clasificarTto(t) {
+    // MOPLEX: el total real sale del catálogo (su total_pagar suele estar en 0).
+    // EN CURSO mientras lo abonado sea menor al total del catálogo.
+    if (t.practica_codigo === 'MOPLEX' && state.moplexCat) {
+      const R = repartoMoplexTto(t);
+      if (R.total > 0 && Number(t.total_abonado || 0) < R.total - 0.5) return 'EN_CURSO';
+      return 'FINALIZADO';
+    }
     // EN CURSO: tiene saldo por cobrar (> 0)
     // FINALIZADO: saldo cero o negativo (ya pagó todo o de más)
     const saldo = Number(t.saldo_pendiente || 0);
@@ -922,7 +934,14 @@
   }
 
   function crearItemTto(t, clasif) {
-    const saldo = Number(t.saldo_pendiente || 0);
+    let saldo = Number(t.saldo_pendiente || 0);
+    let totalMostrar = Number(t.total_pagar || 0);
+    // MOPLEX: mostrar el total del catálogo y lo que falta cobrar
+    if (t.practica_codigo === 'MOPLEX' && state.moplexCat) {
+      const R = repartoMoplexTto(t);
+      totalMostrar = R.total;
+      saldo = R.total - Number(t.total_abonado || 0);
+    }
     let saldoClass = 'pendiente';
     if (clasif === 'FINALIZADO') saldoClass = 'saldado';
     if (saldo < 0) saldoClass = 'negativo';
@@ -939,7 +958,7 @@
       </div>
       <div class="ttoMontos">
         <div class="saldo ${saldoClass}">${fmt(saldo)}</div>
-        <div class="muted">de ${fmt(t.total_pagar)} · ${t.total_sesiones||0} ses.</div>
+        <div class="muted">de ${fmt(totalMostrar)} · ${t.total_sesiones||0} ses.</div>
       </div>
       <span class="estadoBadge ${clasif === 'EN_CURSO' ? 'enCurso' : 'finalizado'}">${clasif === 'EN_CURSO' ? 'EN CURSO' : 'FINALIZADO'}</span>
     `;
@@ -962,9 +981,16 @@
     const clasif = clasificarTto(t);
     $('resEstado').textContent = clasif === 'EN_CURSO' ? 'EN CURSO' : 'FINALIZADO';
     $('resEstado').className = 'estadoBadge ' + (clasif === 'EN_CURSO' ? 'enCurso' : 'finalizado');
-    $('resTotal').textContent = fmt(t.total_pagar);
+    // MOPLEX: total/saldo salen del catálogo (su total_pagar suele estar en 0)
+    let totalRes = Number(t.total_pagar || 0);
+    let saldo = Number(t.saldo_pendiente || 0);
+    if (t.practica_codigo === 'MOPLEX' && state.moplexCat) {
+      const R = repartoMoplexTto(t);
+      totalRes = R.total;
+      saldo = R.total - Number(t.total_abonado || 0);
+    }
+    $('resTotal').textContent = fmt(totalRes);
     $('resAbonado').textContent = fmt(t.total_abonado);
-    const saldo = Number(t.saldo_pendiente || 0);
     $('resSaldo').textContent = fmt(saldo);
     $('resSaldo').classList.toggle('warn', saldo > 0);
     $('resSesiones').textContent = t.total_sesiones || 0;
