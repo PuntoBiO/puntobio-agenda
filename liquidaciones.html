@@ -514,7 +514,7 @@ async function cargar(){
   let sesionesData = [];
   if (tratIds.length > 0){
     const { data: sesData, error: sesErr } = await sb.from('sesiones')
-      .select('tratamiento_id, profesional, monto_profesional, monto_centro')
+      .select('tratamiento_id, profesional, monto_profesional')
       .in('tratamiento_id', tratIds);
     if (!sesErr && sesData) sesionesData = sesData;
   }
@@ -664,56 +664,6 @@ function render(pagos, sesiones, filtroProf){
   // MOPLEX: recalcular el split de cada cobro MOPLEX desde el catálogo (pisa lo que la caja guardó mal).
   // Debe correr ANTES del loop: deja monto_profesional/monto_centro correctos en cada pago MOPLEX.
   const MPX = prepararMoplex(pagos);
-
-  // ===== REPARTO POR SESIONES (único cambio sobre la lógica original) =====
-  // Cada pago de un tratamiento se reparte según QUIÉN HIZO las sesiones, proporcional.
-  // Ej Linossi: 6 sesiones → 3 Bruno, 2 Male, 1 Jime. Punto. El que cobró queda como
-  // cobrador y le debe su parte a los que atendieron. MOPLEX sigue con su circuito propio.
-  {
-    const sesPorTrat = {};   // tid → { byP: {prof→{prof,centro,val}}, total }
-    for (const s of sesiones){
-      const tid = s.tratamiento_id; if (tid == null) continue;
-      const P = normProf(s.profesional); if (!P) continue;
-      const sp = Number(s.monto_profesional)||0, sc = Number(s.monto_centro)||0;
-      if (!sesPorTrat[tid]) sesPorTrat[tid] = { byP:{}, total:0 };
-      const g = sesPorTrat[tid];
-      if (!g.byP[P]) g.byP[P] = { prof:0, centro:0, val:0 };
-      g.byP[P].prof += sp; g.byP[P].centro += sc; g.byP[P].val += sp+sc;
-      g.total += sp+sc;
-    }
-    const nuevos = [];
-    for (const p of pagos){
-      const t = p.tratamientos || {};
-      const g = (p.tratamiento_id != null) ? sesPorTrat[p.tratamiento_id] : null;
-      const profPago = normProf(p.profesional);
-      const esMoplexP = !!p._moplexInfo || (t.practica_codigo||'') === 'MOPLEX';
-      const Ps = g ? Object.keys(g.byP) : [];
-      // Sin sesiones o MOPLEX → pasa igual que siempre. Un solo profesional y es el mismo
-      // que figura → idéntico, no hace falta tocarlo.
-      if (esMoplexP || !g || g.total <= 0 || (Ps.length === 1 && Ps[0] === profPago)){
-        nuevos.push(p);
-        continue;
-      }
-      // Repartir el pago entre los profesionales que hicieron las sesiones (proporcional).
-      const importe = Number(p.importe)||0;
-      let accImp = 0;
-      Ps.forEach((P, i) => {
-        const b = g.byP[P];
-        const imp = (i === Ps.length - 1) ? (importe - accImp) : Math.round(importe * (b.val / g.total));
-        accImp += imp;
-        const mp = b.val > 0 ? Math.round(imp * (b.prof / b.val)) : 0;
-        nuevos.push(Object.assign({}, p, {
-          profesional: P,
-          importe: imp,
-          monto_profesional: mp,
-          monto_centro: imp - mp,
-          _repartidoPorSesiones: true
-        }));
-      });
-    }
-    pagos = nuevos;
-  }
-
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien atendió)
   const porArea = {};        // ganancia por área (Consultorio / BioLab / Especialidades)
@@ -808,25 +758,6 @@ function render(pagos, sesiones, filtroProf){
     if (tid == null) continue;
     if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
     porTrat[tid].profParte += Number(s.monto_profesional) || 0;
-  }
-
-  // ===== COMPRIMIR CRUCES: una fila por tratamiento (no una por pago) =====
-  // Con el reparto por sesiones, un mismo tratamiento puede generar varias porciones
-  // de cruce. Acá se juntan: una fila por cobrador + profesional + tratamiento.
-  {
-    const agg = {};
-    for (const c of crucesBrutos){
-      const k = c.cobro + '||' + c.prof + '||' + (c.tratId != null ? c.tratId : 'x');
-      if (!agg[k]) agg[k] = { fecha: c.fecha, cobro: c.cobro, prof: c.prof, mProf: 0, mCentro: 0, importe: 0, tratId: c.tratId };
-      const a = agg[k];
-      if (c.fecha && c.fecha < a.fecha) a.fecha = c.fecha;
-      a.mProf += c.mProf; a.mCentro += c.mCentro; a.importe += c.importe;
-    }
-    crucesBrutos.length = 0;
-    Object.values(agg).forEach(a => {
-      a.mProf = Math.round(a.mProf); a.mCentro = Math.round(a.mCentro); a.importe = Math.round(a.importe);
-      if (a.mProf > 0.5 || a.mCentro > 0.5) crucesBrutos.push(a);
-    });
   }
 
   // ===== CÁLCULO INTELIGENTE DE CRUCES (POR TRATAMIENTO) =====
@@ -974,12 +905,10 @@ function render(pagos, sesiones, filtroProf){
   } // fin gate bloques 1-2 (no MOPLEX)
 
   // ===== BLOQUE 3: CRUCES BRUTOS =====
-  // Solo se MUESTRAN cruces con parte profesional real (> $0). Las porciones que solo
-  // mueven plata del centro (ej: la sesión de Jime dentro de un pago que cobró Bruno)
-  // NO son "uno cobró por otro": esa deuda con el centro ya sale sola en el bloque 4.
-  const crucesVista = crucesBrutos
-    .filter(c => c.mProf > 0.5)
-    .filter(c => !filtroProf || c.cobro === filtroProf || c.prof === filtroProf);
+  // Si hay un profesional elegido, mostramos solo los cruces que lo involucran (cobró por otro, o cobraron por él).
+  const crucesVista = filtroProf
+    ? crucesBrutos.filter(c => c.cobro === filtroProf || c.prof === filtroProf)
+    : crucesBrutos;
   if (!esModoMoplex){
   html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
   if (crucesVista.length === 0){
