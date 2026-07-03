@@ -523,9 +523,27 @@ async function cargar(){
   let sesionesData = [];
   if (tratIds.length > 0){
     const { data: sesData, error: sesErr } = await sb.from('sesiones')
-      .select('tratamiento_id, profesional, monto_profesional, monto_centro')
+      .select('tratamiento_id, profesional, monto_profesional, monto_centro, fecha')
       .in('tratamiento_id', tratIds);
     if (!sesErr && sesData) sesionesData = sesData;
+  }
+
+  // ===== Pagos ANTERIORES al mes de cada tratamiento =====
+  // Regla: se abona solo lo REALIZADO. Un tratamiento puede empezar en junio y terminar
+  // en julio: los pagos cubren las sesiones en orden. Para saber qué sesiones está pagando
+  // un cobro de ESTE mes, necesitamos cuánto ya se había pagado antes (el "puntero").
+  window._prevPagosTrat = {};
+  if (tratIds.length > 0){
+    try {
+      const { data: prevP } = await sb.from('pagos_consultorio')
+        .select('tratamiento_id, importe')
+        .in('tratamiento_id', tratIds)
+        .lt('fecha', desde);
+      (prevP||[]).forEach(r => {
+        const k = r.tratamiento_id;
+        window._prevPagosTrat[k] = (window._prevPagosTrat[k]||0) + (Number(r.importe)||0);
+      });
+    } catch(e){ console.warn('No se pudieron cargar pagos previos por tratamiento:', e.message); }
   }
 
   DATA = data || [];
@@ -672,21 +690,27 @@ function render(pagos, sesiones, filtroProf){
   const soloLoMio = !!window._soloLoMioLiq;               // profesional que SOLO puede ver lo suyo (no ve nada del centro)
   const MPX = prepararMoplex(pagos);
 
-  // ===== Reparto por SESIONES =====
-  // La parte profesional de cada cobro de consultorio se reparte según QUIÉN HIZO CADA SESIÓN
-  // del tratamiento (NO según el campo 'profesional' del cobro). Ej: Guillermo paga y la plata
-  // la recibe PuntoBiO/Jime, pero las sesiones las hizo Bruno → la parte profesional va a Bruno.
+  // ===== Reparto por SESIONES (solo lo REALIZADO) =====
+  // La parte profesional de cada cobro se asigna a las SESIONES que ese cobro está pagando,
+  // en orden cronológico (el paciente abona lo realizado). Así, un tratamiento que empieza
+  // en junio y sigue en julio liquida en cada mes solo las sesiones que sus pagos cubren,
+  // y la plata va al profesional que HIZO cada una (no al campo 'profesional' del cobro).
   const sesByTrat = {};
   for (const s of sesiones){
     const tid = s.tratamiento_id; if (tid == null) continue;
     const P = normProf(s.profesional); if (!P) continue;
     const sp = Number(s.monto_profesional)||0, sc = Number(s.monto_centro)||0;
-    if (!sesByTrat[tid]) sesByTrat[tid] = { byP:{}, profTotal:0, centroTotal:0, total:0 };
+    if (!sesByTrat[tid]) sesByTrat[tid] = { list:[], byP:{}, profTotal:0, centroTotal:0, total:0 };
     const g = sesByTrat[tid];
+    g.list.push({ prof:P, mp:sp, mc:sc, val:sp+sc, fecha: s.fecha||'9999-99-99' });
     if (!g.byP[P]) g.byP[P] = { prof:0, centro:0, val:0 };
     g.byP[P].prof += sp; g.byP[P].centro += sc; g.byP[P].val += sp+sc;
     g.profTotal += sp; g.centroTotal += sc; g.total += sp+sc;
   }
+  for (const tid of Object.keys(sesByTrat)) sesByTrat[tid].list.sort((a,b)=> (a.fecha).localeCompare(b.fecha));
+  // Puntero de consumo por tratamiento: arranca en lo ya pagado ANTES del mes.
+  const prevPagado = window._prevPagosTrat || {};
+  const consumoTrat = {};
 
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien HIZO las sesiones)
@@ -709,30 +733,62 @@ function render(pagos, sesiones, filtroProf){
 
     // Cómo se reparte este cobro entre profesionales:
     //  - MOPLEX: un solo profesional (el que hizo el estudio), como lo dejó prepararMoplex.
-    //  - Consultorio con sesiones: se reparte según quién hizo cada sesión (ignora el campo 'profesional').
-    //  - Sin sesiones (fallback): el campo 'profesional' del cobro.
+    //  - Consultorio con sesiones: el cobro paga las SESIONES en orden cronológico (lo realizado);
+    //    la parte de cada sesión va al profesional que la hizo. El puntero arranca en lo ya
+    //    pagado antes del mes, así los tratamientos que cruzan meses liquidan bien.
+    //  - Sin sesiones (fallback): el campo 'profesional' del cobro, como antes.
     const sinfo = (!esMoplex && tid != null) ? sesByTrat[tid] : null;
     const usaSesiones = !esMoplex && !!sinfo && sinfo.total > 0;
     let reparto;
     if (!usaSesiones){
       reparto = [{ prof: normProf(p.profesional), mProf: Number(p.monto_profesional)||0, mCentro: Number(p.monto_centro)||0, imp: importe }];
     } else {
-      // Redondear a pesos enteros; el último se lleva el resto para que la suma dé exacta.
-      const Ps = Object.keys(sinfo.byP);
+      if (!consumoTrat[tid]) consumoTrat[tid] = { consumido: Number(prevPagado[tid])||0 };
+      const st = consumoTrat[tid];
+      let restante = importe;
+      const partes = {};   // prof → { mProf, mCentro, imp } (crudos, se redondean al final)
+      const addParte = (P, mp2, mc2, im2) => {
+        if (!partes[P]) partes[P] = { mProf:0, mCentro:0, imp:0 };
+        partes[P].mProf += mp2; partes[P].mCentro += mc2; partes[P].imp += im2;
+      };
+      // Recorrer las sesiones en orden, saltando lo ya cubierto por pagos anteriores
+      let acum = 0;
+      for (const S of sinfo.list){
+        if (restante <= 0.5) break;
+        const ini = acum, fin = acum + S.val; acum = fin;
+        if (S.val <= 0) continue;
+        if (st.consumido >= fin - 0.001) continue;          // sesión ya paga
+        const desde = Math.max(st.consumido, ini);
+        const disponible = fin - desde;
+        const toma = Math.min(restante, disponible);
+        const frac = toma / S.val;
+        addParte(S.prof, S.mp*frac, S.mc*frac, toma);
+        st.consumido += toma; restante -= toma;
+      }
+      // Sobrante (pagó más que las sesiones registradas, p.ej. sesión aún no cargada):
+      // repartir por las proporciones globales del tratamiento como mejor aproximación.
+      if (restante > 0.5){
+        for (const P of Object.keys(sinfo.byP)){
+          const b = sinfo.byP[P];
+          addParte(P, restante*(b.prof/sinfo.total), restante*(b.centro/sinfo.total), restante*(b.val/sinfo.total));
+        }
+        st.consumido += restante; restante = 0;
+      }
+      // Redondear a pesos; el último se lleva el resto para que la suma cierre exacta.
+      const Ps = Object.keys(partes);
+      if (!Ps.length){
+        reparto = [{ prof: normProf(p.profesional), mProf: Number(p.monto_profesional)||0, mCentro: Number(p.monto_centro)||0, imp: importe }];
+      } else {
+      const totP = Ps.reduce((s,P)=> s+partes[P].mProf, 0);
+      const totC = Ps.reduce((s,P)=> s+partes[P].mCentro, 0);
       let accP2 = 0, accC2 = 0, accI2 = 0;
       reparto = Ps.map((P, i) => {
-        const b = sinfo.byP[P];
-        if (i === Ps.length - 1){
-          const mp2 = Math.round(importe*(sinfo.profTotal/sinfo.total)) - accP2;
-          const mc2 = Math.round(importe*(sinfo.centroTotal/sinfo.total)) - accC2;
-          return { prof: P, mProf: mp2, mCentro: mc2, imp: importe - accI2 };
-        }
-        const mp = Math.round(importe*(b.prof/sinfo.total));
-        const mc = Math.round(importe*(b.centro/sinfo.total));
-        const im = Math.round(importe*(b.val/sinfo.total));
+        if (i === Ps.length - 1) return { prof:P, mProf: Math.round(totP)-accP2, mCentro: Math.round(totC)-accC2, imp: importe-accI2 };
+        const mp = Math.round(partes[P].mProf), mc = Math.round(partes[P].mCentro), im = Math.round(partes[P].imp);
         accP2 += mp; accC2 += mc; accI2 += im;
-        return { prof: P, mProf: mp, mCentro: mc, imp: im };
+        return { prof:P, mProf:mp, mCentro:mc, imp:im };
       });
+      }
     }
 
     let contadoVista = false;
