@@ -2028,8 +2028,8 @@ function bloqueMisClases(turnos, asistencias){
     <h2><span class="dot"></span>Mis clases fijas</h2>
     <div id="misClasesRows">${rows}</div>
     <div id="vacBloque"></div>
-    <button class="btn-faltar" style="width:100%;margin-top:10px;justify-content:center;display:flex" onclick="pbVacacionesAbrir()">🏖️ Me voy de vacaciones</button>
-    <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Con menos de 2 horas podés cancelarla igual, pero esa clase <b>no se recupera</b>.<br>¿Te vas unos días? Con <b>🏖️ Me voy de vacaciones</b> avisás todas las faltas del viaje de una sola vez.</div>
+    <button class="btn-faltar" style="width:100%;margin-top:10px;justify-content:center;display:flex" onclick="pbVacacionesAbrir()">🏖️ Avisar ausencia de varios días</button>
+    <div class="nota">Si no vas a poder venir, avisanos al menos <b>2 horas antes</b> del turno para que puedas recuperar la clase. Con menos de 2 horas podés cancelarla igual, pero esa clase <b>no se recupera</b>.<br>¿No vas a venir varios días (viaje, salud propia o de un familiar, etc.)? Con <b>🏖️ Avisar ausencia de varios días</b> avisás todas las faltas de una sola vez.</div>
   </section>`;
 }
 
@@ -2364,6 +2364,14 @@ function pbEtiquetaSemana(iso){
   return 'en ' + difSem + ' semanas';
 }
 
+// Extrae el motivo legible de una ausencia programada (vacaciones / salud / etc.)
+// desde el texto guardado en asistencia.motivo, p. ej. "Salud 10/05 al 20/05 · #vac12".
+function pbLabelDeAusencia(motivo){
+  const cabeza = String(motivo||'').split('·')[0] || '';
+  const lbl = cabeza.replace(/\s*\d{1,2}\/\d{1,2}.*$/, '').trim();
+  return lbl || 'Ausencia';
+}
+
 // Estado de una fecha puntual de esa clase, leyendo las asistencias del alumno
 function pbEstadoFaltaFecha(turnoId, fecha){
   const asis = window._asistenciasAlumno || [];
@@ -2373,8 +2381,8 @@ function pbEstadoFaltaFecha(turnoId, fecha){
   if (row.estado === 'presente') return { tipo: 'presente' };
   if ((row.estado === 'ausente-justificada' || row.estado === 'ausente') && m.includes('aviso del alumno'))
     return { tipo: 'avisada' };
-  if (row.estado === 'ausente-justificada' && m.includes('vacacion'))
-    return { tipo: 'vacaciones' };
+  if (row.estado === 'ausente-justificada' && m.includes('#vac'))
+    return { tipo: 'ausencia', label: pbLabelDeAusencia(row.motivo) };
   if (row.estado === 'ausente' || row.estado === 'ausente-justificada')
     return { tipo: 'otra-ausencia' }; // ausencia cargada por el centro
   return { tipo: 'disponible' };
@@ -2392,8 +2400,8 @@ function pbBuildSelectorFaltaBody(turnoId, dia, hora, serv){
           <span style="color:#16a34a;font-weight:800;font-size:13px">✓ Avisada</span>
           <button class="deshacer" onclick="pbFaltaDeshacerFecha(${turnoId},'${f}','${dia}','${hora}','${serv}')">Deshacer</button>
         </div>`;
-    } else if (est.tipo === 'vacaciones'){
-      accion = `<span style="color:#a16207;font-weight:800;font-size:13px;white-space:nowrap">🏖️ Vacaciones</span>`;
+    } else if (est.tipo === 'ausencia'){
+      accion = `<span style="color:#a16207;font-weight:800;font-size:13px;white-space:nowrap">🏖️ ${esc(est.label||'Ausencia')}</span>`;
     } else if (est.tipo === 'presente'){
       accion = `<span style="color:#16a34a;font-weight:800;font-size:13px;white-space:nowrap">✅ Viniste</span>`;
     } else if (est.tipo === 'otra-ausencia'){
@@ -2439,12 +2447,12 @@ function pbBuildMisClasesRows(){
   const asistencias = window._asistenciasAlumno || [];
   const _hoyISO = hoyISO();
   const faltasAvisadas = new Set();
-  const faltasVacaciones = new Set();
+  const faltasVacaciones = new Map();
   asistencias.forEach(a => {
     if (a.fecha >= _hoyISO && (a.estado === 'ausente-justificada' || a.estado === 'ausente')){
       const m = String(a.motivo||'').toLowerCase();
       if (m.includes('aviso del alumno')) faltasAvisadas.add(a.turno_id + '|' + a.fecha);
-      else if (a.estado === 'ausente-justificada' && m.includes('vacacion')) faltasVacaciones.add(a.turno_id + '|' + a.fecha);
+      else if (a.estado === 'ausente-justificada' && m.includes('#vac')) faltasVacaciones.set(a.turno_id + '|' + a.fecha, pbLabelDeAusencia(a.motivo));
     }
   });
   let rows = '';
@@ -2454,8 +2462,9 @@ function pbBuildMisClasesRows(){
     const dia = esc(t.dia||''); const hora = esc(t.hora||''); const serv = esc(t.servicio||'');
     const yaAvisada = faltasAvisadas.has(t.id + '|' + proxISO);
     const enVacaciones = faltasVacaciones.has(t.id + '|' + proxISO);
+    const vacLabel = faltasVacaciones.get(t.id + '|' + proxISO) || 'Ausencia';
     const proxBadge = enVacaciones
-      ? ' · <span style="color:#a16207;font-weight:700">🏖️ vacaciones</span>'
+      ? ` · <span style="color:#a16207;font-weight:700">🏖️ ${esc(vacLabel.toLowerCase())}</span>`
       : yaAvisada
       ? ' · <span style="color:#16a34a;font-weight:700">✓ avisada</span>' : '';
     rows += `<div class="clase-fija">
@@ -5395,7 +5404,7 @@ function bloqueReglamento(){
     ${item('📅 Vencimiento del plan', 'Tu plan vence el mismo número de día en que arrancaste.<br><span style="opacity:.85">Ej.: si empezaste un 25, vencés el 25 de cada mes.</span>')}
     ${item('💸 Recargo por mora', 'Si abonás fuera de término (dentro de los <b>7 días</b> posteriores al vencimiento), se aplica un <b>10% de recargo</b> sobre el valor del plan.')}
     ${item('⚠️ Baja automática del plan', 'Si pasados <b>7 días</b> del vencimiento el plan sigue sin abonarse, se da de baja automáticamente. Antes de eso te llega un aviso por mail. Al darse de baja se liberan tus días y horarios (quedan disponibles para otra persona) y se corta el acceso a Mi Espacio. Para volver, el reingreso queda sujeto a la disponibilidad de cupo. <b>Mantener la cuota al día es lo que te asegura el lugar.</b>')}
-    ${item('🏖️ Vacaciones y ausencias', 'Para conservar tus días y horarios, la mensualidad tiene que seguir activa, aunque te vayas de vacaciones o faltes un tiempo. Si no se abona, el plan se da de baja.<br>Si te vas unos días, avisá todas tus faltas de una sola vez desde Mi Espacio con <b>🏖️ Me voy de vacaciones</b>. Tené en cuenta que el cupo de recuperatorios de tu plan es el mismo te vayas 10 días o 30: vas a poder recuperar hasta la cantidad que te permita tu plan.')}
+    ${item('🏖️ Vacaciones y ausencias', 'Para conservar tus días y horarios, la mensualidad tiene que seguir activa, aunque te vayas de vacaciones, estés con un tema de salud o faltes un tiempo. Si no se abona, el plan se da de baja.<br>Si no vas a venir varios días, avisá todas tus faltas de una sola vez desde Mi Espacio con <b>🏖️ Avisar ausencia de varios días</b>. Tené en cuenta que el cupo de recuperatorios de tu plan es el mismo te ausentes 10 días o 30: vas a poder recuperar hasta la cantidad que te permita tu plan.')}
     ${item('🔄 Recuperación de clases', 'Cada falta que avises a tiempo (con al menos 2 horas de anticipación) la podés recuperar dentro de los <b>60 días posteriores a esa falta</b>. Con menos de 2 horas podés cancelar igual, pero esa clase <b>no se recupera</b>. Los recuperatorios se programan hasta 15 días vista.<br><br>Para poder usar tus recuperatorios, tu plan tiene que estar <b>activo y sin saldo deudor</b> (la cuota al día). Si tenés la cuota vencida, los recuperatorios quedan bloqueados hasta que regularices el pago.<br><br>La cantidad de clases que podés recuperar depende del <b>cupo de tu plan</b>, que es de <b>(clases por semana + 2) por ciclo</b>:<br>· Plan de 3 veces por semana → hasta <b>5 recuperatorios</b>.<br>· Plan de 2 veces por semana → hasta <b>4 recuperatorios</b>.<br>· Plan de 1 vez por semana → hasta <b>3 recuperatorios</b>.<br><span style="opacity:.85">(Los planes rotativos y bonificados tienen su propio cupo, más amplio.)</span><br><br>Ojo 👉 si cancelás una clase y la cambiás por otra el mismo día, eso cuenta como un recuperatorio. La excepción es el <b>cambio de área en el mismo día y horario</b>: eso <b>no gasta</b> cupo de recuperatorios.')}
     ${item('🎌 Feriados', 'Los feriados que caigan en tus <b>días de clase fijos</b> los podés recuperar dentro de los <b>30 días</b>, y no gastan cupo de recuperatorios.')}
     ${item('🗓️ Faltas con aviso y cierres del centro', 'Cada falta avisada a tiempo se puede recuperar dentro de los <b>60 días posteriores a esa falta</b>. Lo mismo para las clases que el centro cierra por algún motivo: tenés 60 días desde ese cierre.')}
@@ -6068,17 +6077,21 @@ window.pbVacacionesRefrescar = async function(){
   if(!cont || !window._agendaData || !window._agendaData.personaId) return;
   try{
     const { data: vacs, error } = await sb.from('vacaciones_tf')
-      .select('id, fecha_desde, fecha_hasta, clases_marcadas')
+      .select('id, fecha_desde, fecha_hasta, clases_marcadas, motivo')
       .eq('persona_id', window._agendaData.personaId)
       .eq('estado','activa')
       .order('fecha_desde', { ascending: true });
     if(error) throw error;
     if(!vacs || !vacs.length){ cont.innerHTML=''; return; }
-    cont.innerHTML = vacs.map(v => `
+    const _MOT = { vacaciones:{ico:'🏖️',lbl:'Vacaciones'}, salud:{ico:'🩺',lbl:'Salud'}, familiar:{ico:'🧑‍🤝‍🧑',lbl:'Salud de un familiar'}, otro:{ico:'📌',lbl:'Ausencia'} };
+    cont.innerHTML = vacs.map(v => {
+      const mi = _MOT[v.motivo] || _MOT.vacaciones;
+      return `
       <div class="aviso-falta firme" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px">
-        <div>🏖️ Vacaciones del <b>${fmtFechaCorta(v.fecha_desde)}</b> al <b>${fmtFechaCorta(v.fecha_hasta)}</b> · ${v.clases_marcadas||0} falta(s) avisada(s)</div>
+        <div>${mi.ico} ${mi.lbl} · del <b>${fmtFechaCorta(v.fecha_desde)}</b> al <b>${fmtFechaCorta(v.fecha_hasta)}</b> · ${v.clases_marcadas||0} falta(s) avisada(s)</div>
         <button class="deshacer" onclick="pbVacacionesCancelar(${v.id})">Cancelar</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }catch(e){ console.warn('No se pudieron leer las vacaciones', e); }
 };
 
@@ -6100,15 +6113,23 @@ window.pbVacacionesAbrir = function(){
     _cupoMsg = `♻️ Vas a poder recuperar las clases según el cupo de tu plan.`;
   }
   const _cartel = `<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.55;margin-bottom:13px">
-      ⚠️ <b>Importante:</b> programá tus vacaciones <b>solo si vas a seguir abonando el mes</b> para conservar tus turnos. Las vacaciones <b>no congelan ni te reservan el lugar sin pago</b>: lo que hacen es marcar tus clases como <b>falta avisada</b> para que las puedas recuperar.<br><br>
+      ⚠️ <b>Importante:</b> avisá esta ausencia <b>solo si vas a seguir abonando el mes</b> para conservar tus turnos. La ausencia <b>no congela ni te reserva el lugar sin pago</b>: lo que hace es marcar tus clases como <b>falta avisada</b> para que las puedas recuperar.<br><br>
       ${_cupoMsg}
     </div>`;
   pbAbrirModal({
-    titulo: '🏖️ Me voy de vacaciones',
-    subtitulo: 'Elegí el rango y marcamos como <b>falta avisada</b> todas tus clases fijas de esos días, de una sola vez. Cada clase te queda disponible para recuperar hasta <b>60 días después de su fecha</b> — podés recuperarlas antes de irte o a la vuelta.',
+    titulo: '🏖️ Avisar ausencia de varios días',
+    subtitulo: 'Elegí el motivo y el rango de días, y marcamos como <b>falta avisada</b> todas tus clases fijas de esos días, de una sola vez. Cada clase te queda disponible para recuperar hasta <b>60 días después de su fecha</b> — podés recuperarlas antes o después.',
     infoBox: '✅ Se carga desde <b>mañana</b> en adelante, hasta 31 días corridos por carga.<br>♻️ Los planes <b>bonificados</b> no generan recuperatorios.',
     cuerpoHTML: `
       ${_cartel}
+      <label style="display:block;font-size:12px;color:#64748b;margin-bottom:11px">Motivo<br>
+        <select id="vacMotivo" style="width:100%;padding:9px;border-radius:8px;border:1px solid #cbd5e1;font-size:14px;margin-top:3px">
+          <option value="vacaciones">🏖️ Vacaciones</option>
+          <option value="salud">🩺 Salud (propia)</option>
+          <option value="familiar">🧑‍🤝‍🧑 Salud de un familiar</option>
+          <option value="otro">📌 Otro</option>
+        </select>
+      </label>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <label style="flex:1;min-width:130px;font-size:12px;color:#64748b">Desde<br>
           <input type="date" id="vacDesde" min="${minISO}" style="width:100%;padding:9px;border-radius:8px;border:1px solid #cbd5e1;font-size:14px;margin-top:3px">
@@ -6141,7 +6162,7 @@ window.pbVacacionesPreview = async function(){
       cont.innerHTML = '<div style="color:#dc2626;font-size:13px">No tenés clases fijas dentro de ese rango (los feriados y clases canceladas por el centro no se cuentan: esos se recuperan aparte y sin gastar cupo).</div>';
       return;
     }
-    window._vacSel = { desde, hasta };
+    window._vacSel = { desde, hasta, motivo: ((document.getElementById('vacMotivo')||{}).value || 'vacaciones') };
     const esBon = !!(res && res.bonificado);
     // Etiquetar cada falta: cubierta por el cupo del ciclo, o sin recupero
     // (excede el cupo). Orden cronológico dentro de cada ciclo.
@@ -6172,7 +6193,7 @@ window.pbVacacionesPreview = async function(){
       <div style="font-weight:700;font-size:13px;margin-bottom:4px">Se van a avisar ${fechas.length} falta(s)${esBon ? ' · plan bonificado (sin recuperatorios)' : ` · ${conRec} con recupero${sinRec ? ` · ${sinRec} sin recupero` : ''}`}:</div>
       <div style="max-height:180px;overflow:auto">${lista}</div>
       ${avisoCupo}
-      <button class="pb-modal-btn confirm" style="width:100%;margin-top:12px" onclick="pbVacacionesConfirmar()">✅ Confirmar vacaciones (${fechas.length} falta(s))</button>`;
+      <button class="pb-modal-btn confirm" style="width:100%;margin-top:12px" onclick="pbVacacionesConfirmar()">✅ Confirmar ausencia (${fechas.length} falta(s))</button>`;
   }catch(e){
     cont.innerHTML = `<div style="color:#dc2626;font-size:13px">${esc(e.message||'No se pudo calcular.')}</div>`;
   }
@@ -6185,24 +6206,25 @@ window.pbVacacionesConfirmar = async function(){
   try{
     const { data: res, error } = await sb.rpc('vacaciones_cargar', {
       p_persona_id: window._agendaData.personaId,
-      p_desde: window._vacSel.desde, p_hasta: window._vacSel.hasta
+      p_desde: window._vacSel.desde, p_hasta: window._vacSel.hasta,
+      p_motivo: ((document.getElementById('vacMotivo')||{}).value || window._vacSel.motivo || 'vacaciones')
     });
     if(error) throw error;
     pbCerrarModal();
-    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Vacaciones cargadas.'));
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Ausencia cargada.'));
     location.reload();
   }catch(e){
     btns.forEach(b => b.disabled = false);
-    alert('No se pudieron cargar las vacaciones:\n\n' + (e.message || e));
+    alert('No se pudo cargar la ausencia:\n\n' + (e.message || e));
   }
 };
 
 window.pbVacacionesCancelar = async function(vacId){
-  if(!confirm('¿Cancelar estas vacaciones?\n\nSe deshacen las faltas avisadas de los días que todavía no pasaron y volvés a tus clases. Ojo: si tu lugar en alguna clase quedó ocupado provisoriamente por un recuperatorio de otro alumno, esa clase queda como falta avisada y la reprogramás en otro día u horario (te lo detallamos al confirmar). Si ya programaste el recupero de alguna fecha, ese queda como está.')) return;
+  if(!confirm('¿Cancelar esta ausencia?\n\nSe deshacen las faltas avisadas de los días que todavía no pasaron y volvés a tus clases. Ojo: si tu lugar en alguna clase quedó ocupado provisoriamente por un recuperatorio de otro alumno, esa clase queda como falta avisada y la reprogramás en otro día u horario (te lo detallamos al confirmar). Si ya programaste el recupero de alguna fecha, ese queda como está.')) return;
   try{
     const { data: res, error } = await sb.rpc('vacaciones_cancelar', { p_vacacion_id: vacId });
     if(error) throw error;
-    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Vacaciones canceladas.'));
+    alert('✅ ' + (res && res.mensaje ? res.mensaje : 'Ausencia cancelada.'));
     location.reload();
   }catch(e){
     alert('No se pudo cancelar:\n\n' + (e.message || e));
