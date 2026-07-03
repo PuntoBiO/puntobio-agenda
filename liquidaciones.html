@@ -525,6 +525,87 @@ async function cargar(){
     console.warn('No se pudieron cargar saldos MOPLEX (falta tabla moplex_franquicia_saldos?):', e.message);
   }
 
+  // ===== MOPLEX: TODAS las consultas del mes (por fecha de consulta) — SOLO INFORMATIVO =====
+  // Fuente igual que "Consultas MOPLEX": tratamientos + sesiones + turnos_biolab + catálogo.
+  // Lista todas las consultas del mes aunque sean $0 o estén sin cobrar, para que no falte nadie.
+  // ⚠️ NO cambia los totales de la liquidación: esos siguen saliendo de lo efectivamente cobrado.
+  window._moplexConsultasMes = [];
+  if (!window._soloLoMioLiq) {   // los profes con "solo lo mío" no bajan datos del resto
+    try {
+      const { data: mopTtos } = await sb.from('tratamientos')
+        .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto')
+        .eq('practica_codigo','MOPLEX');
+      const ttos = mopTtos || [];
+      if (ttos.length){
+        const ttoIds  = ttos.map(t=>t.id);
+        const codigos = [...new Set(ttos.map(t=>t.codigo_id).filter(Boolean))];
+        const persIds = [...new Set(ttos.map(t=>t.persona_id).filter(Boolean))];
+
+        // fecha real + profesional desde SESIONES
+        const fechaSesion = {}, profSesion = {}, bestSes = {};
+        if (ttoIds.length){
+          const { data: ses } = await sb.from('sesiones').select('tratamiento_id, profesional, fecha').in('tratamiento_id', ttoIds);
+          (ses||[]).forEach(r=>{
+            const k=r.tratamiento_id, f=r.fecha||'';
+            if (f && (!fechaSesion[k] || f>fechaSesion[k])) fechaSesion[k]=f;
+            if (r.profesional && (!bestSes[k] || f>bestSes[k].key)) bestSes[k]={key:f, prof:r.profesional};
+          });
+          Object.keys(bestSes).forEach(k=> profSesion[k]=normProf(bestSes[k].prof));
+        }
+        // fallback: TURNOS BIOLAB (su columna tratamiento_id guarda el codigo_id)
+        const fechaTurno = {}, profTurno = {}, bestT = {};
+        if (codigos.length){
+          const { data: tb } = await sb.from('turnos_biolab').select('tratamiento_id, profesional, fecha, hora_inicio').in('tratamiento_id', codigos).neq('estado','CANCELADO');
+          (tb||[]).forEach(r=>{
+            const k=r.tratamiento_id, key=(r.fecha||'')+(r.hora_inicio||'');
+            if (!bestT[k] || key>bestT[k].key) bestT[k]={key, prof:r.profesional, fecha:r.fecha||''};
+          });
+          Object.keys(bestT).forEach(k=>{ profTurno[k]=normProf(bestT[k].prof); if(bestT[k].fecha) fechaTurno[k]=bestT[k].fecha; });
+        }
+        // nombres
+        const nombres = {};
+        if (persIds.length){
+          const { data: per } = await sb.from('personas').select('id, nombre').in('id', persIds);
+          (per||[]).forEach(p=> nombres[p.id]=p.nombre);
+        }
+
+        const byId = (window._moplexCat && window._moplexCat.byId) || {};
+        const scale = (m, fact) => (m && fact) ? m : { precio:0, moplex:0, prof:0, centro:0 };
+        const lista = [];
+        for (const t of ttos){
+          const fc = fechaSesion[t.id] || fechaTurno[t.codigo_id] || t.fecha_alta || '';
+          if (String(fc).slice(0,7) !== mes) continue;   // solo consultas de ESTE mes
+          const fact = moplexFacturable(fc);
+          const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id]) : null;
+          const rectif   = !!t.moplex_plantilla_rectif;
+          const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0) : null;
+          const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
+          const precio = (ev.precio||0) + (pl.precio||0);
+          lista.push({
+            tratId: t.id, fecha: fc, paciente: nombres[t.persona_id] || '—',
+            prof: normProf(t.profesional) || profSesion[t.id] || profTurno[t.codigo_id] || '',
+            consultaNombre: (byId[t.moplex_consulta_id]||{}).nombre || '—',
+            plantillaNombre: plantRep ? ((rectif?'Rectif. ':'') + ((byId[t.moplex_plantilla_id]||{}).nombre||'')) : '',
+            precio, prof_monto: (ev.prof||0)+(pl.prof||0), centro: (ev.centro||0)+(pl.centro||0), moplex: (ev.moplex||0)+(pl.moplex||0),
+            gratis: (precio <= 0.5), cobrado: false
+          });
+        }
+        // ¿está cobrado? (busca pagos de estos tratamientos, de cualquier fecha)
+        const listIds = lista.map(x=>x.tratId);
+        if (listIds.length){
+          const { data: pagQ } = await sb.from('pagos_consultorio').select('tratamiento_id, importe').in('tratamiento_id', listIds);
+          const cobradoSet = new Set((pagQ||[]).filter(p=> Number(p.importe)>0).map(p=>p.tratamiento_id));
+          lista.forEach(x=> x.cobrado = cobradoSet.has(x.tratId));
+        }
+        lista.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+        window._moplexConsultasMes = lista;
+      }
+    } catch (e) {
+      window._moplexConsultasMes = [];
+      console.warn('No se pudieron cargar las consultas MOPLEX del mes:', e.message);
+    }
+  }
+
   render(data || [], sesionesData, filtroProf);
 }
 
@@ -913,6 +994,35 @@ function render(pagos, sesiones, filtroProf){
     html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td colspan="5">Pendiente de pagar a MOPLEX</td><td class="num">${fmt(moplexPend)}</td><td></td></tr>`;
     if (moplexSald > 0.5) html += `<tr style="font-weight:700;background:#d1fae5;color:#065f46;"><td colspan="5">Ya saldado con MOPLEX</td><td class="num">${fmt(moplexSald)}</td><td></td></tr>`;
     html += `</tbody></table>`;
+  }
+
+  // ===== 🦶 MOPLEX — TODAS las consultas del mes (informativo, NO cambia totales) =====
+  if (mostrarMoplex && moplexEnVista){
+    const cons = window._moplexConsultasMes || [];
+    if (cons.length){
+      html += `<h2 class="bloque-tit">🦶 MOPLEX — todas las consultas del mes</h2>
+        <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Todas las consultas MOPLEX del mes por <b>fecha de consulta</b> (estén cobradas o no). Las de <b>$0</b> y las <b>sin cobrar</b> son <b>informativas</b>: figuran para que no falte nadie, pero <b>no cambian los totales</b> de la liquidación (esos salen de lo efectivamente cobrado, más arriba).</p>
+        <table style="margin-bottom:8px;"><thead><tr>
+          <th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Consulta</th><th>Plantilla</th>
+          <th class="num">$ Paciente</th><th class="num">$ Prof</th><th class="num">$ Centro</th><th class="num">$ MOPLEX</th><th>Estado</th>
+        </tr></thead><tbody>`;
+      let nGratis=0, nSin=0, nCob=0;
+      for (const c of cons){
+        let est, estSty;
+        if (c.gratis){ est='$0 (gratis)'; estSty='background:#f1f5f9;color:#64748b'; nGratis++; }
+        else if (c.cobrado){ est='Cobrado'; estSty='background:#d1fae5;color:#065f46'; nCob++; }
+        else { est='Sin cobrar'; estSty='background:#fee2e2;color:#991b1b'; nSin++; }
+        const dim = (c.gratis || !c.cobrado) ? ' style="opacity:.7"' : '';
+        html += `<tr${dim}>
+          <td>${c.fecha}</td><td>${c.paciente}</td><td>${c.prof?badge(c.prof):'—'}</td>
+          <td>${c.consultaNombre}</td><td>${c.plantillaNombre||'—'}</td>
+          <td class="num">${fmt(c.precio)}</td><td class="num">${fmt(c.prof_monto)}</td>
+          <td class="num">${fmt(c.centro)}</td><td class="num">${fmt(c.moplex)}</td>
+          <td><span class="est" style="${estSty}">${est}</span></td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="10">${cons.length} consulta${cons.length!==1?'s':''} en el mes · ${nCob} cobrada${nCob!==1?'s':''} · ${nSin} sin cobrar · ${nGratis} en $0</td></tr>`;
+      html += `</tbody></table>`;
+    }
   }
 
   // ===== BLOQUE PRODUCTIVIDAD: cuánto GENERÓ cada profesional (independiente de cuánto se lleva) =====
