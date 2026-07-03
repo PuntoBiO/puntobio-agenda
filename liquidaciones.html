@@ -548,7 +548,7 @@ function render(pagos, sesiones, filtroProf){
   const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
   const detalle = {};        // "profesional||practica" → {cobrado, prof, centro}
   const porTrat = {};        // tratamiento_id → {profParte:0, cobradoProfMismo:0} (para cruces por tratamiento)
-  let totalBruto = 0, totalProf = 0, totalCentro = 0, cantVista = 0;
+  let totalBruto = 0, totalProf = 0, totalCentro = 0, cantVista = 0, totalMoplexV = 0;
 
   for (const p of pagos){
     const prof = normProf(p.profesional);     // quien ATENDIÓ
@@ -584,9 +584,10 @@ function render(pagos, sesiones, filtroProf){
     if (!esVista) continue;
 
     totalBruto += importe; totalProf += mProf; totalCentro += mCentro; cantVista++;
-    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, cobroProf:0, cobroPB:0, pagos:[]};
+    totalMoplexV += Number(p._monto_moplex)||0;
+    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, pagos:[]};
     const r = resumen[prof];
-    r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.pagos.push(p);
+    r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.moplex += Number(p._monto_moplex)||0; r.pagos.push(p);
     if (cobro === prof) r.cobroProf += totalPago;
     else if (cobro === 'PuntoBiO') r.cobroPB += totalPago;
 
@@ -690,6 +691,22 @@ function render(pagos, sesiones, filtroProf){
         <div class="card-sub">${(totalCentro/totalBruto*100||0).toFixed(1)}% del bruto</div>
       </div>
     </div>`;
+
+  // ===== GANANCIA DE PUNTOBIO (por profesional y franquicia) ===== (oculto en modo MOPLEX)
+  if (!esModoMoplex){
+    html += `<h2 class="bloque-tit">💰 Qué le queda a PuntoBiO</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Por cada profesional: lo que se cobró, cuánto se lleva el profesional, cuánto va a la franquicia MOPLEX y cuánto le queda a PuntoBiO (su ganancia). Todo junto abajo.</p>
+      <table style="margin-bottom:8px;"><thead><tr>
+        <th>Origen</th><th class="num">Total cobrado</th><th class="num">Se lleva el profesional</th><th class="num">Va a MOPLEX</th><th class="num">Queda en PuntoBiO</th>
+      </tr></thead><tbody>`;
+    for (const prof of profs){
+      const r = resumen[prof];
+      html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(r.bruto)}</td><td class="num">${fmt(r.prof)}</td><td class="num">${fmt(r.moplex||0)}</td><td class="num"><b>${fmt(r.centro)}</b></td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#ecfdf5;color:#065f46;"><td>TODO PuntoBiO</td><td class="num">${fmt(totalBruto)}</td><td class="num">${fmt(totalProf)}</td><td class="num">${fmt(totalMoplexV)}</td><td class="num">${fmt(totalCentro)}</td></tr>`;
+    html += `</tbody></table>`;
+    html += `<div class="prod-total" style="background:#065f46">Ganancia total de PuntoBiO en el período: <b>${fmt(totalCentro)}</b>${totalMoplexV>0.5?` · va a la franquicia MOPLEX: <b>${fmt(totalMoplexV)}</b>`:''}</div>`;
+  }
 
   // ===== BLOQUE 1: RESUMEN ===== (oculto en modo MOPLEX)
   if (!esModoMoplex){
@@ -935,7 +952,7 @@ function render(pagos, sesiones, filtroProf){
       <div class="resumen-card ${claseCard}">
         <div class="rc-nombre">${badge(prof)}</div>
         <div class="rc-fila"><span>Le corresponde</span><b>${fmt(r.prof)}</b></div>
-        <div class="rc-fila"><span>Ya cobró él/ella</span><b>${fmt(r.cobroProf)}</b></div>
+        <div class="rc-fila"><span>Ya cobró ${prof}</span><b>${fmt(r.cobroProf)}</b></div>
         <div class="rc-fila"><span>Cobró PuntoBiO</span><b>${fmt(r.cobroPB)}</b></div>
         <div class="rc-estado">${iconoEstado} ${estadoTxt}</div>
       </div>`;
@@ -1032,7 +1049,7 @@ function render(pagos, sesiones, filtroProf){
   document.getElementById('resultado').innerHTML = html;
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
-  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, profs, ordenarProfs, cant: cantVista, moplex: MPX, moplexFranq: franqVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
+  window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, totalMoplex: totalMoplexV, profs, ordenarProfs, cant: cantVista, moplex: MPX, moplexFranq: franqVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
 }
 
 function toggleDetalle(prof){
@@ -1110,6 +1127,15 @@ function exportarPDF(){
   });
   tabla('1 - Resumen por profesional',
     ['Prof','Total Prof','Total Centro','Cobró Prof','Cobró PuntoBiO','Neto','Estado'], b1);
+
+  // Qué le queda a PuntoBiO (por profesional y franquicia)
+  const bG = L.profs.map(prof=>{
+    const r = L.resumen[prof];
+    return [prof, fmtP(r.bruto), fmtP(r.prof), fmtP(r.moplex||0), fmtP(r.centro)];
+  });
+  bG.push(['TODO PuntoBiO', fmtP(L.totalBruto), fmtP(L.totalProf), fmtP(L.totalMoplex||0), fmtP(L.totalCentro)]);
+  tabla('Qué le queda a PuntoBiO',
+    ['Origen','Total cobrado','Se lleva el prof','Va a MOPLEX','Queda en PuntoBiO'], bG);
 
   // BLOQUE 2
   const b2 = L.ordenarProfs(Object.keys(L.porMedio)).map(prof=>{
