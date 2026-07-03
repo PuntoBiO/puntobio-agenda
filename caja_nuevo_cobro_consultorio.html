@@ -451,7 +451,10 @@
           </select>
         </div>
 
-        <div class="field">
+        <!-- El "profesional" del cobro ya NO se pregunta: el reparto real lo hace
+             Liquidaciones según quién hizo cada SESIÓN. El select queda oculto solo
+             para que el tarifario calcule un split de referencia. -->
+        <div class="field" style="display:none">
           <label for="profesional">Profesional que corresponde</label>
           <select id="profesional"></select>
           <div id="profVariableMsg" class="profVariableMsg" hidden>
@@ -905,15 +908,29 @@
     $('resSaldo').classList.toggle('warn', saldo > 0);
     $('resSesiones').textContent = t.total_sesiones || 0;
 
-    // Profesional sugerido = el del tratamiento, SOLO si el tratamiento tiene profesional fijo
+    // Profesional (OCULTO, solo para el split de referencia del tarifario):
+    // el reparto real lo hace Liquidaciones según quién hizo cada SESIÓN.
+    // - Práctica de profesional fijo → el del tratamiento.
+    // - Práctica variable (Fisio, etc.) → el de la ÚLTIMA sesión; si no hay, el del tratamiento; si no, queda el primero.
     const esVariable = profesionalEsVariable(t.practica_codigo);
-    $('profVariableMsg').hidden = !esVariable;
+    $('profVariableMsg').hidden = true;   // ya no se pregunta
 
     if (!esVariable && t.profesional && state.profesionales.includes(t.profesional)) {
       $('profesional').value = t.profesional;
+    } else if (esVariable) {
+      try {
+        const { data: ultSes } = await sb.from('sesiones')
+          .select('profesional, fecha')
+          .eq('tratamiento_id', t.id)
+          .order('fecha', { ascending: false })
+          .limit(1);
+        const pSes = ultSes && ultSes[0] && ultSes[0].profesional;
+        if (pSes && state.profesionales.includes(pSes)) $('profesional').value = pSes;
+        else if (t.profesional && state.profesionales.includes(t.profesional)) $('profesional').value = t.profesional;
+      } catch(_) {
+        if (t.profesional && state.profesionales.includes(t.profesional)) $('profesional').value = t.profesional;
+      }
     }
-    // Si es variable, dejar el select sin selección forzada (queda el primero)
-    // y el cartel amarillo le indica a Pau/Ale que tienen que elegir quién atendió.
 
     // Reset campos
     $('importe').value = '';
@@ -1111,9 +1128,9 @@
     const okConfirm = confirm(
       '⚠️ Revisá antes de guardar:\n\n' +
       'Paciente: ' + pacienteNom + '\n' +
-      'La sesión la hizo: ' + $('profesional').value + '\n' +
       'La plata la recibió: ' + $('quienCobro').value + '\n' +
       'Importe: ' + fmt(importe) + ' (' + medioLindo + ')\n\n' +
+      '(El reparto al profesional lo calcula Liquidaciones según quién hizo cada sesión.)\n\n' +
       '¿Está todo correcto?'
     );
     if (!okConfirm) { btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
