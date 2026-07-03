@@ -310,19 +310,30 @@ function splitPortionMoplex(rep, portion, fact){
   return { prof, moplex, centro };
 }
 
-// Recalcula el split de cada cobro MOPLEX leyendo el tratamiento + catálogo,
-// pisando lo que la caja guardó mal. Devuelve el detalle (2 líneas por cobro:
-// evaluación / plantilla) y la lista para la sección de franquicia MOPLEX.
+// Recalcula el split de los cobros MOPLEX leyendo el tratamiento + catálogo,
+// pisando lo que la caja guardó mal. AGRUPA por tratamiento: si una consulta/plantilla
+// se cobró en varias cuotas, reparte el TOTAL una sola vez (si no, se contaba la
+// evaluación en cada cuota y el 10% de la plantilla quedaba mal).
 function prepararMoplex(monthPagos){
   const byId = (window._moplexCat && window._moplexCat.byId) || {};
   const out = { detalle:{}, franquicia:[], sinTipo:[], totalMoplex:0 };
   const cerca = (a,b)=> Math.abs(a-b) < 1;
 
+  // 1) Agrupar los cobros MOPLEX por tratamiento (un tratamiento = varias cuotas posibles)
+  const grupos = {};
   for (const p of monthPagos){
     const t = p.tratamientos || {};
     if ((t.practica_codigo||'') !== 'MOPLEX') continue;
+    const tid = (p.tratamiento_id != null) ? ('t'+p.tratamiento_id) : ('p'+p.id);
+    (grupos[tid] = grupos[tid] || []).push(p);
+  }
 
-    const fact = moplexFacturable(p.fecha);
+  // 2) Repartir cada grupo (tratamiento) una sola vez
+  for (const tid of Object.keys(grupos)){
+    const pagos = grupos[tid];
+    const p0 = pagos[0];
+    const t  = p0.tratamientos || {};
+    const fact = moplexFacturable(p0.fecha);
     const evalItem  = byId[t.moplex_consulta_id];
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
@@ -330,55 +341,66 @@ function prepararMoplex(monthPagos){
     const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0) : null;
     const evalPrecio  = evalRep  ? evalRep.precio  : 0;
     const plantPrecio = plantRep ? plantRep.precio : 0;
-    const importe  = Number(p.importe)||0;
     const paciente = (t.personas && t.personas.nombre) || '—';
-    const prof     = normProf(p.profesional);
+    const prof     = normProf(p0.profesional);
+    const totalPaid = pagos.reduce((s,p)=> s + (Number(p.importe)||0), 0);
 
-    // Cobro MOPLEX sin tipo asignado en "Consultas MOPLEX" → no se puede repartir bien
+    // Sin tipo asignado → no se puede repartir bien
     if (!evalRep && !plantRep){
-      out.sinTipo.push({ fecha:p.fecha, paciente, prof, importe, tratId:p.tratamiento_id });
-      p._moplexInfo = { evalPortion:0, plantPortion:0, sinTipo:true };
-      p.monto_profesional = 0;
-      p.monto_centro = importe;
-      p._monto_moplex = 0;
+      out.sinTipo.push({ fecha:p0.fecha, paciente, prof, importe:totalPaid, tratId:p0.tratamiento_id });
+      for (const p of pagos){ p._moplexInfo = { sinTipo:true }; p.monto_profesional = 0; p.monto_centro = Number(p.importe)||0; p._monto_moplex = 0; }
       continue;
     }
 
-    // A qué componente corresponde este cobro (por importe; con fallback en cascada)
-    let evalPortion = 0, plantPortion = 0;
-    if (evalRep && cerca(importe, evalPrecio)) { evalPortion = importe; }
-    else if (plantRep && cerca(importe, plantPrecio)) { plantPortion = importe; }
-    else if (evalRep && plantRep && cerca(importe, evalPrecio+plantPrecio)) { evalPortion = evalPrecio; plantPortion = plantPrecio; }
-    else { // fallback: primero evaluación, después plantilla
-      let a = importe;
-      evalPortion  = Math.min(a, evalPrecio);  a -= evalPortion;
-      plantPortion = Math.min(a, plantPrecio);
+    // A qué componente corresponde el TOTAL cobrado del tratamiento (una sola vez)
+    let evalPaid = 0, plantPaid = 0;
+    if (evalRep && plantRep){
+      if      (cerca(totalPaid, evalPrecio + plantPrecio)) { evalPaid = evalPrecio; plantPaid = plantPrecio; }
+      else if (cerca(totalPaid, plantPrecio))              { plantPaid = totalPaid; }
+      else if (cerca(totalPaid, evalPrecio))               { evalPaid = totalPaid; }
+      else { evalPaid = Math.min(totalPaid, evalPrecio); plantPaid = Math.min(totalPaid - evalPaid, plantPrecio); }
+    } else if (evalRep){
+      evalPaid = Math.min(totalPaid, evalPrecio);
+    } else {
+      plantPaid = Math.min(totalPaid, plantPrecio);
     }
+    const leftover = Math.max(totalPaid - evalPaid - plantPaid, 0);
 
-    const se = splitPortionMoplex(evalRep,  evalPortion,  fact);
-    const sp = splitPortionMoplex(plantRep, plantPortion, fact);
-    const leftover = importe - evalPortion - plantPortion;
+    const se = splitPortionMoplex(evalRep,  evalPaid,  fact);
+    const sp = splitPortionMoplex(plantRep, plantPaid, fact);
+    const tProf   = se.prof + sp.prof;
+    const tCentro = se.centro + sp.centro + leftover;
+    const tMoplex = se.moplex + sp.moplex;
 
-    // Pisar el split del pago con lo correcto
-    p.monto_profesional = se.prof + sp.prof;
-    p.monto_centro      = se.centro + sp.centro + (leftover>0?leftover:0);
-    p._monto_moplex     = se.moplex + sp.moplex;
-    p._moplexInfo       = { evalPortion, plantPortion };
+    // Repartir el split del tratamiento entre sus cuotas (proporcional al importe),
+    // para que los totales por pago sigan cuadrando. El último pago se lleva el redondeo.
+    let accP = 0, accC = 0, accM = 0;
+    pagos.forEach((p, i) => {
+      const imp = Number(p.importe)||0;
+      const fr  = totalPaid > 0 ? imp/totalPaid : 0;
+      let pp, pc, pm;
+      if (i === pagos.length - 1){ pp = tProf - accP; pc = tCentro - accC; pm = tMoplex - accM; }
+      else { pp = Math.round(tProf*fr); pc = Math.round(tCentro*fr); pm = Math.round(tMoplex*fr); accP+=pp; accC+=pc; accM+=pm; }
+      p.monto_profesional = pp;
+      p.monto_centro      = pc;
+      p._monto_moplex     = pm;
+      p._moplexInfo       = { evalPaid, plantPaid };
+    });
 
-    // Detalle por profesional — dos líneas con descripción
-    if (evalPortion > 0){
+    // Detalle por profesional — una línea eval / una plantilla (a nivel tratamiento)
+    if (evalPaid > 0){
       const lbl = 'MOPLEX · Eval. — ' + ((evalItem&&evalItem.nombre)||'');
       const k = prof + '||' + lbl;
       if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
-      out.detalle[k].cobrado += evalPortion; out.detalle[k].mProf += se.prof; out.detalle[k].centro += se.centro;
-      out.franquicia.push({ tratId:p.tratamiento_id, fecha:p.fecha, paciente, prof, tipo:'Evaluación', desc:(evalItem&&evalItem.nombre)||'', montoMoplex:0 });
+      out.detalle[k].cobrado += evalPaid; out.detalle[k].mProf += se.prof; out.detalle[k].centro += se.centro;
+      out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Evaluación', desc:(evalItem&&evalItem.nombre)||'', montoMoplex:0 });
     }
-    if (plantPortion > 0){
+    if (plantPaid > 0){
       const lbl = 'MOPLEX · Plantilla — ' + ((rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''));
       const k = prof + '||' + lbl;
       if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
-      out.detalle[k].cobrado += plantPortion; out.detalle[k].mProf += sp.prof; out.detalle[k].centro += sp.centro;
-      out.franquicia.push({ tratId:p.tratamiento_id, fecha:p.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:sp.moplex });
+      out.detalle[k].cobrado += plantPaid; out.detalle[k].mProf += sp.prof; out.detalle[k].centro += sp.centro;
+      out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:sp.moplex });
       out.totalMoplex += sp.moplex;
     }
   }
