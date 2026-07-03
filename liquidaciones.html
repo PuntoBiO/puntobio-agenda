@@ -814,6 +814,33 @@ function render(pagos, sesiones, filtroProf){
     html += `</tbody></table>`;
   }
 
+  // ===== MOPLEX como un "profesional" más: detalle SOLO de lo que va a la franquicia =====
+  // (agrupa las plantillas por descripción y suma lo que le corresponde a MOPLEX)
+  if (moplexEnVista){
+    const moplexDet = {};   // descripción → { desc, cant, monto }
+    let mTotal = 0, mCant = 0;
+    for (const f of MPX.franquicia){
+      if (filtroProf && f.prof !== filtroProf) continue;
+      if (f.tipo !== 'Plantilla' || f.montoMoplex <= 0.5) continue;  // solo las plantillas pagan a MOPLEX
+      const key = f.desc || 'Plantilla';
+      if (!moplexDet[key]) moplexDet[key] = { desc:key, cant:0, monto:0 };
+      moplexDet[key].cant++; moplexDet[key].monto += f.montoMoplex;
+      mTotal += f.montoMoplex; mCant++;
+    }
+    const moplexItems = Object.values(moplexDet).sort((a,b)=> a.desc.localeCompare(b.desc));
+    if (moplexItems.length){
+      html += `<div class="det-prof-tit"><span class="badge" style="background:#ccfbf1;color:#0f766e">🦶 MOPLEX</span></div>
+        <table style="margin-bottom:16px;"><thead><tr>
+          <th>Plantilla</th><th class="num">Cantidad</th><th class="num">Total a MOPLEX</th>
+        </tr></thead><tbody>`;
+      for (const d of moplexItems){
+        html += `<tr><td>${d.desc}</td><td class="num">${fmtNum(d.cant)}</td><td class="num">${fmt(d.monto)}</td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#f0fdfa;color:#0f766e;"><td>TOTAL a MOPLEX</td><td class="num">${fmtNum(mCant)}</td><td class="num">${fmt(mTotal)}</td></tr>`;
+      html += `</tbody></table>`;
+    }
+  }
+
   // ===== BLOQUE MOPLEX (franquicia) — como una "parte" más =====
   // Aviso: cobros MOPLEX sin tipo asignado (no se pueden repartir bien)
   if (MPX.sinTipo.length > 0){
@@ -1105,8 +1132,29 @@ function exportarPDF(){
     y = doc.lastAutoTable.finalY + 6;
     if (y > 260){ doc.addPage(); y = 20; }
   }
+  // MOPLEX como un "profesional" más (solo lo de la franquicia, agrupado por plantilla)
+  {
+    const franqSrc = (L.moplexFranq && L.moplexFranq.length) ? L.moplexFranq : ((L.moplex && L.moplex.franquicia) || []);
+    const agg = {}; let mT = 0, mC = 0;
+    for (const f of franqSrc){
+      if (f.tipo !== 'Plantilla' || f.montoMoplex <= 0.5) continue;
+      const key = f.desc || 'Plantilla';
+      if (!agg[key]) agg[key] = { desc:key, cant:0, monto:0 };
+      agg[key].cant++; agg[key].monto += f.montoMoplex; mT += f.montoMoplex; mC++;
+    }
+    const items = Object.values(agg).sort((a,b)=> a.desc.localeCompare(b.desc));
+    if (items.length){
+      if (y > 250){ doc.addPage(); y = 20; }
+      doc.setFontSize(10); doc.setTextColor(40); doc.text('MOPLEX', 14, y); y += 1;
+      const body = items.map(d=>[d.desc, String(d.cant), fmtP(d.monto)]);
+      body.push(['TOTAL a MOPLEX', String(mC), fmtP(mT)]);
+      doc.autoTable({ startY:y, head:[['Plantilla','Cantidad','Total a MOPLEX']], body,
+        theme:'grid', headStyles:{fillColor:[13,148,136],fontSize:8}, bodyStyles:{fontSize:8}, margin:{left:14,right:14} });
+      y = doc.lastAutoTable.finalY + 6;
+      if (y > 260){ doc.addPage(); y = 20; }
+    }
+  }
 
-  // BLOQUE MOPLEX (franquicia) — usa la lista ya filtrada por profesional/área
   const franqPDF = (L.moplexFranq && L.moplexFranq.length) ? L.moplexFranq : ((L.moplex && L.moplex.franquicia) || []);
   if (franqPDF.length){
     if (y > 230){ doc.addPage(); y = 20; }
