@@ -501,23 +501,43 @@ async function cargar(){
   }
   window._regalosMes = regalosMes;
 
-  if ((!data || data.length === 0) && regalosMes.length === 0) {
-    document.getElementById('resultado').innerHTML = `<div class="empty">📭 Sin pagos en ${mes}</div>`;
+  // ===== MOTOR "TRABAJADO Y ABONADO" =====
+  // Regla: una sesión se liquida cuando está REALIZADA y ABONADA.
+  //  - Realizada sin abonar → pasa a la próxima liquidación (se paga cuando el paciente abone).
+  //  - Abonada por adelantado → la plata queda en custodia de quien la recibió y se va
+  //    liquidando a medida que los profesionales hacen las sesiones.
+  // Para saberlo hay que mirar la historia COMPLETA de cada tratamiento involucrado:
+  //  - tratamientos con PAGOS este mes (pueden cubrir sesiones viejas), y
+  //  - tratamientos con SESIONES este mes (pueden estar ya pagas de antes).
+  const tratIdsPagos = [...new Set((data || []).map(p => p.tratamiento_id).filter(x => x != null))];
+  let tratIdsSes = [];
+  try {
+    const { data: sesMes } = await sb.from('sesiones')
+      .select('tratamiento_id').gte('fecha', desde).lte('fecha', hasta).limit(5000);
+    tratIdsSes = [...new Set((sesMes || []).map(x => x.tratamiento_id).filter(x => x != null))];
+  } catch (e) { console.warn('No se pudieron leer las sesiones del mes:', e.message); }
+  const tratIds = [...new Set([...tratIdsPagos, ...tratIdsSes])];
+
+  if ((!data || data.length === 0) && regalosMes.length === 0 && tratIds.length === 0) {
+    document.getElementById('resultado').innerHTML = `<div class="empty">📭 Sin movimientos en ${mes}</div>`;
     return;
   }
 
-  // Traemos las SESIONES de los tratamientos involucrados.
-  // La parte profesional REAL de cada tratamiento sale de las sesiones (lo que se trabajó),
-  // NO de los pagos (que pueden venir divididos). Ej: evaluación = 1 sesión de $40.000 prof,
-  // aunque el pago haya entrado en 2 cuotas de $20.000.
-  const tratIds = [...new Set((data || []).map(p => p.tratamiento_id).filter(x => x != null))];
-  let sesionesData = [];
-  if (tratIds.length > 0){
-    const { data: sesData, error: sesErr } = await sb.from('sesiones')
-      .select('tratamiento_id, profesional, monto_profesional')
-      .in('tratamiento_id', tratIds);
-    if (!sesErr && sesData) sesionesData = sesData;
+  // Historia completa (sesiones + pagos) de esos tratamientos, en lotes para no pasarnos de la URL
+  let sesAll = [], pagosAll = [];
+  for (let i = 0; i < tratIds.length; i += 150){
+    const lote = tratIds.slice(i, i + 150);
+    const { data: sesData } = await sb.from('sesiones')
+      .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, personas(nombre))')
+      .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
+    if (sesData) sesAll.push(...sesData);
+    const { data: pagData } = await sb.from('pagos_consultorio')
+      .select('id, tratamiento_id, fecha, importe')
+      .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
+    if (pagData) pagosAll.push(...pagData);
   }
+  const sesionesData = sesAll;
+  window._liqMotor = { sesAll, pagosAll, desde, hasta };
 
   DATA = data || [];
 
@@ -664,79 +684,111 @@ function render(pagos, sesiones, filtroProf){
   // MOPLEX: recalcular el split de cada cobro MOPLEX desde el catálogo (pisa lo que la caja guardó mal).
   // Debe correr ANTES del loop: deja monto_profesional/monto_centro correctos en cada pago MOPLEX.
   const MPX = prepararMoplex(pagos);
-  // ===== procesar todos los pagos =====
-  const resumen = {};        // por profesional (quien atendió)
+  // ===== MOTOR: se liquida lo TRABAJADO y ABONADO =====
+  // La atribución sale SIEMPRE de la SESIÓN (quién atendió/evolucionó, con su % ya guardado
+  // por la agenda: 65/35 para Bruno/Male/Vero, 100% centro para Jime/Lu). El pago solo dice
+  // cuánta plata entró y quién la recibió (quien_cobro). Cobrar no es ser dueño de esa plata.
+  const resumen = {};        // por profesional (quien ATENDIÓ las sesiones liquidables)
   const porArea = {};        // ganancia por área (Consultorio / BioLab / Especialidades)
-  const porMedio = {};       // cobros por medio de cada profesional
-  const crucesBrutos = [];   // pagos donde cobró != atendió
-  const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
-  const detalle = {};        // "profesional||practica" → {cobrado, prof, centro}
-  const porTrat = {};        // tratamiento_id → {profParte:0, cobradoProfMismo:0} (para cruces por tratamiento)
+  const porMedio = {};       // plata recibida por medio, por QUIÉN LA RECIBIÓ
+  const detalle = {};        // "profesional||practica" → {cobrado, mProf, centro}
+  const recibido = {};       // quién recibió → $ recibidos este mes (plata física)
+  const pendientes = [];     // sesiones realizadas sin abonar (pasan a la próxima liquidación)
+  const liquidables = [];    // sesiones que se liquidan ESTE mes (realizadas y abonadas)
   let totalBruto = 0, totalProf = 0, totalCentro = 0, cantVista = 0, totalMoplexV = 0;
 
-  for (const p of pagos){
-    const prof = normProf(p.profesional);     // quien ATENDIÓ
-    const cobro = normProf(p.quien_cobro);     // quien RECIBIÓ la plata
-    const importe = Number(p.importe) || 0;
-    const mProf = Number(p.monto_profesional) || 0;
-    const mCentro = Number(p.monto_centro) || 0;
-    const totalPago = mProf + mCentro;
-    const t = p.tratamientos || {};
-    const areaP = practicaArea(t.practica_codigo); // Consultorio / BioLab / Especialidades
-    if (!prof) continue;
+  const MT = window._liqMotor || { sesAll: sesiones, pagosAll: [], desde: '', hasta: '' };
+  const desde = MT.desde, hasta = MT.hasta;
 
-    // ¿Esta fila es PRODUCCIÓN del profesional que estoy mirando? (quien ATENDIÓ)
-    // Si no hay filtro de profesional, todo cuenta. Si hay filtro, solo lo que atendió ese profesional.
-    // Además, si hay filtro de ÁREA, solo cuentan las prácticas de esa área.
-    const esVista = !esModoMoplex && (!filtroProf || prof === filtroProf) && (!filtroArea || areaP === filtroArea);
+  // Práctica de cada tratamiento (para excluir del motor lo que tiene su propia economía)
+  const tratPrac = {};
+  for (const s of (MT.sesAll || [])){ const t = s.tratamientos || {}; if (s.tratamiento_id != null && t.practica_codigo) tratPrac[s.tratamiento_id] = t.practica_codigo; }
+  for (const p of pagos){ const t = p.tratamientos || {}; if (p.tratamiento_id != null && t.practica_codigo) tratPrac[p.tratamiento_id] = t.practica_codigo; }
+  const excluidaMotor = pc => pc === 'MOPLEX' || pc === 'MASAJES_R' || pc === 'MASAJES_CERO';
 
-    // ===== PARTES GLOBALES (siempre, aunque haya filtro) — necesarias para los CRUCES =====
-    // Acumular por tratamiento: cuánto YA cobró el propio profesional (el pago COMPLETO que se llevó cuenta contra su parte).
-    // (profParte se calcula aparte, desde las SESIONES, más abajo)
-    const tid = p.tratamiento_id;
-    if (tid != null){
-      if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
-      if (cobro === prof) porTrat[tid].cobradoProfMismo += totalPago; // el pago completo que se llevó el profesional
+  // Historia por tratamiento
+  const sesPorTrat = {}, pagosPorTrat = {};
+  for (const s of (MT.sesAll || [])){
+    const tid = s.tratamiento_id; if (tid == null || excluidaMotor(tratPrac[tid] || '')) continue;
+    (sesPorTrat[tid] = sesPorTrat[tid] || []).push(s);
+  }
+  for (const p of (MT.pagosAll || [])){
+    const tid = p.tratamiento_id; if (tid == null || excluidaMotor(tratPrac[tid] || '')) continue;
+    (pagosPorTrat[tid] = pagosPorTrat[tid] || []).push(p);
+  }
+
+  // Cascada por tratamiento: cada sesión queda ABONADA cuando la plata acumulada del
+  // tratamiento la cubre (las sesiones se saldan en orden, de la más vieja a la más nueva).
+  for (const tid of Object.keys(sesPorTrat)){
+    const ses = sesPorTrat[tid].slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
+    const pgs = (pagosPorTrat[tid] || []).slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
+    const acum = []; let run = 0;
+    for (const p of pgs){ run += Number(p.importe) || 0; acum.push({ fecha: p.fecha, cum: run }); }
+    let cumVal = 0;
+    for (const s of ses){
+      const mProf = Number(s.monto_profesional) || 0, mCentro = Number(s.monto_centro) || 0;
+      const valor = mProf + mCentro;
+      if (valor <= 0.5) continue;
+      cumVal += valor;
+      let fechaAbono = null;
+      for (const a of acum){ if (a.cum >= cumVal - 0.5){ fechaAbono = a.fecha; break; } }
+      const t = s.tratamientos || {};
+      const fila = {
+        fecha: s.fecha, fechaAbono, prof: normProf(s.profesional), valor, mProf, mCentro,
+        paciente: ((t.personas || {}).nombre) || '—', codigo: t.codigo_id || '—',
+        practica: t.practica_codigo || '', tratId: tid
+      };
+      if (!fila.prof) continue;
+      if (!fechaAbono){
+        if ((s.fecha || '') <= hasta) pendientes.push(fila);   // realizada sin abonar → próxima liquidación
+        continue;
+      }
+      const fLiq = (fechaAbono > (s.fecha || '')) ? fechaAbono : s.fecha;   // realizada Y abonada
+      if (fLiq >= desde && fLiq <= hasta) liquidables.push(fila);
+      // (fLiq < desde: ya liquidada en un mes anterior · fLiq > hasta: liquidará en un mes posterior)
     }
+  }
 
-    // BLOQUE 3 y 4 — guardar cruces crudos (el cálculo inteligente se hace después del loop)
-    if (PROFS_VALIDOS.includes(cobro) && PROFS_VALIDOS.includes(prof) && cobro !== prof){
-      crucesBrutos.push({fecha:p.fecha, cobro, prof, mProf, mCentro, importe, tratId:p.tratamiento_id});
-    }
-
-    // ===== PARTES DE LA VISTA (solo del profesional filtrado) =====
+  // Resumen / detalle / áreas desde las sesiones LIQUIDABLES de este mes
+  for (const s of liquidables){
+    const prof = s.prof;
+    const esVista = !esModoMoplex && (!filtroProf || prof === filtroProf) && (!filtroArea || practicaArea(s.practica) === filtroArea);
     if (!esVista) continue;
-
-    totalBruto += importe; totalProf += mProf; totalCentro += mCentro; cantVista++;
-    totalMoplexV += Number(p._monto_moplex)||0;
-    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, pagos:[]};
+    totalBruto += s.valor; totalProf += s.mProf; totalCentro += s.mCentro; cantVista++;
+    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
     const r = resumen[prof];
-    r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.moplex += Number(p._monto_moplex)||0; r.pagos.push(p);
+    r.cant++; r.bruto += s.valor; r.prof += s.mProf; r.centro += s.mCentro; r.ses.push(s);
+    const areaP = practicaArea(s.practica);
     if (!porArea[areaP]) porArea[areaP] = {bruto:0, prof:0, moplex:0, centro:0, cant:0};
     const ar = porArea[areaP];
-    ar.cant++; ar.bruto += importe; ar.prof += mProf; ar.centro += mCentro; ar.moplex += Number(p._monto_moplex)||0;
-    if (cobro === prof) r.cobroProf += totalPago;
-    else if (cobro === 'PuntoBiO') r.cobroPB += totalPago;
+    ar.cant++; ar.bruto += s.valor; ar.prof += s.mProf; ar.centro += s.mCentro;
+    const dk = prof + '||' + practicaLabel(s.practica);
+    if (!detalle[dk]) detalle[dk] = {prof, prac: practicaLabel(s.practica), cobrado:0, mProf:0, centro:0};
+    detalle[dk].cobrado += s.valor; detalle[dk].mProf += s.mProf; detalle[dk].centro += s.mCentro;
+  }
 
-    // BLOQUE 2 — por medio (solo de lo que cobró el propio profesional)
-    if (cobro === prof){
-      if (!porMedio[prof]) porMedio[prof] = {debito:0, efectivo:0, transferencia:0};
-      const medio = String(p.medio_pago||'').toUpperCase();
-      if (medio.includes('DEBITO') || medio.includes('DÉBITO')) porMedio[prof].debito += totalPago;
-      else if (medio.includes('TRANSFER')) porMedio[prof].transferencia += totalPago;
-      else if (medio.includes('EFECTIVO')) porMedio[prof].efectivo += totalPago;
-    }
+  // Producción del mes (sesiones TRABAJADAS en el mes, estén abonadas o no)
+  const prodMes = {};
+  for (const s of (MT.sesAll || [])){
+    if (!s.fecha || s.fecha < desde || s.fecha > hasta) continue;
+    const pr = normProf(s.profesional); if (!pr) continue;
+    if (filtroProf && !esModoMoplex && pr !== filtroProf) continue;
+    const val = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
+    if (val <= 0.5) continue;
+    if (!prodMes[pr]) prodMes[pr] = {bruto:0, cant:0};
+    prodMes[pr].bruto += val; prodMes[pr].cant++;
+  }
 
-    // BLOQUE 5 — detalle por profesional + práctica
-    // (MOPLEX se arma aparte, en dos líneas con descripción: eval / plantilla)
-    if (!p._moplexInfo){
-      const prac = practicaLabel(t.practica_codigo);
-      const dk = prof + '||' + prac;
-      if (!detalle[dk]) detalle[dk] = {prof, prac, cobrado:0, mProf:0, centro:0};
-      detalle[dk].cobrado += importe;
-      detalle[dk].mProf += mProf;
-      detalle[dk].centro += mCentro;
-    }
+  // Plata física del mes: quién la recibió y por qué medio (incluye MOPLEX: es plata real)
+  for (const p of pagos){
+    const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
+    const imp = Number(p.importe) || 0;
+    recibido[quien] = (recibido[quien] || 0) + imp;
+    if (!porMedio[quien]) porMedio[quien] = {debito:0, efectivo:0, transferencia:0};
+    const medio = String(p.medio_pago || '').toUpperCase();
+    if (medio.includes('DEBITO') || medio.includes('DÉBITO')) porMedio[quien].debito += imp;
+    else if (medio.includes('TRANSFER')) porMedio[quien].transferencia += imp;
+    else if (medio.includes('EFECTIVO')) porMedio[quien].efectivo += imp;
   }
 
   // Sumar las líneas MOPLEX (eval/plantilla con descripción) al detalle.
@@ -751,43 +803,59 @@ function render(pagos, sesiones, filtroProf){
     }
   }
 
-  // La parte profesional REAL de cada tratamiento sale de las SESIONES (lo trabajado),
-  // no de los pagos. Sumamos monto_profesional de las sesiones por tratamiento.
-  for (const s of sesiones){
-    const tid = s.tratamiento_id;
-    if (tid == null) continue;
-    if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
-    porTrat[tid].profParte += Number(s.monto_profesional) || 0;
+  // MOPLEX también le corresponde al profesional (sale del catálogo, NO de sesiones):
+  // sumamos esas partes al resumen para que el neto de cada uno quede completo.
+  if (!esModoMoplex){
+    for (const k of Object.keys(MPX.detalle)){
+      const d = MPX.detalle[k];
+      if (filtroProf && d.prof !== filtroProf) continue;
+      if (filtroArea && filtroArea !== 'Especialidades') continue;
+      if (!resumen[d.prof]) resumen[d.prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
+      const r = resumen[d.prof];
+      r.cant++; r.bruto += d.cobrado; r.prof += d.mProf; r.centro += d.centro;
+      totalBruto += d.cobrado; totalProf += d.mProf; totalCentro += d.centro; cantVista++;
+      const ar = (porArea['Especialidades'] = porArea['Especialidades'] || {bruto:0, prof:0, moplex:0, centro:0, cant:0});
+      ar.cant++; ar.bruto += d.cobrado; ar.prof += d.mProf; ar.centro += d.centro;
+    }
+    totalMoplexV = MPX.totalMoplex || 0;
+    if (porArea['Especialidades']) porArea['Especialidades'].moplex += totalMoplexV;
   }
 
-  // ===== CÁLCULO INTELIGENTE DE CRUCES (POR TRATAMIENTO) =====
-  // Para cada cruce miramos ESE tratamiento puntual:
-  //   saldo del tratamiento = parte profesional total - lo que el propio profesional YA cobró de ese tratamiento.
-  //   lo que cobró el otro va al profesional solo hasta cubrir ese saldo; el resto va al CENTRO.
-  // Si el profesional ya cobró toda su parte de ese tratamiento, TODO lo que cobró el otro va al centro.
-  const saldoTrat = {};  // tratamiento_id → parte profesional que aún le falta cobrar al profesional
-  for (const tid of Object.keys(porTrat)){
-    saldoTrat[tid] = Math.max(porTrat[tid].profParte - porTrat[tid].cobradoProfMismo, 0);
+  // Quien recibió plata pero no tiene sesiones liquidables igual entra al resumen
+  // (recibió en custodia: tiene que devolverla al centro hasta que se hagan las sesiones)
+  for (const quien of Object.keys(recibido)){
+    if (!PROFS_VALIDOS.includes(quien)) continue;
+    if (filtroProf && quien !== filtroProf) continue;
+    if (esModoMoplex) break;
+    if (!resumen[quien]) resumen[quien] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
   }
-  for (const c of crucesBrutos){
-    const tid = c.tratId;
-    const disponible = (tid != null && saldoTrat[tid] != null) ? saldoTrat[tid] : 0;
-    if (disponible > 0.5){
-      // Al profesional le falta cobrar parte de ESTE tratamiento → le va hasta cubrirlo
-      const aProfesional = Math.min(c.mProf, disponible);
-      const alCentro = c.mProf - aProfesional;
-      if (tid != null) saldoTrat[tid] -= aProfesional;
-      if (aProfesional > 0.5){
-        const k = c.cobro + '||' + c.prof;
-        netos[k] = (netos[k] || 0) + aProfesional;
-      }
-      c._alCentro = alCentro + c.mCentro;
-    } else {
-      // El profesional YA cobró su parte de ESTE tratamiento → todo va al centro
-      c._alCentro = c.mProf + c.mCentro;
+
+  // Sesiones realizadas SIN abonar: se muestran en el detalle del profesional en $0,
+  // aclarando que pasan a la próxima liquidación (para que sepan que existen y van a venir).
+  if (!esModoMoplex){
+    for (const x of pendientes){
+      if (filtroProf && x.prof !== filtroProf) continue;
+      if (filtroArea && practicaArea(x.practica) !== filtroArea) continue;
+      if (!resumen[x.prof]) resumen[x.prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
+      (resumen[x.prof].pend = resumen[x.prof].pend || []).push(x);
     }
-    const k2 = c.cobro + '||CENTRO';
-    netos[k2] = (netos[k2] || 0) + c._alCentro;
+  }
+
+  // Lo recibido en mano por cada profesional este mes
+  for (const prof of Object.keys(resumen)){
+    resumen[prof].cobroProf = recibido[prof] || 0;
+    resumen[prof].cobroPB = 0;
+  }
+
+  // Ajustes: corresponde (sesiones abonadas + MOPLEX) vs recibido en mano.
+  // Recibió de más → lo devuelve al centro (custodia). Recibió de menos → el centro le paga.
+  const crucesBrutos = [];
+  const deudasCentro = {};
+  const netosFinales = [];
+  for (const prof of Object.keys(resumen)){
+    const neto = resumen[prof].prof - resumen[prof].cobroProf;
+    if (neto < -0.5) deudasCentro[prof] = -neto;
+    else if (neto > 0.5) netosFinales.push(['PuntoBiO (centro)', prof, neto]);
   }
 
   const orden = ['Bruno','Male','Vero','Jime','Lu'];
@@ -864,10 +932,10 @@ function render(pagos, sesiones, filtroProf){
 
   // ===== BLOQUE 1: RESUMEN ===== (oculto en modo MOPLEX)
   if (!esModoMoplex){
-  html += `<h2 class="bloque-tit">1 · Resumen por profesional</h2>
+  html += `<h2 class="bloque-tit">1 · Resumen por profesional <span style="font-weight:400;font-size:13px;color:#666;">— sesiones realizadas y abonadas</span></h2>
     <table><thead><tr>
-      <th></th><th>Profesional</th><th class="num">Total Profesional</th>${soloLoMio ? '' : '<th class="num">Total Centro</th>'}
-      <th class="num">Cobró Profesional</th><th class="num">Cobró PuntoBiO</th><th class="num">Neto</th><th>Estado</th>
+      <th></th><th>Profesional</th><th class="num">Le corresponde</th>${soloLoMio ? '' : '<th class="num">Total Centro</th>'}
+      <th class="num">Recibió en mano</th><th class="num">Neto</th><th>Estado</th>
     </tr></thead><tbody>`;
   for (const prof of profs){
     const r = resumen[prof];
@@ -882,20 +950,19 @@ function render(pagos, sesiones, filtroProf){
         <td class="num"><b>${fmt(r.prof)}</b></td>
         ${soloLoMio ? '' : `<td class="num">${fmt(r.centro)}</td>`}
         <td class="num">${fmt(r.cobroProf)}</td>
-        <td class="num">${fmt(r.cobroPB)}</td>
         <td class="num"><b>${fmt(neto)}</b></td>
         <td><span class="est ${estCls}">${estado}</span></td>
       </tr>
       <tr class="detail-row" id="det-${prof}" style="display:none">
-        <td colspan="${soloLoMio ? 7 : 8}"><div class="detail-content" id="det-content-${prof}"></div></td>
+        <td colspan="${soloLoMio ? 6 : 7}"><div class="detail-content" id="det-content-${prof}"></div></td>
       </tr>`;
   }
   html += `</tbody></table>`;
 
-  // ===== BLOQUE 2: COBROS POR MEDIO =====
-  html += `<h2 class="bloque-tit">2 · Cobros por medio de pago</h2>
+  // ===== BLOQUE 2: PLATA RECIBIDA POR MEDIO =====
+  html += `<h2 class="bloque-tit">2 · Plata recibida por medio de pago</h2>
     <table><thead><tr>
-      <th>Profesional</th><th class="num">Débito</th><th class="num">Efectivo</th><th class="num">Transferencia</th>
+      <th>Recibió</th><th class="num">Débito</th><th class="num">Efectivo</th><th class="num">Transferencia</th>
     </tr></thead><tbody>`;
   for (const prof of ordenarProfs(Object.keys(porMedio))){
     const m = porMedio[prof];
@@ -904,74 +971,55 @@ function render(pagos, sesiones, filtroProf){
   html += `</tbody></table>`;
   } // fin gate bloques 1-2 (no MOPLEX)
 
-  // ===== BLOQUE 3: CRUCES BRUTOS =====
-  // Si hay un profesional elegido, mostramos solo los cruces que lo involucran (cobró por otro, o cobraron por él).
-  const crucesVista = filtroProf
-    ? crucesBrutos.filter(c => c.cobro === filtroProf || c.prof === filtroProf)
-    : crucesBrutos;
-  if (!esModoMoplex){
-  html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
-  if (crucesVista.length === 0){
-    html += `<p class="vacio">Sin cruces este mes 👍</p>`;
-  } else {
-    crucesVista.sort((a,b)=> (a.cobro+a.prof).localeCompare(b.cobro+b.prof));
-    html += `<table><thead><tr>
-      <th>Fecha</th><th>Cobró</th><th>Correspondía a</th><th class="num">Cruce profesional</th><th class="num">Total cobrado</th>
-    </tr></thead><tbody>`;
-    for (const c of crucesVista){
-      html += `<tr><td>${c.fecha}</td><td>${badge(c.cobro)}</td><td>${badge(c.prof)}</td><td class="num">${fmt(c.mProf)}</td><td class="num">${fmt(c.importe)}</td></tr>`;
-    }
-    html += `</tbody></table>`;
-  }
-  } // fin gate bloque 3 (no MOPLEX)
-
-  // ===== BLOQUE 4: CRUCES NETOS =====
-  // Separamos deudas hacia el CENTRO (clave "X||CENTRO") de las deudas entre profesionales
-  const deudasCentro = {};   // profesional → cuánto le debe al centro
-  const netosEntreProfs = {};
-  for (const k of Object.keys(netos)){
-    const [a, b] = k.split('||');
-    if (b === 'CENTRO'){
-      deudasCentro[a] = (deudasCentro[a] || 0) + netos[k];
-    } else {
-      netosEntreProfs[k] = netos[k];
-    }
-  }
-  // Netear deudas entre profesionales (A le debe a B menos lo que B le debe a A)
-  const netosFinales = [];
-  const procesadas = new Set();
-  for (const k of Object.keys(netosEntreProfs)){
-    if (procesadas.has(k)) continue;
-    const [cobrador, profesional] = k.split('||');
-    const inversa = profesional + '||' + cobrador;
-    const neto = (netosEntreProfs[k]||0) - (netosEntreProfs[inversa]||0);
-    if (neto > 0.5) netosFinales.push([cobrador, profesional, neto]);
-    else if (neto < -0.5) netosFinales.push([profesional, cobrador, Math.abs(neto)]);
-    procesadas.add(k); procesadas.add(inversa);
-  }
-
-  // Vistas filtradas por profesional elegido (si lo hay)
+  // ===== BLOQUE 3: AJUSTES DEL MES (quién debe a quién) =====
+  const crucesVista = [];   // compat (ya no se usan cruces por pago: el neto lo resuelve)
   const deudasCentroVista = {};
   Object.keys(deudasCentro).forEach(p => { if (!filtroProf || p === filtroProf) deudasCentroVista[p] = deudasCentro[p]; });
-  const netosFinalesVista = filtroProf ? netosFinales.filter(n => n[0] === filtroProf || n[1] === filtroProf) : netosFinales;
-  const hayCentroVista = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
-
-  if (!esModoMoplex && (netosFinalesVista.length > 0 || hayCentroVista)){
-    html += `<h2 class="bloque-tit">4 · Cruces netos (quién debe a quién)</h2>
-      <table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto neto</th></tr></thead><tbody>`;
-    // Deudas hacia el centro
-    const ordenC = ['Bruno','Male','Vero','Jime','Lu'];
-    Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenC.indexOf(a),ib=ordenC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
-      if (deudasCentroVista[prof] > 0.5){
-        html += `<tr><td>${badge(prof)}</td><td><b>PuntoBiO (centro)</b></td><td class="num"><b>${fmt(deudasCentroVista[prof])}</b></td></tr>`;
+  const netosFinalesVista = filtroProf ? netosFinales.filter(n => n[1] === filtroProf) : netosFinales;
+  if (!esModoMoplex){
+    html += `<h2 class="bloque-tit">3 · Ajustes del mes (quién debe a quién)</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Compara lo que a cada uno <b>le corresponde por sus sesiones abonadas</b> (más su parte MOPLEX) contra la <b>plata que recibió en mano</b>. El que recibió de más la devuelve al centro (queda en custodia hasta que se hagan las sesiones que cubre); al que recibió de menos, el centro le paga.</p>`;
+    const hayC = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
+    if (!hayC && netosFinalesVista.length === 0){
+      html += `<p class="vacio">Nadie debe nada este mes 👍</p>`;
+    } else {
+      html += `<table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto</th></tr></thead><tbody>`;
+      const ordenC = ['Bruno','Male','Vero','Jime','Lu'];
+      Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenC.indexOf(a),ib=ordenC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
+        if (deudasCentroVista[prof] > 0.5){
+          html += `<tr><td>${badge(prof)}</td><td><b>PuntoBiO (centro)</b></td><td class="num"><b>${fmt(deudasCentroVista[prof])}</b></td></tr>`;
+        }
+      });
+      for (const n of netosFinalesVista){
+        html += `<tr><td><b>${n[0]}</b></td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
       }
-    });
-    // Deudas entre profesionales
-    netosFinalesVista.sort((a,b)=> (a[0]+a[1]).localeCompare(b[0]+b[1]));
-    for (const n of netosFinalesVista){
-      html += `<tr><td>${badge(n[0])}</td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
+      html += `</tbody></table>`;
     }
-    html += `</tbody></table>`;
+
+    // ===== BLOQUE 4: SESIONES REALIZADAS SIN ABONAR (pasan a la próxima liquidación) =====
+    const pendVista = pendientes.filter(x => (!filtroProf || x.prof === filtroProf) && (!filtroArea || practicaArea(x.practica) === filtroArea));
+    html += `<h2 class="bloque-tit">4 · Sesiones realizadas sin abonar</h2>
+      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Sesiones ya hechas que el paciente todavía no abonó: <b>pasan a la próxima liquidación</b> y se le pagan al profesional cuando el paciente abone.</p>`;
+    if (!pendVista.length){
+      html += `<p class="vacio">No hay sesiones sin abonar 👍</p>`;
+    } else {
+      const pp = {};
+      for (const x of pendVista){ if (!pp[x.prof]) pp[x.prof] = {cant:0, valor:0, mProf:0}; pp[x.prof].cant++; pp[x.prof].valor += x.valor; pp[x.prof].mProf += x.mProf; }
+      html += `<table><thead><tr><th>Profesional</th><th class="num">Sesiones</th><th class="num">Valor total</th><th class="num">$ Profesional (a futuro)</th></tr></thead><tbody>`;
+      let tc=0, tv=0, tp=0;
+      for (const prof of ordenarProfs(Object.keys(pp))){
+        tc+=pp[prof].cant; tv+=pp[prof].valor; tp+=pp[prof].mProf;
+        html += `<tr><td>${badge(prof)}</td><td class="num">${fmtNum(pp[prof].cant)}</td><td class="num">${fmt(pp[prof].valor)}</td><td class="num">${fmt(pp[prof].mProf)}</td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td>TOTAL pendiente de abono</td><td class="num">${fmtNum(tc)}</td><td class="num">${fmt(tv)}</td><td class="num">${fmt(tp)}</td></tr>`;
+      html += `</tbody></table>`;
+      html += `<details style="margin:-2px 0 16px;"><summary style="cursor:pointer;color:#92400e;font-size:13px;">Ver el detalle de cada sesión sin abonar</summary>
+        <table style="margin-top:8px;"><thead><tr><th>Fecha sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Profesional</th><th class="num">Valor</th><th class="num">$ Prof (a futuro)</th></tr></thead><tbody>`;
+      for (const x of pendVista.slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''))){
+        html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td>${badge(x.prof)}</td><td class="num">${fmt(x.valor)}</td><td class="num">${fmt(x.mProf)}</td></tr>`;
+      }
+      html += `</tbody></table></details>`;
+    }
   }
 
   // ===== BLOQUE 5: DETALLE POR PROFESIONAL Y PRÁCTICA ===== (lista de profes: oculta en modo MOPLEX)
@@ -1102,18 +1150,18 @@ function render(pagos, sesiones, filtroProf){
   if (!esModoMoplex){
   html += `<h2 class="bloque-tit">📈 Productividad por profesional</h2>
     <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Cuánto facturó cada uno por atender, sin importar cuánto se lleva. Para las dueñas (Jime y Lu) todo queda en el centro, pero igual cuenta su producción.</p>`;
-  // Ordenar profesionales por lo generado (de mayor a menor)
-  const profsProd = [...profs].sort((a,b)=> resumen[b].bruto - resumen[a].bruto);
-  const totalGenerado = profs.reduce((s,p)=> s + resumen[p].bruto, 0);
+  // Producción = sesiones TRABAJADAS en el mes (estén abonadas o no)
+  const profsProd = ordenarProfs(Object.keys(prodMes)).sort((a,b)=> prodMes[b].bruto - prodMes[a].bruto);
+  const totalGenerado = profsProd.reduce((acc,p)=> acc + prodMes[p].bruto, 0);
   html += `<div class="prod-cards">`;
   for (const prof of profsProd){
-    const r = resumen[prof];
+    const r = prodMes[prof];
     const pct = totalGenerado > 0 ? (r.bruto/totalGenerado*100) : 0;
     html += `
       <div class="prod-card">
         <div class="prod-nombre">${badge(prof)}</div>
         <div class="prod-monto">${fmt(r.bruto)}</div>
-        <div class="prod-sub">${r.cant} pago${r.cant!==1?'s':''} · ${pct.toFixed(0)}% del total</div>
+        <div class="prod-sub">${r.cant} sesi${r.cant!==1?'ones':'ón'} · ${pct.toFixed(0)}% del total</div>
         <div class="prod-barra"><div class="prod-barra-fill" style="width:${pct}%;"></div></div>
       </div>`;
   }
@@ -1134,9 +1182,8 @@ function render(pagos, sesiones, filtroProf){
     html += `
       <div class="resumen-card ${claseCard}">
         <div class="rc-nombre">${badge(prof)}</div>
-        <div class="rc-fila"><span>Le corresponde</span><b>${fmt(r.prof)}</b></div>
-        <div class="rc-fila"><span>Ya cobró ${prof}</span><b>${fmt(r.cobroProf)}</b></div>
-        <div class="rc-fila"><span>Cobró PuntoBiO</span><b>${fmt(r.cobroPB)}</b></div>
+        <div class="rc-fila"><span>Le corresponde (sesiones abonadas)</span><b>${fmt(r.prof)}</b></div>
+        <div class="rc-fila"><span>Recibió en mano</span><b>${fmt(r.cobroProf)}</b></div>
         <div class="rc-estado">${iconoEstado} ${estadoTxt}</div>
       </div>`;
   }
@@ -1246,35 +1293,38 @@ function toggleDetalle(prof){
     const _solo = !!window._soloLoMioLiq;   // profesional restringido: no ve la parte del centro
     const g = window._grupos[prof];
     let html = `<table><thead><tr>
-      <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Cobró</th>
-      <th>Medio</th><th class="num">Bruto</th><th class="num">$ Prof</th>${_solo ? '' : '<th class="num">$ Centro</th>'}
+      <th>Sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Abonada el</th>
+      <th class="num">$ Sesión</th><th class="num">$ Prof</th>${_solo ? '' : '<th class="num">$ Centro</th>'}
     </tr></thead><tbody>`;
-    for (const p of g.pagos){
-      const t = p.tratamientos || {};
-      const per = (t.personas || {});
-      // Para MOPLEX, aclarar si esa fila es Consulta y/o Plantilla
-      let pracCell = practicaLabel(t.practica_codigo);
-      const mi = p._moplexInfo;
-      if (mi && !mi.sinTipo){
-        const parts = [];
-        if ((mi.evalPortion||0)  > 0.5) parts.push('<span style="color:#1e40af">Consulta</span>');
-        if ((mi.plantPortion||0) > 0.5) parts.push('<span style="color:#0f766e">Plantilla</span>');
-        if (parts.length) pracCell = '🦶 MOPLEX · ' + parts.join(' + ');
-      } else if (mi && mi.sinTipo){
-        pracCell = '🦶 MOPLEX · <span style="color:#991b1b">sin tipo</span>';
-      }
+    const filas = (g.ses || []).slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    for (const x of filas){
       html += `<tr>
-        <td>${p.fecha}</td>
-        <td>${per.nombre || '-'}</td>
-        <td>${t.codigo_id || '-'}</td>
-        <td>${pracCell}</td>
-        <td>${normProf(p.quien_cobro) || '-'}</td>
-        <td>${p.medio_pago || '-'}</td>
-        <td class="num">${fmt(p.importe)}</td>
-        <td class="num">${fmt(p.monto_profesional)}</td>
-        ${_solo ? '' : `<td class="num">${fmt(p.monto_centro)}</td>`}
+        <td>${x.fecha}</td>
+        <td>${x.paciente}</td>
+        <td>${x.codigo}</td>
+        <td>${practicaLabel(x.practica)}</td>
+        <td>${x.fechaAbono || '-'}</td>
+        <td class="num">${fmt(x.valor)}</td>
+        <td class="num">${fmt(x.mProf)}</td>
+        ${_solo ? '' : `<td class="num">${fmt(x.mCentro)}</td>`}
       </tr>`;
     }
+    if (!filas.length && !(g.pend||[]).length) html += `<tr><td colspan="${_solo?7:8}" style="color:#888;">Sin sesiones liquidables este mes (lo suyo puede venir de MOPLEX: ver bloque 5, o recibió plata en custodia: ver bloque 3).</td></tr>`;
+    // Sesiones realizadas pero AÚN NO abonadas: van en $0 y pasan a la próxima liquidación
+    const pend = (g.pend || []).slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    for (const x of pend){
+      html += `<tr style="opacity:.6;background:#fffbeb;">
+        <td>${x.fecha}</td>
+        <td>${x.paciente}</td>
+        <td>${x.codigo}</td>
+        <td>${practicaLabel(x.practica)}</td>
+        <td><span class="est" style="background:#fef3c7;color:#92400e;">Aún no abonada</span></td>
+        <td class="num">$0</td>
+        <td class="num">$0 <span style="color:#92400e;font-size:11px;white-space:nowrap;">(serán ${fmt(x.mProf)})</span></td>
+        ${_solo ? '' : `<td class="num">$0</td>`}
+      </tr>`;
+    }
+    if (pend.length) html += `<tr><td colspan="${_solo?7:8}" style="font-size:12.5px;color:#92400e;background:#fffbeb;">⏳ ${pend.length} sesión${pend.length>1?'es':''} realizada${pend.length>1?'s':''} pero <b>aún no abonada${pend.length>1?'s':''} por el paciente</b>: va en $0 este mes y <b>pasa a la próxima liquidación</b> (se le paga al profesional cuando el paciente abone).</td></tr>`;
     html += `</tbody></table>`;
     content.innerHTML = html;
     row.style.display = '';

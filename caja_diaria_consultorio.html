@@ -679,6 +679,7 @@ const COBRADORES = ['Bruno', 'Male', 'PuntoBiO']
 // ======================
 let vista = 'dia'
 let pagos = []
+let sesionesRango = []
 let pacientesMap = {}
 let tratamientosMap = {} // id → practica_codigo
 
@@ -851,6 +852,20 @@ window.cargarDatos = async function() {
     // Filtro "solo lo mío" (solo afecta a quien tiene solo_lo_mio=TRUE; admins ven todo)
     pagos = aplicarFiltroPropio(pagos)
 
+    // Sesiones TRABAJADAS en el rango (para "Generado por profesional"):
+    // lo generado sale de quién ATENDIÓ cada sesión (la agenda), no del pago.
+    sesionesRango = []
+    try {
+      const { data: sesData } = await sb
+        .from('sesiones')
+        .select('fecha, profesional, monto_profesional, monto_centro, tratamientos!inner(practica_codigo)')
+        .gte('fecha', desde)
+        .lte('fecha', hasta)
+        .limit(5000)
+      sesionesRango = (sesData || []).filter(x => PRACTICAS_INCLUIDAS.includes((x.tratamientos||{}).practica_codigo))
+      if (miFiltro) sesionesRango = sesionesRango.filter(x => (x.profesional||'').split(' ')[0] === miFiltro.nombre)
+    } catch (e) { console.warn('No se pudieron leer las sesiones del rango:', e.message) }
+
     // Cargar pacientes en lote (solo los que aparecen en los pagos filtrados)
     const personaIds = [...new Set(pagos.map(p => p.persona_id).filter(Boolean))]
     if (personaIds.length > 0) {
@@ -958,23 +973,24 @@ function pct(parte, total) {
 // PANELES (por profesional + quién recibió)
 // ======================
 function renderPaneles() {
-  // Agrupar por profesional (lo generado)
+  // "Generado por profesional" = sesiones TRABAJADAS en el período, por quien ATENDIÓ
+  // (la atribución sale de la agenda/sesión, no del pago)
   const porProf = {}
-  // Agrupar por quien_cobro (lo que recibió cada persona/lugar)
-  const porCobrador = {}
-
-  pagos.forEach(p => {
-    const importe = Number(p.importe) || 0
-    const mProf = Number(p.monto_profesional) || 0
-    const mCentro = Number(p.monto_centro) || 0
-    const profesional = p.profesional || 'Sin profesional'
-
+  ;(sesionesRango || []).forEach(s => {
+    const mProf = Number(s.monto_profesional) || 0
+    const mCentro = Number(s.monto_centro) || 0
+    if (mProf + mCentro <= 0.5) return
+    const profesional = (s.profesional || 'Sin profesional').split(' ')[0]
     if (!porProf[profesional]) porProf[profesional] = { centro: 0, prof: 0, total: 0 }
     porProf[profesional].centro += mCentro
     porProf[profesional].prof += mProf
     porProf[profesional].total += (mCentro + mProf)
+  })
 
-    // Normalizar quien_cobro (puede venir "Centro / Recepción" o "Bruno (transferencia directa)")
+  // "Quién recibió la plata" = pagos del período, por quien_cobro (caja real)
+  const porCobrador = {}
+  pagos.forEach(p => {
+    const importe = Number(p.importe) || 0
     let cobrador = (p.quien_cobro || 'Sin especificar').split('(')[0].trim()
     if (!porCobrador[cobrador]) porCobrador[cobrador] = 0
     porCobrador[cobrador] += importe
