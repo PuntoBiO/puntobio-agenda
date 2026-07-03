@@ -1122,53 +1122,17 @@
     if (importe > saldo && saldo > 0) { toast('No podés cobrar de más', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
     if (!$('quienCobro').value) { toast('Elegí quién cobró', 'err'); btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
 
-    // ===== REPARTO POR SESIONES =====
-    // "El que hizo cobra, y el que cobró lo reparte": si el tratamiento tiene sesiones
-    // de MÁS DE UN profesional, el pago se guarda repartido entre ellos (proporcional
-    // a sus sesiones), con el mismo cobrador, fecha y medio. Igual que el fix Linossi,
-    // pero automático. Con un solo profesional, se guarda como siempre.
-    // (LIBRE y MOPLEX quedan afuera: tienen su propio manejo.)
-    let repartoSes = null;
-    if (!esLibre && (t.practica_codigo||'') !== 'MOPLEX') {
-      try {
-        const { data: sesT } = await sb.from('sesiones')
-          .select('profesional, monto_profesional, monto_centro')
-          .eq('tratamiento_id', t.id);
-        const byP = {}; let totalSes = 0;
-        (sesT || []).forEach(s => {
-          const raw = String(s.profesional||'').trim();
-          const P = state.profesionales.find(n => n.toLowerCase() === raw.toLowerCase()) || raw;
-          if (!P) return;
-          const sp = Number(s.monto_profesional)||0, sc = Number(s.monto_centro)||0;
-          if (!byP[P]) byP[P] = { prof:0, val:0 };
-          byP[P].prof += sp; byP[P].val += sp+sc; totalSes += sp+sc;
-        });
-        const Ps = Object.keys(byP).filter(P => byP[P].val > 0.5);
-        if (Ps.length > 1 && totalSes > 0.5) {
-          let acc = 0;
-          repartoSes = Ps.map((P, i) => {
-            const b = byP[P];
-            const imp = (i === Ps.length - 1) ? Math.round(importe - acc) : Math.round(importe * (b.val / totalSes));
-            acc += imp;
-            const mp = Math.round(imp * (b.prof / b.val));
-            return { prof: P, importe: imp, monto_profesional: mp, monto_centro: imp - mp };
-          }).filter(r => r.importe > 0.5);
-        }
-      } catch (e) { console.warn('No se pudo evaluar reparto por sesiones (se guarda normal):', e.message); repartoSes = null; }
-    }
+    // Un cobro = un pago aplicado al tratamiento. La atribución por profesional
+    // (quién hizo cada sesión) sale de la agenda / sesiones, NO de partir el pago.
 
     // Cartel de confirmación — que revisen a conciencia antes de cargar
     const pacienteNom = (state.pacienteSel && state.pacienteSel.nombre) ? state.pacienteSel.nombre : 'el paciente';
     const medioLindo = { 'EFECTIVO':'Efectivo', 'DEBITO':'Débito', 'TRANSFERENCIA':'Transferencia' }[$('medio').value] || $('medio').value;
-    const lineaReparto = repartoSes
-      ? '\nAtendieron varios — se reparte por sesiones:\n' + repartoSes.map(r => '  · ' + r.prof + ': ' + fmt(r.importe)).join('\n') + '\n'
-      : '\n(El reparto al profesional sale de quién hizo las sesiones.)\n';
     const okConfirm = confirm(
       '⚠️ Revisá antes de guardar:\n\n' +
       'Paciente: ' + pacienteNom + '\n' +
       'La plata la recibió: ' + $('quienCobro').value + '\n' +
-      'Importe: ' + fmt(importe) + ' (' + medioLindo + ')\n' +
-      lineaReparto + '\n' +
+      'Importe: ' + fmt(importe) + ' (' + medioLindo + ')\n\n' +
       '¿Está todo correcto?'
     );
     if (!okConfirm) { btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
@@ -1182,29 +1146,16 @@
       observaciones: $('obs').value || null,
       cargado_por: $('cargadoPor').value,
     };
-    let payload;   // una fila (como siempre) o varias (reparto por sesiones)
-    if (repartoSes) {
-      payload = repartoSes.map(r => Object.assign({}, base, {
-        importe: r.importe,
-        profesional: r.prof,
-        tipo_cobro: 'MANUAL',   // montos explícitos: que el tarifario NO los recalcule
-        monto_profesional: r.monto_profesional,
-        monto_centro: r.monto_centro,
-        monto_moplex: 0,
-        observaciones: ((base.observaciones||'') + ' [repartido por sesiones]').trim(),
-      }));
-    } else {
-      payload = Object.assign({}, base, {
-        importe: importe,
-        profesional: $('profesional').value,
-        tipo_cobro: esLibre ? 'MANUAL' : tipoCobro,
-      });
-      // En LIBRE mandamos los montos a mano (que NO los recalcule el tarifario)
-      if (esLibre) {
-        payload.monto_profesional = libreProf;
-        payload.monto_centro = libreCentro;
-        payload.monto_moplex = 0;
-      }
+    const payload = Object.assign({}, base, {
+      importe: importe,
+      profesional: $('profesional').value,
+      tipo_cobro: esLibre ? 'MANUAL' : tipoCobro,
+    });
+    // En LIBRE mandamos los montos a mano (que NO los recalcule el tarifario)
+    if (esLibre) {
+      payload.monto_profesional = libreProf;
+      payload.monto_centro = libreCentro;
+      payload.monto_moplex = 0;
     }
 
     // Si tu schema NO tiene tipo_cobro / cargado_por, eliminá esas claves del payload.
@@ -1219,9 +1170,7 @@
       if (error) throw error;
       const primera = Array.isArray(data) ? data[0] : data;
 
-      if (repartoSes) {
-        toast(`✅ Cobrado ${fmt(importe)} de ${state.pacienteSel.nombre} — repartido: ` + repartoSes.map(r => r.prof + ' ' + fmt(r.importe)).join(' · '), 'ok', 6000);
-      } else if (tipoCobro === 'NORMAL' && importe > 0
+      if (tipoCobro === 'NORMAL' && importe > 0
           && primera && Number(primera.monto_centro || 0) === 0
           && Number(primera.monto_profesional || 0) === 0) {
         // Verificar que guardó los montos correctos (defensa contra bug histórico)
