@@ -111,6 +111,26 @@
   .mes-cell{padding:9px 0;border:1px solid #e5e7eb;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:#334155;text-align:center}
   .mes-cell:hover{background:#f0f9ff;border-color:#1e9fe0}
   .mes-cell.sel{background:#1e9fe0;color:#fff;border-color:#1e9fe0}
+  /* ==== Solapa desplegable: Ganancia de PuntoBiO ==== */
+  .gan-panel{background:#fff;border:1px solid #e5e7eb;border-radius:14px;margin-bottom:24px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .gan-sum{list-style:none;cursor:pointer;padding:15px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;background:linear-gradient(90deg,#065f46,#047857);color:#fff}
+  .gan-sum::-webkit-details-marker{display:none}
+  .gan-sum-left{display:flex;align-items:center;gap:10px;font-weight:800;font-size:16px}
+  .gan-sum-right{display:flex;align-items:center;gap:14px}
+  .gan-sum-monto{font-size:22px;font-weight:800}
+  .gan-chevron{transition:transform .2s;font-size:13px;opacity:.85}
+  details[open] .gan-chevron{transform:rotate(180deg)}
+  .gan-body{padding:16px 20px}
+  .gan-sub{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#065f46;font-weight:700;margin:18px 0 8px}
+  .gan-sub:first-child{margin-top:0}
+  .gan-mini{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .gan-mini .m{background:#f8fafc;border:1px solid #eef2f7;border-radius:10px;padding:11px 13px}
+  .gan-mini .m .lbl{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.3px}
+  .gan-mini .m .val{font-size:18px;font-weight:800;color:#0f172a;margin-top:3px;font-variant-numeric:tabular-nums}
+  .gan-mini .m.win{background:#ecfdf5;border-color:#a7f3d0}
+  .gan-mini .m.win .val{color:#065f46}
+  .gan-body table{margin-bottom:0}
+  @media(max-width:768px){ .gan-mini{grid-template-columns:repeat(2,1fr)} }
 </style>
 </head>
 <body>
@@ -645,6 +665,7 @@ function render(pagos, sesiones, filtroProf){
   const MPX = prepararMoplex(pagos);
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien atendió)
+  const porArea = {};        // ganancia por área (Consultorio / BioLab / Especialidades)
   const porMedio = {};       // cobros por medio de cada profesional
   const crucesBrutos = [];   // pagos donde cobró != atendió
   const netos = {};          // deudas entre profesionales: "Cobrador||Profesional" → monto_prof
@@ -690,6 +711,9 @@ function render(pagos, sesiones, filtroProf){
     if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, pagos:[]};
     const r = resumen[prof];
     r.cant++; r.bruto += importe; r.prof += mProf; r.centro += mCentro; r.moplex += Number(p._monto_moplex)||0; r.pagos.push(p);
+    if (!porArea[areaP]) porArea[areaP] = {bruto:0, prof:0, moplex:0, centro:0, cant:0};
+    const ar = porArea[areaP];
+    ar.cant++; ar.bruto += importe; ar.prof += mProf; ar.centro += mCentro; ar.moplex += Number(p._monto_moplex)||0;
     if (cobro === prof) r.cobroProf += totalPago;
     else if (cobro === 'PuntoBiO') r.cobroPB += totalPago;
 
@@ -794,20 +818,46 @@ function render(pagos, sesiones, filtroProf){
       </div>
     </div>`;
 
-  // ===== GANANCIA DE PUNTOBIO (por profesional y franquicia) ===== (oculto en modo MOPLEX)
+  // ===== GANANCIA DE PUNTOBIO — solapa desplegable (general · por área · por profesional) =====
   if (!esModoMoplex){
-    html += `<h2 class="bloque-tit">💰 Qué le queda a PuntoBiO</h2>
-      <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Por cada profesional: lo que se cobró, cuánto se lleva el profesional, cuánto va a la franquicia MOPLEX y cuánto le queda a PuntoBiO (su ganancia). Todo junto abajo.</p>
-      <table style="margin-bottom:8px;"><thead><tr>
-        <th>Origen</th><th class="num">Total cobrado</th><th class="num">Se lleva el profesional</th><th class="num">Va a MOPLEX</th><th class="num">Queda en PuntoBiO</th>
-      </tr></thead><tbody>`;
-    for (const prof of profs){
-      const r = resumen[prof];
-      html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(r.bruto)}</td><td class="num">${fmt(r.prof)}</td><td class="num">${fmt(r.moplex||0)}</td><td class="num"><b>${fmt(r.centro)}</b></td></tr>`;
+    const ordenArea = ['Consultorio','BioLab','Especialidades'];
+    const areas = Object.keys(porArea).sort((a,b)=>{const ia=ordenArea.indexOf(a),ib=ordenArea.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
+    html += `<details class="gan-panel" open>
+      <summary class="gan-sum">
+        <span class="gan-sum-left">💰 Ganancia de PuntoBiO</span>
+        <span class="gan-sum-right"><span class="gan-sum-monto">${fmt(totalCentro)}</span><span class="gan-chevron">▾</span></span>
+      </summary>
+      <div class="gan-body">
+        <div class="gan-sub">General</div>
+        <div class="gan-mini">
+          <div class="m"><div class="lbl">Total cobrado</div><div class="val">${fmt(totalBruto)}</div></div>
+          <div class="m"><div class="lbl">Al profesional</div><div class="val">${fmt(totalProf)}</div></div>
+          <div class="m"><div class="lbl">A MOPLEX (franquicia)</div><div class="val">${fmt(totalMoplexV)}</div></div>
+          <div class="m win"><div class="lbl">Queda en PuntoBiO</div><div class="val">${fmt(totalCentro)}</div></div>
+        </div>`;
+    // Por área
+    if (areas.length){
+      html += `<div class="gan-sub">Por área</div>
+        <table><thead><tr><th>Área</th><th class="num">Total cobrado</th><th class="num">Al profesional</th><th class="num">A MOPLEX</th><th class="num">Queda en PuntoBiO</th></tr></thead><tbody>`;
+      for (const a of areas){
+        const x = porArea[a];
+        html += `<tr><td><b>${a}</b></td><td class="num">${fmt(x.bruto)}</td><td class="num">${fmt(x.prof)}</td><td class="num">${fmt(x.moplex)}</td><td class="num"><b>${fmt(x.centro)}</b></td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#ecfdf5;color:#065f46;"><td>TODAS</td><td class="num">${fmt(totalBruto)}</td><td class="num">${fmt(totalProf)}</td><td class="num">${fmt(totalMoplexV)}</td><td class="num">${fmt(totalCentro)}</td></tr>`;
+      html += `</tbody></table>`;
     }
-    html += `<tr style="font-weight:700;background:#ecfdf5;color:#065f46;"><td>TODO PuntoBiO</td><td class="num">${fmt(totalBruto)}</td><td class="num">${fmt(totalProf)}</td><td class="num">${fmt(totalMoplexV)}</td><td class="num">${fmt(totalCentro)}</td></tr>`;
-    html += `</tbody></table>`;
-    html += `<div class="prod-total" style="background:#065f46">Ganancia total de PuntoBiO en el período: <b>${fmt(totalCentro)}</b>${totalMoplexV>0.5?` · va a la franquicia MOPLEX: <b>${fmt(totalMoplexV)}</b>`:''}</div>`;
+    // Por profesional
+    if (profs.length){
+      html += `<div class="gan-sub">Por profesional</div>
+        <table><thead><tr><th>Profesional</th><th class="num">Total cobrado</th><th class="num">Se lleva</th><th class="num">A MOPLEX</th><th class="num">Queda en PuntoBiO</th></tr></thead><tbody>`;
+      for (const prof of profs){
+        const r = resumen[prof];
+        html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(r.bruto)}</td><td class="num">${fmt(r.prof)}</td><td class="num">${fmt(r.moplex||0)}</td><td class="num"><b>${fmt(r.centro)}</b></td></tr>`;
+      }
+      html += `<tr style="font-weight:700;background:#ecfdf5;color:#065f46;"><td>TODO PuntoBiO</td><td class="num">${fmt(totalBruto)}</td><td class="num">${fmt(totalProf)}</td><td class="num">${fmt(totalMoplexV)}</td><td class="num">${fmt(totalCentro)}</td></tr>`;
+      html += `</tbody></table>`;
+    }
+    html += `</div></details>`;
   }
 
   // ===== BLOQUE 1: RESUMEN ===== (oculto en modo MOPLEX)
