@@ -4295,6 +4295,7 @@ async function cargarEquipoDesempeno(mesVer) {
     //   (los firma con su login). 'cambio' (devuelve horas) es neutral → se ignora acá.
     const cobDias5 = {}, cobDias2 = {}, cobFaltoEmail = {}, cobCubriEmail = {}
     const cambioReatr = {}, cambioCubriEmail = {}, cambioProd = {}
+    const cumpleCubreEmail = {}, cumpleAusEmail = {}   // 🎂 cumpleaños: quién cubre / quién cumple, por fecha
     const faltaCount = {}        // email -> { normal, excep }
     const faltasSinCob = []      // faltas sin cubridor: [{e, fecha, enfermedad}] → descuenta horas de grilla
     const favorExtra = {}        // email cubridor -> { fecha: {horas, hora, aus} } → hora extra por cubrir una hora suelta (sin bono)
@@ -4312,6 +4313,20 @@ async function cargarEquipoDesempeno(mesVer) {
         if (eAus && eCub) {
           cambioReatr[c.fecha + '|' + eCub] = eAus
           ;(cambioCubriEmail[eCub] = cambioCubriEmail[eCub] || {})[c.fecha] = eAus
+        }
+        return
+      }
+      if (c.tipo === 'cumple') {
+        // 🎂 CUMPLEAÑOS: el que cumple NO pierde el premio (no entra en faltaCount).
+        // El que cubre cobra cobertura común (5%/día, tope 15%). Los alumnos se
+        // reparten como en un cambio: 50/50 si el turno es compartido, 100% al
+        // cumpleañero si el turno es solo suyo (mismo mecanismo que cambioReatr).
+        // No genera deuda de horas (es un beneficio, no un cambio con devolución).
+        if (eAus && eCub) {
+          cambioReatr[c.fecha + '|' + eCub] = eAus
+          ;(cobDias5[eCub] = cobDias5[eCub] || new Set()).add(c.fecha)
+          ;(cumpleCubreEmail[eCub] = cumpleCubreEmail[eCub] || {})[c.fecha] = eAus
+          ;(cumpleAusEmail[eAus] = cumpleAusEmail[eAus] || {})[c.fecha] = eCub
         }
         return
       }
@@ -4484,7 +4499,7 @@ async function cargarEquipoDesempeno(mesVer) {
     const pushBita = (em, ev) => { if (!em) return; (bitacoraPorEmail[em] = bitacoraPorEmail[em] || []).push(ev) }
     // FALTAS del titular
     ;((cfR && cfR.data) || []).forEach(c => {
-      if (c.tipo === 'cambio') return  // cambio devuelve horas → neutral, fuera de la bitácora
+      if (c.tipo === 'cambio' || c.tipo === 'cumple') return  // neutral para el titular (cambio: devuelve horas · cumple: no pierde nada), fuera de la bitácora
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
       if (!eAus) return
       const extraFijaDia = esDiaExtraFija(eAus, diaPorFecha[c.fecha] || '')
@@ -4643,6 +4658,12 @@ async function cargarEquipoDesempeno(mesVer) {
             const prod = (cambioProd[e] && cambioProd[e][f]) || 0
             const hsAus = (st[eAus] && st[eAus].horasPorFecha[f]) || 0
             m[f] = { tipo: 'cambio', a: NOMBRES_RANKING[eAus] || eAus, prod: prod, prom: hsAus > 0 ? Math.round(prod / hsAus * 10) / 10 : 0 }
+          })
+          if (cumpleCubreEmail[e]) Object.keys(cumpleCubreEmail[e]).forEach(f => {
+            m[f] = { tipo: 'cumple_cubre', a: NOMBRES_RANKING[cumpleCubreEmail[e][f]] || cumpleCubreEmail[e][f] }
+          })
+          if (cumpleAusEmail[e]) Object.keys(cumpleAusEmail[e]).forEach(f => {
+            m[f] = { tipo: 'cumple_aus', a: NOMBRES_RANKING[cumpleAusEmail[e][f]] || cumpleAusEmail[e][f] }
           })
           return m
         })(),
@@ -4887,6 +4908,16 @@ async function cargarEquipoDesempeno(mesVer) {
             // CAMBIO (con devolución): reparto 50/50 si el turno es compartido, 100% al titular si no
             fondo = '#ede9fe'; borde = '#a78bfa55'
             cuerpo = `<div style="font-size:8px; color:#6d28d9; font-weight:700; line-height:1.1;">🔄 cambio con ${estado.a}</div><div style="font-size:8px; color:#6d28d9;">🙋${estado.prod} alumnos · devuelve hs</div>`
+          }
+          else if (estado && estado.tipo === 'cumple_aus') {
+            // 🎂 Tu cumpleaños: no perdés el premio; los alumnos del día son tuyos (100% o 50/50)
+            fondo = '#fce7f3'; borde = '#f9a8d4'
+            cuerpo = `<div style="font-size:8px; color:#be185d; font-weight:700; line-height:1.1;">🎂 tu cumple</div><div style="font-size:8px; color:#be185d;">lo cubrió ${estado.a}${ev > 0 ? ' · 🙋' + ev : ''}</div>`
+          }
+          else if (estado && estado.tipo === 'cumple_cubre') {
+            // 🎂 Cubriste el cumpleaños de un compa: cobrás +5% (los alumnos son del cumpleañero)
+            fondo = '#fce7f3'; borde = '#f9a8d4'
+            cuerpo = `<div style="font-size:8px; color:#be185d; font-weight:700; line-height:1.1;">🎂 cubriste cumple</div><div style="font-size:8px; color:#be185d;">de ${estado.a} · +5%</div>`
           }
           else if (hs > 0) {
             fondo = '#e6f5fd'; borde = 'var(--turquoise)'
@@ -5748,6 +5779,7 @@ window.abrirReglasBono = function() {
         &nbsp;&nbsp;• <b>Turno compartido</b> (los dos están normalmente en esa sala — Santi+Lean a la tarde, Santi+Lauti a la mañana): los alumnos van <b>50% y 50%</b>.<br>
         &nbsp;&nbsp;• <b>Turno solo del titular</b> (ej. Santi cubre el viernes a la mañana de Lauti): los alumnos van <b>100% al titular</b> (Lauti). Cuando Lauti le devuelva esas horas a Santi cubriéndole un turno, esos alumnos serán de Santi.<br>
         Se carga en <b>Coberturas y faltas</b>.</p>
+        <p style="margin:0 0 10px;"><b>5d-bis · 🎂 Cumpleaños:</b> el día de tu cumpleaños <b>no venís y no perdés el premio del mes</b> (no cuenta como falta). El compañero que te cubre <b>sí cobra su bono de cobertura</b> (5% de ese día, tope 15%), como cualquier cobertura. Los alumnos de ese día son <b>del cumpleañero</b>: <b>100%</b> si el turno es solo suyo, <b>50/50</b> si es un turno compartido. <b>No genera deuda de horas</b> (es un regalo, no un cambio con devolución). Se carga en <b>Coberturas y faltas</b> con el tipo <b>🎂 Cumpleaños</b>.</p>
         <p style="margin:0 0 10px;"><b>5e · Horas extra fijas (Lean):</b> son horas <b>fuera del sueldo</b>.<br>
         • <b>Viernes (15 a 19 h = 4 h):</b> cada viernes que las hace cobra las <b>4 h en $ + 2% del sueldo</b> (sin tope: 5 viernes = 10%). Si un viernes lo cubre otro (ej. Santi), esa hora extra y ese 2% los cobra <b>el que la hace</b> (los alumnos son 100% suyos). Ese viernes Lean <b>no cobra esas horas extra</b> (no las hizo, así que no las gana — no es un descuento del sueldo, son horas extra que ese viernes no entran). <b>Un viernes al mes</b> que le cubran <b>no le baja el premio</b> (puede ser cualquiera, no necesariamente el primero); del <b>2º viernes cubierto en adelante, sí</b>.<br>
         • <b>Miércoles (20 h = 1 h):</b> cobra esa <b>hora en $</b> (queda a la vista de él y de las admin), pero <b>sin el 2%</b> y sin perdón de premio — es solo una hora extra suelta.</p>

@@ -139,6 +139,7 @@
   .badge{font-size:10.5px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;border-radius:999px;padding:3px 9px;border:1px solid transparent;white-space:nowrap}
   .badge-cubre{background:var(--blue-dim);color:var(--blue);border-color:rgba(30,159,224,.3)}
   .badge-cambio{background:var(--warn-dim);color:var(--warn);border-color:rgba(255,178,77,.3)}
+  .badge-cumple{background:#fce7f3;color:#be185d;border-color:rgba(190,24,93,.3)}
   .badge-horas{background:#161616;color:var(--muted);border-color:var(--line)}
   .badge-extra{background:rgba(255,178,77,.16);color:var(--warn);border-color:rgba(255,178,77,.35)}
   .cf-calc{margin-top:8px;padding:8px 11px;background:#0d1922;border:1px solid rgba(30,159,224,.25);border-radius:10px;font-size:12.5px}
@@ -272,9 +273,10 @@
     return SUELDO_LATEST[k]?SUELDO_LATEST[k].monto:0;
   }
   function bonoCobInfo(r){
+    const esCumple=r.tipo==='cumple';
     const sueldo=sueldoDeCobertura(r.cubre,r.fecha);
     const fueraSueldo=esDiaFueraSueldo(r.falta,r.fecha);
-    const conExtra=!!r.horas_extra||fueraSueldo;  // viernes de Lean = siempre hora extra + 2%
+    const conExtra=!esCumple&&(!!r.horas_extra||fueraSueldo);  // cumpleaños = siempre 5% plano; viernes de Lean = hora extra + 2%
     const pct=conExtra?2:5, bono=sueldo*pct/100;
     const tarifa=TARIFA_DE[r.cubre]||0;
     const cant=fueraSueldo?(Number(r.horas_extra_cant)||horasFueraSueldo(r.falta,r.fecha)):Number(r.horas_extra_cant||0);
@@ -294,7 +296,9 @@
       }
     }
     if(r.falta){
-      if(esDiaFueraSueldo(r.falta,r.fecha)){
+      if(r.tipo==='cumple'){
+        rows+='<div class="cf-calc-row" style="color:#be185d"><span>\u{1F382} '+r.falta+': cumplea\u00f1os</span><b>no pierde el premio \u00b7 alumnos para \u00e9l/ella</b></div>';
+      }else if(esDiaFueraSueldo(r.falta,r.fecha)){
         const ord=EXTRA_ORDINAL[r.id]||1;
         if(ord<=1){
           rows+='<div class="cf-calc-row" style="color:#b45309"><span>\u2b50 '+r.falta+': es su hora extra fija \u00b7 no se le descuenta'+(r.cubre?' (la hizo '+r.cubre+')':'')+'</span><b>un viernes al mes no pierde el premio</b></div>';
@@ -316,6 +320,7 @@
       return '<div class="cf-calc"><div class="cf-calc-row total"><span>'+t+'</span><b></b></div></div>';
     }
     if(MI_PROFE&&r.falta===MI_PROFE){
+      if(r.tipo==='cumple')return '<div class="cf-calc"><div class="cf-calc-row total"><span>\u{1F382} Tu cumplea\u00f1os \u00b7 no perd\u00e9s el premio y los alumnos del d\u00eda son tuyos.</span><b></b></div></div>';
       if(esDiaFueraSueldo(r.falta,r.fecha))return '<div class="cf-calc"><div class="cf-calc-row total"><span>\u2b50 Era tu hora extra del viernes \u00b7 no se te descuenta. Un viernes al mes (el que sea) no afecta el premio.</span><b></b></div></div>';
       return '<div class="cf-calc cf-calc-warn">\u{1F912} Faltaste ese día.</div>';
     }
@@ -451,6 +456,7 @@
         <div><label>Tipo</label><select id="cf-tipo">
           <option value="cubre">Cobertura (no devuelve horas)</option>
           <option value="cambio">Cambio (devuelve horas)</option>
+          <option value="cumple">🎂 Cumpleaños (no pierde premio · el que cubre cobra)</option>
           <option value="devolucion">↩️ Devolución de horas (salda un cambio)</option>
           <option value="falta_sc">🚫 Falta sin cobertura (descuenta horas)</option>
         </select></div>
@@ -515,7 +521,7 @@
       EXTRA_ORDINAL={};
       const grpV={};
       (CF_DATA||[]).forEach(r=>{
-        if(r.tipo==='cambio')return;
+        if(r.tipo==='cambio'||r.tipo==='cumple')return;
         if(!esDiaFueraSueldo(r.falta,r.fecha))return;
         const k=(profeDelUsuario(r.falta)||r.falta)+'|'+(r.fecha||'').slice(0,7);
         (grpV[k]=grpV[k]||[]).push(r);
@@ -542,19 +548,20 @@
             </div>`;
           } else {
             const esCambio=r.tipo==='cambio';
+            const esCumple=r.tipo==='cumple';
             const esDevol=!!r.es_devolucion;
             const orig=(esDevol&&r.salda_id)?(CF_DATA||[]).find(x=>String(x.id)===String(r.salda_id)):null;
             const origDD=orig?((orig.fecha||'').slice(8,10)+'/'+(orig.fecha||'').slice(5,7)):'';
             const cambioAbierto=esCambio&&!esDevol&&!r.devuelto;
-            const esFaltaSc=(!esCambio&&!esDevol&&!r.cubre);
+            const esFaltaSc=(!esCambio&&!esCumple&&!esDevol&&!r.cubre);
             html+=`<div class="cf-item ${r.devuelto?'done':''}">
               <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
               <div class="cf-main">
-                <div class="cf-line"><b>${r.falta||'?'}</b> ${esDevol?'recibe devolución':'falta'}${r.cubre?` · ${esDevol?'devuelve':'cubre'} <b>${r.cubre}</b>`:(esFaltaSc?'':' · sin cubrir')}
-                  <span class="badge ${esDevol?'badge-done':(esCambio?'badge-cambio':(esFaltaSc?'badge-extra':'badge-cubre'))}">${esDevol?'↩️ Devolución':(esCambio?'Cambio':(esFaltaSc?'🚫 Falta sin cobertura':'Cobertura'))}</span>
+                <div class="cf-line"><b>${r.falta||'?'}</b> ${esDevol?'recibe devolución':(esCumple?'cumple años 🎂':'falta')}${r.cubre?` · ${esDevol?'devuelve':'cubre'} <b>${r.cubre}</b>`:(esFaltaSc?'':' · sin cubrir')}
+                  <span class="badge ${esDevol?'badge-done':(esCambio?'badge-cambio':(esCumple?'badge-cumple':(esFaltaSc?'badge-extra':'badge-cubre')))}">${esDevol?'↩️ Devolución':(esCambio?'Cambio':(esCumple?'🎂 Cumpleaños':(esFaltaSc?'🚫 Falta sin cobertura':'Cobertura')))}</span>
                   ${esFaltaSc?(r.enfermedad?'<span class="badge badge-cambio">🤒 enfermedad · no descuenta</span>':'<span class="badge badge-extra">descuenta horas</span>'):''}
                   ${(esCambio&&r.horas)?`<span class="badge badge-horas">${r.horas} h</span>`:''}
-                  ${(!esCambio&&!esFaltaSc&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
+                  ${(!esCambio&&!esCumple&&!esFaltaSc&&(r.horas_extra||esDiaFueraSueldo(r.falta,r.fecha)))?`<span class="badge badge-extra">⏰ Hora extra${esDiaFueraSueldo(r.falta,r.fecha)?' (viernes)':''} · 2%</span>`:''}
                   ${r.devuelto&&!esDevol?`<span class="badge badge-done">Saldado ✓</span>`:''}
                 </div>
                 ${esDevol&&orig?`<div class="cf-nota">↩️ Saldó el cambio del ${origDD} (${orig.falta} le debía a ${orig.cubre}).</div>`:''}
@@ -680,14 +687,17 @@
       const horasExtraCant=horasExtra&&extraCantEl&&extraCantEl.value?Number(extraCantEl.value):null;
       // FALTA SIN COBERTURA: se guarda como falta sin cubridor; el motor descuenta las horas de la grilla (salvo enfermedad)
       const esFaltaSc=(tp==='falta_sc');
+      const esCumple=(tp==='cumple');
       const enfEl=document.getElementById('cf-enf');
       const enfermedad=esFaltaSc&&enfEl&&enfEl.checked;
       if(!fecha||!falta){alert('Poné al menos el día y quién falta.');return;}
+      if(esCumple&&!cubre){alert('En cumpleaños tenés que poner quién lo cubre.');return;}
       if(!esFaltaSc&&cubre&&falta===cubre){alert('El que falta y el que cubre no pueden ser el mismo.');return;}
       addBtn.disabled=true;addBtn.textContent='Guardando…';
       try{
         const{error}=await sb.from('coberturas_faltas').insert({
-          fecha,falta,cubre:esFaltaSc?null:(cubre||null),tipo:'cubre',
+          fecha,falta,cubre:esFaltaSc?null:(cubre||null),
+          tipo:(tp==='cambio'?'cambio':(tp==='cumple'?'cumple':'cubre')),
           horas:(tp==='cambio'&&horas)?Number(horas):null,
           horas_extra:horasExtra,
           horas_extra_cant:horasExtraCant,
