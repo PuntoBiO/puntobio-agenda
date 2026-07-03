@@ -545,82 +545,39 @@ async function cargar(){
     if (!sesErr && sesData) sesionesData = sesData;
   }
 
-  // ===== Pagos ANTERIORES al mes de cada tratamiento (con quién cobró) =====
-  // Sirven para: (a) posicionar el puntero de lo ya pagado, y (b) saber QUIÉN retiene
-  // la plata que ahora se libera al realizarse las sesiones.
-  window._prevPagosTrat = {};       // tid → suma pagada antes del mes
-  const prevPagosList = {};         // tid → [{importe, cobro}] en orden cronológico
+  // ===== Pagos ANTERIORES al mes de cada tratamiento (con quién cobró y a quién se atribuyó) =====
+  // Se "reproducen" en el render con la MISMA lógica de asignación que los pagos del mes:
+  // así sabemos qué sesiones ya están pagas, cuáles del mes se liberan ahora, y quién retiene.
+  window._prevPagosTrat = {};        // tid → suma pagada antes del mes (informativo)
+  window._prevPagosTratList = {};    // tid → [{importe, cobro, prof}] en orden cronológico
   if (tratIds.length > 0){
     try {
       const { data: prevP } = await sb.from('pagos_consultorio')
-        .select('tratamiento_id, importe, quien_cobro, fecha')
+        .select('tratamiento_id, importe, quien_cobro, profesional, fecha')
         .in('tratamiento_id', tratIds)
         .lt('fecha', desde)
         .order('fecha');
       (prevP||[]).forEach(r => {
         const k = r.tratamiento_id;
         window._prevPagosTrat[k] = (window._prevPagosTrat[k]||0) + (Number(r.importe)||0);
-        (prevPagosList[k] = prevPagosList[k] || []).push({ importe: Number(r.importe)||0, cobro: normProf(r.quien_cobro) || 'PuntoBiO' });
+        (window._prevPagosTratList[k] = window._prevPagosTratList[k] || []).push({
+          importe: Number(r.importe)||0,
+          cobro: normProf(r.quien_cobro) || 'PuntoBiO',
+          prof: normProf(r.profesional) || ''
+        });
       });
     } catch(e){ console.warn('No se pudieron cargar pagos previos por tratamiento:', e.message); }
   }
 
-  // ===== LIBERACIÓN DE RETENIDOS: sesiones del mes ya cubiertas por pagos anteriores =====
-  // Por cada sesión realizada este mes cuyo valor cae dentro de lo pagado ANTES del mes,
-  // generamos un "pago virtual" (marcado _liberado) que la liquida ahora: la parte
-  // profesional al que la hizo, y como cobrador el que retenía esa plata.
-  {
-    const infoTrat = {};   // tid → { paciente, practica } (desde las sesiones del mes)
-    sesMes.forEach(s => {
-      const t = s.tratamientos || {};
-      if (!infoTrat[s.tratamiento_id]) infoTrat[s.tratamiento_id] = {
-        paciente: (t.personas && t.personas.nombre) || '—',
-        practica: t.practica_codigo || ''
-      };
-    });
-    const sesPorTrat = {};
-    sesionesData.forEach(s => { (sesPorTrat[s.tratamiento_id] = sesPorTrat[s.tratamiento_id] || []).push(s); });
-    const liberados = [];
-    for (const tidStr of Object.keys(infoTrat)){
-      const tid = Number(tidStr);
-      const prevSum = Number(window._prevPagosTrat[tid]) || 0;
-      if (prevSum <= 0.5) continue;   // nada pagado antes → nada retenido que liberar
-      const lista = (sesPorTrat[tid] || []).slice().sort((a,b)=> String(a.fecha||'9999').localeCompare(String(b.fecha||'9999')));
-      // ¿Quién retiene cada tramo? (puntero sobre los pagos previos)
-      const pl = prevPagosList[tid] || [];
-      const cobradorEn = (pos) => {   // en qué cobrador cae la posición 'pos' de plata
-        let acc = 0;
-        for (const q of pl){ acc += q.importe; if (pos < acc - 0.001) return q.cobro; }
-        return (pl.length ? pl[pl.length-1].cobro : 'PuntoBiO');
-      };
-      let acum = 0;
-      for (const S of lista){
-        const val = (Number(S.monto_profesional)||0) + (Number(S.monto_centro)||0);
-        const ini = acum, fin = acum + val; acum = fin;
-        if (val <= 0) continue;
-        const f = String(S.fecha||'');
-        if (f < desde || f > hasta) continue;            // solo sesiones realizadas ESTE mes
-        const cubierto = Math.min(prevSum, fin) - ini;    // cuánto de esta sesión ya estaba pagado antes
-        if (cubierto <= 0.5) continue;
-        const frac = cubierto / val;
-        liberados.push({
-          id: 'lib-' + tid + '-' + f + '-' + Math.round(ini),
-          fecha: f,
-          importe: Math.round(cubierto),
-          medio_pago: 'A CUENTA (mes anterior)',
-          profesional: normProf(S.profesional),
-          quien_cobro: cobradorEn(ini),
-          tipo_cobro: 'LIBERADO',
-          monto_profesional: Math.round((Number(S.monto_profesional)||0) * frac),
-          monto_centro: Math.round(cubierto) - Math.round((Number(S.monto_profesional)||0) * frac),
-          tratamiento_id: tid,
-          _liberado: true,
-          tratamientos: { practica_codigo: infoTrat[tid].practica, personas: { nombre: infoTrat[tid].paciente } }
-        });
-      }
-    }
-    if (liberados.length) data = [...liberados, ...(data||[])];
-  }
+  // Info de tratamientos con sesiones este mes (paciente / práctica), para las liberaciones.
+  window._infoTratMes = {};
+  sesMes.forEach(s => {
+    const t = s.tratamientos || {};
+    if (!window._infoTratMes[s.tratamiento_id]) window._infoTratMes[s.tratamiento_id] = {
+      paciente: (t.personas && t.personas.nombre) || '—',
+      practica: t.practica_codigo || ''
+    };
+  });
 
   DATA = data || [];
 
@@ -771,13 +728,12 @@ function render(pagos, sesiones, filtroProf){
   // Plata RETENIDA: pagos adelantados cuyas sesiones aún no se realizaron.
   // Queda en manos de quien cobró y se liquidará el mes que las sesiones se hagan.
   const retenidos = { total:0, porCobro:{}, lista:[] };
-  const MPX = prepararMoplex(pagos);
 
   // ===== Reparto por SESIONES (solo lo REALIZADO) =====
-  // La parte profesional de cada cobro se asigna a las SESIONES que ese cobro está pagando,
-  // en orden cronológico (el paciente abona lo realizado). Así, un tratamiento que empieza
-  // en junio y sigue en julio liquida en cada mes solo las sesiones que sus pagos cubren,
-  // y la plata va al profesional que HIZO cada una (no al campo 'profesional' del cobro).
+  // Cada pago va PRIMERO a las sesiones del profesional del pago (el que atendió ese día:
+  // así el pago diario le queda al que hizo la sesión y no aparecen cruces fantasma), y
+  // recién después, si sobra, a las sesiones impagas de otros profesionales del tratamiento.
+  // Lo que exceda las sesiones realizadas queda RETENIDO.
   const sesByTrat = {};
   for (const s of sesiones){
     const tid = s.tratamiento_id; if (tid == null) continue;
@@ -785,15 +741,67 @@ function render(pagos, sesiones, filtroProf){
     const sp = Number(s.monto_profesional)||0, sc = Number(s.monto_centro)||0;
     if (!sesByTrat[tid]) sesByTrat[tid] = { list:[], byP:{}, profTotal:0, centroTotal:0, total:0 };
     const g = sesByTrat[tid];
-    g.list.push({ prof:P, mp:sp, mc:sc, val:sp+sc, fecha: s.fecha||'9999-99-99' });
+    g.list.push({ prof:P, mp:sp, mc:sc, val:sp+sc, fecha: s.fecha||'9999-99-99', pagado:0 });
     if (!g.byP[P]) g.byP[P] = { prof:0, centro:0, val:0 };
     g.byP[P].prof += sp; g.byP[P].centro += sc; g.byP[P].val += sp+sc;
     g.profTotal += sp; g.centroTotal += sc; g.total += sp+sc;
   }
   for (const tid of Object.keys(sesByTrat)) sesByTrat[tid].list.sort((a,b)=> (a.fecha).localeCompare(b.fecha));
-  // Puntero de consumo por tratamiento: arranca en lo ya pagado ANTES del mes.
-  const prevPagado = window._prevPagosTrat || {};
-  const consumoTrat = {};
+
+  // Asignador: reparte 'importe' entre las sesiones impagas (fecha ≤ finMes).
+  // Pasada 1: sesiones del profesional 'hint' (el del pago). Pasada 2: el resto, cronológico.
+  function asignarPago(g, importe, hint){
+    const tomas = []; let rest = importe;
+    const pasadas = hint ? [ S => S.prof === hint, S => S.prof !== hint ] : [ () => true ];
+    for (const pass of pasadas){
+      if (rest <= 0.5) break;
+      for (const S of g.list){
+        if (rest <= 0.5) break;
+        if (String(S.fecha||'9999') > finMes) continue;   // sesión aún no realizada este mes
+        if (!pass(S)) continue;
+        const disp = S.val - S.pagado;
+        if (disp <= 0.5) continue;
+        const toma = Math.min(rest, disp);
+        S.pagado += toma; rest -= toma;
+        tomas.push({ S, toma });
+      }
+    }
+    return { tomas, sobrante: rest };
+  }
+
+  // ===== REPLAY de pagos ANTERIORES + liberación de retenidos =====
+  // Reproducimos los pagos previos con la MISMA regla. Las porciones que caen en sesiones
+  // realizadas ESTE mes son plata retenida que ahora se libera: entran como "pagos virtuales".
+  const desdeMes = _pR[0] + '-' + _pR[1] + '-01';
+  {
+    const prevList = window._prevPagosTratList || {};
+    const infoT = window._infoTratMes || {};
+    const virtuales = [];
+    for (const tid of Object.keys(sesByTrat)){
+      const g = sesByTrat[tid];
+      for (const q of (prevList[tid] || [])){
+        const { tomas } = asignarPago(g, q.importe, q.prof || null);
+        for (const tk of tomas){
+          const S = tk.S, f = String(S.fecha||'');
+          if (f < desdeMes || f > finMes) continue;   // sesiones de meses anteriores: ya liquidadas antes
+          const frac = tk.toma / S.val;
+          const mp = Math.round(S.mp * frac);
+          virtuales.push({
+            id: 'lib-' + tid + '-' + f + '-' + virtuales.length,
+            fecha: f, importe: Math.round(tk.toma),
+            medio_pago: 'A CUENTA (mes anterior)',
+            profesional: S.prof, quien_cobro: q.cobro, tipo_cobro: 'LIBERADO',
+            monto_profesional: mp, monto_centro: Math.round(tk.toma) - mp,
+            tratamiento_id: Number(tid), _liberado: true,
+            tratamientos: { practica_codigo: (infoT[tid]||{}).practica || '', personas: { nombre: (infoT[tid]||{}).paciente || '—' } }
+          });
+        }
+      }
+    }
+    if (virtuales.length) pagos = [...virtuales, ...pagos];
+  }
+
+  const MPX = prepararMoplex(pagos);
 
   // ===== procesar todos los pagos =====
   const resumen = {};        // por profesional (quien HIZO las sesiones)
@@ -816,9 +824,9 @@ function render(pagos, sesiones, filtroProf){
 
     // Cómo se reparte este cobro entre profesionales:
     //  - MOPLEX: un solo profesional (el que hizo el estudio), como lo dejó prepararMoplex.
-    //  - Consultorio con sesiones: el cobro paga las SESIONES en orden cronológico (lo realizado);
-    //    la parte de cada sesión va al profesional que la hizo. El puntero arranca en lo ya
-    //    pagado antes del mes, así los tratamientos que cruzan meses liquidan bien.
+    //  - Liberados (_liberado): ya vienen resueltos del replay (sesión + cobrador exactos).
+    //  - Consultorio con sesiones: primero las sesiones del profesional del pago (el que
+    //    atendió ese día), después el resto impago. Lo que exceda lo realizado → RETENIDO.
     //  - Sin sesiones (fallback): el campo 'profesional' del cobro, como antes.
     const sinfo = (!esMoplex && !p._liberado && tid != null) ? sesByTrat[tid] : null;
     const usaSesiones = !esMoplex && !!sinfo && sinfo.total > 0;
@@ -826,41 +834,23 @@ function render(pagos, sesiones, filtroProf){
     if (!usaSesiones){
       reparto = [{ prof: normProf(p.profesional), mProf: Number(p.monto_profesional)||0, mCentro: Number(p.monto_centro)||0, imp: importe }];
     } else {
-      if (!consumoTrat[tid]) consumoTrat[tid] = { consumido: Number(prevPagado[tid])||0 };
-      const st = consumoTrat[tid];
-      let restante = importe;
       let retenidoPago = 0;   // parte de ESTE pago que queda retenida (sesiones no realizadas)
       const partes = {};   // prof → { mProf, mCentro, imp } (crudos, se redondean al final)
-      const addParte = (P, mp2, mc2, im2) => {
-        if (!partes[P]) partes[P] = { mProf:0, mCentro:0, imp:0 };
-        partes[P].mProf += mp2; partes[P].mCentro += mc2; partes[P].imp += im2;
-      };
-      // Recorrer las sesiones en orden, saltando lo ya cubierto por pagos anteriores.
-      // Solo se liquidan sesiones REALIZADAS (fecha hasta fin del mes visto).
-      let acum = 0;
-      for (const S of sinfo.list){
-        if (restante <= 0.5) break;
-        if (String(S.fecha||'9999') > finMes) break;        // sesión aún no realizada (o de meses siguientes) → no se liquida
-        const ini = acum, fin = acum + S.val; acum = fin;
-        if (S.val <= 0) continue;
-        if (st.consumido >= fin - 0.001) continue;          // sesión ya paga
-        const desde = Math.max(st.consumido, ini);
-        const disponible = fin - desde;
-        const toma = Math.min(restante, disponible);
-        const frac = toma / S.val;
-        addParte(S.prof, S.mp*frac, S.mc*frac, toma);
-        st.consumido += toma; restante -= toma;
+      const { tomas, sobrante } = asignarPago(sinfo, importe, normProf(p.profesional) || null);
+      for (const tk of tomas){
+        const S = tk.S, frac = tk.toma / S.val;
+        if (!partes[S.prof]) partes[S.prof] = { mProf:0, mCentro:0, imp:0 };
+        partes[S.prof].mProf += S.mp*frac; partes[S.prof].mCentro += S.mc*frac; partes[S.prof].imp += tk.toma;
       }
       // Sobrante = pagó por adelantado sesiones que TODAVÍA no se realizaron.
       // NO se liquida: queda RETENIDO por quien cobró, y se liberará el mes que
       // las sesiones se hagan (al profesional que las haga).
-      if (restante > 0.5){
-        retenidoPago = restante;
+      if (sobrante > 0.5){
+        retenidoPago = sobrante;
         const rc = cobro || 'PuntoBiO';
-        retenidos.total += restante;
-        retenidos.porCobro[rc] = (retenidos.porCobro[rc]||0) + restante;
-        retenidos.lista.push({ fecha: p.fecha, paciente: (t.personas && t.personas.nombre) || '—', cobro: rc, monto: Math.round(restante) });
-        restante = 0;   // el puntero NO avanza: esas sesiones no existen todavía
+        retenidos.total += sobrante;
+        retenidos.porCobro[rc] = (retenidos.porCobro[rc]||0) + sobrante;
+        retenidos.lista.push({ fecha: p.fecha, paciente: (t.personas && t.personas.nombre) || '—', cobro: rc, monto: Math.round(sobrante) });
       }
       // Redondear a pesos; el último se lleva el resto para que la suma cierre exacta.
       const Ps = Object.keys(partes);
@@ -1122,10 +1112,11 @@ function render(pagos, sesiones, filtroProf){
   } // fin gate bloques 1-2 (no MOPLEX)
 
   // ===== BLOQUE 3: CRUCES BRUTOS =====
-  // Si hay un profesional elegido, mostramos solo los cruces que lo involucran (cobró por otro, o cobraron por él).
-  const crucesVista = filtroProf
-    ? crucesBrutos.filter(c => c.cobro === filtroProf || c.prof === filtroProf)
-    : crucesBrutos;
+  // Solo se MUESTRAN los cruces con parte profesional real (> $0). Los que solo mueven
+  // plata del centro no son "uno cobró por otro": van directo a los netos con el centro.
+  const crucesVista = crucesBrutos
+    .filter(c => c.mProf > 0.5)
+    .filter(c => !filtroProf || c.cobro === filtroProf || c.prof === filtroProf);
   if (!esModoMoplex){
   html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
   if (crucesVista.length === 0){
