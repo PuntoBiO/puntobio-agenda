@@ -717,9 +717,21 @@ function render(pagos, sesiones, filtroProf){
     if (!usaSesiones){
       reparto = [{ prof: normProf(p.profesional), mProf: Number(p.monto_profesional)||0, mCentro: Number(p.monto_centro)||0, imp: importe }];
     } else {
-      reparto = Object.keys(sinfo.byP).map(P => {
+      // Redondear a pesos enteros; el último se lleva el resto para que la suma dé exacta.
+      const Ps = Object.keys(sinfo.byP);
+      let accP2 = 0, accC2 = 0, accI2 = 0;
+      reparto = Ps.map((P, i) => {
         const b = sinfo.byP[P];
-        return { prof: P, mProf: importe*(b.prof/sinfo.total), mCentro: importe*(b.centro/sinfo.total), imp: importe*(b.val/sinfo.total) };
+        if (i === Ps.length - 1){
+          const mp2 = Math.round(importe*(sinfo.profTotal/sinfo.total)) - accP2;
+          const mc2 = Math.round(importe*(sinfo.centroTotal/sinfo.total)) - accC2;
+          return { prof: P, mProf: mp2, mCentro: mc2, imp: importe - accI2 };
+        }
+        const mp = Math.round(importe*(b.prof/sinfo.total));
+        const mc = Math.round(importe*(b.centro/sinfo.total));
+        const im = Math.round(importe*(b.val/sinfo.total));
+        accP2 += mp; accC2 += mc; accI2 += im;
+        return { prof: P, mProf: mp, mCentro: mc, imp: im };
       });
     }
 
@@ -798,6 +810,26 @@ function render(pagos, sesiones, filtroProf){
     if (tid == null) continue;
     if (!porTrat[tid]) porTrat[tid] = {profParte:0, cobradoProfMismo:0};
     porTrat[tid].profParte += Number(s.monto_profesional) || 0;
+  }
+
+  // ===== COMPRIMIR CRUCES: una fila por tratamiento (no una por pago) =====
+  // Con el reparto por sesiones, cada pago de un tratamiento compartido generaba una
+  // fila chiquita por cada profesional (montos de $260, $1.156...). Acá los juntamos:
+  // una sola fila por cobrador + profesional + tratamiento, con los totales sumados.
+  {
+    const agg = {};
+    for (const c of crucesBrutos){
+      const k = c.cobro + '||' + c.prof + '||' + (c.tratId != null ? c.tratId : 'x');
+      if (!agg[k]) agg[k] = { fecha: c.fecha, cobro: c.cobro, prof: c.prof, mProf: 0, mCentro: 0, importe: 0, tratId: c.tratId };
+      const a = agg[k];
+      if (c.fecha && c.fecha < a.fecha) a.fecha = c.fecha;   // mostrar la fecha del primer cobro
+      a.mProf += c.mProf; a.mCentro += c.mCentro; a.importe += c.importe;
+    }
+    crucesBrutos.length = 0;
+    Object.values(agg).forEach(a => {
+      a.mProf = Math.round(a.mProf); a.mCentro = Math.round(a.mCentro); a.importe = Math.round(a.importe);
+      if (a.mProf > 0.5 || a.mCentro > 0.5) crucesBrutos.push(a);   // descartar migajas en $0
+    });
   }
 
   // ===== CÁLCULO INTELIGENTE DE CRUCES (POR TRATAMIENTO) =====
