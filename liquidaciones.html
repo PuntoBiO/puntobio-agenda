@@ -145,6 +145,7 @@
         <option value="Vero">Vero</option>
         <option value="Jime">Jime</option>
         <option value="Lu">Lu</option>
+        <option value="MOPLEX">🦶 MOPLEX (franquicia)</option>
       </select>
     </div>
     <div class="control-group">
@@ -531,6 +532,12 @@ function render(pagos, sesiones, filtroProf){
   filtroProf = filtroProf || '';
   sesiones = sesiones || [];
   const filtroArea = (document.getElementById('filtroArea') || {}).value || '';
+  // MOPLEX es una entidad (no un profesional) a la que el centro le rinde cuentas.
+  // - "Todos"      → se ve todo, incluido MOPLEX
+  // - "MOPLEX"     → SOLO lo de MOPLEX (la franquicia)
+  // - un profesional → SOLO lo de ese profesional (sin la parte de la franquicia)
+  const esModoMoplex = (filtroProf === 'MOPLEX');
+  const mostrarMoplex = (!filtroProf || esModoMoplex);   // bloques MOPLEX visibles solo en Todos o MOPLEX
   // MOPLEX: recalcular el split de cada cobro MOPLEX desde el catálogo (pisa lo que la caja guardó mal).
   // Debe correr ANTES del loop: deja monto_profesional/monto_centro correctos en cada pago MOPLEX.
   const MPX = prepararMoplex(pagos);
@@ -557,7 +564,7 @@ function render(pagos, sesiones, filtroProf){
     // ¿Esta fila es PRODUCCIÓN del profesional que estoy mirando? (quien ATENDIÓ)
     // Si no hay filtro de profesional, todo cuenta. Si hay filtro, solo lo que atendió ese profesional.
     // Además, si hay filtro de ÁREA, solo cuentan las prácticas de esa área.
-    const esVista = (!filtroProf || prof === filtroProf) && (!filtroArea || areaP === filtroArea);
+    const esVista = !esModoMoplex && (!filtroProf || prof === filtroProf) && (!filtroArea || areaP === filtroArea);
 
     // ===== PARTES GLOBALES (siempre, aunque haya filtro) — necesarias para los CRUCES =====
     // Acumular por tratamiento: cuánto YA cobró el propio profesional (el pago COMPLETO que se llevó cuenta contra su parte).
@@ -659,8 +666,9 @@ function render(pagos, sesiones, filtroProf){
   const ordenarProfs = arr => arr.sort((a,b)=>{const ia=orden.indexOf(a),ib=orden.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
   const profs = ordenarProfs(Object.keys(resumen));
 
-  // ===== tarjetas resumen =====
-  let html = `
+  // ===== tarjetas resumen (solo si NO es modo MOPLEX) =====
+  let html = '';
+  if (!esModoMoplex) html += `
     <div class="cards">
       <div class="card cant">
         <div class="card-label">Cant. pagos</div>
@@ -683,7 +691,8 @@ function render(pagos, sesiones, filtroProf){
       </div>
     </div>`;
 
-  // ===== BLOQUE 1: RESUMEN =====
+  // ===== BLOQUE 1: RESUMEN ===== (oculto en modo MOPLEX)
+  if (!esModoMoplex){
   html += `<h2 class="bloque-tit">1 · Resumen por profesional</h2>
     <table><thead><tr>
       <th></th><th>Profesional</th><th class="num">Total Profesional</th><th class="num">Total Centro</th>
@@ -722,12 +731,14 @@ function render(pagos, sesiones, filtroProf){
     html += `<tr><td>${badge(prof)}</td><td class="num">${fmt(m.debito)}</td><td class="num">${fmt(m.efectivo)}</td><td class="num">${fmt(m.transferencia)}</td></tr>`;
   }
   html += `</tbody></table>`;
+  } // fin gate bloques 1-2 (no MOPLEX)
 
   // ===== BLOQUE 3: CRUCES BRUTOS =====
   // Si hay un profesional elegido, mostramos solo los cruces que lo involucran (cobró por otro, o cobraron por él).
   const crucesVista = filtroProf
     ? crucesBrutos.filter(c => c.cobro === filtroProf || c.prof === filtroProf)
     : crucesBrutos;
+  if (!esModoMoplex){
   html += `<h2 class="bloque-tit">3 · Cruces (uno cobró por otro)</h2>`;
   if (crucesVista.length === 0){
     html += `<p class="vacio">Sin cruces este mes 👍</p>`;
@@ -741,6 +752,7 @@ function render(pagos, sesiones, filtroProf){
     }
     html += `</tbody></table>`;
   }
+  } // fin gate bloque 3 (no MOPLEX)
 
   // ===== BLOQUE 4: CRUCES NETOS =====
   // Separamos deudas hacia el CENTRO (clave "X||CENTRO") de las deudas entre profesionales
@@ -773,7 +785,7 @@ function render(pagos, sesiones, filtroProf){
   const netosFinalesVista = filtroProf ? netosFinales.filter(n => n[0] === filtroProf || n[1] === filtroProf) : netosFinales;
   const hayCentroVista = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
 
-  if (netosFinalesVista.length > 0 || hayCentroVista){
+  if (!esModoMoplex && (netosFinalesVista.length > 0 || hayCentroVista)){
     html += `<h2 class="bloque-tit">4 · Cruces netos (quién debe a quién)</h2>
       <table><thead><tr><th>Debe</th><th>A</th><th class="num">Monto neto</th></tr></thead><tbody>`;
     // Deudas hacia el centro
@@ -791,7 +803,8 @@ function render(pagos, sesiones, filtroProf){
     html += `</tbody></table>`;
   }
 
-  // ===== BLOQUE 5: DETALLE POR PROFESIONAL Y PRÁCTICA =====
+  // ===== BLOQUE 5: DETALLE POR PROFESIONAL Y PRÁCTICA ===== (lista de profes: oculta en modo MOPLEX)
+  if (!esModoMoplex){
   html += `<h2 class="bloque-tit">5 · Detalle por profesional y práctica</h2>`;
   const porProfDetalle = {};
   for (const k of Object.keys(detalle)){
@@ -813,14 +826,14 @@ function render(pagos, sesiones, filtroProf){
     html += `<tr style="font-weight:700;background:#eff6ff;color:#1e40af;"><td>TOTAL</td><td class="num">${fmt(sc)}</td><td class="num">${fmt(sp)}</td><td class="num">${fmt(sce)}</td></tr>`;
     html += `</tbody></table>`;
   }
+  } // fin lista de profesionales (no MOPLEX)
 
   // ===== MOPLEX como un "profesional" más: detalle SOLO de lo que va a la franquicia =====
-  // (agrupa las plantillas por descripción y suma lo que le corresponde a MOPLEX)
-  if (moplexEnVista){
+  // (se ve en "Todos" o en "MOPLEX"; NO cuando elegís un profesional)
+  if (mostrarMoplex && moplexEnVista){
     const moplexDet = {};   // descripción → { desc, cant, monto }
     let mTotal = 0, mCant = 0;
     for (const f of MPX.franquicia){
-      if (filtroProf && f.prof !== filtroProf) continue;
       if (f.tipo !== 'Plantilla' || f.montoMoplex <= 0.5) continue;  // solo las plantillas pagan a MOPLEX
       const key = f.desc || 'Plantilla';
       if (!moplexDet[key]) moplexDet[key] = { desc:key, cant:0, monto:0 };
@@ -829,6 +842,7 @@ function render(pagos, sesiones, filtroProf){
     }
     const moplexItems = Object.values(moplexDet).sort((a,b)=> a.desc.localeCompare(b.desc));
     if (moplexItems.length){
+      if (esModoMoplex) html += `<h2 class="bloque-tit">🦶 MOPLEX — lo que el centro le paga a la franquicia</h2>`;
       html += `<div class="det-prof-tit"><span class="badge" style="background:#ccfbf1;color:#0f766e">🦶 MOPLEX</span></div>
         <table style="margin-bottom:16px;"><thead><tr>
           <th>Plantilla</th><th class="num">Cantidad</th><th class="num">Total a MOPLEX</th>
@@ -843,7 +857,7 @@ function render(pagos, sesiones, filtroProf){
 
   // ===== BLOQUE MOPLEX (franquicia) — como una "parte" más =====
   // Aviso: cobros MOPLEX sin tipo asignado (no se pueden repartir bien)
-  if (MPX.sinTipo.length > 0){
+  if (mostrarMoplex && MPX.sinTipo.length > 0){
     html += `<div class="resumen-cruces" style="background:#fee2e2;border-color:#fca5a5">
       <div class="rc-tit-cruces" style="color:#991b1b">⚠️ ${MPX.sinTipo.length} cobro${MPX.sinTipo.length>1?'s':''} MOPLEX sin tipo asignado</div>`;
     for (const s of MPX.sinTipo){
@@ -852,7 +866,9 @@ function render(pagos, sesiones, filtroProf){
     html += `</div>`;
   }
 
-  const franqVista = MPX.franquicia.filter(f => (!filtroProf || f.prof === filtroProf) && (!filtroArea || filtroArea === 'Especialidades'));
+  const franqVista = mostrarMoplex
+    ? MPX.franquicia.filter(f => (!filtroArea || filtroArea === 'Especialidades'))
+    : [];
   let moplexPend = 0, moplexSald = 0, moplexTotalVista = 0;
   if (franqVista.length > 0){
     const saldos = window._moplexSaldos || {};
@@ -883,6 +899,7 @@ function render(pagos, sesiones, filtroProf){
   }
 
   // ===== BLOQUE PRODUCTIVIDAD: cuánto GENERÓ cada profesional (independiente de cuánto se lleva) =====
+  if (!esModoMoplex){
   html += `<h2 class="bloque-tit">📈 Productividad por profesional</h2>
     <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Cuánto facturó cada uno por atender, sin importar cuánto se lleva. Para las dueñas (Jime y Lu) todo queda en el centro, pero igual cuenta su producción.</p>`;
   // Ordenar profesionales por lo generado (de mayor a menor)
@@ -902,11 +919,12 @@ function render(pagos, sesiones, filtroProf){
   }
   html += `</div>`;
   html += `<div class="prod-total">Total generado entre todos: <b>${fmt(totalGenerado)}</b></div>`;
+  } // fin productividad (no MOPLEX)
 
   // ===== RESUMEN FINAL LINDO (después de todo) =====
   html += `<h2 class="bloque-tit">📋 Resumen final</h2>`;
   html += `<div class="resumen-cards">`;
-  for (const prof of profs){
+  if (!esModoMoplex) for (const prof of profs){
     const r = resumen[prof];
     const neto = r.prof - r.cobroProf;
     let estadoTxt, claseCard, iconoEstado;
@@ -949,7 +967,7 @@ function render(pagos, sesiones, filtroProf){
   const hayRegalos = totalRegalos > 0.5;
 
   const hayDeudasCentro = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
-  if (netosFinalesVista.length > 0 || hayDeudasCentro || hayRegalos){
+  if (!esModoMoplex && (netosFinalesVista.length > 0 || hayDeudasCentro || hayRegalos)){
     html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Cobros a devolver</div>`;
     const ordenRC = ['Bruno','Male','Vero','Jime','Lu'];
     Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
@@ -972,7 +990,7 @@ function render(pagos, sesiones, filtroProf){
   // Solo informativo: NO se suma ni afecta los cálculos de la liquidación.
   // Muestra el TOTAL por profesional (el detalle fino está en el módulo Pagos Obras Sociales).
   const pagosOS = window._pagosOS || [];
-  if (pagosOS.length > 0) {
+  if (!esModoMoplex && pagosOS.length > 0) {
     let totalOS = 0;
     const porProf = {};
     for (const p of pagosOS) {
@@ -996,7 +1014,7 @@ function render(pagos, sesiones, filtroProf){
   // ===== BLOQUE: MASAJES DE REGALO (cumpleaños) =====
   // El paciente no pagó nada (cortesía PuntoBiO): esta plata NO sale de los
   // pagos de arriba. PB se la paga al profesional aparte.
-  if (regalosVista.length > 0){
+  if (!esModoMoplex && regalosVista.length > 0){
     html += `<h2 class="bloque-tit">🎁 Masajes de regalo (cumpleaños)</h2>
       <p style="color:#666;font-size:13px;margin:-6px 0 12px;">El paciente no pagó nada (cortesía del centro), así que estos montos <b>no figuran en los pagos de arriba</b>: PuntoBiO se los paga al profesional aparte. Ya están sumados en "Cobros a devolver".</p>`;
     html += `<table style="margin-bottom:8px;"><thead><tr>
