@@ -313,6 +313,12 @@
       <div style="margin-top:12px;">
         <input id="valdMotivo" type="text" placeholder="Motivo / objetivo / antecedentes relevantes (la IA lo tiene en cuenta)"
                style="width:100%; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; margin-bottom:8px; box-sizing:border-box;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+          <span class="hint" style="margin:0;">Tipo de evaluación:</span>
+          <button type="button" id="btnEvalPrimera" onclick="setTipoEval('primera')" style="font-size:13px; padding:5px 14px; border-radius:8px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#475569;">1ª evaluación</button>
+          <button type="button" id="btnEvalReeval" onclick="setTipoEval('reeval')" style="font-size:13px; padding:5px 14px; border-radius:8px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#475569;">Reevaluación</button>
+          <span id="evalTipoHint" class="hint" style="margin:0;"></span>
+        </div>
         <button class="btn ghost" id="btnFinalizarEval" onclick="finalizarEvaluacion()" style="display:none; margin-right:8px;">✅ Finalizar evaluación</button>
         <button class="btn" id="btnGenIA" onclick="generar()" disabled>📋 Crear informe</button>
         <div id="valdBorrador" style="margin-top:10px;"></div>
@@ -338,6 +344,41 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
 let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
+let tipoEval = 'primera';   // 'primera' | 'reeval' — lo elige el usuario (autodetectado al seleccionar paciente)
+
+function setTipoEval(t) { tipoEval = (t === 'reeval') ? 'reeval' : 'primera'; renderTipoEval(); }
+function renderTipoEval() {
+  const pintar = (id, on) => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.style.background = on ? '#1e9fe0' : '#fff';
+    b.style.color = on ? '#fff' : '#475569';
+    b.style.borderColor = on ? '#1e9fe0' : '#cbd5e1';
+  };
+  pintar('btnEvalPrimera', tipoEval === 'primera');
+  pintar('btnEvalReeval', tipoEval === 'reeval');
+}
+async function detectarTipoEval() {
+  // Por defecto arranca en "1ª evaluación"; si el paciente ya tiene un snapshot guardado, sugiere "Reevaluación".
+  tipoEval = 'primera';
+  const hint = document.getElementById('evalTipoHint');
+  if (hint) hint.textContent = '';
+  renderTipoEval();
+  if (!pacienteSel) return;
+  try {
+    const { data } = await sb.from('biolab_evolucion')
+      .select('fecha_vald, fecha_registro')
+      .eq('persona_id', String(pacienteSel.id))
+      .order('fecha_registro', { ascending: false })
+      .limit(1);
+    if (data && data.length) {
+      tipoEval = 'reeval';
+      renderTipoEval();
+      const f = data[0].fecha_vald || (data[0].fecha_registro ? String(data[0].fecha_registro).slice(0, 10) : '');
+      if (hint) hint.textContent = f ? ('· hay una evaluación anterior del ' + f) : '· hay una evaluación anterior guardada';
+    }
+  } catch (_) { /* sin tabla todavía: queda en 1ª evaluación */ }
+}
 let ultimaClasificacion = null;
 
 function toast(msg) {
@@ -409,6 +450,8 @@ function seleccionar(p) {
   document.getElementById('btnGuardarPob').style.display = 'none';
   // ¿Hay un borrador guardado para este paciente? -> ofrecer "Retomar"
   buscarBorrador();
+  // ¿Es 1ª evaluación o reevaluación? (autodetecta si ya hay una anterior)
+  detectarTipoEval();
 }
 
 // ---- PASO 4: traer VALD + pintar 🟢🟡🔴 con las normas ----
@@ -1563,25 +1606,28 @@ async function generar() {
       const d = calcData[it.id];
       if (d && d.sexo) { sexoPac = d.sexo === 'F' ? 'Femenino' : 'Masculino'; break; }
     }
-    // Evolución: buscar la evaluación anterior del paciente (snapshot con fecha VALD distinta a la actual).
+    // Evolución: solo si el usuario marcó "Reevaluación". En "1ª evaluación" no compara nada.
     // Con red: si la tabla no existe o falla, seguimos sin evolución (el informe sale igual).
     const fechaVald = ultimaEvaluacion.datos.fechaEvaluacion || '';
     let evolucion = null;
-    try {
-      const { data: snaps } = await sb.from('biolab_evolucion')
-        .select('fecha_vald, fecha_registro, snapshot')
-        .eq('persona_id', String(pacienteSel.id))
-        .order('fecha_registro', { ascending: false })
-        .limit(10);
-      const previo = (snaps || []).find(s => (s.fecha_vald || '') && (s.fecha_vald || '') !== fechaVald);
-      if (previo && previo.snapshot) {
-        evolucion = {
-          fecha_anterior: previo.fecha_vald || previo.fecha_registro || '',
-          calculadoras: previo.snapshot.calculadoras || [],
-          hallazgos: previo.snapshot.hallazgos || null,
-        };
-      }
-    } catch (_) { /* sin tabla o sin datos previos: sin evolución */ }
+    if (tipoEval === 'reeval') {
+      try {
+        const { data: snaps } = await sb.from('biolab_evolucion')
+          .select('fecha_vald, fecha_registro, snapshot')
+          .eq('persona_id', String(pacienteSel.id))
+          .order('fecha_registro', { ascending: false })
+          .limit(10);
+        const previo = (snaps || []).find(s => (s.fecha_vald || '') && (s.fecha_vald || '') !== fechaVald);
+        if (previo && previo.snapshot) {
+          evolucion = {
+            fecha_anterior: previo.fecha_vald || previo.fecha_registro || '',
+            calculadoras: previo.snapshot.calculadoras || [],
+            hallazgos: previo.snapshot.hallazgos || null,
+          };
+        }
+      } catch (_) { /* sin tabla o sin datos previos: sin evolución */ }
+      if (!evolucion) toast('Marcaste Reevaluación pero no encontré una evaluación anterior comparable. El informe sale sin sección de evolución.');
+    }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
