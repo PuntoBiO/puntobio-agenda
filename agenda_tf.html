@@ -559,6 +559,7 @@
   .hist-detalle { flex: 1; min-width: 0; }
   .hist-modulos { font-size: 13px; font-weight: 600; color: var(--celeste-oscuro); }
   .hist-contenido { font-size: 13px; color: var(--texto); margin-top: 2px; }
+  .hist-ejer { font-size: 13px; color: var(--texto); margin-top: 3px; padding-left: 2px; }
   .hist-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .hist-tag {
     font-size: 11px; padding: 2px 8px; border-radius: 99px;
@@ -4257,6 +4258,21 @@ window.revertirFaltaProfe = async function(id) {
   }
 };
 
+// Devuelve las líneas legibles de los ejercicios principales de una evolución.
+// Soporta el formato nuevo (columna jsonb "ejercicios") y el viejo (columnas sueltas).
+function ejerciciosDe(f){
+  let arr = [];
+  if (Array.isArray(f.ejercicios) && f.ejercicios.length) arr = f.ejercicios;
+  else if (f.ejercicio_principal || f.ejercicio_series || f.ejercicio_reps || f.carga)
+    arr = [{ ej: f.ejercicio_principal, series: f.ejercicio_series, reps: f.ejercicio_reps, carga: f.carga }];
+  return arr.map(r => {
+    const nombre = (r.ej||'').trim();
+    const sr = [(r.series||'').trim(), (r.reps||'').trim()].filter(Boolean).join('×');
+    const carga = (r.carga||'').trim();
+    const detalle = [sr, carga ? ('carga '+carga) : ''].filter(Boolean).join(' · ');
+    return [nombre, detalle].filter(Boolean).join(' — ');
+  }).filter(Boolean);
+}
 window.abrirHistorico = async (personaId, nombre) => {
   document.getElementById('hist-nombre').textContent = nombre || `#${personaId}`;
   document.getElementById('hist-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--celeste)">⟳ Cargando histórico...</div>';
@@ -4279,6 +4295,7 @@ window.abrirHistorico = async (personaId, nombre) => {
           </div>
           <div class="hist-detalle">
             ${partes ? `<div class="hist-modulos">${partes}</div>` : ''}
+            ${ejerciciosDe(f).map(l => `<div class="hist-ejer">🏋️ ${_escAttr(l)}</div>`).join('')}
             ${f.contenido ? `<div class="hist-contenido">${f.contenido}</div>` : ''}
             <div class="hist-tags">
               ${f.como_se_sintio ? `<span class="hist-tag">${f.como_se_sintio}</span>` : ''}
@@ -5430,8 +5447,17 @@ window.abrirEvoIndividual = (personaId) => {
   document.getElementById('evo-obs').value = ev?.observacion || '';
   evoCaritaSel = ev ? (ev.como_se_sintio || '') : CARITA_DEFAULT;
   evoDolorSel = !!ev?.dolor;
+  // Recargar los ejercicios guardados (formato nuevo jsonb o columnas viejas)
+  if (ev && Array.isArray(ev.ejercicios) && ev.ejercicios.length) {
+    evoEjercicios = ev.ejercicios.map(r => ({ ej: r.ej||'', series: r.series||'', reps: r.reps||'', carga: r.carga||'' }));
+  } else if (ev && (ev.ejercicio_principal || ev.ejercicio_series || ev.ejercicio_reps || ev.carga)) {
+    evoEjercicios = [{ ej: ev.ejercicio_principal||'', series: ev.ejercicio_series||'', reps: ev.ejercicio_reps||'', carga: ev.carga||'' }];
+  } else {
+    evoEjercicios = [{ ej:'', series:'', reps:'', carga:'' }];
+  }
   evoSeleccion = new Set([String(personaId)]);
   pintarChipsModulos();
+  renderEjercicios();
   pintarSeleccionEvo();
   document.querySelectorAll('[data-evo-carita]').forEach(el => {
     el.classList.toggle('sel', el.getAttribute('data-evo-carita') === evoCaritaSel);
@@ -5573,8 +5599,12 @@ function renderModalBody(dia, hora, servicio) {
             const color = tieneAlumno ? '#dc2626' : '#ea580c';
             alertaDolor = `<span class="alerta-dolor" style="color:${color};font-weight:700" title="${titulo.replace(/"/g,'&quot;')}">⚠️${tieneAlumno?'🩹':''}</span>`;
           }
+          const _ejerMiniArr = tieneEvo ? ejerciciosDe(ev) : [];
+          const _ejerMini = _ejerMiniArr.length === 1
+            ? ' · 🏋️ ' + _escAttr(_ejerMiniArr[0])
+            : (_ejerMiniArr.length > 1 ? ' · 🏋️ ' + _escAttr(_ejerMiniArr[0]) + ` (+${_ejerMiniArr.length-1})` : '');
           const resumenEvo = tieneEvo
-            ? `<div class="evo-mini">📝 ${[ev.sala, ev.modulo, ev.contenido].filter(Boolean).join(' · ') || 'evolución cargada'}${ev.como_se_sintio? ' · '+ev.como_se_sintio : ''}${ev.dolor? ' · ⚠️ dolor':''}</div>`
+            ? `<div class="evo-mini">📝 ${[ev.sala, ev.modulo, ev.contenido].filter(Boolean).join(' · ') || 'evolución cargada'}${_ejerMini}${ev.como_se_sintio? ' · '+ev.como_se_sintio : ''}${ev.dolor? ' · ⚠️ dolor':''}</div>`
             : '';
           // Chip de estado bien visible (solo para los que vienen, no para ausentes)
           const chipEvo = esAusente
@@ -5790,7 +5820,7 @@ function renderPanelEvo() {
       <div id="evo-ejercicios"></div>
       <button type="button" class="evo-ej-add" onclick="evoEjAgregar()">＋ Agregar ejercicio</button>
       <div class="evo-sublabel" style="margin-top:8px">Contenido de la sesión</div>
-      <textarea id="evo-contenido" class="evo-input" rows="2" placeholder="Ejercicios (ej: sentadilla, estocada, tracciones con banda...)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other"></textarea>
+      <textarea id="evo-contenido" class="evo-input" rows="2" placeholder="Notas o detalle de la sesión (opcional)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other"></textarea>
       <div class="evo-fila">
         <div class="evo-grupo">
           <div class="evo-sublabel">Cómo se sintió</div>
