@@ -507,6 +507,9 @@
     border: 1.5px dashed var(--celeste); background: #f0f9ff; color: var(--celeste);
     border-radius: 9px; cursor: pointer;
   }
+  /* Ejercicio principal: series + repeticiones lado a lado */
+  .evo-ej-sr { display: flex; gap: 8px; margin-top: 4px; }
+  .evo-ej-sr-campo { flex: 1; min-width: 0; }
   /* Alerta de dolor al lado del nombre */
   .alerta-dolor { margin-right: 5px; font-size: 13px; }
   /* Modal histórico del alumno */
@@ -3780,19 +3783,45 @@ window.modmgrGuardar = async () => {
   const btn = document.getElementById('modmgr-guardar');
   if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
   try {
+    // Traer TODO lo que ya existe en la base (activos e inactivos) para no chocar
+    // con el nombre único: si un nombre ya existe, se ACTUALIZA en vez de crear.
+    let existentes = [];
+    try { existentes = await supabaseQuery('modulos_tf', `?select=id,nombre,activo`); } catch (e) { existentes = []; }
+    const porNombre = {};
+    (existentes || []).forEach(r => { porNombre[(r.nombre || '').trim().toLowerCase()] = r; });
+
     let orden = 0;
     for (const m of MODMGR_LISTA) {
       const nombre = (m.nombre || '').trim();
-      if (m.id) {
-        if (m._eliminar) { await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { activo: false }); continue; }
-        if (!nombre) continue; // no dejar renombrar a vacío: se ignora
-        await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { nombre, ambito: m._amb || 'ambos', orden });
-        orden++;
-      } else {
-        if (m._eliminar || !nombre) continue;
-        await supabaseInsert('modulos_tf', { nombre, ambito: m._amb || 'ambos', orden, activo: true });
-        orden++;
+      // Baja (soft-delete)
+      if (m._eliminar) {
+        if (m.id) await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { activo: false });
+        continue;
       }
+      if (!nombre) continue; // no guardar renglones vacíos
+      const clave = nombre.toLowerCase();
+      const yaExiste = porNombre[clave];
+      const datos = { nombre, ambito: m._amb || 'ambos', orden, activo: true };
+
+      if (m.id) {
+        // Renglón que vino de la base. Si el nombre nuevo choca con OTRO módulo, no lo renombro.
+        if (yaExiste && String(yaExiste.id) !== String(m.id)) {
+          await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { ambito: datos.ambito, orden, activo: true });
+        } else {
+          await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, datos);
+          porNombre[clave] = { id: m.id, nombre, activo: true };
+        }
+      } else {
+        // Renglón nuevo. Si el nombre ya existe (aunque esté inactivo), lo reactivo/actualizo.
+        if (yaExiste) {
+          await supabaseUpdate('modulos_tf', `id=eq.${yaExiste.id}`, datos);
+        } else {
+          const creado = await supabaseInsertReturn('modulos_tf', datos);
+          const nuevoId = Array.isArray(creado) ? creado[0]?.id : creado?.id;
+          porNombre[clave] = { id: nuevoId, nombre, activo: true };
+        }
+      }
+      orden++;
     }
     await cargarModulosTF();
     cerrarModMgr();
@@ -5206,6 +5235,8 @@ function leerPanelEvo() {
     dolor: !!evoDolorSel,
     observacion: (document.getElementById('evo-obs')?.value || '').trim() || null,
     ejercicio_principal: (document.getElementById('evo-ej-principal')?.value || '').trim() || null,
+    ejercicio_series: (document.getElementById('evo-ej-series')?.value || '').trim() || null,
+    ejercicio_reps: (document.getElementById('evo-ej-reps')?.value || '').trim() || null,
     carga: (document.getElementById('evo-carga')?.value || '').trim() || null,
     sala: esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null
   };
@@ -5249,6 +5280,8 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
     dolor: !!datos.dolor,
     observacion: datos.observacion || null,
     ejercicio_principal: datos.ejercicio_principal || null,
+    ejercicio_series: datos.ejercicio_series || null,
+    ejercicio_reps: datos.ejercicio_reps || null,
     carga: datos.carga || null,
     score: scoreDesdeCarita(datos.como_se_sintio)
   };
@@ -5684,8 +5717,18 @@ function renderPanelEvo() {
         ${btnAdminMod}
       </div>
       <div class="evo-chips-modulos" id="evo-chips-modulos"></div>
-      <div class="evo-sublabel" style="margin-top:8px">Ejercicio principal (serie y rep)</div>
-      <input id="evo-ej-principal" class="evo-input" type="text" placeholder="Ej: Sentadilla 4×8" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+      <div class="evo-sublabel" style="margin-top:8px">Ejercicio principal</div>
+      <input id="evo-ej-principal" class="evo-input" type="text" placeholder="Ej: Sentadilla" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+      <div class="evo-ej-sr">
+        <div class="evo-ej-sr-campo">
+          <div class="evo-sublabel">Series</div>
+          <input id="evo-ej-series" class="evo-input" type="text" inputmode="numeric" placeholder="Ej: 4" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+        </div>
+        <div class="evo-ej-sr-campo">
+          <div class="evo-sublabel">Repeticiones</div>
+          <input id="evo-ej-reps" class="evo-input" type="text" placeholder="Ej: 8 (o 8-10)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+        </div>
+      </div>
       <div class="evo-sublabel" style="margin-top:6px">Carga</div>
       <input id="evo-carga" class="evo-input" type="text" placeholder="Ej: 40 kg / banda roja / peso corporal" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
       <div class="evo-sublabel" style="margin-top:6px">Contenido de la sesión</div>
