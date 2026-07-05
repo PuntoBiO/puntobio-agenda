@@ -2994,25 +2994,42 @@ async function abrirSelectorPDF() {
   } catch (_) { /* sin tabla: sin gráfico */ }
   window._snapsEvoPDF = _snapsEvo;
 
+  // Fecha de cada ítem para agrupar por evaluación (misma evaluación = misma fecha)
+  const isoDia = d => { try { return new Date(d).toISOString().slice(0, 10); } catch (_) { return ''; } };
+  const dispDia = iso => iso ? (iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4)) : '';
+  const fechaEvalObs = o => {
+    const m = (o.texto || '').match(/Fecha de evaluaci[oó]n:\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+    if (m) return m[3] + '-' + m[2] + '-' + m[1];
+    return isoDia(o.creado_en);
+  };
+  const fechaAdj = a => a.fecha_estudio ? isoDia(a.fecha_estudio) : isoDia(a.creado_en);
+
   const obsCheckboxes = observaciones.length
-    ? observaciones.map((o, i) => `
+    ? observaciones.map((o, i) => {
+        const fIso = fechaEvalObs(o);
+        return `
         <label style="display:flex; gap:10px; align-items:flex-start; padding:10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:8px; cursor:pointer;">
-          <input type="checkbox" class="pdf-obs-check" data-obs-id="${o.id}" checked style="margin-top:3px;">
+          <input type="checkbox" class="pdf-obs-check" data-obs-id="${o.id}" data-fecha="${fIso}" checked style="margin-top:3px;">
           <span style="flex:1;">
+            ${fIso ? `<span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:1px 8px;border-radius:5px;margin-bottom:4px;">📅 Evaluación ${dispDia(fIso)}</span><br>` : ''}
             <span style="font-weight:600; font-size:13px;">${escapeHtml(o.autor_nombre ? upperName(o.autor_nombre).split(' ').slice(0,2).join(' ') : 'Profesional')}</span>
             <span style="color:var(--gris-texto); font-size:12px;"> · ${formatDateTime(o.creado_en)}</span>
             <div style="font-size:13px; margin-top:4px; white-space:pre-wrap;">${escapeHtml(o.texto)}</div>
           </span>
-        </label>`).join('')
+        </label>`;
+      }).join('')
     : '<div class="obs-empty">No hay observaciones clínicas cargadas.</div>';
 
   // Adjuntos (para listar / incluir referencia en el PDF)
   const adjCheckboxes = adjActual.length
-    ? adjActual.map(a => `
+    ? adjActual.map(a => {
+        const fIso = fechaAdj(a);
+        return `
         <label style="display:flex; gap:10px; align-items:center; padding:8px 10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:6px; cursor:pointer;">
-          <input type="checkbox" class="pdf-adj-check" data-adj-id="${a.id}" checked>
-          <span style="flex:1; font-size:13px;">${iconoArchivo(a.tipo_mime, a.nombre_original)} ${escapeHtml(a.nombre_original)} <span style="color:var(--gris-texto); font-size:12px;">(${formatTamano(a.tamano_bytes)})</span></span>
-        </label>`).join('')
+          <input type="checkbox" class="pdf-adj-check" data-adj-id="${a.id}" data-fecha="${fIso}" checked>
+          <span style="flex:1; font-size:13px;">${iconoArchivo(a.tipo_mime, a.nombre_original)} ${escapeHtml(a.nombre_original)} <span style="color:var(--gris-texto); font-size:12px;">(${formatTamano(a.tamano_bytes)})</span>${fIso ? ` <span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;margin-left:4px;">📅 ${dispDia(fIso)}</span>` : ''}</span>
+        </label>`;
+      }).join('')
     : '<div class="obs-empty">Sin archivos adjuntos.</div>';
 
   const html = `
@@ -3026,6 +3043,11 @@ async function abrirSelectorPDF() {
           <button class="modal-close" onclick="cerrarSelectorPDF()">×</button>
         </div>
         <div class="modal-body">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; padding:10px; background:#f0f9ff; border:1px solid #bae6fd; border-radius:10px;">
+            <span style="font-size:12px; color:#0369a1; font-weight:700;">Selección rápida:</span>
+            <button type="button" class="btn btn-sm" onclick="pdfSeleccionar('reciente')" style="background:#1e9fe0; color:#fff; border-color:#1e9fe0;">📌 Solo la evaluación más reciente</button>
+            <button type="button" class="btn btn-sm" onclick="pdfSeleccionar('todas')">Todas</button>
+          </div>
           <div class="hc-section">
             <div class="hc-section-header">📋 Datos del formulario del paciente</div>
             <div class="hc-section-body">
@@ -3129,6 +3151,16 @@ async function abrirSelectorPDF() {
   cont.id = 'selectorPDFWrap';
   cont.innerHTML = html;
   document.body.appendChild(cont);
+}
+
+// Selección rápida en el selector de PDF: por evaluación (fecha) o todas.
+function pdfSeleccionar(modo) {
+  const checks = Array.from(document.querySelectorAll('.pdf-obs-check, .pdf-adj-check'));
+  if (!checks.length) return;
+  if (modo === 'todas') { checks.forEach(c => { c.checked = true; }); return; }
+  const fechas = checks.map(c => c.dataset.fecha || '').filter(Boolean).sort();
+  const max = fechas.length ? fechas[fechas.length - 1] : '';
+  checks.forEach(c => { c.checked = !!max && c.dataset.fecha === max; });
 }
 
 function cerrarSelectorPDF() {
