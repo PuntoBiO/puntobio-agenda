@@ -450,6 +450,63 @@
     align-items: center; justify-content: center; padding: 16px;
   }
   .justif-overlay.activo { display: flex; }
+  /* ===== Administrar lista de módulos (solo Lu) ===== */
+  .modmgr-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55); z-index: 300;
+    align-items: center; justify-content: center; padding: 16px;
+  }
+  .modmgr-overlay.activo { display: flex; }
+  .modmgr-modal {
+    background: #fff; border-radius: 14px;
+    width: 640px; max-width: 100%; max-height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.3); border-top: 3px solid var(--celeste);
+  }
+  .modmgr-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--gris-borde);
+    display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+  }
+  .modmgr-header .modmgr-titulo { font-size: 16px; font-weight: 700; }
+  .modmgr-header small { color: var(--texto-suave); font-size: 12px; display: block; margin-top: 2px; font-weight: 400; }
+  .modmgr-body { padding: 12px 16px; overflow-y: auto; flex: 1; }
+  .modmgr-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 4px; border-bottom: 1px solid #f1f5f9;
+  }
+  .modmgr-row.eliminada { opacity: .45; }
+  .modmgr-orden { display: flex; flex-direction: column; gap: 2px; }
+  .modmgr-orden button {
+    width: 22px; height: 16px; line-height: 12px; font-size: 9px;
+    border: 1px solid var(--gris-borde); background: #f8fafc; border-radius: 4px;
+    cursor: pointer; color: var(--texto-suave); padding: 0;
+  }
+  .modmgr-orden button:hover { background: #e2e8f0; }
+  .modmgr-nombre {
+    flex: 1; min-width: 0; padding: 7px 9px; font-size: 13px;
+    border: 1.5px solid var(--gris-borde); border-radius: 8px; font-family: inherit;
+  }
+  .modmgr-amb { display: flex; gap: 3px; }
+  .modmgr-amb button {
+    padding: 6px 8px; font-size: 11px; font-weight: 600;
+    border: 1.5px solid var(--gris-borde); background: #fff; border-radius: 7px;
+    cursor: pointer; color: var(--texto-suave); white-space: nowrap;
+  }
+  .modmgr-amb button.sel { background: var(--celeste); border-color: var(--celeste); color: #fff; }
+  .modmgr-del {
+    width: 30px; height: 30px; border: 1.5px solid #fecaca; background: #fff;
+    border-radius: 8px; cursor: pointer; font-size: 13px; flex-shrink: 0;
+  }
+  .modmgr-del:hover { background: #fef2f2; }
+  .modmgr-footer {
+    padding: 12px 16px; border-top: 1px solid var(--gris-borde);
+    display: flex; gap: 8px; justify-content: space-between; flex-shrink: 0; align-items: center;
+  }
+  .modmgr-add {
+    padding: 8px 12px; font-size: 13px; font-weight: 600;
+    border: 1.5px dashed var(--celeste); background: #f0f9ff; color: var(--celeste);
+    border-radius: 9px; cursor: pointer;
+  }
   /* Alerta de dolor al lado del nombre */
   .alerta-dolor { margin-right: 5px; font-size: 13px; }
   /* Modal histórico del alumno */
@@ -899,6 +956,26 @@
     <div class="justif-footer">
       <button class="btn-modal" onclick="cancelarRevisarPendientes()">Cancelar</button>
       <button class="btn-modal primario" id="rev-pend-aplicar" onclick="aplicarRevisarYCerrar()" disabled>Aplicar y cerrar</button>
+    </div>
+  </div>
+</div>
+<!-- ADMINISTRAR LISTA DE MÓDULOS (solo Lu) -->
+<div class="modmgr-overlay" id="modmgr-overlay">
+  <div class="modmgr-modal">
+    <div class="modmgr-header">
+      <div>
+        <div class="modmgr-titulo">⚙️ Editar lista de módulos</div>
+        <small>Elegí en qué agenda aparece cada uno. Ordená con ▲▼ (ese es el orden de paso).</small>
+      </div>
+      <button class="modal-cerrar" onclick="cerrarModMgr()">✕</button>
+    </div>
+    <div class="modmgr-body" id="modmgr-body"></div>
+    <div class="modmgr-footer">
+      <button class="modmgr-add" onclick="modmgrAgregar()">＋ Agregar módulo</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-modal" onclick="cerrarModMgr()">Cancelar</button>
+        <button class="btn-modal primario" id="modmgr-guardar" onclick="modmgrGuardar()">Guardar cambios</button>
+      </div>
     </div>
   </div>
 </div>
@@ -3641,30 +3718,90 @@ window.evoBorrarNotaPred = async (i) => {
   } catch (e) { toast('No se pudo borrar: ' + e.message, 'err'); }
 };
 
-// ===== Editar la lista de módulos (solo Lu) =====
+// ===== Editar la lista de módulos (solo Lu) — administrador visual =====
+// Cada módulo tiene un "ámbito": 'kine' (solo Kinefilaxia), 'entrenamiento' (solo
+// Entrenamiento) o 'ambos' (aparece en las dos agendas). El ORDEN de la lista es el
+// orden de paso con el que se muestran en el desplegable.
+let MODMGR_LISTA = []; // copia de trabajo mientras edita
+
 window.evoAdminModulos = async () => {
   if (!puedeEditarModulos()) return;
-  const nombre = prompt('Escribí el nombre del módulo nuevo a AGREGAR.\n\n(Para quitar uno, dejá vacío y aceptá: te muestro la lista para elegir cuál desactivar.)');
-  if (nombre === null) return;
-  const limpio = nombre.trim();
   try {
-    if (limpio) {
-      await supabaseInsert('modulos_tf', { nombre: limpio, orden: 999 });
-      await cargarModulosTF();
-      toast('✓ Módulo agregado: ' + limpio);
-    } else {
-      // Quitar: pedir cuál
-      const lista = MODULOS_TF.map((m,i) => `${i+1}. ${m.nombre}`).join('\n');
-      const cual = prompt('¿Qué módulo querés QUITAR? Escribí el número:\n\n' + lista);
-      const idx = parseInt(cual) - 1;
-      if (!isNaN(idx) && MODULOS_TF[idx]) {
-        await supabaseUpdate('modulos_tf', `id=eq.${MODULOS_TF[idx].id}`, { activo: false });
-        await cargarModulosTF();
-        toast('Módulo quitado: ' + MODULOS_TF[idx]?.nombre);
+    const filas = await supabaseQuery('modulos_tf', `?select=*&activo=eq.true&order=orden.asc,nombre.asc`);
+    MODMGR_LISTA = (filas || []).map(m => ({ id: m.id, nombre: m.nombre || '', _amb: m.ambito || 'ambos', _eliminar: false }));
+  } catch (e) {
+    MODMGR_LISTA = (MODULOS_TF || []).map(m => ({ id: m.id, nombre: m.nombre || '', _amb: m.ambito || 'ambos', _eliminar: false }));
+  }
+  renderModMgr();
+  document.getElementById('modmgr-overlay').classList.add('activo');
+};
+
+function renderModMgr() {
+  const cont = document.getElementById('modmgr-body');
+  if (!cont) return;
+  if (!MODMGR_LISTA.length) {
+    cont.innerHTML = '<div style="padding:16px;color:var(--texto-suave);font-size:13px">No hay módulos. Tocá «＋ Agregar módulo».</div>';
+    return;
+  }
+  cont.innerHTML = MODMGR_LISTA.map((m, i) => `
+    <div class="modmgr-row${m._eliminar ? ' eliminada' : ''}" data-i="${i}">
+      <div class="modmgr-orden">
+        <button onclick="modmgrMover(${i},-1)" title="Subir">▲</button>
+        <button onclick="modmgrMover(${i},1)" title="Bajar">▼</button>
+      </div>
+      <input class="modmgr-nombre" value="${(m.nombre || '').replace(/"/g,'&quot;')}"
+             oninput="modmgrSetNombre(${i}, this.value)" placeholder="Nombre del módulo" ${m._eliminar ? 'disabled' : ''}>
+      <div class="modmgr-amb">
+        <button class="${m._amb==='kine'?'sel':''}" onclick="modmgrSetAmb(${i},'kine')" title="Solo Kinefilaxia">Kine</button>
+        <button class="${m._amb==='entrenamiento'?'sel':''}" onclick="modmgrSetAmb(${i},'entrenamiento')" title="Solo Entrenamiento">Entren</button>
+        <button class="${m._amb==='ambos'?'sel':''}" onclick="modmgrSetAmb(${i},'ambos')" title="En las dos agendas">Ambos</button>
+      </div>
+      <button class="modmgr-del" onclick="modmgrEliminar(${i})" title="${m._eliminar ? 'Deshacer' : 'Quitar de la lista'}">${m._eliminar ? '↩︎' : '🗑'}</button>
+    </div>`).join('');
+}
+window.modmgrMover = (i, dir) => {
+  const j = i + dir;
+  if (j < 0 || j >= MODMGR_LISTA.length) return;
+  const tmp = MODMGR_LISTA[i]; MODMGR_LISTA[i] = MODMGR_LISTA[j]; MODMGR_LISTA[j] = tmp;
+  renderModMgr();
+};
+window.modmgrSetNombre = (i, v) => { if (MODMGR_LISTA[i]) MODMGR_LISTA[i].nombre = v; };
+window.modmgrSetAmb = (i, a) => { if (MODMGR_LISTA[i]) { MODMGR_LISTA[i]._amb = a; renderModMgr(); } };
+window.modmgrEliminar = (i) => { if (MODMGR_LISTA[i]) { MODMGR_LISTA[i]._eliminar = !MODMGR_LISTA[i]._eliminar; renderModMgr(); } };
+window.modmgrAgregar = () => {
+  MODMGR_LISTA.push({ nombre: '', _amb: 'entrenamiento', _eliminar: false, _nuevo: true });
+  renderModMgr();
+  const cont = document.getElementById('modmgr-body');
+  const inputs = cont ? cont.querySelectorAll('.modmgr-nombre') : [];
+  if (inputs.length) { const last = inputs[inputs.length-1]; last.focus(); last.scrollIntoView({block:'nearest'}); }
+};
+window.cerrarModMgr = () => document.getElementById('modmgr-overlay').classList.remove('activo');
+window.modmgrGuardar = async () => {
+  const btn = document.getElementById('modmgr-guardar');
+  if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+  try {
+    let orden = 0;
+    for (const m of MODMGR_LISTA) {
+      const nombre = (m.nombre || '').trim();
+      if (m.id) {
+        if (m._eliminar) { await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { activo: false }); continue; }
+        if (!nombre) continue; // no dejar renombrar a vacío: se ignora
+        await supabaseUpdate('modulos_tf', `id=eq.${m.id}`, { nombre, ambito: m._amb || 'ambos', orden });
+        orden++;
+      } else {
+        if (m._eliminar || !nombre) continue;
+        await supabaseInsert('modulos_tf', { nombre, ambito: m._amb || 'ambos', orden, activo: true });
+        orden++;
       }
     }
+    await cargarModulosTF();
+    cerrarModMgr();
     renderPanelEvo();
-  } catch (e) { toast('No se pudo editar la lista: ' + e.message, 'err'); }
+    toast('✓ Lista de módulos actualizada');
+  } catch (e) {
+    toast('No se pudo guardar: ' + e.message, 'err');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Guardar cambios'; }
 };
 
 // Guardar la anotación del panel a TODOS los seleccionados
@@ -5068,6 +5205,8 @@ function leerPanelEvo() {
     como_se_sintio: evoCaritaSel || null,
     dolor: !!evoDolorSel,
     observacion: (document.getElementById('evo-obs')?.value || '').trim() || null,
+    ejercicio_principal: (document.getElementById('evo-ej-principal')?.value || '').trim() || null,
+    carga: (document.getElementById('evo-carga')?.value || '').trim() || null,
     sala: esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null
   };
 }
@@ -5109,6 +5248,8 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
     como_se_sintio: datos.como_se_sintio || null,
     dolor: !!datos.dolor,
     observacion: datos.observacion || null,
+    ejercicio_principal: datos.ejercicio_principal || null,
+    carga: datos.carga || null,
     score: scoreDesdeCarita(datos.como_se_sintio)
   };
   // 1) ¿Ya existe en cache local?
@@ -5457,8 +5598,15 @@ function renderPanelEvo() {
         <button class="evo-nota-pred-x" onclick="evoBorrarNotaPred(${i})" title="Borrar esta nota">×</button>
       </span>`).join('')
     : '<span style="font-size:12px;color:var(--texto-suave)">Todavía no guardaste notas predeterminadas. Armá una abajo y tocá «Guardar como predeterminada».</span>';
-  // Opciones del desplegable de módulos
-  const opcionesMod = MODULOS_TF.map(m => `<option value="${m.nombre.replace(/"/g,'&quot;')}">${m.nombre}</option>`).join('');
+  // Opciones del desplegable de módulos — filtradas según el servicio de la clase.
+  // Kinefilaxia muestra módulos 'kine' (+ 'ambos'); Entrenamiento muestra 'entrenamiento' (+ 'ambos').
+  const _esKineMod = esKinefilaxia(evoTurnoActual?.servicio);
+  const modsFiltrados = MODULOS_TF.filter(m => {
+    const amb = (m.ambito || 'ambos');
+    if (amb === 'ambos') return true;
+    return _esKineMod ? (amb === 'kine') : (amb === 'entrenamiento');
+  });
+  const opcionesMod = modsFiltrados.map(m => `<option value="${m.nombre.replace(/"/g,'&quot;')}">${m.nombre}</option>`).join('');
   const btnAdminMod = puedeEditarModulos()
     ? `<button class="evo-mod-admin" onclick="evoAdminModulos()" title="Agregar o quitar módulos de la lista">⚙️ Editar lista</button>` : '';
   // Selector de sala: solo si la clase es de Kinefilaxia
@@ -5536,6 +5684,10 @@ function renderPanelEvo() {
         ${btnAdminMod}
       </div>
       <div class="evo-chips-modulos" id="evo-chips-modulos"></div>
+      <div class="evo-sublabel" style="margin-top:8px">Ejercicio principal (serie y rep)</div>
+      <input id="evo-ej-principal" class="evo-input" type="text" placeholder="Ej: Sentadilla 4×8" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+      <div class="evo-sublabel" style="margin-top:6px">Carga</div>
+      <input id="evo-carga" class="evo-input" type="text" placeholder="Ej: 40 kg / banda roja / peso corporal" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
       <div class="evo-sublabel" style="margin-top:6px">Contenido de la sesión</div>
       <textarea id="evo-contenido" class="evo-input" rows="2" placeholder="Ejercicios (ej: sentadilla, estocada, tracciones con banda...)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other"></textarea>
       <div class="evo-fila">
