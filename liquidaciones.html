@@ -152,6 +152,7 @@
       <select id="filtroArea" onchange="cargar()">
         <option value="">Todas</option>
         <option value="Consultorio">Consultorio</option>
+        <option value="Masoterapia">Masoterapia</option>
         <option value="BioLab">BioLab</option>
         <option value="MOPLEX">MOPLEX</option>
       </select>
@@ -231,6 +232,8 @@ function practicaArea(code){
   if (c === 'EVALUACION' || c === 'EVAL' || c.startsWith('SARKMED')) return 'BioLab';
   // MOPLEX (podología / plantillas): área propia
   if (c === 'MOPLEX') return 'MOPLEX';
+  // Masoterapia: área de Vero (liquida por pago, no por sesiones)
+  if (c.startsWith('MASAJES')) return 'Masoterapia';
   // Consultorio: fisio, osteo, maso, DLM, punción, RPG, suelo pélvico, terapia manual
   return 'Consultorio';
 }
@@ -710,7 +713,7 @@ function render(pagos, sesiones, filtroProf){
   const tratPrac = {};
   for (const s of (MT.sesAll || [])){ const t = s.tratamientos || {}; if (s.tratamiento_id != null && t.practica_codigo) tratPrac[s.tratamiento_id] = t.practica_codigo; }
   for (const p of pagos){ const t = p.tratamientos || {}; if (p.tratamiento_id != null && t.practica_codigo) tratPrac[p.tratamiento_id] = t.practica_codigo; }
-  const excluidaMotor = pc => pc === 'MOPLEX' || pc === 'MASAJES_R' || pc === 'MASAJES_CERO';
+  const excluidaMotor = pc => pc === 'MOPLEX' || String(pc||'').startsWith('MASAJES');   // maso liquida por PAGO, no por sesiones
 
   // Historia por tratamiento
   const sesPorTrat = {}, pagosPorTrat = {};
@@ -775,6 +778,35 @@ function render(pagos, sesiones, filtroProf){
     detalle[dk].cobrado += s.valor; detalle[dk].mProf += s.mProf; detalle[dk].centro += s.mCentro;
   }
 
+  // MASOTERAPIA: el área es de Vero sola → el pack/masaje se liquida ENTERO en el momento
+  // en que se ABONA (no hay que esperar sesiones para atribuirlo, no se comparte con nadie).
+  // Los regalos (MASAJES_R) siguen en su módulo aparte; los de junio ya se liquidaron en junio.
+  for (const p of pagos){
+    const pc = String((p.tratamientos || {}).practica_codigo || '');
+    if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
+    const imp = Number(p.importe) || 0;
+    if (imp <= 0.5) continue;
+    const prof = normProf(p.profesional) || 'Vero';
+    const esVar = ['Bruno','Male','Vero'].includes(prof);
+    const mProf = esVar ? Math.round(imp * 0.65) : 0;
+    const mCentro = imp - mProf;
+    const esVista = !esModoMoplex && (!filtroProf || prof === filtroProf) && (!filtroArea || filtroArea === 'Masoterapia');
+    if (!esVista) continue;
+    totalBruto += imp; totalProf += mProf; totalCentro += mCentro; cantVista++;
+    if (!resumen[prof]) resumen[prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
+    const r = resumen[prof];
+    r.cant++; r.bruto += imp; r.prof += mProf; r.centro += mCentro;
+    const tM = p.tratamientos || {};
+    r.ses.push({ fecha: p.fecha, fechaAbono: p.fecha, prof, valor: imp, mProf, mCentro,
+                 paciente: ((tM.personas || {}).nombre) || '—', codigo: tM.codigo_id || '—', practica: pc });
+    if (!porArea['Masoterapia']) porArea['Masoterapia'] = {bruto:0, prof:0, moplex:0, centro:0, cant:0};
+    const arM = porArea['Masoterapia'];
+    arM.cant++; arM.bruto += imp; arM.prof += mProf; arM.centro += mCentro;
+    const dkM = prof + '||' + practicaLabel(pc);
+    if (!detalle[dkM]) detalle[dkM] = {prof, prac: practicaLabel(pc), cobrado:0, mProf:0, centro:0};
+    detalle[dkM].cobrado += imp; detalle[dkM].mProf += mProf; detalle[dkM].centro += mCentro;
+  }
+
   // Producción del mes (sesiones TRABAJADAS en el mes, estén abonadas o no)
   const prodMes = {};
   for (const s of (MT.sesAll || [])){
@@ -788,10 +820,17 @@ function render(pagos, sesiones, filtroProf){
   }
 
   // Plata física del mes: quién la recibió y por qué medio (incluye MOPLEX: es plata real)
+  const recibidoDet = {};   // quién recibió → lista de pagos (para mostrar qué compone el "en mano")
   for (const p of pagos){
     const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
     const imp = Number(p.importe) || 0;
     recibido[quien] = (recibido[quien] || 0) + imp;
+    const tD = p.tratamientos || {};
+    (recibidoDet[quien] = recibidoDet[quien] || []).push({
+      fecha: p.fecha, importe: imp,
+      paciente: ((tD.personas || {}).nombre) || '—',
+      codigo: tD.codigo_id || '—', practica: tD.practica_codigo || ''
+    });
     if (!porMedio[quien]) porMedio[quien] = {debito:0, efectivo:0, transferencia:0};
     const medio = String(p.medio_pago || '').toUpperCase();
     if (medio.includes('DEBITO') || medio.includes('DÉBITO')) porMedio[quien].debito += imp;
@@ -898,7 +937,7 @@ function render(pagos, sesiones, filtroProf){
   // ===== GANANCIA DE PUNTOBIO — solapa desplegable (general · por área · por profesional) =====
   // (NO se muestra a un profesional restringido: es info del centro, no suya)
   if (!esModoMoplex && !soloLoMio){
-    const ordenArea = ['Consultorio','BioLab','MOPLEX'];
+    const ordenArea = ['Consultorio','Masoterapia','BioLab','MOPLEX'];
     const areas = Object.keys(porArea).sort((a,b)=>{const ia=ordenArea.indexOf(a),ib=ordenArea.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
     html += `<details class="gan-panel" open>
       <summary class="gan-sum">
@@ -1002,6 +1041,26 @@ function render(pagos, sesiones, filtroProf){
         html += `<tr><td><b>${n[0]}</b></td><td>${badge(n[1])}</td><td class="num"><b>${fmt(n[2])}</b></td></tr>`;
       }
       html += `</tbody></table>`;
+    }
+
+    // Detalle de la plata recibida por cada uno (acá se ven los pagos adelantados en custodia,
+    // ej. un pack pagado cuyas sesiones todavía no se hicieron: no liquida, pero la plata está)
+    {
+      const quienes = Object.keys(recibidoDet).filter(q => !filtroProf || q === filtroProf);
+      if (quienes.length){
+        html += `<details style="margin:-4px 0 18px;"><summary style="cursor:pointer;color:#1e6fa8;font-size:13.5px;">Ver qué pagos recibió cada uno este mes (incluye adelantos en custodia)</summary>`;
+        for (const q of ordenarProfs(quienes)){
+          const lista = recibidoDet[q].slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+          const tot = lista.reduce((a,x)=> a + x.importe, 0);
+          html += `<div style="margin-top:10px;"><b>${badge(q)}</b> — recibió ${fmt(tot)}</div>
+            <table style="margin-top:6px;"><thead><tr><th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th class="num">Importe</th></tr></thead><tbody>`;
+          for (const x of lista){
+            html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td class="num">${fmt(x.importe)}</td></tr>`;
+          }
+          html += `</tbody></table>`;
+        }
+        html += `</details>`;
+      }
     }
 
     // ===== BLOQUE 4: SESIONES REALIZADAS SIN ABONAR (pasan a la próxima liquidación) =====
