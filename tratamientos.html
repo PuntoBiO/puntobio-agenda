@@ -361,7 +361,7 @@ tbody tr:last-child td { border-bottom: 0; }
   <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
     <div>
       <b style="color:#92400e;">🧹 Tratamientos sin actividad</b>
-      <span style="color:#a16207; font-size:13px;"> — creados hace más de 30 días, sin ninguna sesión ni pago (típico: se creó para dar turno y el paciente canceló). Borrarlos no toca nada más.</span>
+      <span style="color:#a16207; font-size:13px;"> — dos grupos: los que <b>nunca tuvieron nada</b> (se pueden borrar) y los que <b>hace más de 30 días que no se mueven</b> (se dan de baja; su historia de sesiones y pagos se conserva).</span>
     </div>
     <button class="btn btn-secondary" onclick="document.getElementById('panelSinActividad').style.display='none'">✕ Cerrar</button>
   </div>
@@ -1732,36 +1732,72 @@ window.abrirSinActividad = async function(){
     if (error) throw error
     const ids = (ttos||[]).map(t => t.id)
     if (!ids.length){ lista.innerHTML = 'No hay tratamientos sin actividad 👍'; return }
-    const conAlgo = new Set()
+    // Última actividad (sesión o pago) de cada tratamiento
+    const ultAct = {}   // id → fecha máxima (YYYY-MM-DD)
     for (let i = 0; i < ids.length; i += 150){
       const lote = ids.slice(i, i+150)
-      const { data: ses } = await sb.from('sesiones').select('tratamiento_id').in('tratamiento_id', lote).limit(5000)
-      ;(ses||[]).forEach(x => conAlgo.add(x.tratamiento_id))
-      const { data: pag } = await sb.from('pagos_consultorio').select('tratamiento_id').in('tratamiento_id', lote).limit(5000)
-      ;(pag||[]).forEach(x => conAlgo.add(x.tratamiento_id))
+      const { data: ses } = await sb.from('sesiones').select('tratamiento_id, fecha').in('tratamiento_id', lote).limit(10000)
+      ;(ses||[]).forEach(x => { const f = String(x.fecha||'').slice(0,10); if (!ultAct[x.tratamiento_id] || f > ultAct[x.tratamiento_id]) ultAct[x.tratamiento_id] = f })
+      const { data: pag } = await sb.from('pagos_consultorio').select('tratamiento_id, fecha').in('tratamiento_id', lote).limit(10000)
+      ;(pag||[]).forEach(x => { const f = String(x.fecha||'').slice(0,10); if (!ultAct[x.tratamiento_id] || f > ultAct[x.tratamiento_id]) ultAct[x.tratamiento_id] = f })
     }
-    const candidatos = (ttos||[]).filter(t => !conAlgo.has(t.id))
-    if (!candidatos.length){ lista.innerHTML = 'No hay tratamientos sin actividad 👍'; return }
-    lista.innerHTML = `<table style="width:100%; border-collapse:collapse; background:#fff; border-radius:8px; overflow:hidden;">
-      <thead><tr style="background:#fef3c7; color:#92400e; text-align:left;">
-        <th style="padding:8px 10px;">Tto</th><th style="padding:8px 10px;">Paciente</th>
-        <th style="padding:8px 10px;">Práctica</th><th style="padding:8px 10px;">Alta</th>
-        <th style="padding:8px 10px;">Valor/sesión</th><th style="padding:8px 10px;"></th>
-      </tr></thead><tbody>` +
-      candidatos.map(t => `<tr style="border-top:1px solid #fde68a;">
+    // Grupo A: nunca tuvieron NADA (alta > 30 días) → se pueden BORRAR
+    const nuncaNada = (ttos||[]).filter(t => !ultAct[t.id])
+    // Grupo B: tuvieron actividad, pero la última fue hace más de 30 días → DAR DE BAJA
+    const frenados = (ttos||[]).filter(t => ultAct[t.id] && ultAct[t.id] < corte)
+      .sort((a,b) => (ultAct[a.id]).localeCompare(ultAct[b.id]))
+
+    const filaTto = (t, extra, boton) => `<tr style="border-top:1px solid #fde68a;">
         <td style="padding:7px 10px; font-family:monospace; font-size:12.5px;">${t.codigo_id || ('#'+t.id)}</td>
         <td style="padding:7px 10px;">${(t.personas||{}).nombre || '—'}</td>
         <td style="padding:7px 10px;">${t.practica_codigo || '—'}</td>
         <td style="padding:7px 10px;">${t.fecha_alta ? String(t.fecha_alta).slice(0,10) : '—'}</td>
-        <td style="padding:7px 10px;">$${Number(t.valor_sesion||0).toLocaleString('es-AR')}</td>
-        <td style="padding:7px 10px; text-align:right;">
-          <button class="btn btn-secondary" style="color:#b91c1c; border-color:#fca5a5;" onclick="borrarTtoSinActividad(${t.id}, '${(t.codigo_id||'').replace(/'/g,'')}')">🗑 Borrar</button>
-        </td></tr>`).join('') +
-      `</tbody></table>
-      <div style="margin-top:8px; font-size:12.5px; color:#a16207;">${candidatos.length} tratamiento(s) sin sesiones ni pagos, con más de 30 días.</div>`
+        <td style="padding:7px 10px;">${extra}</td>
+        <td style="padding:7px 10px; text-align:right;">${boton}</td></tr>`
+
+    let htmlP = ''
+    if (!nuncaNada.length && !frenados.length){ lista.innerHTML = 'No hay tratamientos sin actividad ni frenados 👍'; return }
+
+    if (nuncaNada.length){
+      htmlP += `<div style="margin:4px 0 6px; font-weight:700; color:#92400e;">Nunca tuvieron actividad (${nuncaNada.length}) — se pueden borrar</div>
+        <table style="width:100%; border-collapse:collapse; background:#fff; border-radius:8px; overflow:hidden;">
+        <thead><tr style="background:#fef3c7; color:#92400e; text-align:left;">
+          <th style="padding:8px 10px;">Tto</th><th style="padding:8px 10px;">Paciente</th>
+          <th style="padding:8px 10px;">Práctica</th><th style="padding:8px 10px;">Alta</th>
+          <th style="padding:8px 10px;">Valor/sesión</th><th style="padding:8px 10px;"></th>
+        </tr></thead><tbody>` +
+        nuncaNada.map(t => filaTto(t,
+          '$' + Number(t.valor_sesion||0).toLocaleString('es-AR'),
+          `<button class="btn btn-secondary" style="color:#b91c1c; border-color:#fca5a5;" onclick="borrarTtoSinActividad(${t.id}, '${(t.codigo_id||'').replace(/'/g,'')}')">🗑 Borrar</button>`)).join('') +
+        `</tbody></table>`
+    }
+    if (frenados.length){
+      htmlP += `<div style="margin:14px 0 6px; font-weight:700; color:#92400e;">Frenados hace más de 30 días (${frenados.length}) — última sesión/pago vieja; se dan de baja (la historia se conserva)</div>
+        <table style="width:100%; border-collapse:collapse; background:#fff; border-radius:8px; overflow:hidden;">
+        <thead><tr style="background:#fef3c7; color:#92400e; text-align:left;">
+          <th style="padding:8px 10px;">Tto</th><th style="padding:8px 10px;">Paciente</th>
+          <th style="padding:8px 10px;">Práctica</th><th style="padding:8px 10px;">Alta</th>
+          <th style="padding:8px 10px;">Última actividad</th><th style="padding:8px 10px;"></th>
+        </tr></thead><tbody>` +
+        frenados.map(t => filaTto(t,
+          ultAct[t.id],
+          `<button class="btn btn-secondary" style="color:#92400e; border-color:#fcd34d;" onclick="darBajaTto(${t.id}, '${(t.codigo_id||'').replace(/'/g,'')}')">📁 Dar de baja</button>`)).join('') +
+        `</tbody></table>`
+    }
+    lista.innerHTML = htmlP
   } catch (e) {
     lista.innerHTML = 'Error buscando: ' + (e.message || e)
   }
+}
+
+window.darBajaTto = async function(id, codigo){
+  if (!confirm(`¿Dar de baja el tratamiento ${codigo}?\n\nSus sesiones y pagos se CONSERVAN (solo deja de figurar como activo). Se puede reactivar editándolo si el paciente vuelve.`)) return
+  try {
+    const { error } = await sb.from('tratamientos').update({ estado: 'BAJA' }).eq('id', id)
+    if (error) throw error
+    abrirSinActividad()
+    cargarDatos()
+  } catch (e) { alert('No se pudo dar de baja: ' + (e.message || e)) }
 }
 
 window.borrarTtoSinActividad = async function(id, codigo){
