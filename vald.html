@@ -1551,14 +1551,27 @@ async function generar() {
       movilidad: (col.movilidad || []).filter(x => !x.excluido),
       postura: col.postura,
     };
+    // Calculadoras clínicas + tests manuales cargados (SARC-F, SPPB, TUG, Gait, 2-Min Step, Ishii, etc.).
+    // Antes se guardaban en la HC pero NO viajaban a la IA: ahora se suman al prompt ya calculados.
+    const calculadoras = (protocoloItems || [])
+      .filter(it => it.manual && (valoresManual[it.id] || '').toString().trim())
+      .map(it => ({ test: it.label, resultado: valoresManual[it.id] }));
+    // Sexo: no hay campo de paciente; lo tomamos de una calculadora que lo tenga (Ishii / 2-Min Step).
+    let sexoPac = null;
+    for (const it of (protocoloItems || [])) {
+      const d = calcData[it.id];
+      if (d && d.sexo) { sexoPac = d.sexo === 'F' ? 'Femenino' : 'Masculino'; break; }
+    }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
         edad: edadVal ? Number(edadVal) : null,
+        sexo: sexoPac,
         poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
       },
       hallazgos: sinExcluidos,
+      calculadoras: calculadoras,
       fecha: ultimaEvaluacion.datos.fechaEvaluacion,
     };
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
@@ -1569,7 +1582,7 @@ async function generar() {
     const txt = await resp.text();
     let out; try { out = JSON.parse(txt); } catch { out = { borrador: txt }; }
     if (!resp.ok || out.error) throw new Error(out.error || ('HTTP ' + resp.status));
-    mostrarBorrador(out.borrador || '');
+    mostrarBorradores(out.informe || '', out.nota || '');
   } catch (e) {
     cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
   } finally {
@@ -1577,26 +1590,32 @@ async function generar() {
   }
 }
 
-function mostrarBorrador(texto) {
+function mostrarBorradores(informe, nota) {
   const cont = document.getElementById('valdBorrador');
+  const areaStyle = 'width:100%; min-height:240px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;';
   cont.innerHTML =
-    '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--azul); margin-bottom:4px;">Borrador para revisar y firmar</div>' +
-    '<textarea id="valdBorradorTxt" style="width:100%; min-height:240px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;"></textarea>' +
-    '<div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
-      '<button class="btn" id="btnGuardarNota" onclick="guardarNotaProfes()">💾 Firmar y guardar en HC</button>' +
-      '<span class="hint" style="margin:0;">Queda como Nota para Profes (interna) en la HC del paciente.</span>' +
+    '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--azul); margin-bottom:4px;">📋 Informe para el paciente · va a Observaciones del profesional</div>' +
+    '<textarea id="valdInformeTxt" style="' + areaStyle + '"></textarea>' +
+    '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#d97706; margin:14px 0 4px;">🔒 Consideraciones para el profesor · va a Notas para profes (interna)</div>' +
+    '<textarea id="valdNotaTxt" style="' + areaStyle + '"></textarea>' +
+    '<div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
+      '<button class="btn" id="btnGuardarHC" onclick="guardarInformeYNota()">💾 Firmar y guardar en la HC</button>' +
+      '<span class="hint" style="margin:0;">El informe queda en Observaciones del profesional; las consideraciones, en Notas para profes (interna). Podés editar los dos antes de guardar.</span>' +
     '</div>';
-  document.getElementById('valdBorradorTxt').value = texto;
+  document.getElementById('valdInformeTxt').value = informe || '';
+  document.getElementById('valdNotaTxt').value = nota || '';
 }
 
-async function guardarNotaProfes() {
+async function guardarInformeYNota() {
   if (!pacienteSel) { toast('Seleccioná un paciente.'); return; }
-  const ta = document.getElementById('valdBorradorTxt');
-  const texto = ((ta && ta.value) || '').trim();
-  if (!texto) { toast('No hay borrador para guardar.'); return; }
+  const taInf = document.getElementById('valdInformeTxt');
+  const taNota = document.getElementById('valdNotaTxt');
+  const informe = ((taInf && taInf.value) || '').trim();
+  const nota = ((taNota && taNota.value) || '').trim();
+  if (!informe && !nota) { toast('No hay nada para guardar.'); return; }
   if (!usuarioActual) await detectarUsuario();
   if (!usuarioActual) { toast('No detectamos tu usuario. Iniciá sesión para guardar.'); return; }
-  const btn = document.getElementById('btnGuardarNota');
+  const btn = document.getElementById('btnGuardarHC');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
     const { data: hcs, error: e1 } = await sb.from('historias_clinicas')
@@ -1605,26 +1624,33 @@ async function guardarNotaProfes() {
     if (e1) throw e1;
     if (!hcs || !hcs.length) {
       toast('El paciente no tiene HC abierta. Abrí una primero y reintentá.');
-      btn.disabled = false; btn.textContent = '💾 Firmar y guardar en HC';
+      btn.disabled = false; btn.textContent = '💾 Firmar y guardar en la HC';
       return;
     }
+    const hcId = hcs[0].id;
     const fecha = (ultimaEvaluacion && ultimaEvaluacion.datos.fechaEvaluacion) || '';
-    const encabezado = '🔬 BiOLAB — Consideraciones para el Profesor (evaluación VALD ' + fecha + ')\n\n';
-    const { error: e2 } = await sb.from('hc_observaciones').insert({
-      historia_id: hcs[0].id,
+    const base = {
+      historia_id: hcId,
       persona_id: pacienteSel.id,
-      tipo: 'nota',
-      texto: encabezado + texto,
       autor_id: usuarioActual.id,
       autor_nombre: usuarioActual.nombre,
       autor_email: usuarioActual.email
-    });
+    };
+    const filas = [];
+    // El informe ya trae su propio encabezado (INFORME BIOMECÁNICO FUNCIONAL…): se guarda tal cual.
+    if (informe) filas.push({ ...base, tipo: 'observacion', texto: informe });
+    if (nota) {
+      const encabezado = '🔬 BiOLAB — Consideraciones para el Profesor (evaluación VALD ' + fecha + ')\n\n';
+      filas.push({ ...base, tipo: 'nota', texto: encabezado + nota });
+    }
+    const { error: e2 } = await sb.from('hc_observaciones').insert(filas);
     if (e2) throw e2;
-    btn.textContent = '✅ Guardada en la HC';
-    toast('Nota para profes guardada en la HC del paciente.');
+    btn.textContent = '✅ Guardado en la HC';
+    const que = (informe && nota) ? 'Informe y nota guardados' : (informe ? 'Informe guardado' : 'Nota guardada');
+    toast(que + ' en la HC del paciente.');
   } catch (e) {
     toast('Error al guardar: ' + (e.message || e));
-    btn.disabled = false; btn.textContent = '💾 Firmar y guardar en HC';
+    btn.disabled = false; btn.textContent = '💾 Firmar y guardar en la HC';
   }
 }
 
