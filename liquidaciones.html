@@ -136,7 +136,7 @@
 <body>
 <div class="container">
   <h1>💰 Liquidaciones</h1>
-  <p class="subtitle">Liquidación mensual por profesional · basada en pagos cobrados</p>
+  <p class="subtitle">Liquidación mensual por profesional · basada en sesiones realizadas y abonadas (desde julio 2026)</p>
 
   <div class="controls">
     <div class="control-group">
@@ -153,7 +153,7 @@
         <option value="">Todas</option>
         <option value="Consultorio">Consultorio</option>
         <option value="BioLab">BioLab</option>
-        <option value="Especialidades">Especialidades</option>
+        <option value="MOPLEX">MOPLEX</option>
       </select>
     </div>
     <div class="control-group">
@@ -229,8 +229,8 @@ function practicaArea(code){
   const c = String(code||'').toUpperCase();
   // BioLab: evaluaciones funcionales + Sarkmed
   if (c === 'EVALUACION' || c === 'EVAL' || c.startsWith('SARKMED')) return 'BioLab';
-  // Especialidades: MOPLEX (podología / plantillas)
-  if (c === 'MOPLEX') return 'Especialidades';
+  // MOPLEX (podología / plantillas): área propia
+  if (c === 'MOPLEX') return 'MOPLEX';
   // Consultorio: fisio, osteo, maso, DLM, punción, RPG, suelo pélvico, terapia manual
   return 'Consultorio';
 }
@@ -700,6 +700,12 @@ function render(pagos, sesiones, filtroProf){
   const MT = window._liqMotor || { sesAll: sesiones, pagosAll: [], desde: '', hasta: '' };
   const desde = MT.desde, hasta = MT.hasta;
 
+  // CORTE DEL MOTOR: hasta junio 2026 se liquidó con el sistema viejo (por pagos cobrados).
+  // Todo lo ABONADO antes de esta fecha ya se liquidó en su mes bajo ese sistema — el motor
+  // nuevo NO lo vuelve a liquidar aunque las sesiones se hagan después (evita el doble pago,
+  // ej. packs de masajes pagados y liquidados en junio cuyas sesiones se hacen en julio).
+  const CORTE_MOTOR = '2026-07-01';
+
   // Práctica de cada tratamiento (para excluir del motor lo que tiene su propia economía)
   const tratPrac = {};
   for (const s of (MT.sesAll || [])){ const t = s.tratamientos || {}; if (s.tratamiento_id != null && t.practica_codigo) tratPrac[s.tratamiento_id] = t.practica_codigo; }
@@ -743,6 +749,8 @@ function render(pagos, sesiones, filtroProf){
         if ((s.fecha || '') <= hasta) pendientes.push(fila);   // realizada sin abonar → próxima liquidación
         continue;
       }
+      // Abonada ANTES del corte → ya liquidada con el sistema viejo (por pagos) en ese mes
+      if (fechaAbono < CORTE_MOTOR) continue;
       const fLiq = (fechaAbono > (s.fecha || '')) ? fechaAbono : s.fecha;   // realizada Y abonada
       if (fLiq >= desde && fLiq <= hasta) liquidables.push(fila);
       // (fLiq < desde: ya liquidada en un mes anterior · fLiq > hasta: liquidará en un mes posterior)
@@ -795,7 +803,7 @@ function render(pagos, sesiones, filtroProf){
   // ⚠️ IMPORTANTE: MPX.detalle trae TODOS los profesionales (se calcula sobre todo el mes
   // para que los cruces salgan bien). Acá hay que respetar el filtro elegido, si no
   // aparecen líneas de otros profesionales (ej: elijo Bruno y me sale Male).
-  const moplexEnVista = (!filtroArea || filtroArea === 'Especialidades');
+  const moplexEnVista = (!filtroArea || filtroArea === 'MOPLEX');
   for (const k of Object.keys(MPX.detalle)){
     const d = MPX.detalle[k];
     if ((!filtroProf || d.prof === filtroProf) && moplexEnVista){
@@ -809,16 +817,16 @@ function render(pagos, sesiones, filtroProf){
     for (const k of Object.keys(MPX.detalle)){
       const d = MPX.detalle[k];
       if (filtroProf && d.prof !== filtroProf) continue;
-      if (filtroArea && filtroArea !== 'Especialidades') continue;
+      if (filtroArea && filtroArea !== 'MOPLEX') continue;
       if (!resumen[d.prof]) resumen[d.prof] = {cant:0, bruto:0, prof:0, centro:0, moplex:0, cobroProf:0, cobroPB:0, ses:[], pagos:[]};
       const r = resumen[d.prof];
       r.cant++; r.bruto += d.cobrado; r.prof += d.mProf; r.centro += d.centro;
       totalBruto += d.cobrado; totalProf += d.mProf; totalCentro += d.centro; cantVista++;
-      const ar = (porArea['Especialidades'] = porArea['Especialidades'] || {bruto:0, prof:0, moplex:0, centro:0, cant:0});
+      const ar = (porArea['MOPLEX'] = porArea['MOPLEX'] || {bruto:0, prof:0, moplex:0, centro:0, cant:0});
       ar.cant++; ar.bruto += d.cobrado; ar.prof += d.mProf; ar.centro += d.centro;
     }
     totalMoplexV = MPX.totalMoplex || 0;
-    if (porArea['Especialidades']) porArea['Especialidades'].moplex += totalMoplexV;
+    if (porArea['MOPLEX']) porArea['MOPLEX'].moplex += totalMoplexV;
   }
 
   // Quien recibió plata pero no tiene sesiones liquidables igual entra al resumen
@@ -867,12 +875,12 @@ function render(pagos, sesiones, filtroProf){
   if (!esModoMoplex) html += `
     <div class="cards">
       <div class="card cant">
-        <div class="card-label">Cant. pagos</div>
+        <div class="card-label">Sesiones liquidadas</div>
         <div class="card-value">${fmtNum(cantVista)}</div>
         <div class="card-sub">${profs.length} profesionales</div>
       </div>
       <div class="card bruto">
-        <div class="card-label">Total bruto cobrado</div>
+        <div class="card-label">Total liquidado (realizado y abonado)</div>
         <div class="card-value">${fmt(totalBruto)}</div>
       </div>
       <div class="card prof">
@@ -890,7 +898,7 @@ function render(pagos, sesiones, filtroProf){
   // ===== GANANCIA DE PUNTOBIO — solapa desplegable (general · por área · por profesional) =====
   // (NO se muestra a un profesional restringido: es info del centro, no suya)
   if (!esModoMoplex && !soloLoMio){
-    const ordenArea = ['Consultorio','BioLab','Especialidades'];
+    const ordenArea = ['Consultorio','BioLab','MOPLEX'];
     const areas = Object.keys(porArea).sort((a,b)=>{const ia=ordenArea.indexOf(a),ib=ordenArea.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);});
     html += `<details class="gan-panel" open>
       <summary class="gan-sum">
