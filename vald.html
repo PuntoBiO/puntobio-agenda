@@ -337,6 +337,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
+let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
 let ultimaClasificacion = null;
 
 function toast(msg) {
@@ -1562,6 +1563,25 @@ async function generar() {
       const d = calcData[it.id];
       if (d && d.sexo) { sexoPac = d.sexo === 'F' ? 'Femenino' : 'Masculino'; break; }
     }
+    // Evolución: buscar la evaluación anterior del paciente (snapshot con fecha VALD distinta a la actual).
+    // Con red: si la tabla no existe o falla, seguimos sin evolución (el informe sale igual).
+    const fechaVald = ultimaEvaluacion.datos.fechaEvaluacion || '';
+    let evolucion = null;
+    try {
+      const { data: snaps } = await sb.from('biolab_evolucion')
+        .select('fecha_vald, fecha_registro, snapshot')
+        .eq('persona_id', String(pacienteSel.id))
+        .order('fecha_registro', { ascending: false })
+        .limit(10);
+      const previo = (snaps || []).find(s => (s.fecha_vald || '') && (s.fecha_vald || '') !== fechaVald);
+      if (previo && previo.snapshot) {
+        evolucion = {
+          fecha_anterior: previo.fecha_vald || previo.fecha_registro || '',
+          calculadoras: previo.snapshot.calculadoras || [],
+          hallazgos: previo.snapshot.hallazgos || null,
+        };
+      }
+    } catch (_) { /* sin tabla o sin datos previos: sin evolución */ }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
@@ -1572,7 +1592,16 @@ async function generar() {
       },
       hallazgos: sinExcluidos,
       calculadoras: calculadoras,
-      fecha: ultimaEvaluacion.datos.fechaEvaluacion,
+      evolucion: evolucion,
+      fecha: fechaVald,
+    };
+    // Guardamos en memoria lo medido, para el snapshot de evolución al firmar.
+    ultimaGeneracion = {
+      persona_id: String(pacienteSel.id),
+      fecha_vald: fechaVald,
+      poblacion: body.paciente.poblacion,
+      edad: body.paciente.edad,
+      snapshot: { calculadoras: calculadoras, hallazgos: sinExcluidos },
     };
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
       method: 'POST',
@@ -1645,6 +1674,20 @@ async function guardarInformeYNota() {
     }
     const { error: e2 } = await sb.from('hc_observaciones').insert(filas);
     if (e2) throw e2;
+    // Snapshot de evolución (no bloquea ni rompe si la tabla no existe todavía)
+    try {
+      if (ultimaGeneracion && ultimaGeneracion.persona_id === String(pacienteSel.id)) {
+        await sb.from('biolab_evolucion').insert({
+          persona_id: ultimaGeneracion.persona_id,
+          fecha_vald: ultimaGeneracion.fecha_vald || null,
+          poblacion: ultimaGeneracion.poblacion || null,
+          edad: ultimaGeneracion.edad != null ? ultimaGeneracion.edad : null,
+          snapshot: ultimaGeneracion.snapshot || {},
+          autor_id: usuarioActual.id,
+          autor_nombre: usuarioActual.nombre
+        });
+      }
+    } catch (_) { /* sin tabla de evolución: no pasa nada, el informe ya quedó guardado */ }
     btn.textContent = '✅ Guardado en la HC';
     const que = (informe && nota) ? 'Informe y nota guardados' : (informe ? 'Informe guardado' : 'Nota guardada');
     toast(que + ' en la HC del paciente.');
