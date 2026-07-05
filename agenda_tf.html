@@ -527,6 +527,9 @@
     border-radius: 9px; cursor: pointer; margin-bottom: 4px;
   }
   .evo-ej-add:hover { background: #e0f2fe; }
+  .evo-ej-carga { display: flex; align-items: center; gap: 8px; }
+  .evo-ej-carga .evo-input { flex: 1; min-width: 0; }
+  .evo-ej-unidad { font-size: 13px; font-weight: 700; color: var(--texto-suave); }
   /* Alerta de dolor al lado del nombre */
   .alerta-dolor { margin-right: 5px; font-size: 13px; }
   /* Modal histórico del alumno */
@@ -3689,6 +3692,8 @@ function renderEjercicios(){
   const cont = document.getElementById('evo-ejercicios');
   if (!cont) return;
   if (!evoEjercicios.length) evoEjercicios = [{ ej:'', series:'', reps:'', carga:'' }];
+  const opts = (max, sel) => ['', ...Array.from({length:max}, (_,k)=>String(k+1))]
+    .map(v => `<option value="${v}" ${String(sel||'')===v?'selected':''}>${v||'—'}</option>`).join('');
   cont.innerHTML = evoEjercicios.map((r,i) => `
     <div class="evo-ej-item">
       <div class="evo-ej-item-head">
@@ -3699,15 +3704,18 @@ function renderEjercicios(){
       <div class="evo-ej-sr">
         <div class="evo-ej-sr-campo">
           <div class="evo-sublabel">Series</div>
-          <input class="evo-input" type="text" inputmode="numeric" value="${_escAttr(r.series)}" oninput="evoEjSet(${i},'series',this.value)" placeholder="Ej: 4" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+          <select class="evo-input evo-select" onchange="evoEjSet(${i},'series',this.value)">${opts(10, r.series)}</select>
         </div>
         <div class="evo-ej-sr-campo">
           <div class="evo-sublabel">Repeticiones</div>
-          <input class="evo-input" type="text" value="${_escAttr(r.reps)}" oninput="evoEjSet(${i},'reps',this.value)" placeholder="Ej: 8 (o 8-10)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+          <select class="evo-input evo-select" onchange="evoEjSet(${i},'reps',this.value)">${opts(20, r.reps)}</select>
         </div>
       </div>
       <div class="evo-sublabel">Carga</div>
-      <input class="evo-input" type="text" value="${_escAttr(r.carga)}" oninput="evoEjSet(${i},'carga',this.value)" placeholder="Ej: 40 kg / banda roja / peso corporal" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+      <div class="evo-ej-carga">
+        <input class="evo-input" type="text" inputmode="decimal" value="${_escAttr(r.carga)}" oninput="evoEjSet(${i},'carga',this.value)" placeholder="Ej: 40 (o banda roja / peso corporal)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+        <span class="evo-ej-unidad">Kg</span>
+      </div>
     </div>`).join('');
 }
 window.evoEjSet = (i, campo, val) => { if (evoEjercicios[i]) evoEjercicios[i][campo] = val; };
@@ -3737,7 +3745,14 @@ window.evoUsarNotaPred = (i) => {
   evoDolorSel = !!n.dolor;
   // La sala solo aplica si la clase es de Kinefilaxia
   if (esKinefilaxia(evoTurnoActual?.servicio)) evoSalaSel = n.sala || '';
+  // Traer los ejercicios guardados en la plantilla (si tiene)
+  if (Array.isArray(n.ejercicios) && n.ejercicios.length) {
+    evoEjercicios = n.ejercicios.map(r => ({ ej: r.ej||'', series: r.series||'', reps: r.reps||'', carga: r.carga||'' }));
+  } else {
+    evoEjercicios = [{ ej:'', series:'', reps:'', carga:'' }];
+  }
   pintarChipsModulos();
+  renderEjercicios();
   // Repintar selección visual de carita, dolor y sala
   document.querySelectorAll('[data-evo-carita]').forEach(el => {
     el.classList.toggle('sel', el.getAttribute('data-evo-carita') === evoCaritaSel);
@@ -3756,8 +3771,11 @@ window.evoGuardarNotaPred = async () => {
   const modulos = evoModulosSel.join(', ');
   const contenido = (document.getElementById('evo-contenido')?.value || '').trim();
   const sala = esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null;
-  if (!modulos && !contenido && !sala) { toast('Elegí sala, módulos o escribí contenido antes de guardar', 'err'); return; }
-  const titulo = [sala, modulos].filter(Boolean).join(' · ') || contenido.slice(0,30);
+  const _ejer = (evoEjercicios || [])
+    .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: (r.reps||'').trim(), carga: (r.carga||'').trim() }))
+    .filter(r => r.ej || r.series || r.reps || r.carga);
+  if (!modulos && !contenido && !sala && !_ejer.length) { toast('Elegí sala, módulos, ejercicios o escribí contenido antes de guardar', 'err'); return; }
+  const titulo = [sala, modulos].filter(Boolean).join(' · ') || (_ejer[0]?.ej) || contenido.slice(0,30);
   try {
     await supabaseInsert('notas_predeterminadas_tf', {
       autor_email: email,
@@ -3765,7 +3783,8 @@ window.evoGuardarNotaPred = async () => {
       titulo, modulos, contenido,
       sala,
       como_se_sintio: evoCaritaSel || null,
-      dolor: !!evoDolorSel
+      dolor: !!evoDolorSel,
+      ejercicios: _ejer.length ? _ejer : null
     });
     await cargarNotasPred();
     toast('✓ Plantilla guardada completa');
@@ -4269,7 +4288,8 @@ function ejerciciosDe(f){
     const nombre = (r.ej||'').trim();
     const sr = [(r.series||'').trim(), (r.reps||'').trim()].filter(Boolean).join('×');
     const carga = (r.carga||'').trim();
-    const detalle = [sr, carga ? ('carga '+carga) : ''].filter(Boolean).join(' · ');
+    const cargaFmt = carga ? (/^\d+([.,]\d+)?$/.test(carga) ? (carga+' Kg') : carga) : '';
+    const detalle = [sr, cargaFmt ? ('carga '+cargaFmt) : ''].filter(Boolean).join(' · ');
     return [nombre, detalle].filter(Boolean).join(' — ');
   }).filter(Boolean);
 }
