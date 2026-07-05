@@ -1596,6 +1596,54 @@ function pintarEvaluacion(datos, normas) {
     }
   }
 
+  // ---- RATIOS calculados EN CÓDIGO (la IA solo los interpreta) ----
+  // H:Q — isquiotibiales : cuádriceps, por lado. Se calcula por anatomía (rodilla flexión/extensión).
+  {
+    const isq = (datos.fuerza || []).find(f => f.region === 'Knee' && f.movimiento === 'Flexion')
+             || (datos.fuerza || []).find(f => /isquiotibial|flexi/i.test(f.grupo) && /rodilla|knee/i.test(f.grupo));
+    const cua = (datos.fuerza || []).find(f => f.region === 'Knee' && f.movimiento === 'Extension')
+             || (datos.fuerza || []).find(f => /cu[aá]driceps|extensi/i.test(f.grupo) && /rodilla|knee/i.test(f.grupo));
+    if (isq && cua) {
+      const colorHQ = hq => hq >= 0.60 ? '🟢' : (hq >= 0.47 ? '🟡' : '🔴');
+      const pushHQ = (lado, i, c) => {
+        if (i == null || !c) return;
+        const hq = Math.round((i / c) * 100) / 100;
+        const em = colorHQ(hq); cnt(em);
+        fuerza.push({ em, nom: `Ratio H:Q (isquios:cuádriceps) · ${lado}`, det: `${hq} · isquios ${i} N / cuádriceps ${c} N`, fuente: 'H:Q convencional (ref. ~0,5–0,6)', cat: 'Fuerza' });
+      };
+      pushHQ('izquierda', isq.izquierda_N, cua.izquierda_N);
+      pushHQ('derecha', isq.derecha_N, cua.derecha_N);
+    }
+  }
+  // DSI — Dynamic Strength Index = fuerza pico CMJ / fuerza pico IMTP. Ref. Comfort/Sheppard.
+  {
+    const peakVF = fd => {
+      if (!fd || !fd.resultados) return null;
+      for (const nombre in fd.resultados) {
+        const r = fd.resultados[nombre];
+        if (r && r.codigo === 'PEAK_VERTICAL_FORCE') {
+          const l = r.lados || {};
+          const comb = (l.Trial != null) ? l.Trial
+            : (l.Combined != null) ? l.Combined
+            : (l.Left != null && l.Right != null) ? (l.Left + l.Right)
+            : (l.Left != null ? l.Left : l.Right);
+          return comb != null ? Math.round(comb) : null;
+        }
+      }
+      return null;
+    };
+    const cmj = (datos.forceDecks || []).find(fd => /countermovement/i.test(fd.prueba));
+    const imtp = (datos.forceDecks || []).find(fd => /isometric mid|imtp/i.test(fd.prueba));
+    const fCMJ = peakVF(cmj), fIMTP = peakVF(imtp);
+    if (fCMJ != null && fIMTP != null && fIMTP > 0) {
+      const dsi = Math.round((fCMJ / fIMTP) * 100) / 100;
+      const em = (dsi >= 0.60 && dsi <= 0.80) ? '🟢' : '🟡'; cnt(em);
+      const foco = dsi < 0.60 ? 'sugiere priorizar potencia/pliometría (poca expresión dinámica de la fuerza)'
+        : (dsi > 0.80 ? 'sugiere priorizar fuerza máxima (déficit relativo de fuerza isométrica)' : 'perfil equilibrado');
+      forceDecks.push({ em, nom: 'DSI (índice de fuerza dinámica) · CMJ/IMTP', det: `${dsi} · CMJ ${fCMJ} N / IMTP ${fIMTP} N — ${foco}`, fuente: 'DSI Comfort/Sheppard (0,60–0,80 equilibrado)', cat: 'ForceDecks' });
+    }
+  }
+
   return { fuerza, forceDecks, movilidad, postura: datos.postura, conteo };
 }
 
