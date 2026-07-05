@@ -353,7 +353,19 @@ tbody tr:last-child td { border-bottom: 0; }
     <option value="activos">Activos</option>
   </select>
   <button class="btn btn-secondary" onclick="cargarDatos()">🔄 Recargar</button>
+  <button class="btn btn-secondary" onclick="abrirSinActividad()" title="Tratamientos creados para dar turno que nunca se realizaron">🧹 Sin actividad</button>
   <button class="btn btn-primary" onclick="abrirNuevo()">＋ Nuevo tratamiento</button>
+</div>
+
+<div id="panelSinActividad" style="display:none; background:#fffbeb; border:1px solid #fcd34d; border-radius:12px; padding:16px 18px; margin-bottom:16px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+    <div>
+      <b style="color:#92400e;">🧹 Tratamientos sin actividad</b>
+      <span style="color:#a16207; font-size:13px;"> — creados hace más de 30 días, sin ninguna sesión ni pago (típico: se creó para dar turno y el paciente canceló). Borrarlos no toca nada más.</span>
+    </div>
+    <button class="btn btn-secondary" onclick="document.getElementById('panelSinActividad').style.display='none'">✕ Cerrar</button>
+  </div>
+  <div id="sinActividadLista" style="margin-top:12px; font-size:14px; color:#78716c;">Buscando…</div>
 </div>
 
 <!-- Tabla -->
@@ -1699,6 +1711,79 @@ $('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
 $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
 const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEventListener('change', () => { autocompletarPrecioEd(); actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa') })
+
+// ===== TRATAMIENTOS SIN ACTIVIDAD (creados para dar turno, nunca realizados) =====
+// Sin sesiones, sin pagos, con más de 30 días de alta. Borrarlos: primero se desengancha
+// cualquier turno viejo (FK a null) y después se borra el tratamiento. Doble verificación
+// contra la base en el momento de borrar, por si algo cambió.
+window.abrirSinActividad = async function(){
+  const panel = document.getElementById('panelSinActividad')
+  const lista = document.getElementById('sinActividadLista')
+  panel.style.display = ''
+  lista.innerHTML = 'Buscando…'
+  try {
+    const corte = new Date(Date.now() - 30*24*3600*1000).toISOString().slice(0,10)
+    const { data: ttos, error } = await sb.from('tratamientos')
+      .select('id, codigo_id, practica_codigo, valor_sesion, fecha_alta, estado, personas(nombre)')
+      .lt('fecha_alta', corte)
+      .not('estado', 'in', '("BAJA","CANCELADO","FINALIZADO")')
+      .order('fecha_alta')
+      .limit(500)
+    if (error) throw error
+    const ids = (ttos||[]).map(t => t.id)
+    if (!ids.length){ lista.innerHTML = 'No hay tratamientos sin actividad 👍'; return }
+    const conAlgo = new Set()
+    for (let i = 0; i < ids.length; i += 150){
+      const lote = ids.slice(i, i+150)
+      const { data: ses } = await sb.from('sesiones').select('tratamiento_id').in('tratamiento_id', lote).limit(5000)
+      ;(ses||[]).forEach(x => conAlgo.add(x.tratamiento_id))
+      const { data: pag } = await sb.from('pagos_consultorio').select('tratamiento_id').in('tratamiento_id', lote).limit(5000)
+      ;(pag||[]).forEach(x => conAlgo.add(x.tratamiento_id))
+    }
+    const candidatos = (ttos||[]).filter(t => !conAlgo.has(t.id))
+    if (!candidatos.length){ lista.innerHTML = 'No hay tratamientos sin actividad 👍'; return }
+    lista.innerHTML = `<table style="width:100%; border-collapse:collapse; background:#fff; border-radius:8px; overflow:hidden;">
+      <thead><tr style="background:#fef3c7; color:#92400e; text-align:left;">
+        <th style="padding:8px 10px;">Tto</th><th style="padding:8px 10px;">Paciente</th>
+        <th style="padding:8px 10px;">Práctica</th><th style="padding:8px 10px;">Alta</th>
+        <th style="padding:8px 10px;">Valor/sesión</th><th style="padding:8px 10px;"></th>
+      </tr></thead><tbody>` +
+      candidatos.map(t => `<tr style="border-top:1px solid #fde68a;">
+        <td style="padding:7px 10px; font-family:monospace; font-size:12.5px;">${t.codigo_id || ('#'+t.id)}</td>
+        <td style="padding:7px 10px;">${(t.personas||{}).nombre || '—'}</td>
+        <td style="padding:7px 10px;">${t.practica_codigo || '—'}</td>
+        <td style="padding:7px 10px;">${t.fecha_alta ? String(t.fecha_alta).slice(0,10) : '—'}</td>
+        <td style="padding:7px 10px;">$${Number(t.valor_sesion||0).toLocaleString('es-AR')}</td>
+        <td style="padding:7px 10px; text-align:right;">
+          <button class="btn btn-secondary" style="color:#b91c1c; border-color:#fca5a5;" onclick="borrarTtoSinActividad(${t.id}, '${(t.codigo_id||'').replace(/'/g,'')}')">🗑 Borrar</button>
+        </td></tr>`).join('') +
+      `</tbody></table>
+      <div style="margin-top:8px; font-size:12.5px; color:#a16207;">${candidatos.length} tratamiento(s) sin sesiones ni pagos, con más de 30 días.</div>`
+  } catch (e) {
+    lista.innerHTML = 'Error buscando: ' + (e.message || e)
+  }
+}
+
+window.borrarTtoSinActividad = async function(id, codigo){
+  // Doble verificación en el momento: que siga sin sesiones ni pagos
+  const { data: s1 } = await sb.from('sesiones').select('id').eq('tratamiento_id', id).limit(1)
+  const { data: p1 } = await sb.from('pagos_consultorio').select('id').eq('tratamiento_id', id).limit(1)
+  if ((s1||[]).length || (p1||[]).length){
+    alert('Este tratamiento tiene sesiones o pagos registrados: no se puede borrar desde acá.')
+    return
+  }
+  if (!confirm(`¿Borrar el tratamiento ${codigo}?\n\nNo tiene sesiones ni pagos. Sus turnos viejos (cancelados) quedan en la agenda pero sueltos.\n\nEsto NO se puede deshacer.`)) return
+  try {
+    // Desenganchar turnos (FK) y borrar
+    await sb.from('turnos_consultorio').update({ tratamiento_id: null }).eq('tratamiento_id', id)
+    const { error } = await sb.from('tratamientos').delete().eq('id', id)
+    if (error) throw error
+    abrirSinActividad()
+    cargarDatos()
+  } catch (e) {
+    alert('No se pudo borrar: ' + (e.message || e))
+  }
+}
 
 // Init
 poblarPracticasSelect()
