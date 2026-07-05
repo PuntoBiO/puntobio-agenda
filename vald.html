@@ -213,6 +213,7 @@
         </div>
         <div class="patient-actions">
           <button class="btn ghost" id="btnHC">🩺 Abrir historia clínica</button>
+          <button class="btn ghost" id="btnEvolucion" onclick="verEvolucion()" style="display:none;">📈 Ver evolución</button>
         </div>
       </div>
       <div id="retomarBanner" style="display:none; margin-top:10px; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px 12px; font-size:13px; color:#92400e;"></div>
@@ -363,6 +364,8 @@ async function detectarTipoEval() {
   tipoEval = 'primera';
   const hint = document.getElementById('evalTipoHint');
   if (hint) hint.textContent = '';
+  const btnEvo = document.getElementById('btnEvolucion');
+  if (btnEvo) btnEvo.style.display = 'none';
   renderTipoEval();
   if (!pacienteSel) return;
   try {
@@ -370,15 +373,119 @@ async function detectarTipoEval() {
       .select('fecha_vald, fecha_registro')
       .eq('persona_id', String(pacienteSel.id))
       .order('fecha_registro', { ascending: false })
-      .limit(1);
+      .limit(10);
     if (data && data.length) {
       tipoEval = 'reeval';
       renderTipoEval();
       const f = data[0].fecha_vald || (data[0].fecha_registro ? String(data[0].fecha_registro).slice(0, 10) : '');
       if (hint) hint.textContent = f ? ('· hay una evaluación anterior del ' + f) : '· hay una evaluación anterior guardada';
+      // El botón de evolución aparece si hay 2 o más evaluaciones guardadas para comparar.
+      if (btnEvo && data.length >= 2) btnEvo.style.display = '';
     }
   } catch (_) { /* sin tabla todavía: queda en 1ª evaluación */ }
 }
+// ---- Gráfico de líneas en SVG puro (sin librerías) ----
+function svgLineChart(points) {
+  const pts = (points || []).filter(p => p && p.value != null && !isNaN(Number(p.value)));
+  if (pts.length < 2) return '';
+  const fmt = v => (Math.round(Number(v) * 100) / 100);
+  const W = 340, H = 150, padL = 44, padR = 14, padT = 16, padB = 28;
+  const ys = pts.map(p => Number(p.value));
+  let min = Math.min(...ys), max = Math.max(...ys);
+  if (min === max) { min -= 1; max += 1; }
+  const rango = max - min; min -= rango * 0.15; max += rango * 0.15;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const X = i => padL + (i / (pts.length - 1)) * plotW;
+  const Y = v => padT + plotH - ((Number(v) - min) / (max - min)) * plotH;
+  let path = '';
+  pts.forEach((p, i) => { path += (path ? ' L' : 'M') + X(i).toFixed(1) + ' ' + Y(p.value).toFixed(1); });
+  let dots = '', vlab = '', xlab = '';
+  pts.forEach((p, i) => {
+    const col = p.color || '#1e9fe0';
+    dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.value).toFixed(1)}" r="4" fill="${col}"/>`;
+    vlab += `<text x="${X(i).toFixed(1)}" y="${(Y(p.value) - 8).toFixed(1)}" font-size="10" text-anchor="middle" fill="#0f172a">${fmt(p.value)}</text>`;
+    xlab += `<text x="${X(i).toFixed(1)}" y="${H - 9}" font-size="9" text-anchor="middle" fill="#64748b">${escapeHtml(p.label || '')}</text>`;
+  });
+  const ejes =
+    `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#e2e8f0"/>` +
+    `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#e2e8f0"/>` +
+    `<text x="6" y="${padT + 8}" font-size="9" fill="#94a3b8">${fmt(max)}</text>` +
+    `<text x="6" y="${padT + plotH}" font-size="9" fill="#94a3b8">${fmt(min)}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;height:auto;">${ejes}<path d="${path}" fill="none" stroke="#1e9fe0" stroke-width="2"/>${dots}${vlab}${xlab}</svg>`;
+}
+
+async function verEvolucion() {
+  if (!pacienteSel) return;
+  let snaps = [];
+  try {
+    const { data } = await sb.from('biolab_evolucion')
+      .select('fecha_vald, fecha_registro, snapshot')
+      .eq('persona_id', String(pacienteSel.id))
+      .order('fecha_registro', { ascending: true })
+      .limit(20);
+    snaps = data || [];
+  } catch (_) { /* sin tabla */ }
+  if (snaps.length < 2) { toast('Necesitás al menos 2 evaluaciones firmadas para ver la evolución.'); return; }
+
+  const etiqueta = s => {
+    const raw = String(s.fecha_vald || s.fecha_registro || '');
+    let m = raw.match(/(\d{4})-(\d{2})-(\d{2})/); if (m) return m[3] + '/' + m[2];
+    m = raw.match(/(\d{2})\/(\d{2})\/(\d{4})/); if (m) return m[1] + '/' + m[2];
+    return raw.slice(0, 10);
+  };
+  const fechas = snaps.map(etiqueta);
+  const emColor = em => em === '🟢' ? '#16a34a' : (em === '🟡' ? '#d97706' : (em === '🔴' ? '#dc2626' : '#1e9fe0'));
+
+  // Series de calculadoras (tests funcionales)
+  const calcMap = {};
+  snaps.forEach((s, i) => {
+    ((s.snapshot && s.snapshot.calculadoras) || []).forEach(c => {
+      if (c.valorNum == null || isNaN(Number(c.valorNum))) return;
+      (calcMap[c.test] = calcMap[c.test] || { unidad: c.unidad || '', pts: [] }).pts.push({ label: fechas[i], value: Number(c.valorNum) });
+    });
+  });
+  // Series de asimetrías (color de cada punto = su semáforo de ese día)
+  const asimMap = {};
+  snaps.forEach((s, i) => {
+    const h = (s.snapshot && s.snapshot.hallazgos) || {};
+    ['fuerza', 'forceDecks', 'movilidad'].forEach(cat => {
+      (h[cat] || []).forEach(mt => {
+        if (mt.asim == null || isNaN(Number(mt.asim))) return;
+        (asimMap[mt.nom] = asimMap[mt.nom] || { pts: [] }).pts.push({ label: fechas[i], value: Math.abs(Number(mt.asim)), color: emColor(mt.em) });
+      });
+    });
+  });
+
+  const card = (titulo, sub, svg) =>
+    `<div style="border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:10px;">
+       <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px;">${escapeHtml(titulo)} <span style="font-weight:400;color:#64748b;">${escapeHtml(sub)}</span></div>${svg}</div>`;
+  const cardsCalc = Object.keys(calcMap).filter(k => calcMap[k].pts.length >= 2)
+    .map(k => card(k, '(' + calcMap[k].unidad + ')', svgLineChart(calcMap[k].pts))).join('');
+  const cardsAsim = Object.keys(asimMap).filter(k => asimMap[k].pts.length >= 2)
+    .map(k => card(k, '(% asimetría · menor = mejor)', svgLineChart(asimMap[k].pts))).join('');
+
+  const cuerpo =
+    `<div style="font-size:12px;color:#64748b;margin-bottom:10px;">${snaps.length} evaluaciones · ${fechas.join(' → ')}</div>` +
+    (cardsCalc ? `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#1e9fe0;margin:6px 0;">Tests funcionales</div>${cardsCalc}` : '') +
+    (cardsAsim ? `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#1e9fe0;margin:12px 0 6px;">Asimetrías</div>${cardsAsim}` : '') +
+    ((!cardsCalc && !cardsAsim) ? '<div style="color:#64748b;font-size:13px;">Todavía no hay métricas repetidas en 2 o más evaluaciones para graficar. Van a aparecer a medida que se repitan mediciones.</div>' : '');
+
+  const wrap = document.createElement('div');
+  wrap.id = 'evolucionWrap';
+  wrap.innerHTML =
+    `<div style="position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow:auto;" onclick="if(event.target===this)cerrarEvolucion()">
+       <div style="background:#fff;border-radius:14px;max-width:560px;width:100%;padding:18px;box-shadow:0 20px 50px rgba(0,0,0,.3);">
+         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+           <div style="font-size:17px;font-weight:800;color:#0f172a;">📈 Evolución · ${escapeHtml(pacienteSel.nombre || '')}</div>
+           <button onclick="cerrarEvolucion()" style="border:none;background:#f1f5f9;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer;">×</button>
+         </div>
+         ${cuerpo}
+       </div>
+     </div>`;
+  document.body.appendChild(wrap);
+}
+function cerrarEvolucion() { const w = document.getElementById('evolucionWrap'); if (w) w.remove(); }
+
 let ultimaClasificacion = null;
 
 function toast(msg) {
@@ -1339,7 +1446,7 @@ function pintarEvaluacion(datos, normas) {
       det += ` · grip ${Lkg.toFixed(1)}/${Rkg.toFixed(1)} kg${Math.min(Lkg, Rkg) < 16 ? ' ⚠️<16' : ''}`;
       fuente = 'Noyes_1991 + EWGSOP2';
     }
-    fuerza.push({ em: c, nom: f.grupo, det, fuente });
+    fuerza.push({ em: c, nom: f.grupo, det, fuente, asim: f.asimetria_pct, L: f.izquierda_N, R: f.derecha_N, unidad: 'N', cat: 'Fuerza' });
   }
 
   // FORCEDECKS (guardia de artefactos SOLO en métricas de fuerza)
@@ -1399,7 +1506,7 @@ function pintarEvaluacion(datos, normas) {
         const asim = (A != null) ? A : Math.round((R - L) / (mag || 1) * 1000) / 10;
         const c = colorAsim(asim); cnt(c);
         const nota = (esTasa && (L < 0 || R < 0)) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
-        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${asim}% asim · L ${L} / R ${R} ${u || (esTasa ? '' : 'N')}${nota}`.trim(), fuente: 'asimetría VALD' });
+        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${asim}% asim · L ${L} / R ${R} ${u || (esTasa ? '' : 'N')}${nota}`.trim(), fuente: 'asimetría VALD', asim: asim, L: L, R: R, unidad: (u || (esTasa ? '' : 'N')), cat: 'ForceDecks' });
         continue;
       }
       // No gradeable → informativo (⚪, no marca rojo).
@@ -1431,11 +1538,11 @@ function pintarEvaluacion(datos, normas) {
       if (!rel) continue;
       if (m.asimetria_pct == null) {
         cnt('🟢');
-        movilidad.push({ em: '🟢', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor}° (referencia HumanTrak)`, fuente: 'HumanTrak' });
+        movilidad.push({ em: '🟢', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor}° (referencia HumanTrak)`, fuente: 'HumanTrak', valor: m.valor, unidad: '°', cat: 'Movilidad' });
         continue;
       }
       const c = colorAsim(m.asimetria_pct); cnt(c);
-      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}`, fuente: 'HumanTrak / LSI' });
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}`, fuente: 'HumanTrak / LSI', asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
     }
   }
 
@@ -1642,12 +1749,25 @@ async function generar() {
       fecha: fechaVald,
     };
     // Guardamos en memoria lo medido, para el snapshot de evolución al firmar.
+    const calcNum = (tipo, d) => {
+      if (!d) return {};
+      if (tipo === 'tug')   return { valorNum: d.seg,   unidad: 's' };
+      if (tipo === 'gait')  return { valorNum: d.ms,    unidad: 'm/s' };
+      if (tipo === 'sppb')  return { valorNum: d.total, unidad: '/12' };
+      if (tipo === 'sarcf') return { valorNum: d.total, unidad: '/10' };
+      if (tipo === 'ishii') return { valorNum: d.score, unidad: 'score' };
+      if (tipo === '2step') return { valorNum: d.pasos, unidad: 'pasos' };
+      return {};
+    };
+    const calculadorasSnap = (protocoloItems || [])
+      .filter(it => it.manual && (valoresManual[it.id] || '').toString().trim())
+      .map(it => ({ test: it.label, resultado: valoresManual[it.id], calcTipo: it.calc || null, ...calcNum(it.calc, calcData[it.id]) }));
     ultimaGeneracion = {
       persona_id: String(pacienteSel.id),
       fecha_vald: fechaVald,
       poblacion: body.paciente.poblacion,
       edad: body.paciente.edad,
-      snapshot: { calculadoras: calculadoras, hallazgos: sinExcluidos },
+      snapshot: { calculadoras: calculadorasSnap, hallazgos: sinExcluidos },
     };
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
       method: 'POST',
