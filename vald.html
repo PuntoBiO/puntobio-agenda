@@ -486,6 +486,36 @@ async function verEvolucion() {
 }
 function cerrarEvolucion() { const w = document.getElementById('evolucionWrap'); if (w) w.remove(); }
 
+// ---- Vigía: detecta métricas de VALD que no habíamos visto antes ----
+async function chequearMetricasNuevas(colored) {
+  if (!colored) return;
+  const limpiar = s => String(s || '').replace(/^[⭐★*\s]+/, '').trim(); // saca la estrella de "importante"
+  const mapa = {};
+  const juntar = (arr, sistema) => (arr || []).forEach(m => {
+    if (!m || !m.nom) return;
+    const n = limpiar(m.nom);
+    if (n && !mapa[n]) mapa[n] = sistema;
+  });
+  juntar(colored.fuerza, 'DynaMo');
+  juntar(colored.forceDecks, 'ForceDecks');
+  juntar(colored.movilidad, 'HumanTrak');
+  const nombres = Object.keys(mapa);
+  if (!nombres.length) return;
+  try {
+    const { data: cat } = await sb.from('biolab_metricas_catalogo').select('nombre');
+    const yaHabia = (cat || []).length;
+    const vistos = new Set((cat || []).map(r => r.nombre));
+    const nuevos = nombres.filter(n => !vistos.has(n));
+    if (!nuevos.length) return;
+    await sb.from('biolab_metricas_catalogo').insert(nuevos.map(n => ({ nombre: n, sistema: mapa[n] })));
+    // Mientras se arma el catálogo base no avisamos (evita ruido de los primeros usos).
+    if (yaHabia < 40) return;
+    const s = nuevos.length > 1 ? 's' : '';
+    const muestra = nuevos.slice(0, 4).join(', ') + (nuevos.length > 4 ? ` y ${nuevos.length - 4} más` : '');
+    toast('🆕 Apareció ' + nuevos.length + ' métrica' + s + ' no registrada' + s + ' antes: ' + muestra);
+  } catch (_) { /* sin tabla de catálogo todavía: no pasa nada */ }
+}
+
 let ultimaClasificacion = null;
 
 function toast(msg) {
@@ -1369,6 +1399,7 @@ async function traerEvaluacionVALD(forzarProfileId) {
     const colored = pintarEvaluacion(datos, normas || []);
     ultimaEvaluacion = { datos, colored };
     cont.innerHTML = renderEvaluacion(colored, datos);
+    chequearMetricasNuevas(colored);
     // Checklist del protocolo: ya quedó armado en el paso 4; sólo auto-tildamos lo que llegó de VALD
     const cardProt2 = document.getElementById('cardProtocolo');
     if (cardProt2) cardProt2.style.display = 'block';

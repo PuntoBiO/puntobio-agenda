@@ -2982,6 +2982,18 @@ async function abrirSelectorPDF() {
   const _bit = window._bitPDF;
   const _perfilDep = window._perfilDepPDF;
 
+  // Snapshots de evolución (para el gráfico opcional dentro del PDF)
+  let _snapsEvo = [];
+  try {
+    const { data } = await sb.from('biolab_evolucion')
+      .select('fecha_vald, fecha_registro, snapshot')
+      .eq('persona_id', personaId)
+      .order('fecha_registro', { ascending: true })
+      .limit(20);
+    _snapsEvo = data || [];
+  } catch (_) { /* sin tabla: sin gráfico */ }
+  window._snapsEvoPDF = _snapsEvo;
+
   const obsCheckboxes = observaciones.length
     ? observaciones.map((o, i) => `
         <label style="display:flex; gap:10px; align-items:flex-start; padding:10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:8px; cursor:pointer;">
@@ -3035,6 +3047,16 @@ async function abrirSelectorPDF() {
               <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
                 <input type="checkbox" id="pdfIncluirEvoluciones" ${_evos.length ? 'checked' : 'disabled'}>
                 <span style="font-size:13px;">${_evos.length ? `Incluir las ${_evos.length} evoluciones cargadas por los profes` : 'Sin evoluciones cargadas todavía'}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hc-section">
+            <div class="hc-section-header">📈 Gráfico de evolución <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(comparativa entre evaluaciones)</span></div>
+            <div class="hc-section-body">
+              <label style="display:flex; gap:10px; align-items:center; cursor:pointer;">
+                <input type="checkbox" id="pdfIncluirEvolucion" ${_snapsEvo.length >= 2 ? 'checked' : 'disabled'}>
+                <span style="font-size:13px;">${_snapsEvo.length >= 2 ? `Incluir el gráfico de evolución (${_snapsEvo.length} evaluaciones)` : 'Necesita 2 o más evaluaciones firmadas para comparar'}</span>
               </label>
             </div>
           </div>
@@ -3713,6 +3735,80 @@ async function generarPDF(conWhatsApp = false) {
       bloqueTexto(o.texto || '', { size: 10, color: GRIS_OSCURO });
       y += 12; // espacio entre observaciones
     });
+  }
+
+  // ====== GRÁFICO DE EVOLUCIÓN (opcional) ======
+  const incEvolucion = document.getElementById('pdfIncluirEvolucion')?.checked;
+  const snapsEvo = window._snapsEvoPDF || [];
+  if (incEvolucion && snapsEvo.length >= 2) {
+    const round2 = v => Math.round(Number(v) * 100) / 100;
+    const emRgb = em => em === '🟢' ? [22, 163, 74] : (em === '🟡' ? [217, 119, 6] : (em === '🔴' ? [220, 38, 38] : AZUL));
+    const etiq = s => {
+      const raw = String(s.fecha_vald || s.fecha_registro || '');
+      let m = raw.match(/(\d{4})-(\d{2})-(\d{2})/); if (m) return m[3] + '/' + m[2];
+      m = raw.match(/(\d{2})\/(\d{2})\/(\d{4})/); if (m) return m[1] + '/' + m[2];
+      return raw.slice(0, 10);
+    };
+    const fechasEvo = snapsEvo.map(etiq);
+    const calcMap = {}, asimMap = {};
+    snapsEvo.forEach((s, i) => {
+      ((s.snapshot && s.snapshot.calculadoras) || []).forEach(c => {
+        if (c.valorNum == null || isNaN(Number(c.valorNum))) return;
+        (calcMap[c.test] = calcMap[c.test] || { unidad: c.unidad || '', pts: [] }).pts.push({ label: fechasEvo[i], value: Number(c.valorNum) });
+      });
+      const h = (s.snapshot && s.snapshot.hallazgos) || {};
+      ['fuerza', 'forceDecks', 'movilidad'].forEach(cat => {
+        (h[cat] || []).forEach(mt => {
+          if (mt.asim == null || isNaN(Number(mt.asim))) return;
+          (asimMap[mt.nom] = asimMap[mt.nom] || { pts: [] }).pts.push({ label: fechasEvo[i], value: Math.abs(Number(mt.asim)), em: mt.em, rgb: emRgb(mt.em) });
+        });
+      });
+    });
+    const calcKeys = Object.keys(calcMap).filter(k => calcMap[k].pts.length >= 2);
+    // Asimetrías relevantes: las que tuvieron 🟡/🔴 en alguna evaluación (evitamos ruido informativo)
+    const asimKeys = Object.keys(asimMap).filter(k => asimMap[k].pts.length >= 2 && asimMap[k].pts.some(p => p.em === '🟡' || p.em === '🔴')).slice(0, 8);
+
+    function drawChart(titulo, sub, pts) {
+      const chartH = 118;
+      checkPage(chartH + 26);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...NEGRO);
+      doc.text(titulo, MARGIN, y);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+      doc.text(sub, MARGIN + doc.getTextWidth(titulo) + 8, y);
+      y += 6;
+      const padL = MARGIN + 30;
+      const plotW = PAGE_W - MARGIN - padL;
+      const top = y + 8, plotH = chartH - 34, bot = top + plotH;
+      const vals = pts.map(p => Number(p.value));
+      let mn = Math.min(...vals), mx = Math.max(...vals);
+      if (mn === mx) { mn -= 1; mx += 1; }
+      const rg = mx - mn; mn -= rg * 0.15; mx += rg * 0.15;
+      const X = i => padL + (pts.length === 1 ? plotW / 2 : (i / (pts.length - 1)) * plotW);
+      const Y = v => bot - ((Number(v) - mn) / (mx - mn)) * plotH;
+      doc.setDrawColor(205, 210, 215); doc.setLineWidth(0.5);
+      doc.line(padL, top, padL, bot); doc.line(padL, bot, padL + plotW, bot);
+      doc.setFontSize(7); doc.setTextColor(150, 150, 150);
+      doc.text(String(round2(mx)), padL - 4, top + 3, { align: 'right' });
+      doc.text(String(round2(mn)), padL - 4, bot, { align: 'right' });
+      doc.setDrawColor(...AZUL); doc.setLineWidth(1.5);
+      for (let i = 0; i < pts.length - 1; i++) doc.line(X(i), Y(pts[i].value), X(i + 1), Y(pts[i + 1].value));
+      pts.forEach((p, i) => {
+        doc.setFillColor(...(p.rgb || AZUL)); doc.circle(X(i), Y(p.value), 2.4, 'F');
+        doc.setFontSize(8); doc.setTextColor(...NEGRO);
+        doc.text(String(round2(p.value)), X(i), Y(p.value) - 5, { align: 'center' });
+        doc.setFontSize(7); doc.setTextColor(...GRIS);
+        doc.text(String(p.label || ''), X(i), bot + 12, { align: 'center' });
+      });
+      y = bot + 22;
+    }
+
+    if (calcKeys.length || asimKeys.length) {
+      tituloSeccion('Evolución entre evaluaciones');
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+      doc.text(`${snapsEvo.length} evaluaciones · ${fechasEvo.join('  ·  ')}`, MARGIN, y); y += 14;
+      calcKeys.forEach(k => drawChart(k, '(' + calcMap[k].unidad + ')', calcMap[k].pts));
+      asimKeys.forEach(k => drawChart(k, '(% asimetría · menor = mejor)', asimMap[k].pts));
+    }
   }
 
   // ====== EVOLUCIONES DE LOS PROFES ======
