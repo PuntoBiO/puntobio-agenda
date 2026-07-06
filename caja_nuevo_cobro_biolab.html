@@ -649,7 +649,7 @@
     const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof };
   }
-  function calcPlantillaMoplex(p, rectif, montoCustom){
+  function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
     if(!p) return null;
     if(rectif){
       // El monto de la rectificación se puede editar (se sabe al cargar el pedido).
@@ -658,8 +658,14 @@
       const moplex = Math.round(precio*0.85);
       return { precio, moplex, prof:0, centro: precio - moplex, rectif:true };
     }
-    const precio = Number(p.precio_paciente)||0;
-    const moplex = Number(p.costo_moplex)||0;
+    // Nueva: precio editable (convenios MOPLEX). Por defecto el del catálogo; si Lu cargó
+    // un precio de convenio en la pantalla de MOPLEX (moplex_plantilla_monto), se usa ese.
+    // El descuento se reparte proporcional: MOPLEX baja igual que el precio; prof ya es %.
+    const precioDef = Number(p.precio_paciente)||0;
+    const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
+    const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
+    const moplexBase = Number(p.costo_moplex)||0;
+    const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
     const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof, rectif:false };
   }
@@ -698,7 +704,7 @@
     const ev = byId[t.moplex_consulta_id];
     const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const er = ev ? calcConsultaMoplex(ev) : null;
-    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0) : null;
+    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
     const evalPrecio  = er ? er.precio : 0;
     const plantPrecio = pr ? pr.precio : 0;
     return {
@@ -747,7 +753,7 @@
     const rectif = !!t.moplex_plantilla_rectif;
     const txt = $('moplexPlantillaTxt'), btn = $('btnPlantilla');
     if (pl){
-      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, Number(t.moplex_rectif_monto)||0).precio) + '</b>';
+      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0).precio) + '</b>';
       btn.textContent = 'Cambiar';
     } else {
       txt.textContent = 'Ninguna';
@@ -794,9 +800,12 @@
     const id = $('modalPlantillaSel').value;
     const rectif = $('modalPlantillaRectif').checked;
     const rectifMonto = (id && rectif) ? (Number($('modalRectifMonto').value)||0) : null;
+    // Si se cambia de plantilla (o se saca), el precio de convenio de la anterior no aplica.
+    const cambioPlantilla = Number(id||0) !== Number(t.moplex_plantilla_id||0);
     const patch = id
-      ? { solicita_plantillas: true, moplex_plantilla_id: Number(id), moplex_plantilla_rectif: rectif, moplex_rectif_monto: rectifMonto }
-      : { solicita_plantillas: false, moplex_plantilla_id: null, moplex_plantilla_rectif: false, moplex_rectif_monto: null };
+      ? { solicita_plantillas: true, moplex_plantilla_id: Number(id), moplex_plantilla_rectif: rectif, moplex_rectif_monto: rectifMonto,
+          ...(cambioPlantilla ? { moplex_plantilla_monto: null } : {}) }
+      : { solicita_plantillas: false, moplex_plantilla_id: null, moplex_plantilla_rectif: false, moplex_rectif_monto: null, moplex_plantilla_monto: null };
     try {
       const { error } = await sb.from('tratamientos').update(patch).eq('id', t.id);
       if (error) throw error;
