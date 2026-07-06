@@ -819,6 +819,20 @@ function render(pagos, sesiones, filtroProf){
     prodMes[pr].bruto += val; prodMes[pr].cant++;
   }
 
+  // Mapa tratamiento → profesional(es) que atendió, para atribuir los cobros que recibió PuntoBiO
+  const profPorTrat = {};
+  for (const s of (MT.sesAll || [])){
+    const tid = s.tratamiento_id, pr = normProf(s.profesional);
+    if (tid == null || !pr) continue;
+    (profPorTrat[tid] = profPorTrat[tid] || new Set()).add(pr);
+  }
+  const profDeTrat = tid => {
+    const set = profPorTrat[tid];
+    if (!set || set.size === 0) return '';
+    if (set.size === 1) return [...set][0];
+    return 'varios';
+  };
+
   // Plata física del mes: quién la recibió y por qué medio (incluye MOPLEX: es plata real)
   const recibidoDet = {};   // quién recibió → lista de pagos (para mostrar qué compone el "en mano")
   for (const p of pagos){
@@ -829,7 +843,8 @@ function render(pagos, sesiones, filtroProf){
     (recibidoDet[quien] = recibidoDet[quien] || []).push({
       fecha: p.fecha, importe: imp,
       paciente: ((tD.personas || {}).nombre) || '—',
-      codigo: tD.codigo_id || '—', practica: tD.practica_codigo || ''
+      codigo: tD.codigo_id || '—', practica: tD.practica_codigo || '',
+      prof: profDeTrat(p.tratamiento_id)
     });
     if (!porMedio[quien]) porMedio[quien] = {debito:0, efectivo:0, transferencia:0};
     const medio = String(p.medio_pago || '').toUpperCase();
@@ -1053,11 +1068,22 @@ function render(pagos, sesiones, filtroProf){
           const lista = recibidoDet[q].slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
           const tot = lista.reduce((a,x)=> a + x.importe, 0);
           html += `<div style="margin-top:10px;"><b>${badge(q)}</b> — recibió ${fmt(tot)}</div>
-            <table style="margin-top:6px;"><thead><tr><th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th class="num">Importe</th></tr></thead><tbody>`;
+            <table style="margin-top:6px;"><thead><tr><th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Corresponde a</th><th class="num">Importe</th></tr></thead><tbody>`;
           for (const x of lista){
-            html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td class="num">${fmt(x.importe)}</td></tr>`;
+            html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td>${x.prof ? badge(x.prof) : '—'}</td><td class="num">${fmt(x.importe)}</td></tr>`;
           }
           html += `</tbody></table>`;
+          // Si PuntoBiO recibió plata que corresponde a un profesional (Bruno/Male/Vero), resumirla
+          if (q === 'PuntoBiO'){
+            const porProfPB = {};
+            for (const x of lista){ if (['Bruno','Male','Vero'].includes(x.prof)) porProfPB[x.prof] = (porProfPB[x.prof]||0) + x.importe; }
+            const profsPB = ordenarProfs(Object.keys(porProfPB));
+            if (profsPB.length){
+              html += `<div style="margin:6px 0 2px;font-size:12.5px;color:#92400e;background:#fef3c7;border-radius:8px;padding:8px 10px;">🏦 De lo que recibió PuntoBiO, corresponde a un profesional: ` +
+                profsPB.map(pr => `<b>${pr}</b> ${fmt(porProfPB[pr])}`).join(' · ') +
+                ` <span style="color:#78716c;">— la parte de cada uno ya está sumada en su neto de arriba.</span></div>`;
+            }
+          }
         }
         html += `</details>`;
       }
