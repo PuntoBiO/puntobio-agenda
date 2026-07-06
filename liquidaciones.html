@@ -924,6 +924,20 @@ function render(pagos, sesiones, filtroProf){
     resumen[prof].cobroPB = cobradoPBporProf[prof] || 0;
   }
 
+  // Cobros que le corresponden a cada profe, con QUIÉN los recibió (para el detalle desplegable).
+  // Así el profe/administración ve la plata que es suya y quién la tiene (en mano, PuntoBiO u otro).
+  for (const p of pagos){
+    const pr = profDePago(p.tratamiento_id, p.fecha);
+    if (!['Bruno','Male','Vero'].includes(pr) || !resumen[pr]) continue;
+    const tD = p.tratamientos || {};
+    (resumen[pr].cobros = resumen[pr].cobros || []).push({
+      fecha: p.fecha, importe: Number(p.importe) || 0,
+      paciente: ((tD.personas || {}).nombre) || '—',
+      medio: String(p.medio_pago || '').toUpperCase(),
+      quien: String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO'
+    });
+  }
+
   // Ajustes: corresponde (sesiones abonadas + MOPLEX) vs recibido en mano.
   // Recibió de más → lo devuelve al centro (custodia). Recibió de menos → el centro le paga.
   const crucesBrutos = [];
@@ -1435,6 +1449,23 @@ function toggleDetalle(prof){
     }
     if (pend.length) html += `<tr><td colspan="${_solo?7:8}" style="font-size:12.5px;color:#92400e;background:#fffbeb;">⏳ ${pend.length} sesión${pend.length>1?'es':''} realizada${pend.length>1?'s':''} pero <b>aún no abonada${pend.length>1?'s':''} por el paciente</b>: va en $0 este mes y <b>pasa a la próxima liquidación</b> (se le paga al profesional cuando el paciente abone).</td></tr>`;
     html += `</tbody></table>`;
+
+    // 💵 Cobros que le corresponden a este profe — y QUIÉN tiene la plata
+    const cobros = (g.cobros || []).slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+    if (cobros.length){
+      const totC = cobros.reduce((a,x)=> a + x.importe, 0);
+      html += `<div style="margin-top:16px;font-weight:600;color:#0f172a;">💵 Cobros que te corresponden — quién tiene la plata (${fmt(totC)})</div>
+        <table style="margin-top:6px;"><thead><tr><th>Fecha</th><th>Paciente</th><th>Medio</th><th>Quién la recibió</th><th class="num">Importe</th></tr></thead><tbody>`;
+      for (const x of cobros){
+        const ajeno = (x.quien !== prof);
+        html += `<tr${ajeno ? ' style="background:#fef3c7;"' : ''}>
+          <td>${x.fecha}</td><td>${x.paciente}</td><td>${x.medio}</td>
+          <td>${ajeno ? ('🏦 ' + x.quien) : ('✅ ' + x.quien + ' (vos)')}</td>
+          <td class="num">${fmt(x.importe)}</td></tr>`;
+      }
+      html += `</tbody></table>
+        <div style="font-size:12px;color:#92400e;margin-top:4px;">Las filas en amarillo las cobró otro (PuntoBiO u otro profe): esa plata es tuya pero la tiene otro → por eso se ajusta en el neto.</div>`;
+    }
     content.innerHTML = html;
     row.style.display = '';
     arr.classList.add('open');
