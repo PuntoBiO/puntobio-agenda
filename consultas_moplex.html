@@ -101,7 +101,7 @@ function calcConsulta(c){
   const centro = precio - moplex - prof
   return { precio, moplex, prof, centro }
 }
-function calcPlantilla(p, rectif, montoCustom){
+function calcPlantilla(p, rectif, montoCustom, montoPlantilla){
   if(!p) return null
   if(rectif){
     const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2)  // editable; por defecto la mitad
@@ -110,11 +110,13 @@ function calcPlantilla(p, rectif, montoCustom){
     const centro = precio - moplex                                // 15%
     return { precio, moplex, prof, centro, rectif:true }
   }
-  const precio = Number(p.precio_paciente)||0
+  // Nueva: precio editable (convenios MOPLEX). Por defecto el del catálogo; si Lu lo cambió, ese.
+  const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : (Number(p.precio_paciente)||0)
+  const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== (Number(p.precio_paciente)||0)
   const moplex = Number(p.costo_moplex)||0
   const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
-  return { precio, moplex, prof, centro, rectif:false }
+  return { precio, moplex, prof, centro, rectif:false, custom }
 }
 function montosLine(m){
   if(!m) return ''
@@ -245,11 +247,20 @@ function filaTto(t){
       `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}</option>`).join('')
     const plSel = `<select class="sel" onchange="setPlantilla(${t.id}, this.value)"><option value="">— tipo —</option>${plOpts}</select>`
     const rectSel = `<select class="sel sel-sm" onchange="setRectif(${t.id}, this.value)"><option value="0" ${!rectif?'selected':''}>Nueva</option><option value="1" ${rectif?'selected':''}>Rectificación</option></select>`
-    const rectInput = rectif
-      ? `<input class="sel sel-sm" type="number" step="100" min="0" placeholder="monto MOPLEX" value="${t.moplex_rectif_monto || ''}" onchange="setRectifMonto(${t.id}, this.value)" title="Monto que indica MOPLEX para la rectificación" style="width:130px;">`
-      : ''
-    const pMon = montosLine(aplicarFactura(calcPlantilla(state.cat.byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0), factura))
-    plCell = `<div class="plrow">${plSel} ${rectSel} ${rectInput}</div>${pMon}<div class="muted">cobra ${prof || '—'}</div>`
+    const plCat = state.cat.byId[t.moplex_plantilla_id]
+    const precioDef = plCat ? (Number(plCat.precio_paciente)||0) : 0
+    const precioActual = (Number(t.moplex_plantilla_monto) > 0) ? Number(t.moplex_plantilla_monto) : precioDef
+    const editado = (Number(t.moplex_plantilla_monto) > 0) && Number(t.moplex_plantilla_monto) !== precioDef
+    let extraInput = ''
+    if (rectif){
+      extraInput = `<input class="sel sel-sm" type="number" step="100" min="0" placeholder="monto MOPLEX" value="${t.moplex_rectif_monto || ''}" onchange="setRectifMonto(${t.id}, this.value)" title="Monto que indica MOPLEX para la rectificación" style="width:130px;">`
+    } else if (plCat){
+      // Precio del paciente editable (convenios MOPLEX). Trae por defecto el del catálogo.
+      extraInput = `<span title="Precio del paciente. Trae el del catálogo; editalo si hay convenio MOPLEX." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${precioActual}" onchange="setPlantillaMonto(${t.id}, this.value)" style="width:110px;${editado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span>`
+    }
+    const pMon = montosLine(aplicarFactura(calcPlantilla(plCat, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0), factura))
+    const convChip = (!rectif && editado) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio de convenio (catálogo ${fmt(precioDef)})</div>` : ''
+    plCell = `<div class="plrow">${plSel} ${rectSel} ${extraInput}</div>${pMon}${convChip}<div class="muted">cobra ${prof || '—'}</div>`
   } else {
     plCell = `<span class="badge b-no">—</span>`
   }
@@ -367,11 +378,22 @@ async function setConsulta(id, val){
 async function setPlantilla(id, val){
   const v = val ? Number(val) : null
   try{
-    const { error } = await sb.from('tratamientos').update({ moplex_plantilla_id: v }).eq('id', id)
+    // al cambiar de tipo de plantilla, se limpia el precio custom para traer el del catálogo nuevo
+    const { error } = await sb.from('tratamientos').update({ moplex_plantilla_id: v, moplex_plantilla_monto: null }).eq('id', id)
     if (error) throw error
-    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_plantilla_id = v
+    const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_plantilla_id = v; t.moplex_plantilla_monto = null }
     render()
   } catch(e){ msg('No se pudo guardar la plantilla: ' + (e.message || e), 'err') }
+}
+
+async function setPlantillaMonto(id, val){
+  const v = (val === '' || val == null) ? null : Number(val)
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_plantilla_monto: v }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_plantilla_monto = v
+    render()
+  } catch(e){ msg('No se pudo guardar el precio de la plantilla: ' + (e.message || e), 'err') }
 }
 
 async function setRectif(id, val){
