@@ -1658,20 +1658,34 @@ function renderWeek(container) {
       const motivos = bloqs.map(b => etiquetaBloqueo(b) || 'Bloqueado').join(' · ');
 
       if (!tieneTurnos) {
-        // Casillero vacío con cierre → "CERRADO".
-        //   · Permanente (recurrente)  → GRIS  (slot-bloqueado)
-        //   · Temporal (un día puntual) → ROJO (slot-bloqueado-temp)
-        // En ambos casos sigue siendo is-libre → en Modo gestión se puede tocar para reabrir.
-        const ref = bloqAmplio || bloqs[0];
-        // PERMANENTE (gris) si CUALQUIER cierre que aplica es recurrente, O si su
-        // fecha_hasta es lejana (2099 = marca de cierre permanente). Si no → temporal (rojo).
-        const esPermB = b => b.recurrente || (b.fecha_hasta && String(b.fecha_hasta) >= '2099-01-01');
-        const esPerm = bloqs.some(esPermB);
-        c.classList.remove('slot-bloqueado', 'slot-bloqueado-temp'); // nunca las dos juntas
-        c.classList.add(esPerm ? 'slot-bloqueado' : 'slot-bloqueado-temp');
-        c.setAttribute('data-bloqueo-motivo', 'CERRADO');
-        c.title = bloqAmplio ? (etiquetaBloqueo(bloqAmplio) || 'Cerrado') : motivos;
-        const ss = c.querySelector('.subslots'); if (ss) ss.style.display = 'none'; // que no se vean Cons 1/2 debajo del CERRADO
+        // Solo cerramos el casillero ENTERO si el cierre es AMPLIO (sin profe ni
+        // práctica): ahí no atiende nadie. Un cierre por PROFE o por PRÁCTICA no cierra
+        // el casillero, porque los demás profes/prácticas siguen disponibles (ej: Jime
+        // de vacaciones no debe cerrarle el consultorio a Bruno). Se muestra como aviso.
+        if (bloqAmplio) {
+          // Casillero vacío con cierre TOTAL → "CERRADO".
+          //   · Permanente (recurrente / hasta 2099) → GRIS  (slot-bloqueado)
+          //   · Temporal (un día puntual)            → ROJO  (slot-bloqueado-temp)
+          // Sigue siendo is-libre → en Modo gestión se puede tocar para reabrir.
+          const esPermB = b => b.recurrente || (b.fecha_hasta && String(b.fecha_hasta) >= '2099-01-01');
+          const esPerm = bloqs.some(esPermB);
+          c.classList.remove('slot-bloqueado', 'slot-bloqueado-temp'); // nunca las dos juntas
+          c.classList.add(esPerm ? 'slot-bloqueado' : 'slot-bloqueado-temp');
+          c.setAttribute('data-bloqueo-motivo', 'CERRADO');
+          c.title = etiquetaBloqueo(bloqAmplio) || 'Cerrado';
+          const ss = c.querySelector('.subslots'); if (ss) ss.style.display = 'none'; // que no se vean Cons 1/2 debajo del CERRADO
+          return;
+        }
+        // Cierre PARCIAL (solo por profe o práctica) sobre casillero vacío: NO se cierra,
+        // se muestra un chip con el motivo así la admin ve la restricción, pero el slot
+        // sigue disponible para los demás profesionales.
+        c.classList.add('slot-bloqueado-parcial');
+        c.setAttribute('data-bloqueo-motivo', motivos);
+        const chipV = document.createElement('div');
+        chipV.className = 'slot-bloqueo-chip';
+        chipV.textContent = '🚫 ' + motivos;
+        chipV.title = motivos;
+        c.insertBefore(chipV, c.firstChild);
         return;
       }
 
@@ -2922,14 +2936,14 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
   const slotTurnos = turnos.filter(t => t.fecha===fecha && parseInt(t.hora_inicio.slice(0,2),10)===hora && t.estado!=='CANCELADO');
   const hayEspecialidad = slotTurnos.some(t => esEspecialidadCons(t.practica_codigo)); // osteo / masaje
   const vacioCompleto = slotTurnos.length === 0;
-  // Cierres (igual que la agenda): cierre TOTAL siempre bloquea; y un casillero VACÍO
-  // con cualquier cierre (total o por profe) se muestra como CERRADO → no disponible.
+  // Cierres: un cierre TOTAL (sin profe ni práctica) siempre bloquea. Un cierre por
+  // PROFE o por PRÁCTICA NO cierra el slot para los demás (ej: Jime de vacaciones no
+  // le cierra el consultorio a Bruno), así que no lo descartamos acá.
   if (window.Bloqueos) {
     const hi = pad(hora)+':00', hf = pad(hora+1)+':00';
     const bl = Bloqueos.todosLosQueAplican('CONSULTORIOS', fecha, hi, hf, null, null) || [];
     const amplio = bl.some(b => !b.profesional_email && !b.practica_codigo);
     if (amplio) return false;
-    if (bl.length > 0 && vacioCompleto) return false;
   }
 
   // OSTEOPATÍA / MASAJE (especialidad)
