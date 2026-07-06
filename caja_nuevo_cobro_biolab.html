@@ -475,6 +475,31 @@
           </select>
         </div>
 
+        <!-- 💸 DESCUENTO al cobrar — SOLO EVAL (MOPLEX reparte por catálogo) -->
+        <div class="field full" id="descWrap" style="grid-column: 1 / -1; display:none;">
+          <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600;">
+            <input type="checkbox" id="descOn" onchange="toggleDescuento()"> 💸 Aplicar descuento a esta evaluación
+          </label>
+          <div id="descBox" hidden style="margin-top:10px; padding:12px; border:1px solid var(--border,#e2e8f0); border-radius:10px; background:rgba(0,0,0,.02);">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+              <div>
+                <label for="descPrecio">Precio real por sesión ($)</label>
+                <input id="descPrecio" type="number" step="100" min="0" placeholder="precio con descuento">
+              </div>
+              <div>
+                <label for="descQuien">¿Quién pone el descuento?</label>
+                <select id="descQuien">
+                  <option value="CENTRO">PuntoBiO absorbe (el profe cobra su parte, el centro regala la suya)</option>
+                  <option value="REPARTE">Se reparte (profe cobra su % sobre el precio con descuento)</option>
+                </select>
+              </div>
+            </div>
+            <div style="font-size:12px; color:var(--text-dim,#64748b); margin-top:8px;">
+              💡 Solo EVAL. Reprecia la sesión de esta evaluación (desde 01/07/2026) y ajusta el total → queda <b>saldado</b>. El <b>motivo es obligatorio</b> (Observaciones). Evolucioná la eval <b>antes</b> de cobrar con descuento, así se puede repreciar la sesión.
+            </div>
+          </div>
+        </div>
+
         <div class="field" id="libreBox" style="display:none; grid-column: 1 / -1;">
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
             <div>
@@ -1165,6 +1190,13 @@
     $('obs').value = '';
     $('tipoCobro').value = 'NORMAL';
 
+    // Descuento: SOLO disponible para EVAL (MOPLEX reparte por catálogo)
+    if ($('descWrap')) {
+      const esEval = (t.practica_codigo === 'EVAL');
+      $('descWrap').style.display = esEval ? 'block' : 'none';
+      if (!esEval && $('descOn')) { $('descOn').checked = false; if ($('descBox')) $('descBox').hidden = true; }
+    }
+
     // Habilitar paso 3
     $('step3').classList.remove('disabled');
     $('btnCobrar').disabled = true;
@@ -1375,6 +1407,58 @@
   }
 
   /* ===== GUARDAR ===== */
+  // ===== 💸 DESCUENTO AL COBRAR (SOLO EVAL) =====
+  window.toggleDescuento = function(){
+    const on = document.getElementById('descOn').checked;
+    document.getElementById('descBox').hidden = !on;
+  }
+
+  // % del profesional (0..1) desde tarifario_splits. Jime/Lu = 0. Soporta escala 0-1 o 0-100.
+  async function pctProfDesc(practica, profesional){
+    if (!profesional) return 0;
+    try {
+      const { data } = await sb.from('tarifario_splits')
+        .select('pct_centro, pct_moplex')
+        .eq('practica_codigo', practica).eq('profesional', profesional).maybeSingle();
+      if (!data) return 0;
+      const pc = Number(data.pct_centro || 0), pm = Number(data.pct_moplex || 0);
+      const scale = (pc > 1 || pm > 1) ? 100 : 1;
+      return Math.max(0, 1 - (pc + pm) / scale);
+    } catch(e){ return 0; }
+  }
+
+  // Reprecia las sesiones (post-corte) de una EVAL al precio con descuento y baja
+  // valor_sesion para que total_pagar refleje el precio nuevo → estado SALDADO.
+  // escenario: 'REPARTE' (profe % sobre precio con descuento) | 'CENTRO' (profe % sobre lista, centro absorbe)
+  const CORTE_DESC = '2026-07-01';
+  async function aplicarDescuentoTto(t, precioDesc, escenario, motivo){
+    const { data: tt, error: eT } = await sb.from('tratamientos')
+      .select('id, valor_sesion, total_sesiones, observaciones, practica_codigo')
+      .eq('id', t.id).single();
+    if (eT) throw eT;
+    if (tt.practica_codigo !== 'EVAL') throw new Error('El descuento solo aplica a evaluaciones EVAL.');
+    const lista = Number(tt.valor_sesion) || 0;
+    const { data: ses, error: eS } = await sb.from('sesiones')
+      .select('id, profesional, fecha')
+      .eq('tratamiento_id', t.id).gte('fecha', CORTE_DESC);
+    if (eS) throw eS;
+    const sesiones = ses || [];
+    for (const s of sesiones){
+      const p = await pctProfDesc(tt.practica_codigo, s.profesional);   // 0..1
+      let mProf = (escenario === 'CENTRO') ? Math.round(lista * p) : Math.round(precioDesc * p);
+      if (mProf > precioDesc) mProf = precioDesc;   // tope: centro nunca negativo
+      const mCentro = precioDesc - mProf;
+      const { error: eU } = await sb.from('sesiones')
+        .update({ monto_centro: mCentro, monto_profesional: mProf }).eq('id', s.id);
+      if (eU) throw eU;
+    }
+    const obsNueva = (tt.observaciones ? tt.observaciones + ' · ' : '') + '[DESCUENTO] ' + motivo + ' (aplicado al cobrar)';
+    const { error: eTT } = await sb.from('tratamientos')
+      .update({ valor_sesion: precioDesc, descuento_monto: 0, observaciones: obsNueva }).eq('id', t.id);
+    if (eTT) throw eTT;
+    return { n: sesiones.length, lista };
+  }
+
   async function cobrar() {
     const t = state.ttoSel;
     if (!t) return;
@@ -1429,6 +1513,38 @@
     );
     if (!okConfirm) { btn.disabled = false; btn.textContent = 'Registrar cobro'; return; }
 
+    // 💸 Descuento (solo EVAL): repreciar sesión + bajar precio del tto ANTES de insertar el pago
+    let descAplicado = false, descPagoProf = 0, descPagoCentro = 0;
+    if (t.practica_codigo === 'EVAL' && document.getElementById('descOn') && document.getElementById('descOn').checked) {
+      const precioDesc = Number($('descPrecio').value) || 0;
+      const escenario = $('descQuien').value;
+      const motivo = ($('obs').value || '').trim();
+      if (precioDesc <= 0) { toast('Poné el precio real por sesión del descuento', 'err'); btn.disabled=false; btn.textContent='Registrar cobro'; return; }
+      if (!motivo) { toast('El motivo del descuento es obligatorio (Observaciones)', 'err'); btn.disabled=false; btn.textContent='Registrar cobro'; return; }
+      const okDesc = confirm(
+        '💸 Vas a aplicar un DESCUENTO (EVAL):\n\n' +
+        'Precio por sesión: ' + fmt(precioDesc) + '\n' +
+        (escenario === 'CENTRO' ? 'Lo absorbe: PuntoBiO (el profe cobra su parte, el centro regala la suya)' : 'Se reparte (profe cobra sobre el precio con descuento)') + '\n' +
+        'Motivo: ' + motivo + '\n\n' +
+        'Se reprecia la sesión de esta evaluación desde el 01/07/2026. ¿Confirmás?'
+      );
+      if (!okDesc) { btn.disabled=false; btn.textContent='Registrar cobro'; return; }
+      try {
+        const r = await aplicarDescuentoTto(t, precioDesc, escenario, motivo);
+        if (r.n === 0) { toast('⚠️ No hay sesión evolucionada todavía. Evolucioná la eval y volvé a cobrar con descuento.', 'warn', 7000); btn.disabled=false; btn.textContent='Registrar cobro'; return; }
+        // El pago se guarda con el MISMO reparto que la sesión (para que la caja coincida con la liquidación)
+        const pPago = await pctProfDesc('EVAL', $('profesional').value);
+        let profPago = (escenario === 'CENTRO') ? Math.round((Number(r.lista) || 0) * pPago) : Math.round(importe * pPago);
+        if (profPago > importe) profPago = importe;
+        descAplicado = true; descPagoProf = profPago; descPagoCentro = importe - profPago;
+        toast('💸 Descuento aplicado a ' + r.n + ' sesión(es) a ' + fmt(precioDesc), 'ok', 4000);
+      } catch(e){
+        console.error('Error aplicando descuento:', e);
+        toast('Error al aplicar descuento: ' + e.message, 'err', 6000);
+        btn.disabled=false; btn.textContent='Registrar cobro'; return;
+      }
+    }
+
     const payload = {
       fecha: $('fecha').value || hoy(),
       tratamiento_id: t.id,
@@ -1454,6 +1570,14 @@
       payload.monto_profesional = s.prof;
       payload.monto_centro      = s.centro;
       payload.monto_moplex      = s.moplex;
+    }
+
+    // 💸 Descuento aplicado: el pago va MANUAL con el mismo reparto que la sesión
+    if (descAplicado) {
+      payload.tipo_cobro = 'MANUAL';
+      payload.monto_profesional = descPagoProf;
+      payload.monto_centro = descPagoCentro;
+      payload.monto_moplex = 0;
     }
 
     // Si tu schema NO tiene tipo_cobro / cargado_por, eliminá esas claves del payload.
