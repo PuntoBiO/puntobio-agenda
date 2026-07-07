@@ -732,6 +732,37 @@ function totalMoplexTto(t){
   const plantPrecio = _precioPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0)
   return evalPrecio + plantPrecio
 }
+// Igual que totalMoplexTto pero devolviendo eval y plantilla por separado (para el detalle).
+function desgloseMoplexTto(t){
+  const byId = estado.moplexCatById || {}
+  const ev = byId[t.moplex_consulta_id]
+  const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null
+  const evalPrecio  = ev ? (Number(ev.precio_paciente)||0) : 0
+  const plantPrecio = _precioPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0)
+  return {
+    evalPrecio, plantPrecio,
+    evalNombre:  ev ? ev.nombre : null,
+    plantNombre: pl ? pl.nombre : null,
+    rectif: !!t.moplex_plantilla_rectif,
+    total: evalPrecio + plantPrecio
+  }
+}
+// Atribuye cada pago del MOPLEX a evaluación / plantilla con el mismo criterio que la caja:
+// waterfall (primero se cubre la evaluación, después la plantilla) en orden cronológico.
+function atribuirPagosMoplex(t, pagos){
+  const dg = desgloseMoplexTto(t)
+  let evalRest = dg.evalPrecio, plantRest = dg.plantPrecio
+  const mapa = {}
+  const ordenados = [...pagos].sort((a,b) =>
+    String(a.fecha||'').localeCompare(String(b.fecha||'')) || (Number(a.id)-Number(b.id)))
+  ordenados.forEach(p => {
+    let imp = Number(p.importe||0)
+    const aEval  = Math.min(imp, evalRest);  evalRest  -= aEval;  imp -= aEval
+    const aPlant = Math.min(imp, plantRest); plantRest -= aPlant; imp -= aPlant
+    mapa[p.id] = { aEval, aPlant, sobra: imp>0?imp:0 }
+  })
+  return { mapa, dg }
+}
 // Rellena _totalReal y _saldoReal en cada tratamiento. Para MOPLEX recalcula desde el
 // catálogo; para el resto usa exactamente los campos de siempre (comportamiento idéntico).
 function enriquecerTotales(){
@@ -1015,7 +1046,7 @@ window.verDetalle = async function(ttoId) {
     ['Diagnóstico', t.diagnostico ? `<strong>${t.diagnostico}</strong>` : '<span style="color:var(--text-faint);">— sin completar (editá para agregarlo)</span>'],
     ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
-    ['Total a pagar', t._moplexRecalc ? `${fmt(t._totalReal)} <span style="color:var(--text-faint);font-size:11px;">(eval + plantilla)</span>` : fmt(t.total_pagar)],
+    ['Total a pagar', t._moplexRecalc ? `${fmt(t._totalReal)} <span style="color:var(--text-faint);font-size:11px;">(evaluación ${fmt(desgloseMoplexTto(t).evalPrecio)} + plantilla ${fmt(desgloseMoplexTto(t).plantPrecio)})</span>` : fmt(t.total_pagar)],
     ['Total abonado', fmt(t.total_abonado)],
     ['Saldo pendiente', fmt(t._moplexRecalc ? t._saldoReal : t.saldo_pendiente)],
     ['Tipo de cobro', t.tipo_cobro || '—'],
@@ -1037,6 +1068,17 @@ window.verDetalle = async function(ttoId) {
     pagosHtml = `<div style="padding: 12px; color: var(--text-dim); font-size: 13px;">Sin pagos asociados.</div>`
   } else {
     const sumaPagos = pagosAsoc.reduce((acc, p) => acc + Number(p.importe || 0), 0)
+    // MOPLEX: atribuir cada pago a evaluación / plantilla (mismo waterfall que la caja).
+    const atrib = t._moplexRecalc ? atribuirPagosMoplex(t, pagosAsoc).mapa : null
+    const chipAtrib = (p) => {
+      if (!atrib || !atrib[p.id]) return ''
+      const at = atrib[p.id], parts = []
+      if (at.aEval  > 0) parts.push(`Evaluación ${fmt(at.aEval)}`)
+      if (at.aPlant > 0) parts.push(`Plantilla ${fmt(at.aPlant)}`)
+      if (at.sobra  > 0) parts.push(`A cuenta ${fmt(at.sobra)}`)
+      if (!parts.length) return ''
+      return `<div style="font-size:11px;color:var(--turquoise);margin-top:3px;">→ ${parts.join(' + ')}</div>`
+    }
     pagosHtml = `
       <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">
         ${pagosAsoc.length} pago(s) · Suma: <strong style="color: var(--green);">${fmt(sumaPagos)}</strong>
@@ -1045,7 +1087,7 @@ window.verDetalle = async function(ttoId) {
         ${pagosAsoc.map(p => `
           <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
             <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${p.id}</span>
-            <span style="flex: 1;">${fmtFecha(p.fecha)} · <strong>${fmt(p.importe)}</strong> · ${p.medio_pago || '—'} · ${p.quien_cobro || '—'} ${p.tipo_cobro && p.tipo_cobro !== 'NORMAL' ? `· <span style="color: var(--amber);">${p.tipo_cobro}</span>` : ''}</span>
+            <span style="flex: 1;">${fmtFecha(p.fecha)} · <strong>${fmt(p.importe)}</strong> · ${p.medio_pago || '—'} · ${p.quien_cobro || '—'} ${p.tipo_cobro && p.tipo_cobro !== 'NORMAL' ? `· <span style="color: var(--amber);">${p.tipo_cobro}</span>` : ''}${chipAtrib(p)}</span>
             <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarPago(${p.id})">🗑️</button>
           </div>
         `).join('')}
