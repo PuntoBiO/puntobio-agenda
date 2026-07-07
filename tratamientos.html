@@ -711,9 +711,49 @@ function badgeArea(area) {
   return `<span class="badge ${m.cls}">${m.txt}</span>`
 }
 
+// ===== MOPLEX: total real = evaluación + plantilla (con precio de convenio) =====
+// Mismo criterio que la caja de cobro: el total NO sale del campo total_pagar (que para
+// MOPLEX solo tiene la evaluación), sino que se recalcula desde el catálogo. Solo lectura.
+function _precioPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
+  if(!p) return 0
+  if(rectif){
+    // Rectificación: el paciente paga el monto indicado (o la mitad del precio por defecto).
+    return (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2)
+  }
+  // Plantilla nueva: precio de convenio si se cargó, si no el de lista.
+  const precioDef = Number(p.precio_paciente)||0
+  return (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef
+}
+function totalMoplexTto(t){
+  const byId = estado.moplexCatById || {}
+  const ev = byId[t.moplex_consulta_id]
+  const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null
+  const evalPrecio  = ev ? (Number(ev.precio_paciente)||0) : 0
+  const plantPrecio = _precioPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0)
+  return evalPrecio + plantPrecio
+}
+// Rellena _totalReal y _saldoReal en cada tratamiento. Para MOPLEX recalcula desde el
+// catálogo; para el resto usa exactamente los campos de siempre (comportamiento idéntico).
+function enriquecerTotales(){
+  const cat = estado.moplexCatById || {}
+  estado.tratamientos.forEach(t => {
+    const esMoplex = (t.practica_codigo === 'MOPLEX') && (t.moplex_consulta_id || t.moplex_plantilla_id)
+    if (esMoplex && Object.keys(cat).length){
+      const total = totalMoplexTto(t)
+      t._totalReal = total
+      t._saldoReal = total - Number(t.total_abonado || 0)
+      t._moplexRecalc = true
+    } else {
+      t._totalReal = Number(t.total_pagar || 0)
+      t._saldoReal = Number(t.saldo_pendiente || 0)
+      t._moplexRecalc = false
+    }
+  })
+}
+
 function badgeEstado(t) {
   const estadoStr = String(t.estado || '').toUpperCase()
-  const saldo = Number(t.saldo_pendiente || 0)
+  const saldo = Number(t._saldoReal != null ? t._saldoReal : (t.saldo_pendiente || 0))
   // Priorizar el campo estado de la BD; si no, deducir del saldo
   if (estadoStr === 'PENDIENTE' || estadoStr === 'ACTIVO') {
     return `<span class="badge badge-activo">${t.estado}</span>`
@@ -747,6 +787,9 @@ async function cargarDatos() {
 
     if (errT) throw errT
     estado.tratamientos = ttos || []
+
+    // 1b) Catálogo MOPLEX (para recalcular el total real de los MOPLEX). No frena si falla.
+    try { await cargarMoplexConsultasCat() } catch (e) { console.warn('MOPLEX cat:', e) }
 
     // 2) Cargar personas en lote (solo las que aparecen)
     const personaIds = [...new Set(estado.tratamientos.map(t => t.persona_id).filter(Boolean))]
@@ -787,6 +830,7 @@ async function cargarDatos() {
       }
     }
 
+    enriquecerTotales()
     renderTodo()
     toast(`✓ ${estado.tratamientos.length} tratamientos cargados`, 'ok')
   } catch (err) {
@@ -811,7 +855,7 @@ function obtenerFiltrados() {
   return estado.tratamientos.filter(t => {
     const pInfo = practicaInfo(t.practica_codigo)
     const persona = estado.personasMap[t.persona_id] || ''
-    const saldo = Number(t.saldo_pendiente || 0)
+    const saldo = Number(t._saldoReal != null ? t._saldoReal : (t.saldo_pendiente || 0))
 
     // Search
     if (q) {
@@ -836,11 +880,12 @@ function renderTodo() {
 
 function renderKPIs() {
   const total = estado.tratamientos.length
-  const conSaldo = estado.tratamientos.filter(t => Number(t.saldo_pendiente || 0) > 0).length
-  const finalizados = estado.tratamientos.filter(t => Number(t.saldo_pendiente || 0) <= 0).length
+  const saldoDe = t => Number(t._saldoReal != null ? t._saldoReal : (t.saldo_pendiente || 0))
+  const conSaldo = estado.tratamientos.filter(t => saldoDe(t) > 0).length
+  const finalizados = estado.tratamientos.filter(t => saldoDe(t) <= 0).length
   // Solo sumar saldos positivos (los negativos son créditos, no deuda)
   const saldoTotal = estado.tratamientos.reduce((acc, t) => {
-    const s = Number(t.saldo_pendiente || 0)
+    const s = saldoDe(t)
     return acc + (s > 0 ? s : 0)
   }, 0)
   $('kpi-total').textContent = total
@@ -867,7 +912,7 @@ function renderTabla() {
   const rows = filtrados.map(t => {
     const pInfo = practicaInfo(t.practica_codigo)
     const persona = estado.personasMap[t.persona_id] || '(sin nombre)'
-    const saldo = Number(t.saldo_pendiente || 0)
+    const saldo = Number(t._saldoReal != null ? t._saldoReal : (t.saldo_pendiente || 0))
     const sesReal = estado.sesionesPorTto[t.id] || 0
     const sesTotal = Number(t.total_sesiones || 0)
     const sesCompleto = sesTotal > 0 && sesReal >= sesTotal
@@ -879,7 +924,7 @@ function renderTabla() {
         <td>${pInfo.label}<div style="font-size:11px;color:var(--text-faint);margin-top:2px;">${t.practica_codigo || '—'}</div></td>
         <td>${badgeArea(pInfo.area)}</td>
         <td>${badgeEstado(t)}</td>
-        <td class="cell-monto">${fmt(t.total_pagar)}</td>
+        <td class="cell-monto">${fmt(t._totalReal != null ? t._totalReal : t.total_pagar)}</td>
         <td class="cell-monto" style="color:var(--green);">${fmt(t.total_abonado)}</td>
         <td class="cell-saldo ${saldo > 0 ? 'tiene-saldo' : 'sin-saldo'}">${fmt(saldo)}</td>
         <td style="font-weight:700;color:${sesColor};font-variant-numeric:tabular-nums;">${sesReal}/${sesTotal || '—'}</td>
@@ -970,9 +1015,9 @@ window.verDetalle = async function(ttoId) {
     ['Diagnóstico', t.diagnostico ? `<strong>${t.diagnostico}</strong>` : '<span style="color:var(--text-faint);">— sin completar (editá para agregarlo)</span>'],
     ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
-    ['Total a pagar', fmt(t.total_pagar)],
+    ['Total a pagar', t._moplexRecalc ? `${fmt(t._totalReal)} <span style="color:var(--text-faint);font-size:11px;">(eval + plantilla)</span>` : fmt(t.total_pagar)],
     ['Total abonado', fmt(t.total_abonado)],
-    ['Saldo pendiente', fmt(t.saldo_pendiente)],
+    ['Saldo pendiente', fmt(t._moplexRecalc ? t._saldoReal : t.saldo_pendiente)],
     ['Tipo de cobro', t.tipo_cobro || '—'],
     ['Descuento', fmt(t.descuento_monto)],
   ]
@@ -1047,7 +1092,7 @@ window.verDetalle = async function(ttoId) {
 
   // Alerta de verificación de saldo: si el tto está SALDADO pero saldo_pendiente != 0
   const estadoUp = String(t.estado || '').toUpperCase()
-  const saldoAlerta = Number(t.saldo_pendiente || 0)
+  const saldoAlerta = Number(t._saldoReal != null ? t._saldoReal : (t.saldo_pendiente || 0))
   let alertaSaldoHtml = ''
   if (estadoUp === 'SALDADO' && saldoAlerta !== 0) {
     const tipo = saldoAlerta > 0 ? 'deuda' : 'pago de más'
@@ -1463,8 +1508,13 @@ let MOPLEX_CONSULTAS = []   // baropodometrías del catálogo (Nuevo / Control /
 async function cargarMoplexConsultasCat() {
   try {
     const { data } = await sb.from('moplex_catalogo')
-      .select('id, nombre, precio_paciente, activo, orden').eq('activo', true).order('orden')
-    MOPLEX_CONSULTAS = (data || []).filter(c => (c.nombre || '').toLowerCase().startsWith('baropod'))
+      .select('id, nombre, precio_paciente, costo_moplex, pct_profesional, activo, orden').eq('activo', true).order('orden')
+    const cat = data || []
+    // Mapa completo (consultas + plantillas) para recalcular el total real de los MOPLEX.
+    estado.moplexCatById = {}
+    cat.forEach(c => { estado.moplexCatById[c.id] = c })
+    // Solo las baropodometrías para el selector del form de "nuevo".
+    MOPLEX_CONSULTAS = cat.filter(c => (c.nombre || '').toLowerCase().startsWith('baropod'))
   } catch (e) {
     MOPLEX_CONSULTAS = []
     console.warn('No se pudo cargar moplex_catalogo (consultas):', e.message)
