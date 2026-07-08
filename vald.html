@@ -1866,6 +1866,21 @@ async function generar() {
       } catch (_) { /* sin tabla o sin datos previos: sin evolución */ }
       if (!evolucion) toast('Marcaste Reevaluación pero no encontré una evaluación anterior comparable. El informe sale sin sección de evolución.');
     }
+    // Observaciones clínicas del profesional (lo que escribió Lu en la HC): limitaciones, indicaciones médicas, qué no se pudo hacer.
+    // Se excluyen los informes auto-generados (que empiezan con "INFORME BIOMECÁNICO FUNCIONAL"). Con red: si falla, sigue sin ellas.
+    let observaciones = [];
+    try {
+      const { data: obs } = await sb.from('hc_observaciones')
+        .select('texto, creado_en, autor_nombre')
+        .eq('persona_id', pacienteSel.id)
+        .eq('tipo', 'observacion')
+        .order('creado_en', { ascending: false })
+        .limit(8);
+      observaciones = (obs || [])
+        .filter(o => !/^\s*INFORME BIOMEC[ÁA]NICO FUNCIONAL/i.test(o.texto || ''))
+        .slice(0, 3)
+        .map(o => ({ fecha: (o.creado_en || '').slice(0, 10), autor: o.autor_nombre || '', texto: (o.texto || '').trim() }));
+    } catch (_) { /* sin acceso: sigue sin observaciones */ }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
@@ -1877,6 +1892,7 @@ async function generar() {
       hallazgos: sinExcluidos,
       calculadoras: calculadoras,
       evolucion: evolucion,
+      observaciones: observaciones,
       fecha: fechaVald,
     };
     // Guardamos en memoria lo medido, para el snapshot de evolución al firmar.
