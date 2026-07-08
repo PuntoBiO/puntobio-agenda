@@ -189,8 +189,11 @@ function inputCambiado(inp, actual){
 }
 
 function celdaAccionTf(r){
-  if (state.planesEnUso.has(r.plan)) return `<span class="lock-ico" title="En uso, no se puede borrar">🔒</span>`
-  return `<button class="del" title="Borrar plan" onclick="borrarTf('${r.plan}','${r.actividad}')">🗑️</button>`
+  const editar = `<button class="del" title="Cambiar precio ahora (sin programar)" onclick="abrirEditarPrecioTf('${r.plan}','${r.actividad}', ${Number(r.valor_lista)||0})">✏️</button>`
+  const resto = state.planesEnUso.has(r.plan)
+    ? `<span class="lock-ico" title="En uso, no se puede borrar">🔒</span>`
+    : `<button class="del" title="Borrar plan" onclick="borrarTf('${r.plan}','${r.actividad}')">🗑️</button>`
+  return editar + ' ' + resto
 }
 function celdaAccionCo(r){
   if (state.practicasEnUso.has(r.practica_codigo)) return `<span class="lock-ico" title="Práctica en uso, no se puede borrar">🔒</span>`
@@ -582,6 +585,25 @@ function abrirCrear(tipo){
   $('ovCrear').classList.add('show')
 }
 function toggleOS(){ const os = $('cModalidad').value === 'O.S'; $('cOSwrap').style.display = os ? 'block' : 'none' }
+
+// ---- Cambio de precio MANUAL e INMEDIATO (no programado) ----
+let editPlanActual = null, editActActual = null
+function abrirEditarPrecioTf(plan, actividad, valorActual){
+  crearTipo = 'edit-tf'
+  editPlanActual = plan
+  editActActual = actividad
+  $('crearTitulo').textContent = 'Cambiar precio (ahora)'
+  const up = String(plan).toUpperCase()
+  let info = ''
+  if(up.includes('BON')) info = `Bonificado · pase libre · ${_cupoRecupPlan(plan)} recuperatorios/ciclo`
+  else { const n=_clasesSemPlan(plan); if(n>0) info = `${n} clase${n>1?'s':''}/semana · ${_cupoRecupPlan(plan)} recuperatorios/ciclo · ${up.includes('ROT')?'Rotativo':'Regular'}` }
+  $('crearForm').innerHTML = `
+    <div class="cfld"><label>Plan</label><input value="${plan}" disabled></div>
+    ${info ? `<div style="margin:-6px 0 14px;padding:8px 12px;border-radius:8px;font-size:12.5px;background:#e0f2fe;color:#075985;border:1px solid #7dd3fc">→ ${info}</div>` : ''}
+    <div class="cfld"><label>Precio vigente ($) — se cambia YA, sin programar</label><input id="cValor" type="number" min="0" value="${Number(valorActual)||0}"></div>`
+  if($('crearOk')) $('crearOk').disabled = false
+  $('ovCrear').classList.add('show')
+}
 function cerrarCrear(){ $('ovCrear').classList.remove('show') }
 async function guardarCrear(){
   $('crearOk').disabled = true
@@ -591,6 +613,11 @@ async function guardarCrear(){
       const valor = Number($('cValor').value)||0
       if(!plan){ alert('Poné el nombre del plan'); return }
       const { error } = await sb.rpc('tarifario_tf_crear', { p_plan: plan, p_actividad: 'TERAPIA_FISICA', p_valor_lista: valor })
+      if (error) throw error
+    } else if (crearTipo === 'edit-tf'){
+      const valor = Number($('cValor').value)||0
+      if(!(valor > 0)){ alert('Poné un precio válido (mayor a 0)'); return }
+      const { error } = await sb.rpc('tarifario_tf_precio_set', { p_plan: editPlanActual, p_actividad: editActActual, p_valor_lista: valor })
       if (error) throw error
     } else {
       const practica = ($('cPractica').value||'').trim()
@@ -603,9 +630,9 @@ async function guardarCrear(){
       if (error) throw error
     }
     cerrarCrear()
-    msg('✅ Ítem creado.', 'ok')
+    msg(crearTipo === 'edit-tf' ? '✅ Precio actualizado (cambio inmediato).' : '✅ Ítem creado.', 'ok')
     await cargar()
-  } catch(e){ alert('No se pudo crear: ' + (e.message || e)) }
+  } catch(e){ alert('No se pudo guardar: ' + (e.message || e)) }
   finally { $('crearOk').disabled = false }
 }
 
