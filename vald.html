@@ -1881,6 +1881,33 @@ async function generar() {
         .slice(0, 3)
         .map(o => ({ fecha: (o.creado_en || '').slice(0, 10), autor: o.autor_nombre || '', texto: (o.texto || '').trim() }));
     } catch (_) { /* sin acceso: sigue sin observaciones */ }
+    // Documentos médicos (estudios / indicaciones / apto físico) para que la IA los tenga de contexto.
+    // Solo PDF, solo esas categorías (NO los de VALD ni la evaluación generada), con topes de tamaño/cantidad.
+    let documentos = [];
+    try {
+      const { data: adjs } = await sb.from('hc_adjuntos')
+        .select('nombre_original, storage_path, categoria, tipo_mime, tamano_bytes')
+        .eq('persona_id', pacienteSel.id)
+        .in('categoria', ['estudio', 'consideracion', 'apto_fisico']);
+      const blobABase64 = (blob) => new Promise((res) => {
+        const r = new FileReader();
+        r.onload = () => { const s = String(r.result || ''); const i = s.indexOf(','); res(i >= 0 ? s.slice(i + 1) : ''); };
+        r.onerror = () => res('');
+        r.readAsDataURL(blob);
+      });
+      const candidatos = (adjs || [])
+        .filter(a => ((a.tipo_mime || '').toLowerCase().includes('pdf')) || /\.pdf$/i.test(a.nombre_original || ''))
+        .filter(a => !a.tamano_bytes || a.tamano_bytes <= 6 * 1024 * 1024) // hasta ~6 MB c/u
+        .slice(0, 3); // máximo 3 para controlar el costo
+      for (const a of candidatos) {
+        try {
+          const { data: blob } = await sb.storage.from('hc-adjuntos').download(a.storage_path);
+          if (!blob) continue;
+          const b64 = await blobABase64(blob);
+          if (b64) documentos.push({ nombre: a.nombre_original, base64: b64 });
+        } catch (_) { /* un PDF que falla no frena el resto */ }
+      }
+    } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
@@ -1893,6 +1920,7 @@ async function generar() {
       calculadoras: calculadoras,
       evolucion: evolucion,
       observaciones: observaciones,
+      documentos: documentos,
       fecha: fechaVald,
     };
     // Guardamos en memoria lo medido, para el snapshot de evolución al firmar.
