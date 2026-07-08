@@ -2254,17 +2254,22 @@ async function abrirBitacoraAlumno(ventana = 60) {
       return k ? _desdePorDia[k] : null;
     };
     const pendientes = [];
+    // REGLAS A FUEGO (independientes del filtro visual de la bitácora, espejo de Mi Espacio):
+    //   · faltas con aviso: 60 días desde la falta (incluye avisadas a futuro)
+    //   · cierres del centro: 60 días, recuperables desde que se cancelan (futuros incluidos)
+    //   · feriados: visibles desde el 1° de su MES CALENDARIO, 30 días desde el día del feriado
+    const _finMesBita = (() => { const [yy, mm] = hoy.split('-').map(Number); const last = new Date(yy, mm, 0).getDate(); return `${yy}-${String(mm).padStart(2,'0')}-${String(last).padStart(2,'0')}`; })();
     (asisRes.data || []).forEach(a => {
       if (a.estado !== 'ausente-justificada' || yaBooked.has(a.fecha)) return;
       const d = diasDesde(a.fecha);
-      if (d < 0 || d > ventana) return;
-      pendientes.push({ fecha: a.fecha, dias: ventana - d, motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
+      if (d > 60) return;   // permite avisadas a futuro (d negativo), igual que Mi Espacio
+      pendientes.push({ fecha: a.fecha, dias: Math.max(0, 60 - d), motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
     });
     (cerradasRes.data || []).forEach(c => {
       if (!misTurnoIds.has(c.turno_id) || yaBooked.has(c.fecha)) return;
       const d = diasDesde(c.fecha);
-      if (d > ventana) return;   // permite futuras (d negativo)
-      pendientes.push({ fecha: c.fecha, dias: Math.max(0, ventana - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
+      if (d > 60) return;   // permite futuras (d negativo)
+      pendientes.push({ fecha: c.fecha, dias: Math.max(0, 60 - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
     });
     (ferRes.data || []).forEach(fe => {
       const fIso = fe.fecha;
@@ -2273,9 +2278,10 @@ async function abrirBitacoraAlumno(ventana = 60) {
       if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
       const _piso = _pisoAltaDia(nd);
       if (_piso && fIso < _piso) return;   // feriado anterior al alta en ese día
+      if (fIso > _finMesBita) return;      // mes futuro: se habilita el 1° de su mes calendario
       const d = diasDesde(fIso);
-      if (d < 0 || d > ventana) return;
-      pendientes.push({ fecha: fIso, dias: ventana - d, motivo: 'Feriado · ' + (fe.motivo || 'feriado'), sub: '', cupo: false });
+      if (d > 30) return;                  // 30 días desde el DÍA del feriado (permite futuros del mes)
+      pendientes.push({ fecha: fIso, dias: Math.max(0, 30 - d), motivo: 'Feriado · ' + (fe.motivo || 'feriado'), sub: '', cupo: false });
     });
     pendientes.sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
 
@@ -2717,6 +2723,9 @@ async function abrirFichaAlumno() {
     // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
     const feriadosYaRecup = new Set(recups.filter(r => r.tipo === 'feriado').map(r => r.fecha_ausencia));
     let feriadosExtraPend = 0;
+    // FERIADO (regla a fuego): visible desde el 1° de su MES CALENDARIO (incluye
+    // futuros del mes actual) y recuperable hasta 30 días desde el DÍA del feriado.
+    const _finMesFicha = (() => { const [yy, mm] = hoyIsoFicha.split('-').map(Number); const last = new Date(yy, mm, 0).getDate(); return `${yy}-${String(mm).padStart(2,'0')}-${String(last).padStart(2,'0')}`; })();
     feriados.forEach(f => {
       const fFer = f.fecha;
       if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
@@ -2724,8 +2733,9 @@ async function abrirFichaAlumno() {
       if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
       const _pisoF = _desdePorDiaF[nombreDia] || null;
       if (_pisoF && fFer < _pisoF) return;                         // feriado anterior al alta
+      if (fFer > _finMesFicha) return;                             // mes futuro: se habilita el 1° de su mes
       const dias = diasEntreFicha(fFer, hoyIsoFicha);
-      if (dias < 0 || dias > 60) return;                           // futuro o vencido (>60 días)
+      if (dias > 30) return;                                       // pasaron +30 días del feriado: vencido
       feriadosExtraPend++;
     });
 
