@@ -508,6 +508,59 @@ async function borrarCo(practica, modalidad, obra_social){
   } catch(e){ msg(e.message || String(e), 'err') }
 }
 
+// ---- Preview en vivo del plan de TF (solo visual; calca las reglas de la ficha del alumno) ----
+// Clases/semana = número pegado a COD (COD4=4, COD4DES3=4). Sufijos DES/ROT/BON no cambian el nº.
+function _clasesSemPlan(cod){
+  if(!cod) return 0
+  const m = String(cod).toUpperCase().match(/COD\s*0*([1-9])/)
+  return m ? parseInt(m[1],10) : 0
+}
+// Recuperatorios/ciclo: BON=14 · ROT=N×5 · Regular=N+2
+function _cupoRecupPlan(cod){
+  if(!cod) return 0
+  const up = String(cod).toUpperCase()
+  if(up.includes('BON')) return 14
+  const n = _clasesSemPlan(cod)
+  if(up.includes('ROT')) return n>0 ? n*5 : 0
+  return n>0 ? n+2 : 0
+}
+function previewPlanTF(){
+  const box = $('cPlanPreview'); if(!box) return
+  const raw = ($('cPlan').value||'').trim()
+  const up = raw.toUpperCase()
+  const base = 'display:block;margin:-6px 0 14px;padding:8px 12px;border-radius:8px;font-size:12.5px;line-height:1.45'
+  const setBtn = b => { const ok=$('crearOk'); if(ok) ok.disabled = b }
+  if(!raw){ box.innerHTML=''; setBtn(false); return }
+  // ¿ya existe ese plan en el tarifario? (no permitir duplicar/pisar)
+  const yaExiste = (state.tf||[]).some(r => String(r.plan||'').toUpperCase() === up)
+  if(yaExiste){
+    const enUso = state.planesEnUso && state.planesEnUso.has(raw)
+    const nota = enUso ? ' Además <b>tiene alumnos activos</b>, no lo toques desde acá.' : ''
+    box.innerHTML = `<div style="${base};background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5">🔒 <b>Ya existe un plan «${up}»</b>. No se puede crear de nuevo.${nota}</div>`
+    setBtn(true)
+    return
+  }
+  if(!up.startsWith('COD')){
+    box.innerHTML = `<div style="${base};background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5">⚠️ El nombre debería empezar con <b>COD</b>. Si no, el sistema le daría <b>0 clases</b>.</div>`
+    setBtn(false)
+    return
+  }
+  if(up.includes('BON')){
+    box.innerHTML = `<div style="${base};background:#ede9fe;color:#6d28d9;border:1px solid #c4b5fd">💜 <b>Bonificado</b> · pase libre · ${_cupoRecupPlan(raw)} recuperatorios/ciclo</div>`
+    setBtn(false)
+    return
+  }
+  const n = _clasesSemPlan(raw)
+  if(n === 0){
+    box.innerHTML = `<div style="${base};background:#fef3c7;color:#92400e;border:1px solid #fcd34d">⚠️ No detecto la cantidad de clases. El número tiene que ir <b>pegado a COD</b> (ej: COD4, COD4DES3). Así daría <b>0 clases</b>.</div>`
+    setBtn(false)
+    return
+  }
+  const tipo = up.includes('ROT') ? 'Rotativo' : 'Regular'
+  box.innerHTML = `<div style="${base};background:#e0f2fe;color:#075985;border:1px solid #7dd3fc">→ <b>${n} clase${n>1?'s':''}/semana</b> · ${_cupoRecupPlan(raw)} recuperatorios/ciclo · ${tipo}</div>`
+  setBtn(false)
+}
+
 // ---- Crear ----
 let crearTipo = null
 function abrirCrear(tipo){
@@ -515,7 +568,8 @@ function abrirCrear(tipo){
   $('crearTitulo').textContent = tipo === 'tf' ? 'Agregar plan de TF' : 'Agregar precio de consultorio'
   if (tipo === 'tf'){
     $('crearForm').innerHTML = `
-      <div class="cfld"><label>Nombre del plan</label><input id="cPlan" placeholder="ej. COD4"></div>
+      <div class="cfld"><label>Nombre del plan</label><input id="cPlan" placeholder="ej. COD4" oninput="previewPlanTF()"></div>
+      <div id="cPlanPreview"></div>
       <div class="cfld"><label>Precio actual ($)</label><input id="cValor" type="number" min="0" placeholder="0"></div>`
   } else {
     $('crearForm').innerHTML = `
@@ -524,6 +578,7 @@ function abrirCrear(tipo){
       <div class="cfld" id="cOSwrap" style="display:none"><label>Obra social</label><input id="cObra" placeholder="ej. APROSS"></div>
       <div class="cfld"><label>Precio actual ($)</label><input id="cValor" type="number" min="0" placeholder="0"></div>`
   }
+  if($('crearOk')) $('crearOk').disabled = false
   $('ovCrear').classList.add('show')
 }
 function toggleOS(){ const os = $('cModalidad').value === 'O.S'; $('cOSwrap').style.display = os ? 'block' : 'none' }
