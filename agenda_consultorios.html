@@ -129,7 +129,7 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .turno.p-terap_manual .practica{color:var(--c-tm)}
 .turno.is-sobreturno{border-color:var(--c-sobre)!important;background:var(--c-sobre-bg)!important;outline:1px dashed var(--c-sobre);outline-offset:-3px}
 .turno.is-sobreturno .practica{color:var(--c-sobre)!important}
-.turno.is-sobreturno::after{content:"REHAB";position:absolute;top:2px;right:4px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:var(--c-sobre);letter-spacing:.05em}
+.turno.is-sobreturno::after{content:attr(data-sobre);position:absolute;top:2px;right:4px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;color:var(--c-sobre);letter-spacing:.05em}
 .turno.e-presente .turno-paciente::before{content:"✓ ";color:var(--s-presente);font-weight:700}
 .turno.e-ausente .turno-paciente{text-decoration:line-through;opacity:.6}
 .loading-state,.empty-state,.error-state{padding:40px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);letter-spacing:.04em}
@@ -757,7 +757,7 @@ const REGLAS_PRACTICA = {
   PUNCION_SECA:  { label:'Punción Seca',       cap_normal:1, permite_sobreturno:false, espacios:['CONSULTORIO_1','CONSULTORIO_2'], modalidad:'INDIVIDUAL' },
   SUELO_PELVICO: { label:'Suelo Pélvico',      cap_normal:2, permite_sobreturno:true, cap_max:3, espacios:['CONSULTORIO_1','CONSULTORIO_2'], espacio_sobreturno:'SALA_TF', modalidad:'COMPARTIDO' },
   MASAJES:       { label:'Masoterapia',        cap_normal:1, permite_sobreturno:false, espacios:['CONSULTORIO_ESPECIALIDADES'], modalidad:'INDIVIDUAL' },
-  TERAP_MANUAL:  { label:'Terapia Manual',     cap_normal:1, permite_sobreturno:false, espacios:['CONSULTORIO_1','CONSULTORIO_2'], modalidad:'INDIVIDUAL' }
+  TERAP_MANUAL:  { label:'Terapia Manual',     cap_normal:1, permite_sobreturno:false, espacios:['CONSULTORIO_ESPECIALIDADES'], modalidad:'INDIVIDUAL' }
 };
 
 const PRACTICA_PREFIX = { FISIO:'FISIO', FISIO_PQ:'FISIOPQ', OSTEOPATIA:'OSTEO', DLM:'DLM', PUNCION_SECA:'PUNC', SUELO_PELVICO:'SP', MASAJES:'MASR', TERAP_MANUAL:'TM' };
@@ -897,11 +897,16 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
       const ocupadoEspec = slotTurnos.some(t => { const n=normPractica(t.practica_codigo); return n==='OSTEOPATIA' || n==='MASAJES'; });
       if (ocupadoEspec) return [];
     }
-    // Para prácticas COMPARTIDAS, chequear cupo
+    // Individual EN CONSULTORIO (punción seca, drenaje): ocupa el horario completo.
+    // Si ya hay CUALQUIER turno en el slot, no se puede ofrecer.
+    if (regla.modalidad === 'INDIVIDUAL' && !esEspecialidadCons(real) && slotTurnos.length > 0) return [];
+    // Para prácticas COMPARTIDAS, chequear cupo cruzando TODAS las prácticas de consultorio
+    // (mismo criterio que validarTurno y que el casillero libre).
     if (regla.modalidad === 'COMPARTIDO') {
-      const sameCount = slotTurnos.filter(t => normPractica(t.practica_codigo)===real && t.estado!=='SOBRETURNO').length;
-      if (sameCount >= regla.cap_normal && !regla.permite_sobreturno) return [];
-      if (sameCount >= (regla.cap_max||regla.cap_normal)) return [];
+      const consCount  = slotTurnos.filter(t => !esSobreTurnoCons(t) && !esEspecialidadCons(t.practica_codigo)).length;
+      const sobreCount = slotTurnos.filter(esSobreTurnoCons).length;
+      if (consCount >= regla.cap_normal && !regla.permite_sobreturno) return [];
+      if ((consCount + sobreCount) >= (regla.cap_max||regla.cap_normal)) return [];
     }
   }
 
@@ -1821,15 +1826,20 @@ function renderTurno(t) {
   const nroSesion = calcularNumeroSesion(t);
   const sesTxt = nroSesion ? ` · S${nroSesion}` : '';
   const titleSes = nroSesion ? ` · Sesión ${nroSesion}` : '';
-  // Rehab (sobreturno o manual) de FISIO/FISIO_PQ se muestra como "REHAB FIS"
-  const etiqueta = esRehab ? 'REHAB FIS' : t.practica_codigo;
+  // "REHAB FIS" es SOLO para fisio en el 3er cupo. Un suelo pélvico que caiga en el
+  // 3er cupo mantiene su identidad (no es rehab física).
+  const nPrac = normPractica(t.practica_codigo);
+  const esFisioPrac = (nPrac === 'FISIO' || nPrac === 'FISIO_PQ');
+  const etiqueta = (esRehab && esFisioPrac) ? 'REHAB FIS' : t.practica_codigo;
+  // Cartelito de esquina del 3er cupo: "REHAB" para fisio, la sigla de la práctica (ej "SP") para el resto.
+  const sobreLbl = esRehab ? (esFisioPrac ? 'REHAB' : (PRACTICA_PREFIX[nPrac] || 'SOBRE')) : '';
   // Mini botón 📝 para evolucionar directo (solo si hay paciente y el turno no está cancelado).
   // Si ya tiene evolución cargada, sale en verde sólido; si no, fantasma con hover.
   const tieneEvo = TURNOS_CON_EVO.has(t.id);
   const btnEvo = (t.persona_id && t.estado !== 'CANCELADO')
     ? `<button class="turno-evo-btn ${tieneEvo?'tiene-evo':''}" data-evo-turno="${t.id}" title="${tieneEvo?'Ver / editar evolución':'Evolucionar a '+escapeHtml(nombre)}">📝</button>`
     : '';
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}">${btnEvo}<div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" data-sobre="${sobreLbl}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}">${btnEvo}<div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
 }
 
 // ¿La práctica usa la sala de Especialidades (Osteo / Masaje), no los consultorios 1-2?
@@ -1867,7 +1877,7 @@ function celdaSubslotsHTML(slotTurnos, diaNumero, h) {
   const sobre = slotTurnos.filter(esSobreTurnoCons);
   const noSobre = slotTurnos.filter(t => !esSobreTurnoCons(t));
   const esp = noSobre.filter(t => esEspecialidadCons(t.practica_codigo));   // osteo / masaje (solo mar/jue 19h llega acá)
-  const cons = noSobre.filter(t => !esEspecialidadCons(t.practica_codigo)); // fisio, dlm, punción, suelo, terap
+  const cons = noSobre.filter(t => !esEspecialidadCons(t.practica_codigo)); // fisio, dlm, punción, suelo (NO osteo/masaje/terap.manual → Especialidades)
 
   const free = (cls, label, sub) => `<div class="subslot sub-free ${cls}">${label}${sub ? `<small>${sub}</small>` : ''}</div>`;
   const occ = (cards, cls) => `<div class="subslot sub-occ ${cls || ''}">${cards}</div>`;
@@ -2466,17 +2476,34 @@ function validarUnSlot(slot, datosForm) {
     if (c) return { ok:false, errores:[`Ya hay ${c.practica_codigo} el ${slot.fecha} ${pad(slot.hora)}:00.`] };
   }
 
-  const sameCount = slotTurnos.filter(t => normPractica(t.practica_codigo)===practica && t.estado!=='SOBRETURNO').length;
+  // sameCount = misma práctica (para la regla INDIVIDUAL: no dos iguales).
+  const sameCount = slotTurnos.filter(t => normPractica(t.practica_codigo)===practica && !esSobreTurnoCons(t)).length;
+  // consCount = ocupación REAL de los 2 consultorios, CRUZANDO todas las prácticas de
+  // consultorio (fisio + suelo pélvico + drenaje + punción). No cuenta
+  // rehab (SOBRETURNO o [REHAB]) ni osteo/masajes (que van a su espacio aparte).
+  // Ej: 1 fisio + 1 suelo pélvico = los 2 consultorios llenos → el 3ro va a sobreturno.
+  const consCount  = slotTurnos.filter(t => !esSobreTurnoCons(t) && !esEspecialidadCons(t.practica_codigo)).length;
+  // sobreCount = cuántos ya están en el 3er cupo (rehab / sobreturno).
+  const sobreCount = slotTurnos.filter(esSobreTurnoCons).length;
   let requiereSobre = false, box = null;
 
   if (regla.modalidad==='COMPARTIDO') {
-    if (sameCount < regla.cap_normal) {
+    if (consCount < regla.cap_normal) {
+      // Hay consultorio físico libre → PENDIENTE en el box que quede vacío.
       const ocup = slotTurnos.map(t => t.box);
       box = regla.espacios.find(e => !ocup.includes(e)) || regla.espacios[0];
-    } else if (regla.permite_sobreturno && sameCount < regla.cap_max) {
+    } else if (regla.permite_sobreturno && (consCount + sobreCount) < regla.cap_max) {
+      // Los 2 consultorios están llenos → el 3ro va al sobreturno (rehab / SP).
       requiereSobre = true; box = regla.espacio_sobreturno;
     } else return { ok:false, errores:[`Cupo lleno ${practica} el ${slot.fecha} ${pad(slot.hora)}:00.`] };
   } else {
+    // Individual EN CONSULTORIO (punción seca, drenaje): el profesional queda
+    // dedicado a ese paciente → ocupa el horario COMPLETO (los 3 casilleros). No convive
+    // con ningún otro turno. Osteo/Masaje/Terap.Manual NO entran acá: van a Especialidades.
+    if (!esEspecialidadCons(practica)) {
+      const otros = slotTurnos.filter(t => t.estado !== 'CANCELADO');
+      if (otros.length > 0) return { ok:false, errores:[`${practica} es individual y ocupa el horario completo. Ya hay ${otros.length} turno(s) el ${slot.fecha} ${pad(slot.hora)}:00.`] };
+    }
     if (sameCount >= regla.cap_normal) return { ok:false, errores:[`Ya hay ${practica} el ${slot.fecha} ${pad(slot.hora)}:00.`] };
     if (regla.espacios.length===1) {
       if (slotTurnos.some(t => t.box===regla.espacios[0])) return { ok:false, errores:[`${regla.espacios[0]} ocupado.`] };
@@ -2986,7 +3013,7 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
 
   // FISIO (consultorio): SOLO el cupo de los 2 consultorios (sin contar el de rehab).
   // Los 2 boxes (CONSULTORIO_1/2) los comparten TODAS las prácticas de consultorio
-  // (fisio, drenaje, punción, terapia manual, suelo), no solo la que estamos compartiendo.
+  // (fisio, drenaje, punción, suelo), no solo la que estamos compartiendo.
   // Por eso contamos todos los turnos de consultorio ocupados (sin sobreturno ni osteo/masaje),
   // igual que la agenda. Si los 2 boxes están llenos, no hay lugar aunque quede el de rehab.
   const regla = REGLAS_PRACTICA[esp.cod];
