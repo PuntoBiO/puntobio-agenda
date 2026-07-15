@@ -77,6 +77,7 @@ h1{font-size:24px;margin:0 0 4px;display:flex;align-items:center;gap:10px}
   <p class="sub">Armá el mail, elegí a quién, y mandalo por tandas sin pasarte del límite diario.</p>
 
   <div id="tope-global"></div>
+  <div id="rebotes"></div>
   <div id="nuevo"></div>
   <div id="campanias"></div>
   <div id="app"></div>
@@ -383,6 +384,55 @@ async function pruebaNuevo(){
 }
 
 // ─────────────────────────────────────────────────────────────
+//  MAILS QUE NO LLEGARON (rebotes / quejas de spam vía webhook de Resend)
+// ─────────────────────────────────────────────────────────────
+async function refrescarRebotes(){
+  const box = $('rebotes')
+  if (!box) return
+  try {
+    const desde = new Date(Date.now() - 30*24*60*60*1000).toISOString()
+    const { data: reb, error } = await sb.from('mails_rebotados')
+      .select('email, tipo, asunto, motivo, creado_en')
+      .gte('creado_en', desde).order('creado_en', { ascending: false }).limit(200)
+    if (error) throw error
+    if (!reb || !reb.length){ box.innerHTML = ''; return }
+
+    // Cruzar con personas para mostrar nombre
+    const mails = [...new Set(reb.map(r => String(r.email||'').toLowerCase()).filter(Boolean))]
+    const nomPorMail = {}
+    for (let i = 0; i < mails.length; i += 100) {
+      const tanda = mails.slice(i, i+100)
+      const [a, b] = await Promise.all([
+        sb.from('personas').select('nombre, email').in('email', tanda),
+        sb.from('personas').select('nombre, mail').in('mail', tanda),
+      ])
+      ;(a.data||[]).forEach(p => { nomPorMail[String(p.email).toLowerCase()] = p.nombre })
+      ;(b.data||[]).forEach(p => { if(!nomPorMail[String(p.mail).toLowerCase()]) nomPorMail[String(p.mail).toLowerCase()] = p.nombre })
+    }
+
+    const tipoTxt = t => t === 'bounced' ? '📛 rebotó' : t === 'complained' ? '🗑️ lo marcó como spam' : '⏱️ demorado'
+    box.innerHTML = `
+      <div class="card" style="border-color:#fecaca;background:#fff5f5">
+        <div class="card-top">
+          <div>
+            <p class="card-title" style="color:#b91c1c">📮 Mails que NO llegaron (últimos 30 días)</p>
+            <p class="card-desc">Avisos automáticos de Resend. A esta gente conviene avisarle por WhatsApp o corregirle el mail.</p>
+          </div>
+        </div>
+        <div class="lista"><div class="lista-scroll">
+          ${reb.map((r,i) => {
+            const nom = nomPorMail[String(r.email||'').toLowerCase()]
+            return `<div class="fila"><span><span class="idx">${i+1}.</span>${esc(nom || r.email)}${nom ? ' · <span class="r">'+esc(r.email)+'</span>' : ''}</span><span class="r">${tipoTxt(r.tipo)} · ${fmtFechaCorta(r.creado_en)}${r.motivo ? ' · '+esc(String(r.motivo).slice(0,60)) : ''}</span></div>`
+          }).join('')}
+        </div></div>
+      </div>`
+  } catch(_) {
+    // Si la tabla no existe todavía, no molestar.
+    box.innerHTML = ''
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  CAMPAÑAS EN CURSO (comunicados creados)
 // ─────────────────────────────────────────────────────────────
 async function refrescarCampanias(){
@@ -510,15 +560,22 @@ async function cargarEstado(){
     .select('persona_id, plan, estado, dia_vencimiento').eq('estado','ACTIVO')
 
   const porPersona = {}
+  const excluRaw = []   // inscripciones ACTIVO que quedan afuera de la campaña (y por qué)
   ;(insc||[]).forEach(i => {
-    if(!i.plan || /BON/i.test(i.plan)) return
-    if(precio[i.plan] == null || precio[i.plan] <= 0) return
+    if(!i.plan || !String(i.plan).trim()){ excluRaw.push({ pid:i.persona_id, plan:'(sin plan)', motivo:'inscripción sin plan' }); return }
+    if(/BON/i.test(i.plan)){ excluRaw.push({ pid:i.persona_id, plan:i.plan, motivo:'bonificado (afuera por diseño)' }); return }
+    if(precio[i.plan] == null || precio[i.plan] <= 0){ excluRaw.push({ pid:i.persona_id, plan:i.plan, motivo:'plan sin precio nuevo en el tarifario' }); return }
     const dia = Number(i.dia_vencimiento) || 99
     if(!porPersona[i.persona_id] || dia < porPersona[i.persona_id].dia)
       porPersona[i.persona_id] = { persona_id:i.persona_id, plan:i.plan, precio:precio[i.plan], dia }
   })
 
-  const ids = Object.keys(porPersona).map(Number)
+  // Excluido de verdad = no quedó adentro por NINGUNA otra inscripción
+  const excluMap = {}
+  excluRaw.forEach(e => { if(!porPersona[e.pid] && !excluMap[e.pid]) excluMap[e.pid] = e })
+  const excluidosIds = Object.keys(excluMap).map(Number)
+
+  const ids = [...new Set([...Object.keys(porPersona).map(Number), ...excluidosIds])]
   let personas = []
   if(ids.length){
     const { data } = await sb.from('personas')
@@ -533,12 +590,17 @@ async function cargarEstado(){
     return { ...c, nombre:p.nombre || '(sin nombre)', email, emailOk: email.includes('@'), enviado: !!p.aviso_aumento_jul26_mail, mailAt: p.aviso_aumento_jul26_mail || null }
   })
 
+  const excluidos = excluidosIds.map(pid => {
+    const p = perById[pid] || {}
+    return { nombre: p.nombre || ('#'+pid), plan: excluMap[pid].plan, motivo: excluMap[pid].motivo }
+  }).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
+
   const conMail   = lista.filter(c => c.emailOk)
   const enviados  = conMail.filter(c => c.enviado).sort((a,b) => new Date(b.mailAt||0) - new Date(a.mailAt||0))
   const pendientes= conMail.filter(c => !c.enviado).sort((a,b) => a.dia - b.dia)
   const sinEmail  = lista.filter(c => !c.emailOk).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
   const enviadosHoy = enviados.filter(c => esHoyAR(c.mailAt)).length
-  return { total: conMail.length, enviados, pendientes, sinEmail, enviadosHoy }
+  return { total: conMail.length, enviados, pendientes, sinEmail, excluidos, enviadosHoy }
 }
 
 function fmtFechaCorta(ts){
@@ -611,6 +673,16 @@ function render(est){
         ${listaCompleta(est.sinEmail, () => 'sin mail', 'Todos tienen mail cargado. 👍')}
       </details>
 
+      <details class="det" ${est.excluidos.length ? 'open' : ''}>
+        <summary>🚫 Afuera de la campaña (${est.excluidos.length})</summary>
+        ${est.excluidos.length
+          ? `<div class="lista"><div class="lista-scroll">${est.excluidos.map((c,i) =>
+              `<div class="fila"><span><span class="idx">${i+1}.</span>${esc(c.nombre)} · <span class="r">${esc(c.plan)}</span></span><span class="r">${esc(c.motivo)}</span></div>`
+            ).join('')}</div></div>
+            <div class="muted" style="font-size:12px;margin-top:6px">Los de "plan sin precio nuevo" entran solos a la campaña apenas cargues <b>valor nuevo</b> y <b>fecha de aumento</b> de ese plan en el tarifario. No hace falta tocar nada más.</div>`
+          : '<div class="lista"><div class="fila"><span class="r">Nadie quedó afuera. 👍</span></div></div>'}
+      </details>
+
       <details class="det">
         <summary>Ver el texto que se envía</summary>
         <div class="preview">
@@ -629,6 +701,7 @@ async function refrescar(){
   try {
     await refrescarCampanias()
     render(await cargarEstado())
+    await refrescarRebotes()
   }
   catch(e){ $('app').innerHTML = `<div class="lock">No se pudo cargar el estado: ${esc(e.message||e)}</div>` }
 }
