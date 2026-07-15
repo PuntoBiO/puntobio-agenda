@@ -2176,7 +2176,9 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes] = await Promise.all([
       sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
       sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado').eq('persona_id', p.id).neq('estado', 'cancelado'),
-      sb.from('turno_alumnos').select('turno_id, fecha_desde').eq('persona_id', p.id).eq('activo', true),
+      // Trae también los turnos TERMINADOS con fecha_hasta: cierres/feriados se
+      // evalúan contra su fecha (¿era fijo ese día?), no contra hoy.
+      sb.from('turno_alumnos').select('turno_id, fecha_desde, fecha_hasta, activo').eq('persona_id', p.id).or('activo.is.true,fecha_hasta.not.is.null'),
       fichaTurnosSistema.length ? { data: fichaTurnosSistema } : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sb.from('clases_cerradas').select('turno_id,fecha,tipo,motivo').eq('tipo', 'centro'),
       sb.from('feriados').select('fecha,motivo')
@@ -2187,7 +2189,15 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const nombreTurno = (id) => { const t = turnoMap[id]; return t ? `${t.servicio||''} ${t.dia||''} ${t.hora||''}`.trim() : ''; };
     const fmtF = (iso) => { if (!iso) return ''; const pp = String(iso).slice(0,10).split('-'); return pp.length === 3 ? `${+pp[2]}/${+pp[1]}/${pp[0]}` : iso; };
 
-    const misTurnoIds = new Set((misTurnosRes.data || []).map(t => t.turno_id));
+    // Ventanas de vigencia por turno: ¿era fijo en ese turno EN esa fecha?
+    // (incluye turnos ya terminados con fecha_hasta — cambio de plan, cambio de día)
+    const _ventPorTurnoB = {};
+    (misTurnosRes.data || []).forEach(t => {
+      if (!(t.turno_id in _ventPorTurnoB)) _ventPorTurnoB[t.turno_id] = [];
+      _ventPorTurnoB[t.turno_id].push({ desde: t.fecha_desde || null, hasta: t.fecha_hasta || null });
+    });
+    const eraFijoEn = (turnoId, fechaIso) => (_ventPorTurnoB[turnoId] || []).some(v =>
+      (!v.desde || v.desde <= fechaIso) && (!v.hasta || fechaIso <= v.hasta));
     const recups = recupRes.data || [];
     // Clases tomadas como recuperatorio (turno+fecha) para no duplicarlas con el "presente"
     const claveRecup = new Set(recups.map(r => `${r.turno_recupero_id}-${r.fecha_recupero}`));
@@ -2223,7 +2233,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
       });
     });
     (cerradasRes.data || []).forEach(c => {
-      if (!misTurnoIds.has(c.turno_id)) return;
+      if (!eraFijoEn(c.turno_id, c.fecha)) return;   // no era su turno fijo ESE día
       eventos.push({ fecha: c.fecha, tipo: 'cancelada', icono: '🚫', color: '#b91c1c', bg: '#fef2f2', titulo: 'Clase cancelada por el centro', sub: `${nombreTurno(c.turno_id)}${c.motivo ? ' · ' + c.motivo.replace(/\s*\[bloqueo#\d+\]/, '') : ''}` });
     });
 
@@ -2237,21 +2247,19 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const diasDesde = (fIso) => Math.round((new Date(hoy + 'T00:00:00') - new Date(fIso + 'T00:00:00')) / 86400000);
     const NOMBRE_DIA = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
     const diasFijosNombres = new Set((misTurnosRes.data || []).map(t => (turnoMap[t.turno_id] || {}).dia).filter(Boolean));
-    // Map nombre-de-día -> fecha_desde MÍNIMA (null = sin piso). Para no mostrar
-    // como pendiente un feriado anterior al alta del alumno en ese día.
-    const _desdePorDia = {};
+    // Ventanas de vigencia por NOMBRE de día: el derecho al feriado se evalúa
+    // contra la fecha del feriado (¿era fijo ese día?), no contra hoy.
+    const _ventPorDiaB = {};
     (misTurnosRes.data || []).forEach(t => {
       const dia = (turnoMap[t.turno_id] || {}).dia;
       if (!dia) return;
-      const fd = t.fecha_desde || null;
-      if (!(dia in _desdePorDia)) { _desdePorDia[dia] = fd; return; }
-      const prev = _desdePorDia[dia];
-      if (prev === null || fd === null) _desdePorDia[dia] = null;
-      else if (fd < prev) _desdePorDia[dia] = fd;
+      if (!(dia in _ventPorDiaB)) _ventPorDiaB[dia] = [];
+      _ventPorDiaB[dia].push({ desde: t.fecha_desde || null, hasta: t.fecha_hasta || null });
     });
-    const _pisoAltaDia = (nd) => {
-      const k = (nd in _desdePorDia) ? nd : (nd === 'Miércoles' && ('Miercoles' in _desdePorDia)) ? 'Miercoles' : null;
-      return k ? _desdePorDia[k] : null;
+    const _eraFijoDia = (nd, fIso) => {
+      const k = (nd in _ventPorDiaB) ? nd : (nd === 'Miércoles' && ('Miercoles' in _ventPorDiaB)) ? 'Miercoles' : null;
+      if (!k) return false;
+      return (_ventPorDiaB[k] || []).some(v => (!v.desde || fIso >= v.desde) && (!v.hasta || fIso <= v.hasta));
     };
     const pendientes = [];
     // REGLAS A FUEGO (independientes del filtro visual de la bitácora, espejo de Mi Espacio):
@@ -2266,7 +2274,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
       pendientes.push({ fecha: a.fecha, dias: Math.max(0, 60 - d), motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
     });
     (cerradasRes.data || []).forEach(c => {
-      if (!misTurnoIds.has(c.turno_id) || yaBooked.has(c.fecha)) return;
+      if (!eraFijoEn(c.turno_id, c.fecha) || yaBooked.has(c.fecha)) return;   // ¿era fijo ESE día?
       const d = diasDesde(c.fecha);
       if (d > 60) return;   // permite futuras (d negativo)
       pendientes.push({ fecha: c.fecha, dias: Math.max(0, 60 - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
@@ -2276,8 +2284,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
       if (!fIso || yaBooked.has(fIso)) return;
       const nd = NOMBRE_DIA[new Date(fIso + 'T00:00:00').getDay()];
       if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
-      const _piso = _pisoAltaDia(nd);
-      if (_piso && fIso < _piso) return;   // feriado anterior al alta en ese día
+      if (!_eraFijoDia(nd, fIso)) return;   // no era fijo ese día EN esa fecha (alta posterior o baja previa)
       if (fIso > _finMesBita) return;      // mes futuro: se habilita el 1° de su mes calendario
       const d = diasDesde(fIso);
       if (d > 30) return;                  // 30 días desde el DÍA del feriado (permite futuros del mes)
@@ -2668,7 +2675,10 @@ async function abrirFichaAlumno() {
     // su inscripción (plan), los feriados del calendario y sus recuperatorios
     const [turnosRes, misTurnosRes, asisRes, evoRes, inscRes, ferRes, recupRes] = await Promise.all([
       fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
-      sb.from('turno_alumnos').select('turno_id, fecha_desde').eq('persona_id', p.id).eq('activo', true),
+      // Trae también los turnos TERMINADOS con fecha_hasta: los feriados/cierres se
+      // evalúan contra su fecha (¿era fijo ese día?), no contra hoy. Para la lista de
+      // horarios se filtran los vigentes abajo.
+      sb.from('turno_alumnos').select('turno_id, fecha_desde, fecha_hasta, activo').eq('persona_id', p.id).or('activo.is.true,fecha_hasta.not.is.null'),
       sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('inscripciones_tf').select('plan,estado,dia_vencimiento,creado_en,fecha_alta').eq('persona_id', p.id).order('creado_en', {ascending:false}).limit(1),
@@ -2676,7 +2686,11 @@ async function abrirFichaAlumno() {
       sb.from('recuperatorios_tf').select('fecha_ausencia,tipo,estado').eq('persona_id', p.id).neq('estado','cancelado')
     ]);
     if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
-    const misTurnoIds = (misTurnosRes.data || []).map(t => t.turno_id);
+    const _hoyFichaTA = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    // VIGENTES hoy → lista de horarios fijos. Las filas terminadas quedan solo
+    // para evaluar feriados/cierres por ventana de fechas.
+    const _misTurnosVig = (misTurnosRes.data || []).filter(t => t.activo !== false && (!t.fecha_hasta || t.fecha_hasta >= _hoyFichaTA));
+    const misTurnoIds = _misTurnosVig.map(t => t.turno_id);
     const asistencias = asisRes.data || [];
     const evoluciones = evoRes.data || [];
 
@@ -2709,21 +2723,18 @@ async function abrirFichaAlumno() {
 
     // Feriados EXTRA: días feriados que cayeron en un día de turno fijo del alumno,
     // dentro de los últimos 60 días, que TODAVÍA no recuperó. No gastan cupo, suman aparte.
-    const hoyIsoFicha = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
-    const diasFijosNombres = new Set(misTurnos.map(t => t.dia));   // {"Lunes","Martes"...}
-    // fecha_desde por turno → fecha_desde MÍNIMA por día (null = sin piso). Para no
-    // contar como pendiente un feriado anterior al alta del alumno en ese día.
-    const _desdePorTurnoF = {};
-    (misTurnosRes.data || []).forEach(t => { _desdePorTurnoF[t.turno_id] = t.fecha_desde || null; });
-    const _desdePorDiaF = {};
-    misTurnos.forEach(t => {
-      const dia = t.dia; if (!dia) return;
-      const fd = _desdePorTurnoF[t.id] || null;
-      if (!(dia in _desdePorDiaF)) { _desdePorDiaF[dia] = fd; return; }
-      const prev = _desdePorDiaF[dia];
-      if (prev === null || fd === null) _desdePorDiaF[dia] = null;
-      else if (fd < prev) _desdePorDiaF[dia] = fd;
+    const hoyIsoFicha = _hoyFichaTA;
+    // Ventanas de vigencia por NOMBRE de día (incluye turnos terminados con
+    // fecha_hasta): el derecho al feriado se evalúa contra la fecha del feriado.
+    const _turnoDiaF = {};
+    fichaTurnosSistema.forEach(t => { _turnoDiaF[t.id] = t.dia; });
+    const _ventanasPorDiaF = {};
+    (misTurnosRes.data || []).forEach(t => {
+      const dia = _turnoDiaF[t.turno_id]; if (!dia) return;
+      if (!(dia in _ventanasPorDiaF)) _ventanasPorDiaF[dia] = [];
+      _ventanasPorDiaF[dia].push({ desde: t.fecha_desde || null, hasta: t.fecha_hasta || null });
     });
+    const diasFijosNombres = new Set(Object.keys(_ventanasPorDiaF));   // {"Lunes","Martes"...}
     const feriados = ferRes.data || [];
     const recups = recupRes.data || [];
     // Feriados que el alumno ya tiene reprogramados (fila viva, no cancelada)
@@ -2736,9 +2747,11 @@ async function abrirFichaAlumno() {
       const fFer = f.fecha;
       if (feriadosYaRecup.has(fFer)) return;                       // ya lo reprogramó
       const nombreDia = nombreDiaDeFechaFicha(fFer);
-      if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // no tenía clase ese día
-      const _pisoF = _desdePorDiaF[nombreDia] || null;
-      if (_pisoF && fFer < _pisoF) return;                         // feriado anterior al alta
+      if (!nombreDia || !diasFijosNombres.has(nombreDia)) return;  // nunca tuvo clase ese día
+      // ¿Era fijo ese día EN LA FECHA del feriado? (alta posterior o baja previa: no aplica)
+      const _ventF = _ventanasPorDiaF[nombreDia] || [];
+      const _eraFijoF = _ventF.some(v => (!v.desde || fFer >= v.desde) && (!v.hasta || fFer <= v.hasta));
+      if (!_eraFijoF) return;
       if (fFer > _finMesFicha) return;                             // mes futuro: se habilita el 1° de su mes
       const dias = diasEntreFicha(fFer, hoyIsoFicha);
       if (dias > 30) return;                                       // pasaron +30 días del feriado: vencido
@@ -2888,7 +2901,9 @@ window.fichaQuitarHorario = async (turnoId, etiqueta) => {
   try {
     // Si deja de venir hoy o antes → baja inmediata (libera el cupo ya).
     // Si es a futuro → sigue fijo hasta el día antes; el cron lo da de baja al pasar la fecha.
-    const upd = (iso <= hoy) ? { activo: false } : { fecha_hasta: _diaAnterior(iso) };
+    // Baja inmediata: también sellamos fecha_hasta (día anterior) para conservar la
+    // VENTANA de vigencia — así no pierde los cierres/feriados que le correspondían.
+    const upd = (iso <= hoy) ? { activo: false, fecha_hasta: _diaAnterior(iso) } : { fecha_hasta: _diaAnterior(iso) };
     const { error } = await sb.from('turno_alumnos').update(upd)
       .eq('persona_id', alumnoActivo.persona.id).eq('turno_id', turnoId).eq('activo', true);
     if (error) throw error;
@@ -2999,7 +3014,9 @@ window.fichaConfirmarHorario = async (turnoViejoId) => {
     //    y las de esta semana quedan como fijas, no como recuperatorio).
     //  · Si arranca hoy o antes → baja inmediata (libera el cupo ya).
     if (turnoViejoId) {
-      const upd = futuro ? { fecha_hasta: _diaAnterior(desdeIso) } : { activo: false };
+      // Baja inmediata: también sellamos fecha_hasta (día anterior) para conservar
+      // la ventana de vigencia (cierres/feriados que le correspondían al turno viejo).
+      const upd = futuro ? { fecha_hasta: _diaAnterior(desdeIso) } : { activo: false, fecha_hasta: _diaAnterior(desdeIso) };
       const { error: eV } = await sb.from('turno_alumnos').update(upd)
         .eq('persona_id', pid).eq('turno_id', turnoViejoId).eq('activo', true);
       if (eV) throw eV;
@@ -4283,7 +4300,11 @@ window.confirmarCambioPlan = async () => {
     if (cpQuitarSel.size > 0) {
       const hoyIso = _isoLocal(new Date());
       const efeBaja = fechaEfectivaCP;
-      const updBaja = (efeBaja > hoyIso) ? { fecha_hasta: _diaAnterior(efeBaja) } : { activo: false };
+      // Baja inmediata: también sellamos fecha_hasta (día anterior a la fecha efectiva)
+      // para conservar la ventana de vigencia (cierres/feriados del turno que deja).
+      const updBaja = (efeBaja > hoyIso)
+        ? { fecha_hasta: _diaAnterior(efeBaja) }
+        : { activo: false, fecha_hasta: _diaAnterior(efeBaja || hoyIso) };
       const { error: errQuitar } = await sb.from('turno_alumnos')
         .update(updBaja)
         .in('id', [...cpQuitarSel]);
@@ -5337,9 +5358,10 @@ window.confirmarBaja = async () => {
     }).eq('id', alumnoActivo.inscripcion.id);
     if (errIns) throw errIns;
 
-    // Liberar turnos
+    // Liberar turnos — sellando fecha_hasta (día anterior) para conservar la
+    // ventana de vigencia por si reactiva por el camino "conserva recuperatorios".
     const { data: turnosLib, error: errTur } = await sb.from('turno_alumnos')
-      .update({ activo: false })
+      .update({ activo: false, fecha_hasta: _diaAnterior(hoyISO) })
       .eq('persona_id', alumnoActivo.persona.id)
       .eq('activo', true)
       .select();
@@ -5714,7 +5736,8 @@ async function guardarTurnosReactivar() {
   }
   const idsDesactivar = (existentes || []).filter(r => r.activo && !reactivarTurnoSel.has(Number(r.turno_id))).map(r => r.id);
   if (idsDesactivar.length) {
-    const { error } = await sb.from('turno_alumnos').update({ activo: false }).in('id', idsDesactivar);
+    // Sellamos fecha_hasta (día anterior) para conservar la ventana de vigencia.
+    const { error } = await sb.from('turno_alumnos').update({ activo: false, fecha_hasta: _diaAnterior(hoyIso) }).in('id', idsDesactivar);
     if (error) throw error;
   }
 }

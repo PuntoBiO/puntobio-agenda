@@ -1488,11 +1488,15 @@ async function cargarEspacio(per){
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
     sb.from('historias_clinicas').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
     sb.from('evaluaciones_moplex').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
-    // Turnos fijos del alumno (JOIN con tabla turnos para traer dia/hora/servicio)
+    // Turnos fijos del alumno (JOIN con tabla turnos para traer dia/hora/servicio).
+    // Trae también los TERMINADOS con fecha_hasta (activo=false o vencidos): los
+    // cierres/feriados se evalúan contra la fecha del cierre, no contra hoy — un
+    // alumno que cambió de plan conserva los créditos de su turno viejo. Para la
+    // agenda/render se filtran los VIGENTES más abajo.
     sb.from('turno_alumnos')
-      .select('turno_id, fecha_desde, turnos!inner(id, dia, hora, servicio, capacidad)')
+      .select('turno_id, fecha_desde, fecha_hasta, activo, turnos!inner(id, dia, hora, servicio, capacidad)')
       .eq('persona_id', pid)
-      .eq('activo', true),
+      .or('activo.is.true,fecha_hasta.not.is.null'),
     // Todos los turnos del centro (para el panel "Agenda de la semana")
     sb.from('turnos').select('id, dia, hora, servicio, capacidad'),
     // MIS agregados puntuales (sueltos/recuperatorios cargados para mí) en el rango de 2 semanas
@@ -1558,8 +1562,12 @@ async function cargarEspacio(per){
     });
   } catch(e) { window._profesPorTurno = {}; }
 
+  // Filas VIGENTES hoy (activo y sin fecha_hasta pasada) → para agenda, recibo y marcas.
+  // Las filas terminadas quedan solo para evaluar cierres/feriados por fecha (ventanas).
+  const _esVigenteTA = (r) => r.activo !== false && (!r.fecha_hasta || r.fecha_hasta >= _hoyISO);
+  const misTurnosVigentes = (misTurnosRes.data || []).filter(_esVigenteTA);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
-  const misTurnos = (misTurnosRes.data || [])
+  const misTurnos = misTurnosVigentes
     .map(r => r.turnos)
     .filter(t => t && t.id);
   window._reciboTurnos = misTurnos;
@@ -1636,17 +1644,15 @@ async function cargarEspacio(per){
     // Mapa global fecha -> motivo: lo usa la agenda para marcar/bloquear días feriados.
     window._feriadosMapAll = {};
     (feriadosData || []).forEach(f => { if (f.fecha) window._feriadosMapAll[f.fecha] = f.motivo || 'Feriado'; });
-    // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
-    // Conserva .has() para la lógica de abajo y agrega .get() para el piso de alta.
+    // Map nombre-de-día -> [ {desde, hasta} ] (ventanas de vigencia, incluye turnos
+    // ya terminados con fecha_hasta). El derecho a un feriado se evalúa contra la
+    // FECHA del feriado (¿era fijo ese día?), no contra hoy.
     const diasFijos = new Map();
     (misTurnosRes.data || []).forEach(r => {
       const dia = r.turnos && r.turnos.dia;
       if (!dia) return;
-      const fd = r.fecha_desde || null;
-      if (!diasFijos.has(dia)) { diasFijos.set(dia, fd); return; }
-      const prev = diasFijos.get(dia);
-      if (prev === null || fd === null) diasFijos.set(dia, null);
-      else if (fd < prev) diasFijos.set(dia, fd);
+      if (!diasFijos.has(dia)) diasFijos.set(dia, []);
+      diasFijos.get(dia).push({ desde: r.fecha_desde || null, hasta: r.fecha_hasta || null });
     });
     // Feriados que YA estás recuperando (fila cargada) → no los volvemos a ofrecer
     const feriadosYaCargados = new Set(
@@ -1673,10 +1679,12 @@ async function cargarEspacio(per){
                     : (nombreDia === 'Miércoles' && diasFijos.has('Miercoles')) ? 'Miercoles'
                     : null;
       if (!_diaKey) return;                          // ese día no tenés clase fija
-      // FERIADO ANTERIOR AL ALTA: si cayó antes de que te dieras de alta en ese
-      // día, no perdiste ninguna clase → no se recupera.
-      const _pisoAlta = diasFijos.get(_diaKey);
-      if (_pisoAlta && fIso < _pisoAlta) return;
+      // ¿Eras fijo ese día EN LA FECHA del feriado? Cubre alta posterior (no
+      // perdiste clase) y baja/cambio de plan posterior (te corresponde igual).
+      const _ventFer = diasFijos.get(_diaKey) || [];
+      const _eraFijoFer = _ventFer.some(v =>
+        (!v.desde || fIso >= v.desde) && (!v.hasta || fIso <= v.hasta));
+      if (!_eraFijoFer) return;
       if (_inicioPlanISO && fIso < _inicioPlanISO) return;  // baja/reingreso: lo previo no se arrastra
       feriadosPendientes.push({ fecha: fIso, motivo: f.motivo || 'Feriado' });
     });
@@ -1707,7 +1715,7 @@ async function cargarEspacio(per){
     hoyISO: _hoyISO,
     // SELF-SERVICE · datos del alumno para mostrar/ocultar botones
     personaId: per.id,
-    misTurnosIds: new Set((misTurnosRes.data || []).map(r => r.turno_id)),
+    misTurnosIds: new Set(misTurnosVigentes.map(r => r.turno_id)),
     // Ausencias recuperables PENDIENTES (no asignadas todavía y dentro de 60 días)
     recuperatoriosPendientes: (recus.data || []).filter(r => {
       if (r.estado !== 'pendiente') return false;
@@ -1759,8 +1767,10 @@ async function cargarEspacio(per){
   // RLS bloquea la lectura directa del alumno, así que los traemos por RPC (sólo
   // turno+fecha+motivo, sin datos personales) y los cruzamos en JS con sus turnos
   // fijos. Los cierres de día completo ya vienen por la tabla `feriados`.
+  // TODAS las filas (vigentes + terminadas con fecha_hasta): los cierres se
+  // evalúan por ventana contra la fecha del cierre, no contra hoy.
   window._agendaData.misTurnosDesde = (misTurnosRes.data || [])
-    .map(r => ({ turno_id: r.turno_id, fecha_desde: r.fecha_desde || null }));
+    .map(r => ({ turno_id: r.turno_id, fecha_desde: r.fecha_desde || null, fecha_hasta: r.fecha_hasta || null }));
   try {
     const { data: cc } = await sb.rpc('alumno_cierres_centro_recientes', { p_persona_id: window._pidActivo() });
     window._agendaData.cierresCentro = cc || [];
@@ -3092,8 +3102,14 @@ function bloqueRecuperatorios(recus){
   // 60 días. La fila en recuperatorios_tf se crea recién al reservar.
   const _esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const cierresData = (window._agendaData && window._agendaData.cierresCentro) || [];
-  const misTurnosDesde = new Map(((window._agendaData && window._agendaData.misTurnosDesde) || [])
-    .map(x => [String(x.turno_id), x.fecha_desde]));
+  // Ventanas de vigencia por turno (incluye terminados con fecha_hasta): el derecho
+  // al cierre se evalúa contra la FECHA del cierre, no contra hoy.
+  const _misVentanasRec = new Map();
+  ((window._agendaData && window._agendaData.misTurnosDesde) || []).forEach(x => {
+    const k = String(x.turno_id);
+    if (!_misVentanasRec.has(k)) _misVentanasRec.set(k, []);
+    _misVentanasRec.get(k).push({ desde: x.fecha_desde || null, hasta: x.fecha_hasta || null });
+  });
   const _turnoMapRec = {};
   ((window._agendaData && window._agendaData.turnos) || []).forEach(t => { if (t && t.id != null) _turnoMapRec[String(t.id)] = t; });
   // Cierres YA recuperados (fila tipo 'cierre' en recuperatorios_tf) → no reaparecen
@@ -3101,9 +3117,10 @@ function bloqueRecuperatorios(recus){
   const cierres = [];
   cierresData.forEach(cc => {
     const tid = String(cc.turno_id);
-    if (!misTurnosDesde.has(tid)) return;                 // no es su turno fijo
-    const desde = misTurnosDesde.get(tid);
-    if (desde && cc.fecha < desde) return;                // todavía no era fijo en esa clase
+    const _ventCc = _misVentanasRec.get(tid) || [];
+    const _eraFijoCc = _ventCc.some(v =>
+      (!v.desde || v.desde <= cc.fecha) && (!v.hasta || cc.fecha <= v.hasta));
+    if (!_eraFijoCc) return;                              // no era su turno fijo ese día
     if (cierresYaRecuperados.has(cc.fecha)) return;       // ya lo recuperó
     const dias = DIAS_PARA_RECUPERAR - diasEntre(cc.fecha, hoy);
     if (dias <= 0) return;                                 // pasó la ventana de 60 días
@@ -5645,15 +5662,23 @@ window.pbCierresPendientes = function() {
   const data = window._agendaData || {};
   const lista = data.cierresCentro || [];
   if (!lista.length) return [];
-  const misDesde = new Map((data.misTurnosDesde || []).map(x => [String(x.turno_id), x.fecha_desde]));
+  // Ventanas de vigencia por turno (incluye turnos ya terminados con fecha_hasta):
+  // el derecho al cierre se evalúa contra la FECHA del cierre, no contra hoy.
+  const misVentanas = new Map();
+  (data.misTurnosDesde || []).forEach(x => {
+    const k = String(x.turno_id);
+    if (!misVentanas.has(k)) misVentanas.set(k, []);
+    misVentanas.get(k).push({ desde: x.fecha_desde || null, hasta: x.fecha_hasta || null });
+  });
   const ya = data.cierresRecuperadosSet || new Set();
   const hoy = data.hoyISO || (typeof hoyIso === 'function' ? hoyIso() : new Date().toISOString().slice(0,10));
   const out = [];
   lista.forEach(cc => {
     const tid = String(cc.turno_id);
-    if (!misDesde.has(tid)) return;                    // no es su turno fijo
-    const desde = misDesde.get(tid);
-    if (desde && cc.fecha < desde) return;             // todavía no era fijo ahí
+    const ventanas = misVentanas.get(tid) || [];
+    const eraFijo = ventanas.some(v =>
+      (!v.desde || v.desde <= cc.fecha) && (!v.hasta || cc.fecha <= v.hasta));
+    if (!eraFijo) return;                              // no era su turno fijo ese día
     if (ya.has(cc.fecha)) return;                      // ya lo reservó
     const dias = DIAS_PARA_RECUPERAR - diasEntre(cc.fecha, hoy);
     if (dias <= 0) return;                             // venció la ventana

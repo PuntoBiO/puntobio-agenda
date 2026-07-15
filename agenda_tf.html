@@ -3433,35 +3433,35 @@ async function recuperatoriosDe(personaId) {
 // Sirve para saber qué feriados le corresponden recuperar.
 async function diasFijosDePersona(personaId) {
   try {
+    // Traemos también las filas terminadas (activo=false con fecha_hasta): el derecho
+    // a un feriado se evalúa contra la FECHA del feriado (¿era fijo ese día?), no contra hoy.
     const filas = await supabaseQuery('turno_alumnos',
-      `?select=fecha_desde,fecha_hasta,turnos(dia)&persona_id=eq.${personaId}&activo=eq.true`);
-    const _hoy = hoyIso();
-    // Map nombre-de-día -> fecha_desde MÍNIMA en ese día (null = sin piso, vale siempre).
-    // Sirve para no ofrecer un feriado anterior al alta del alumno en ese día.
+      `?select=fecha_desde,fecha_hasta,activo,turnos(dia)&persona_id=eq.${personaId}&or=(activo.is.true,fecha_hasta.not.is.null)`);
+    // Map nombre-de-día -> [ {desde, hasta} ] (ventanas de vigencia; null = sin tope).
     const m = new Map();
     (filas || []).forEach(f => {
-      if (f.fecha_hasta && f.fecha_hasta < _hoy) return;   // ya dejó ese turno: no cuenta
       const dia = f.turnos && f.turnos.dia;
       if (!dia) return;
-      const fd = f.fecha_desde || null;
-      if (!m.has(dia)) { m.set(dia, fd); return; }
-      const prev = m.get(dia);
-      if (prev === null || fd === null) m.set(dia, null);
-      else if (fd < prev) m.set(dia, fd);
+      if (!m.has(dia)) m.set(dia, []);
+      m.get(dia).push({ desde: f.fecha_desde || null, hasta: f.fecha_hasta || null });
     });
-    return m;  // Map de nombres -> fecha_desde mínima. Conserva .has() para la lógica vieja.
+    return m;  // Conserva .has() para la lógica de abajo; .get() ahora devuelve ventanas.
   } catch (e) { console.warn('No se pudo leer días fijos', e); return new Map(); }
 }
-// Turnos FIJOS (turno_id + desde cuándo) en que la persona está activa.
+// Turnos FIJOS (turno_id + ventana de vigencia) de la persona.
 // Sirve para saber si le corresponde el recupero de una clase cancelada por el centro.
+// IMPORTANTE: el derecho a un cierre se evalúa contra la FECHA del cierre (¿era fijo
+// ese día?), NO contra hoy — un alumno que cambió de plan conserva los cierres que
+// cayeron mientras su turno viejo seguía vigente. Por eso traemos también las filas
+// terminadas: activo=true (con o sin fecha_hasta) y activo=false CON fecha_hasta
+// (salida con fecha conocida). activo=false sin fecha_hasta no acredita (no sabemos
+// hasta cuándo fue fijo).
 async function turnosFijosDePersona(personaId) {
   try {
     const filas = await supabaseQuery('turno_alumnos',
-      `?select=turno_id,fecha_desde,fecha_hasta&persona_id=eq.${personaId}&activo=eq.true`);
-    const _hoy = hoyIso();
+      `?select=turno_id,fecha_desde,fecha_hasta,activo&persona_id=eq.${personaId}&or=(activo.is.true,fecha_hasta.not.is.null)`);
     return (filas || [])
-      .filter(f => !f.fecha_hasta || f.fecha_hasta >= _hoy)   // ya dejó ese turno: no cuenta
-      .map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null }));
+      .map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null, fecha_hasta: f.fecha_hasta || null }));
   } catch (e) { console.warn('No se pudo leer turnos fijos', e); return []; }
 }
 // Lista de clases CANCELADAS POR EL CENTRO: [{ turno_id, fecha, motivo }]
@@ -3547,10 +3547,12 @@ async function estadoRecuperatorios(personaId) {
                   : (nombreDia === 'Miércoles' && diasFijos.has('Miercoles')) ? 'Miercoles'
                   : null;
     if (!_diaKey) return;    // no tenía clase ese día
-    // FERIADO ANTERIOR AL ALTA: si el feriado cayó antes de que el alumno se diera
-    // de alta en ese día, no perdió ninguna clase → no se recupera.
-    const _pisoAlta = diasFijos.get(_diaKey);
-    if (_pisoAlta && fFer < _pisoAlta) return;
+    // ¿Era fijo ese día EN LA FECHA del feriado? Cubre alta posterior (no perdió
+    // clase) y también baja/cambio de plan posterior (el feriado le corresponde igual).
+    const _ventanasDia = diasFijos.get(_diaKey) || [];
+    const _eraFijoFer = _ventanasDia.some(v =>
+      (!v.desde || fFer >= v.desde) && (!v.hasta || fFer <= v.hasta));
+    if (!_eraFijoFer) return;
     if (inicioISO && fFer < inicioISO) return;   // reactivado: no arrastra feriados previos
     const dias = diasEntre(fFer, hoy);
     // FERIADO FUTURO: se habilita recién el 1ro de SU mes calendario (regla unificada
@@ -3569,12 +3571,18 @@ async function estadoRecuperatorios(personaId) {
   // No gastan cupo (igual que feriado). Se ofrecen desde que se cancelan (incluso
   // antes de la fecha original) y hasta 60 días después. La fila en recuperatorios_tf
   // se crea recién al reservar.
-  const desdePorTurno = new Map();
-  misTurnosFijos.forEach(tf => desdePorTurno.set(tf.turno_id, tf.fecha_desde));
+  const ventanasPorTurno = new Map();
+  misTurnosFijos.forEach(tf => {
+    if (!ventanasPorTurno.has(tf.turno_id)) ventanasPorTurno.set(tf.turno_id, []);
+    ventanasPorTurno.get(tf.turno_id).push(tf);
+  });
   cierresCentroLista().forEach(cc => {
-    if (!desdePorTurno.has(cc.turno_id)) return;            // no es su turno fijo
-    const desde = desdePorTurno.get(cc.turno_id);
-    if (desde && cc.fecha < desde) return;                 // todavía no era fijo en esa clase
+    // ¿ERA fijo en esa clase EL DÍA del cierre? (no hace falta que siga siéndolo hoy)
+    const ventanas = ventanasPorTurno.get(String(cc.turno_id)) || [];
+    const eraFijo = ventanas.some(v =>
+      (!v.fecha_desde || v.fecha_desde <= cc.fecha) &&
+      (!v.fecha_hasta || cc.fecha <= v.fecha_hasta));
+    if (!eraFijo) return;                                  // no era su turno fijo ese día
     if (inicioISO && cc.fecha < inicioISO) return;         // reactivado: no arrastra cierres previos
     if (cierresYaRecuperados.has(cc.fecha)) return;        // ya lo recuperó
     const dias = diasEntre(cc.fecha, hoy);
@@ -5259,7 +5267,11 @@ window.quitarFijo = async (personaId, nombre, dia, hora, servicio) => {
   }
   if (!confirm(`¿Sacar a ${nombre} de este turno fijo (${servicio} ${hora} ${dia})?\n\nDejará de aparecer todas las semanas. Su historia NO se borra.`)) return;
   try {
-    await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${personaId}`, { activo: false });
+    // Sellamos fecha_hasta (día anterior) además de desactivar, para conservar la
+    // VENTANA de vigencia — así no pierde los cierres/feriados que le correspondían.
+    const _ayer = (() => { const d = new Date(hoyIso() + 'T00:00:00'); d.setDate(d.getDate() - 1);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${personaId}`, { activo: false, fecha_hasta: _ayer });
     // Sacar de memoria
     const key = `${t.dia}-${t.hora}-${t.servicio}`;
     if (ALUMNOS_POR_TURNO[key])
