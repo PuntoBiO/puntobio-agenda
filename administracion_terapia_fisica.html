@@ -396,7 +396,7 @@
     </div>
     <div class="modal-body" id="bitacoraBody"></div>
     <div class="modal-footer">
-      <button class="btn-modal" id="bitacoraWaBtn" style="background:#25D366;color:#fff;display:none" onclick="enviarBitacoraWhatsApp()">📲 Enviar pendientes por WhatsApp</button>
+      <button class="btn-modal" id="bitacoraWaBtn" style="background:#25D366;color:#fff;display:none" onclick="enviarBitacoraWhatsApp()">📲 Enviar resumen por WhatsApp</button>
       <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalBitacora')">Cerrar</button>
     </div>
   </div>
@@ -2306,15 +2306,38 @@ async function abrirBitacoraAlumno(ventana = 60) {
          </div>`
       : `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:13px;color:#166534;font-weight:700">✅ Sin clases pendientes de recuperar en este rango</div>`;
 
-    // WhatsApp: arma el mensaje con las pendientes y muestra el botón si hay celular
+    // WhatsApp: RESUMEN COMPLETO del período (presentes, faltas justificadas o no,
+    // canceladas por el centro, recuperatorios programados y pendientes de recuperar).
+    // Sin emojis: texto plano para que nunca salgan signos raros en WhatsApp.
     const waBtn = $('#bitacoraWaBtn');
     const tel = (p.celular || p.telefono || '').replace(/\D/g, '');
     if (waBtn) {
-      if (pendientes.length && tel) {
-        const lineas = pendientes.map(x => `• ${x.motivo} del ${fmtF(x.fecha)}${x.cupo ? '' : ' (sin gastar cupo)'} — ${x.dias <= 7 ? `¡vence en ${x.dias} día${x.dias !== 1 ? 's' : ''}!` : `tenés ${x.dias} días`}`).join('\n');
+      if (tel) {
+        const _fmtCorto = (iso) => { const pp = String(iso).slice(0,10).split('-'); return pp.length === 3 ? `${+pp[2]}/${+pp[1]}` : iso; };
+        // Eventos del período elegido (30/60/90 días hacia atrás; las programadas a futuro entran siempre)
+        const evPeriodo = eventos.filter(e => e.tipo === 'recu_prog' || diasDesde(e.fecha) <= ventana);
+        const _pres  = evPeriodo.filter(e => e.tipo === 'presente');
+        const _fJust = evPeriodo.filter(e => e.tipo === 'ausente_just');
+        const _fSin  = evPeriodo.filter(e => e.tipo === 'ausente');
+        const _canc  = evPeriodo.filter(e => e.tipo === 'cancelada');
+        const _prog  = evPeriodo.filter(e => e.tipo === 'recu_prog');
+        const _rec   = evPeriodo.filter(e => e.tipo === 'recu_hecho');
+        const _linea = (e, extra) => `- ${_fmtCorto(e.fecha)}${e.sub ? ' (' + e.sub + ')' : ''}${extra || ''}`;
+        const secciones = [];
+        if (_pres.length || _rec.length) {
+          const fechasPres = _pres.map(e => _fmtCorto(e.fecha)).reverse().join(', ');
+          secciones.push(`Asististe a ${_pres.length + _rec.length} clase${(_pres.length + _rec.length) !== 1 ? 's' : ''}${_rec.length ? ` (${_rec.length} recuperada${_rec.length !== 1 ? 's' : ''})` : ''}${fechasPres ? `: ${fechasPres}` : ''}`);
+        }
+        if (_fJust.length) secciones.push(`Faltas con aviso (justificadas):\n${_fJust.map(e => _linea(e)).join('\n')}`);
+        if (_fSin.length)  secciones.push(`Faltas sin aviso (no recuperables):\n${_fSin.map(e => _linea(e)).join('\n')}`);
+        if (_canc.length)  secciones.push(`Clases canceladas por el centro (se recuperan sin gastar cupo):\n${_canc.map(e => _linea(e)).join('\n')}`);
+        if (_prog.length)  secciones.push(`Clases programadas para recuperar:\n${_prog.map(e => _linea(e)).join('\n')}`);
+        if (pendientes.length) {
+          const lineasPend = pendientes.map(x => `- ${x.motivo} del ${_fmtCorto(x.fecha)}${x.cupo ? '' : ' (sin gastar cupo)'} — ${x.dias <= 7 ? `¡vence en ${x.dias} día${x.dias !== 1 ? 's' : ''}!` : `tenés ${x.dias} días`}`).join('\n');
+          secciones.push(`Pendientes de recuperar:\n${lineasPend}\n\nRecordá: las faltas avisadas con menos de 2 horas de anticipación no quedan justificadas y no se pueden recuperar.`);
+        }
         const nombre1 = p.nombre ? p.nombre.split(' ')[0] : '';
-        // Sin emojis: texto plano para que nunca salgan signos raros en WhatsApp
-        const msg = `Hola ${nombre1}! Te paso desde PuntoBiO las clases que tenés pendientes de recuperar:\n\n${lineas}\n\nRecordá: las faltas avisadas con menos de 2 horas de anticipación no quedan justificadas y no se pueden recuperar.\n\nReprogramalas vos misma/o desde Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\nO escribinos y lo coordinamos. ¡Te esperamos!`;
+        const msg = `Hola ${nombre1}! Te paso tu resumen de clases de PuntoBiO (últimos ${ventana} días):\n\n${secciones.join('\n\n')}\n\n${pendientes.length ? 'Reprogramá tus clases vos misma/o desde Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\n' : 'Podés ver todo tu detalle en Mi Espacio: https://www.puntobio.com.ar/mi_espacio.html\n'}Cualquier duda escribinos. ¡Te esperamos!`;
         const telFull = tel.startsWith('549') ? tel : (tel.startsWith('54') ? '549' + tel.slice(2) : '549' + tel);
         window._bitacoraWA = `https://wa.me/${telFull}?text=${encodeURIComponent(msg)}`;
         waBtn.style.display = '';
@@ -2348,7 +2371,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
       : '<div style="padding:14px;text-align:center;color:var(--text-dim);font-size:13px">Todavía no hay movimientos registrados.</div>';
     const OPC_VENTANA = [[30, 'Último mes'], [60, 'Últimos 2 meses'], [90, 'Últimos 3 meses']];
     const selector = `<div style="margin-bottom:12px">
-      <div style="font-size:11px;color:var(--text-dim);font-weight:600;margin-bottom:5px">Pendientes a mostrar / enviar:</div>
+      <div style="font-size:11px;color:var(--text-dim);font-weight:600;margin-bottom:5px">Período del resumen a enviar:</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
         ${OPC_VENTANA.map(([d, lbl]) => `<button onclick="bitacoraSetVentana(${d})" style="flex:1;min-width:88px;padding:7px 8px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${ventana === d ? '#1e9fe0' : '#d1d5db'};background:${ventana === d ? '#1e9fe0' : '#fff'};color:${ventana === d ? '#fff' : '#374151'}">${lbl}</button>`).join('')}
       </div>
@@ -2365,7 +2388,7 @@ window.bitacoraSetVentana = (dias) => abrirBitacoraAlumno(dias);
 // Abre WhatsApp con el listado de pendientes de recuperar (lo arma abrirBitacoraAlumno)
 window.enviarBitacoraWhatsApp = () => {
   if (window._bitacoraWA) window.open(window._bitacoraWA, '_blank');
-  else toast('No hay pendientes para enviar, o el alumno no tiene celular cargado.', true);
+  else toast('El alumno no tiene celular cargado.', true);
 };
 
 // Lee el saldo pendiente por cambio de fecha guardado en la inscripción.
