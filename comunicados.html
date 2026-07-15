@@ -98,7 +98,6 @@ const ADMINS = [
 
 const $ = id => document.getElementById(id)
 let adminEmail = null
-let estActual = null
 let comsHoy = 0                 // mails de comunicados enviados HOY (para el tope compartido)
 const TOPE_DIARIO = 70          // máximo de mails por día ENTRE TODO (aumento + comunicados)
 const fmt$ = n => '$' + Math.round(Number(n)||0).toLocaleString('es-AR')
@@ -111,7 +110,7 @@ const fmtDMA = iso => iso ? iso.split('-').reverse().join('/') : ''
 // ─────────────────────────────────────────────────────────────
 //  TOPE DIARIO COMPARTIDO (aumento + comunicados)
 // ─────────────────────────────────────────────────────────────
-function enviadosHoyTotal(){ return (estActual ? estActual.enviadosHoy : 0) + comsHoy }
+function enviadosHoyTotal(){ return ((mailsHoyInfo && Number(mailsHoyInfo.aumento)) || 0) + comsHoy }
 function restanteHoy(){ return Math.max(0, TOPE_DIARIO - enviadosHoyTotal()) }
 let mailsHoyInfo = null   // desglose total del día (RPC mails_enviados_hoy)
 function renderTope(){
@@ -548,61 +547,6 @@ async function cerrarCom(id){
   await refrescarCampanias()
 }
 
-// ─────────────────────────────────────────────────────────────
-//  CAMPAÑA "AUMENTO JULIO 2026" (igual que antes, tope compartido)
-// ─────────────────────────────────────────────────────────────
-async function cargarEstado(){
-  const { data: tar } = await sb.from('tarifario_tf').select('plan, valor_nuevo, aumento_desde')
-  const precio = {}
-  ;(tar||[]).forEach(t => { if(t.valor_nuevo != null && t.aumento_desde) precio[t.plan] = Number(t.valor_nuevo) })
-
-  const { data: insc } = await sb.from('inscripciones_tf')
-    .select('persona_id, plan, estado, dia_vencimiento').eq('estado','ACTIVO')
-
-  const porPersona = {}
-  const excluRaw = []   // inscripciones ACTIVO que quedan afuera de la campaña (y por qué)
-  ;(insc||[]).forEach(i => {
-    if(!i.plan || !String(i.plan).trim()){ excluRaw.push({ pid:i.persona_id, plan:'(sin plan)', motivo:'inscripción sin plan' }); return }
-    if(/BON/i.test(i.plan)){ excluRaw.push({ pid:i.persona_id, plan:i.plan, motivo:'bonificado (afuera por diseño)' }); return }
-    if(precio[i.plan] == null || precio[i.plan] <= 0){ excluRaw.push({ pid:i.persona_id, plan:i.plan, motivo:'plan sin precio nuevo en el tarifario' }); return }
-    const dia = Number(i.dia_vencimiento) || 99
-    if(!porPersona[i.persona_id] || dia < porPersona[i.persona_id].dia)
-      porPersona[i.persona_id] = { persona_id:i.persona_id, plan:i.plan, precio:precio[i.plan], dia }
-  })
-
-  // Excluido de verdad = no quedó adentro por NINGUNA otra inscripción
-  const excluMap = {}
-  excluRaw.forEach(e => { if(!porPersona[e.pid] && !excluMap[e.pid]) excluMap[e.pid] = e })
-  const excluidosIds = Object.keys(excluMap).map(Number)
-
-  const ids = [...new Set([...Object.keys(porPersona).map(Number), ...excluidosIds])]
-  let personas = []
-  if(ids.length){
-    const { data } = await sb.from('personas')
-      .select('id, nombre, email, mail, aviso_aumento_jul26_mail').in('id', ids)
-    personas = data || []
-  }
-  const perById = {}; personas.forEach(p => perById[p.id] = p)
-
-  const lista = Object.values(porPersona).map(c => {
-    const p = perById[c.persona_id] || {}
-    const email = (p.email && String(p.email).trim()) || (p.mail && String(p.mail).trim()) || ''
-    return { ...c, nombre:p.nombre || '(sin nombre)', email, emailOk: email.includes('@'), enviado: !!p.aviso_aumento_jul26_mail, mailAt: p.aviso_aumento_jul26_mail || null }
-  })
-
-  const excluidos = excluidosIds.map(pid => {
-    const p = perById[pid] || {}
-    return { nombre: p.nombre || ('#'+pid), plan: excluMap[pid].plan, motivo: excluMap[pid].motivo }
-  }).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
-
-  const conMail   = lista.filter(c => c.emailOk)
-  const enviados  = conMail.filter(c => c.enviado).sort((a,b) => new Date(b.mailAt||0) - new Date(a.mailAt||0))
-  const pendientes= conMail.filter(c => !c.enviado).sort((a,b) => a.dia - b.dia)
-  const sinEmail  = lista.filter(c => !c.emailOk).sort((a,b) => String(a.nombre).localeCompare(b.nombre))
-  const enviadosHoy = enviados.filter(c => esHoyAR(c.mailAt)).length
-  return { total: conMail.length, enviados, pendientes, sinEmail, excluidos, enviadosHoy }
-}
-
 function fmtFechaCorta(ts){
   if(!ts) return ''
   try {
@@ -611,145 +555,12 @@ function fmtFechaCorta(ts){
   } catch(_){ return '' }
 }
 
-function filaPersona(c, i, derecha){
-  return `<div class="fila"><span><span class="idx">${i}.</span>${esc(c.nombre)} · <span class="r">${esc(c.plan)} · ${fmt$(c.precio)}</span></span><span class="r">${derecha}</span></div>`
-}
-
-function listaCompleta(items, derechaFn, vacio){
-  if(!items.length) return `<div class="lista"><div class="fila"><span class="r">${vacio}</span></div></div>`
-  return `<div class="lista"><div class="lista-scroll">${items.map((c,idx)=>filaPersona(c, idx+1, derechaFn(c))).join('')}</div></div>`
-}
-
-function render(est){
-  estActual = est
-  renderTope()
-  const pct = est.total ? Math.round(est.enviados.length / est.total * 100) : 0
-  const rest = restanteHoy()
-  const topeAlcanzado = rest <= 0
-  const puedeEnviar = est.pendientes.length > 0 && !topeAlcanzado
-  const valorLote = Math.min(TOPE_DIARIO, rest || TOPE_DIARIO, est.pendientes.length || TOPE_DIARIO) || 1
-  $('app').innerHTML = `
-    <div class="card">
-      <div class="card-top">
-        <div>
-          <p class="card-title">Aumento de cuota · Julio 2026</p>
-          <p class="card-desc">Le avisa a cada alumno cuánto pasa a pagar su plan desde julio. Empieza por los que vencen a principio de mes. No repite a nadie. (Bonificados quedan afuera.)</p>
-        </div>
-        <span class="pill">Mail · lotes de ${TOPE_DIARIO}/día</span>
-      </div>
-
-      <div class="kpis">
-        <div class="kpi ok"><div class="n">${est.enviados.length}</div><div class="l">Enviados</div></div>
-        <div class="kpi pend"><div class="n">${est.pendientes.length}</div><div class="l">Faltan</div></div>
-        <div class="kpi"><div class="n">${est.total}</div><div class="l">Total con mail</div></div>
-      </div>
-      <div class="bar"><i style="width:${pct}%"></i></div>
-
-      <div class="acciones">
-        <label>Enviar de a</label>
-        <input id="lote" type="number" min="1" max="${rest || 1}" value="${valorLote}" ${puedeEnviar ? '' : 'disabled'}>
-        <button class="btn" id="btnEnviar" ${puedeEnviar ? '' : 'disabled'}>Enviar el próximo lote</button>
-        <button class="btn sec" id="btnPrueba">✉️ Enviarme una prueba</button>
-        <button class="btn sec" id="btnRefrescar">↻ Actualizar</button>
-        ${est.pendientes.length ? '' : '<span class="muted">¡Listo! No quedan pendientes 🎉</span>'}
-      </div>
-
-      ${topeAlcanzado && est.pendientes.length ? `<div class="warn">🛑 Hoy ya se enviaron <b>${enviadosHoyTotal()}</b> mails entre todas las campañas (tope ${TOPE_DIARIO}). Seguí <b>mañana</b>.</div>` : ''}
-
-      <div class="res" id="res"></div>
-
-      <details class="det">
-        <summary>✅ Ya recibieron el mail (${est.enviados.length})</summary>
-        ${listaCompleta(est.enviados, c => 'enviado ' + (fmtFechaCorta(c.mailAt) || ''), 'Todavía no se envió a nadie.')}
-      </details>
-
-      <details class="det" ${est.pendientes.length ? '' : ''}>
-        <summary>⏳ Todavía falta enviarles (${est.pendientes.length})</summary>
-        ${listaCompleta(est.pendientes, c => 'vence día ' + (c.dia===99?'—':c.dia), 'No quedan pendientes. 🎉')}
-      </details>
-
-      <details class="det">
-        <summary>⚠️ Sin email cargado (${est.sinEmail.length})</summary>
-        ${listaCompleta(est.sinEmail, () => 'sin mail', 'Todos tienen mail cargado. 👍')}
-      </details>
-
-      <details class="det" ${est.excluidos.length ? 'open' : ''}>
-        <summary>🚫 Afuera de la campaña (${est.excluidos.length})</summary>
-        ${est.excluidos.length
-          ? `<div class="lista"><div class="lista-scroll">${est.excluidos.map((c,i) =>
-              `<div class="fila"><span><span class="idx">${i+1}.</span>${esc(c.nombre)} · <span class="r">${esc(c.plan)}</span></span><span class="r">${esc(c.motivo)}</span></div>`
-            ).join('')}</div></div>
-            <div class="muted" style="font-size:12px;margin-top:6px">Los de "plan sin precio nuevo" entran solos a la campaña apenas cargues <b>valor nuevo</b> y <b>fecha de aumento</b> de ese plan en el tarifario. No hace falta tocar nada más.</div>`
-          : '<div class="lista"><div class="fila"><span class="r">Nadie quedó afuera. 👍</span></div></div>'}
-      </details>
-
-      <details class="det">
-        <summary>Ver el texto que se envía</summary>
-        <div class="preview">
-          <b>Asunto:</b> PuntoBiO — Actualización de tu cuota desde julio<br><br>
-          Hola {nombre}, te contamos que <b>a partir del 1 de julio de 2026</b> la cuota de tu plan <b>{plan}</b> pasa a <b>{precio} / mes</b>. Cualquier duda, escribinos. ¡Gracias por ser parte de PuntoBiO! 💙
-        </div>
-      </details>
-    </div>`
-
-  $('btnEnviar').addEventListener('click', enviarLote)
-  $('btnPrueba').addEventListener('click', enviarPrueba)
-  $('btnRefrescar').addEventListener('click', refrescar)
-}
-
 async function refrescar(){
   try {
     await refrescarCampanias()
-    render(await cargarEstado())
     await refrescarRebotes()
   }
   catch(e){ $('app').innerHTML = `<div class="lock">No se pudo cargar el estado: ${esc(e.message||e)}</div>` }
-}
-
-async function enviarPrueba(){
-  const res = $('res'); const btn = $('btnPrueba')
-  const txt = btn.textContent; btn.disabled = true; btn.textContent = 'Enviando prueba...'
-  res.className = 'res'; res.textContent = ''
-  try {
-    const { data, error } = await sb.functions.invoke('aviso-aumento-mail', { body: { test_email: adminEmail } })
-    if(error) throw error
-    res.className = 'res show ok'
-    res.innerHTML = data && data.ok
-      ? `✅ Te envié un mail de prueba a <b>${esc(adminEmail)}</b>. Revisá tu casilla (y la carpeta de spam por las dudas).`
-      : `⚠️ La función respondió pero el mail no salió. Revisá el secret RESEND_API_KEY.`
-  } catch(e) {
-    res.className = 'res show err'
-    res.textContent = '❌ No se pudo enviar la prueba: ' + (e.message || e)
-  } finally {
-    btn.textContent = txt; btn.disabled = false
-  }
-}
-
-async function enviarLote(){
-  const rest = restanteHoy()
-  if(rest <= 0){
-    const res = $('res'); res.className = 'res show err'
-    res.textContent = `🛑 Ya se enviaron ${enviadosHoyTotal()} mails hoy entre todas las campañas (tope ${TOPE_DIARIO}). Seguí mañana.`
-    return
-  }
-  let n = Math.max(1, Math.min(100, parseInt($('lote').value) || TOPE_DIARIO))
-  n = Math.min(n, rest) // nunca pasarse del tope diario compartido
-  const btn = $('btnEnviar'); const res = $('res')
-  btn.disabled = true; const txt = btn.textContent; btn.textContent = 'Enviando...'
-  res.className = 'res'; res.textContent = ''
-  try {
-    const { data, error } = await sb.functions.invoke('aviso-aumento-mail', { body: { limit: n } })
-    if(error) throw error
-    res.className = 'res show ok'
-    res.innerHTML = `✅ Enviados: <b>${data.enviados}</b>${data.errores ? ` · con error: ${data.errores}` : ''} · faltan: <b>${data.restantes_sin_enviar}</b>.`
-      + (data.fallidos && data.fallidos.length ? `<br><span class="muted">No salieron: ${esc(data.fallidos.join(', '))}</span>` : '')
-  } catch(e) {
-    res.className = 'res show err'
-    res.textContent = '❌ No se pudo enviar: ' + (e.message || e) + '. Verificá que la función "aviso-aumento-mail" esté deployada y con el secret RESEND_API_KEY.'
-  } finally {
-    btn.textContent = txt
-    await refrescar()
-  }
 }
 
 ;(async function init(){
