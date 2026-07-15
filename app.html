@@ -5418,7 +5418,7 @@ async function cargarEvidenciasSala(mesStr) {
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end;">
         <label style="font-size:11.5px;">Fecha<br><input type="date" id="evid-sala-fecha" style="padding:6px; border-radius:7px; border:1px solid #ccc;"></label>
         <label style="font-size:11.5px; flex:1; min-width:160px;">Qué pasó (opcional)<br><input type="text" id="evid-sala-nota" placeholder="Ej: camillas sin ordenar, material tirado" style="padding:6px; border-radius:7px; border:1px solid #ccc; width:100%;"></label>
-        <label style="font-size:11.5px;">Archivo (foto / PDF)<br><input type="file" id="evid-sala-file" accept="image/*,application/pdf" style="font-size:12px;"></label>
+        <label style="font-size:11.5px;">Archivos (foto / PDF)<br><input type="file" id="evid-sala-file" accept="image/*,application/pdf" multiple style="font-size:12px;"></label>
         <button id="evid-sala-btn" onclick="subirEvidenciaSala()" style="border:none; background:#dc2626; color:#fff; border-radius:8px; padding:8px 16px; cursor:pointer; font-weight:700; font-size:13px;">Subir</button>
       </div>
       <div id="evid-sala-status" style="font-size:12px; margin-top:8px;"></div>
@@ -5432,30 +5432,41 @@ window.subirEvidenciaSala = async function() {
   const fecha = document.getElementById('evid-sala-fecha').value
   const nota = document.getElementById('evid-sala-nota').value.trim() || null
   const fileInput = document.getElementById('evid-sala-file')
-  const file = fileInput && fileInput.files && fileInput.files[0]
+  const files = fileInput && fileInput.files ? Array.from(fileInput.files) : []
   const status = document.getElementById('evid-sala-status')
   const btn = document.getElementById('evid-sala-btn')
   if (!fecha) { status.innerHTML = '<span style="color:#dc2626;">Poné la fecha.</span>'; return }
-  if (!file) { status.innerHTML = '<span style="color:#dc2626;">Adjuntá la foto o el archivo.</span>'; return }
-  if (file.size > 15 * 1024 * 1024) { status.innerHTML = '<span style="color:#dc2626;">El archivo es muy grande (máx. 15 MB).</span>'; return }
+  if (!files.length) { status.innerHTML = '<span style="color:#dc2626;">Adjuntá al menos una foto o archivo.</span>'; return }
+  const grande = files.find(f => f.size > 15 * 1024 * 1024)
+  if (grande) { status.innerHTML = '<span style="color:#dc2626;">"' + grande.name + '" es muy grande (máx. 15 MB por archivo).</span>'; return }
   if (btn) btn.disabled = true
-  status.innerHTML = 'Subiendo…'
-  try {
-    const limpio = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
-    const ruta = `${EVID_SALA_MES}/${Date.now()}_${limpio}`
-    const up = await supabase.storage.from(EVID_SALA_BUCKET).upload(ruta, file, { upsert: false })
-    if (up.error) throw up.error
-    const pub = supabase.storage.from(EVID_SALA_BUCKET).getPublicUrl(ruta)
-    const archivo_url = pub.data.publicUrl
-    const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
-    const ins = await supabase.from('reportes_sala').insert({ fecha, nota, autor, archivo_url, archivo_path: ruta, visible_profes: false })
-    if (ins.error) throw ins.error
-    status.innerHTML = '<span style="color:#16a34a;">✓ Evidencia cargada.</span>'
-    cargarEvidenciasSala(EVID_SALA_MES)
-  } catch (e) {
-    if (btn) btn.disabled = false
-    status.innerHTML = '<span style="color:#dc2626;">No se pudo: ' + (e.message || '') + '</span>'
+  const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
+  let ok = 0
+  const errores = []
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    status.innerHTML = 'Subiendo ' + (i + 1) + ' de ' + files.length + '…'
+    try {
+      const limpio = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+      const ruta = `${EVID_SALA_MES}/${Date.now()}_${i}_${limpio}`
+      const up = await supabase.storage.from(EVID_SALA_BUCKET).upload(ruta, file, { upsert: false })
+      if (up.error) throw up.error
+      const pub = supabase.storage.from(EVID_SALA_BUCKET).getPublicUrl(ruta)
+      const archivo_url = pub.data.publicUrl
+      const ins = await supabase.from('reportes_sala').insert({ fecha, nota, autor, archivo_url, archivo_path: ruta, visible_profes: false })
+      if (ins.error) throw ins.error
+      ok++
+    } catch (e) {
+      errores.push((file.name || ('archivo ' + (i + 1))) + ': ' + (e.message || ''))
+    }
   }
+  if (btn) btn.disabled = false
+  if (errores.length === 0) {
+    status.innerHTML = '<span style="color:#16a34a;">✓ ' + ok + (ok === 1 ? ' evidencia cargada.' : ' evidencias cargadas.') + '</span>'
+  } else {
+    status.innerHTML = '<span style="color:#dc2626;">Subieron ' + ok + ' de ' + files.length + '. Falló: ' + errores.join(' · ') + '</span>'
+  }
+  cargarEvidenciasSala(EVID_SALA_MES)
 }
 
 window.toggleVisibleProfe = async function(id, visible) {
