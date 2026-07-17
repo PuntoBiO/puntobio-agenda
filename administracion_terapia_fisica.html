@@ -2261,35 +2261,24 @@ async function abrirBitacoraAlumno(ventana = 60) {
       if (!k) return false;
       return (_ventPorDiaB[k] || []).some(v => (!v.desde || fIso >= v.desde) && (!v.hasta || fIso <= v.hasta));
     };
+    // FUENTE ÚNICA: los pendientes de recuperar ahora salen de fn_estado_recuperatorios
+    // (la misma función que usa Mi Espacio). Antes se calculaban acá a mano; se centralizó
+    // para que administración y Mi Espacio muestren SIEMPRE exactamente lo mismo.
     const pendientes = [];
-    // REGLAS A FUEGO (independientes del filtro visual de la bitácora, espejo de Mi Espacio):
-    //   · faltas con aviso: 60 días desde la falta (incluye avisadas a futuro)
-    //   · cierres del centro: 60 días, recuperables desde que se cancelan (futuros incluidos)
-    //   · feriados: visibles desde el 1° de su MES CALENDARIO, 30 días desde el día del feriado
-    const _finMesBita = (() => { const [yy, mm] = hoy.split('-').map(Number); const last = new Date(yy, mm, 0).getDate(); return `${yy}-${String(mm).padStart(2,'0')}-${String(last).padStart(2,'0')}`; })();
-    (asisRes.data || []).forEach(a => {
-      if (a.estado !== 'ausente-justificada' || yaBooked.has(a.fecha)) return;
-      const d = diasDesde(a.fecha);
-      if (d > 60) return;   // permite avisadas a futuro (d negativo), igual que Mi Espacio
-      pendientes.push({ fecha: a.fecha, dias: Math.max(0, 60 - d), motivo: 'Falta con aviso', sub: nombreTurno(a.turno_id), cupo: true });
-    });
-    (cerradasRes.data || []).forEach(c => {
-      if (!eraFijoEn(c.turno_id, c.fecha) || yaBooked.has(c.fecha)) return;   // ¿era fijo ESE día?
-      const d = diasDesde(c.fecha);
-      if (d > 60) return;   // permite futuras (d negativo)
-      pendientes.push({ fecha: c.fecha, dias: Math.max(0, 60 - d), motivo: 'Clase cancelada por el centro', sub: nombreTurno(c.turno_id), cupo: false });
-    });
-    (ferRes.data || []).forEach(fe => {
-      const fIso = fe.fecha;
-      if (!fIso || yaBooked.has(fIso)) return;
-      const nd = NOMBRE_DIA[new Date(fIso + 'T00:00:00').getDay()];
-      if (!(diasFijosNombres.has(nd) || (nd === 'Miércoles' && diasFijosNombres.has('Miercoles')))) return;
-      if (!_eraFijoDia(nd, fIso)) return;   // no era fijo ese día EN esa fecha (alta posterior o baja previa)
-      if (fIso > _finMesBita) return;      // mes futuro: se habilita el 1° de su mes calendario
-      const d = diasDesde(fIso);
-      if (d > 30) return;                  // 30 días desde el DÍA del feriado (permite futuros del mes)
-      pendientes.push({ fecha: fIso, dias: Math.max(0, 30 - d), motivo: 'Feriado · ' + (fe.motivo || 'feriado'), sub: '', cupo: false });
-    });
+    try {
+      const { data: _estRec, error: _errRec } = await sb.rpc('fn_estado_recuperatorios', { p_persona_id: p.id });
+      if (_errRec) throw _errRec;
+      (_estRec || []).forEach(r => {
+        if (!r.recuperable) return;   // las faltas SIN aviso no van al recuadro de pendientes
+        let motivo, sub;
+        if (r.tipo === 'cierre')       { motivo = 'Clase cancelada por el centro'; sub = nombreTurno(r.turno_origen_id); }
+        else if (r.tipo === 'feriado') { motivo = r.motivo || 'Feriado'; sub = ''; }
+        else                           { motivo = 'Falta con aviso'; sub = nombreTurno(r.turno_origen_id); }
+        pendientes.push({ fecha: r.fecha_ausencia, dias: Math.max(0, r.dias_restantes), motivo, sub, cupo: !!r.gasta_cupo });
+      });
+    } catch (e) {
+      console.warn('No se pudo leer fn_estado_recuperatorios', e);
+    }
     pendientes.sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
 
     const boxPend = pendientes.length
