@@ -1817,6 +1817,18 @@ async function cargarEspacio(per){
   // día y horario con cupo, así que no mostramos pendientes ni conteo de recuperadas.
   window._esBonifAlumno = !!(inscBonif || (window._agendaData && window._agendaData.esBonificado));
 
+  // FUENTE ÚNICA de recuperatorios: traemos el estado del alumno LOGUEADO desde la
+  // base (alumno_estado_recuperatorios → mismo cálculo que Agenda y Administración)
+  // y lo guardamos para que bloqueRecuperatorios lo muestre.
+  try {
+    const _er = await sb.rpc('alumno_estado_recuperatorios');
+    if (_er && _er.error) throw _er.error;
+    window._estadoRecu = (_er && _er.data) || [];
+  } catch (e) {
+    window._estadoRecu = [];
+    console.warn('No se pudo leer alumno_estado_recuperatorios', e);
+  }
+
   const html = [
     // 1) Acceso rápido al registro diario, bien arriba
     bloqueBitacora(bitacoraAlumno),
@@ -3086,76 +3098,34 @@ function bloqueAsistencia(asis){
 
 function bloqueRecuperatorios(recus){
   const hoy = hoyISO();
-  // Las faltas ahora las leemos de la ASISTENCIA (misma fuente que ve el equipo en
-  // la Agenda y en Administración), no de recuperatorios_tf. Así la alumna ve TODAS
-  // sus faltas, las haya avisado ella o las haya cargado el equipo.
-  const asis = window._asistenciasAlumno || [];
-  // Feriados del ciclo que cayeron en tu día fijo (virtuales, todavía sin reservar)
-  const feriadosPend = (window._agendaData && window._agendaData.feriadosPendientes) || [];
-
-  // recus puede traer filas CANCELADAS (la query trae todo): las descartamos.
-  const recAct = (recus || []).filter(r => (r.estado||'').toLowerCase() !== 'cancelado');
-  // Faltas YA recuperadas o reprogramadas (tienen fecha_recupero) → no reaparecen.
-  const yaRecuperadas = new Set(recAct.filter(r => r.fecha_recupero).map(r => r.fecha_ausencia));
-  // Clases tomadas COMO recuperatorio (turno+fecha del recupero): esas asistencias
-  // no son faltas nuevas — las salteamos para no ofrecer "recupero del recupero".
-  const clasesRecupe = new Set(recAct.filter(r => r.fecha_recupero).map(r => `${r.turno_recupero_id}|${r.fecha_recupero}`));
-
-  // CIERRES DE UN TURNO POR EL CENTRO (clases_cerradas tipo='centro') que pisan un
-  // turno fijo del alumno. No gastan cupo (igual que un feriado). Se ofrecen hasta
-  // 60 días. La fila en recuperatorios_tf se crea recién al reservar.
   const _esc = (s) => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const cierresData = (window._agendaData && window._agendaData.cierresCentro) || [];
-  // Ventanas de vigencia por turno (incluye terminados con fecha_hasta): el derecho
-  // al cierre se evalúa contra la FECHA del cierre, no contra hoy.
-  const _misVentanasRec = new Map();
-  ((window._agendaData && window._agendaData.misTurnosDesde) || []).forEach(x => {
-    const k = String(x.turno_id);
-    if (!_misVentanasRec.has(k)) _misVentanasRec.set(k, []);
-    _misVentanasRec.get(k).push({ desde: x.fecha_desde || null, hasta: x.fecha_hasta || null });
-  });
+  // FUENTE ÚNICA: faltas (con y sin aviso), cierres del centro y feriados salen de
+  // alumno_estado_recuperatorios — el MISMO cálculo que ve el equipo en la Agenda y
+  // en Administración. Antes se calculaba todo acá a mano.
   const _turnoMapRec = {};
   ((window._agendaData && window._agendaData.turnos) || []).forEach(t => { if (t && t.id != null) _turnoMapRec[String(t.id)] = t; });
-  // Cierres YA recuperados (fila tipo 'cierre' en recuperatorios_tf) → no reaparecen
-  const cierresYaRecuperados = new Set(recAct.filter(r => (r.tipo||'').toLowerCase().includes('cierre')).map(r => r.fecha_ausencia));
-  const cierres = [];
-  cierresData.forEach(cc => {
-    const tid = String(cc.turno_id);
-    const _ventCc = _misVentanasRec.get(tid) || [];
-    const _eraFijoCc = _ventCc.some(v =>
-      (!v.desde || v.desde <= cc.fecha) && (!v.hasta || cc.fecha <= v.hasta));
-    if (!_eraFijoCc) return;                              // no era su turno fijo ese día
-    if (cierresYaRecuperados.has(cc.fecha)) return;       // ya lo recuperó
-    const dias = DIAS_PARA_RECUPERAR - diasEntre(cc.fecha, hoy);
-    if (dias <= 0) return;                                 // pasó la ventana de 60 días
-    const t = _turnoMapRec[tid];
-    const srv = t ? ((typeof nombreServicio === 'function') ? nombreServicio(t.servicio) : (t.servicio||'')) : '';
-    const nombre = t ? `${srv||''} ${t.dia||''} ${t.hora||''}`.trim() : '';
-    cierres.push({ fecha: cc.fecha, dias, motivo: cc.motivo || '', nombre });
-  });
-  cierres.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
-
-  // Recorremos las faltas de la asistencia:
-  //   • CON aviso (ausente-justificada) → DISPONIBLE para recuperar (60 días)
-  //   • SIN aviso (ausente)             → NO recuperable (avisó fuera de término)
+  const _est = window._estadoRecu || [];
   const disponibles = [];
   const noRecuperables = [];
-  (asis || []).forEach(a=>{
-    const e = (a.estado||'').toLowerCase();
-    const f = a.fecha;
-    if(!f) return;
-    if(clasesRecupe.has(`${a.turno_id}|${f}`)) return;   // es una clase de recupero, no una falta
-    const transcurridos = diasEntre(f, hoy);             // días desde la falta
-    if(transcurridos > DIAS_PARA_RECUPERAR) return;      // muy vieja: ya no se muestra
-    if(e === 'ausente-justificada'){
-      if(yaRecuperadas.has(f)) return;                   // ya la recuperó / reprogramó
-      disponibles.push({ fecha: f, dias: DIAS_PARA_RECUPERAR - transcurridos });
-    } else if(e === 'ausente'){
-      noRecuperables.push({ fecha: f });
+  const cierres = [];
+  const feriadosPend = [];
+  _est.forEach(r => {
+    if (r.tipo === 'falta') {
+      if (r.recuperable) disponibles.push({ fecha: r.fecha_ausencia, dias: r.dias_restantes });
+      else noRecuperables.push({ fecha: r.fecha_ausencia });
+    } else if (r.tipo === 'cierre') {
+      const t = _turnoMapRec[String(r.turno_origen_id)];
+      const srv = t ? ((typeof nombreServicio === 'function') ? nombreServicio(t.servicio) : (t.servicio||'')) : '';
+      const nombre = t ? `${srv||''} ${t.dia||''} ${t.hora||''}`.trim() : '';
+      cierres.push({ fecha: r.fecha_ausencia, dias: r.dias_restantes, motivo: r.motivo || '', nombre });
+    } else if (r.tipo === 'feriado') {
+      feriadosPend.push({ fecha: r.fecha_ausencia });
     }
   });
   disponibles.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
   noRecuperables.sort((a,b)=> a.fecha < b.fecha ? 1 : -1);   // más recientes primero
+  cierres.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
+  feriadosPend.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
 
   // Tarjetas de feriado (van arriba): no gastan cupo, disponibles todo el ciclo
   let ferRows='';
