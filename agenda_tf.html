@@ -3487,113 +3487,27 @@ function nombreDiaDeFecha(fechaIso) {
 // El "ciclo" es el mes personal según el día de corte del plan (no el mes calendario).
 // Devuelve: { codPlan, diaCorte, cupoMes, recuperables:[{fecha, diasRestantes, mes, tipo}], usadosPorMes:{...} }
 async function estadoRecuperatorios(personaId) {
-  const { plan: codPlan, diaCorte, inicioISO } = await planDePersona(personaId);
+  // FUENTE ÚNICA: los recuperables y el cupo salen de fn_estado_recuperatorios
+  // (la misma función que usan administración y Mi Espacio). Antes se calculaba
+  // todo acá a mano. codPlan/diaCorte siguen viniendo del plan (otro dominio).
+  const { plan: codPlan, diaCorte } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
-  const [_ausenciasRaw, _usadosRaw, diasFijos, misTurnosFijos] = await Promise.all([
-    ausenciasConAviso(personaId),
-    recuperatoriosDe(personaId),
-    diasFijosDePersona(personaId),
-    turnosFijosDePersona(personaId)
-  ]);
-  // CORTE POR REINGRESO: un alumno reactivado arranca limpio — no se arrastran
-  // faltas ni recuperatorios de su etapa anterior (misma regla que Mi Espacio).
-  const ausencias = inicioISO ? _ausenciasRaw.filter(f => !f || String(f) >= String(inicioISO)) : _ausenciasRaw;
-  const usados    = inicioISO ? _usadosRaw.filter(r => !r.fecha_ausencia || String(r.fecha_ausencia) >= String(inicioISO)) : _usadosRaw;
-  const hoy = hoyIso();
-  // Último día del MES CALENDARIO actual (para habilitar feriados futuros recién
-  // el 1ro de su mes, no por ciclo de facturación).
-  const finMesActual = (() => {
-    const yy = parseInt(hoy.slice(0,4),10), mm = parseInt(hoy.slice(5,7),10);
-    const ultimo = new Date(yy, mm, 0).getDate();   // día 0 del mes siguiente = último de este mes
-    return `${yy}-${String(mm).padStart(2,'0')}-${String(ultimo).padStart(2,'0')}`;
-  })();
-  // Recupes normales ya usados, contados por CICLO de la falta.
-  // Los de feriado y los de cierre-del-centro NO gastan cupo.
-  const usadosPorMes = {};
-  const fechasYaRecuperadas = new Set();
-  usados.forEach(r => {
-    if (r.tipo === 'feriado' || r.tipo === 'cierre') return;   // no gastan cupo
-    // Créditos SIN destino (generados al avisar falta desde Mi Espacio o por
-    // VACACIONES): la falta sigue recuperable y todavía no gastó cupo.
-    if (!r.fecha_recupero) return;
-    const ciclo = cicloDe(r.fecha_ausencia, diaCorte);
-    usadosPorMes[ciclo] = (usadosPorMes[ciclo] || 0) + 1;
-    fechasYaRecuperadas.add(r.fecha_ausencia);
-  });
-  // Feriados YA recuperados (para no ofrecerlos de nuevo)
-  const feriadosYaRecuperados = new Set();
-  usados.forEach(r => { if (r.tipo === 'feriado') feriadosYaRecuperados.add(r.fecha_ausencia); });
-  // Cierres-del-centro YA recuperados (por fecha, para no ofrecerlos de nuevo)
-  const cierresYaRecuperados = new Set();
-  usados.forEach(r => { if (r.tipo === 'cierre') cierresYaRecuperados.add(r.fecha_ausencia); });
-
-  // Ausencias recuperables: con aviso, NO recuperadas ya, dentro de los 60 días
   const recuperables = [];
-  ausencias.forEach(fAus => {
-    if (fechasYaRecuperadas.has(fAus)) return;     // ya la recuperó
-    const dias = diasEntre(fAus, hoy);             // días desde que faltó
-    if (dias > 60) return;                         // venció el plazo de 60 días
-    recuperables.push({ fecha: fAus, diasRestantes: 60 - dias, mes: cicloDe(fAus, diaCorte), tipo: 'recuperatorio' });
+  const usadosPorMes = {};
+  const { data: _est, error: _err } = await sb.rpc('fn_estado_recuperatorios', { p_persona_id: personaId });
+  if (_err) throw _err;
+  (_est || []).forEach(r => {
+    if (!r.recuperable) return;                         // faltas sin aviso no van acá
+    const tipo = (r.tipo === 'falta') ? 'recuperatorio' : r.tipo;
+    const mes  = cicloDe(r.fecha_ausencia, diaCorte);   // mismo formato de ciclo de siempre
+    const item = { fecha: r.fecha_ausencia, diasRestantes: r.dias_restantes, mes, tipo };
+    if (tipo === 'feriado')     item.motivo = String(r.motivo || '').replace(/^Feriado\s*·\s*/, '') || 'Feriado';
+    else if (tipo === 'cierre') item.motivo = r.motivo || 'Clase cancelada por el centro';
+    recuperables.push(item);
+    if (tipo === 'recuperatorio' && r.cupo_disponible != null) {
+      usadosPorMes[mes] = Math.max(0, (r.cupo_mes != null ? r.cupo_mes : cupoMes) - r.cupo_disponible);
+    }
   });
-
-  // FERIADOS recuperables: días feriados que cayeron en un día de turno fijo de la persona.
-  // No gastan cupo y se recuperan dentro de los 30 días (regla del centro). (FERIADOS es el mapa fecha->motivo)
-  Object.keys(FERIADOS || {}).forEach(fFer => {
-    if (feriadosYaRecuperados.has(fFer)) return;            // ya lo recuperó
-    const nombreDia = nombreDiaDeFecha(fFer);
-    // En la base conviven "Miércoles" (con acento) y "Miercoles" (sin acento):
-    // resolvemos cuál de las dos claves tiene el alumno.
-    const _diaKey = diasFijos.has(nombreDia) ? nombreDia
-                  : (nombreDia === 'Miércoles' && diasFijos.has('Miercoles')) ? 'Miercoles'
-                  : null;
-    if (!_diaKey) return;    // no tenía clase ese día
-    // ¿Era fijo ese día EN LA FECHA del feriado? Cubre alta posterior (no perdió
-    // clase) y también baja/cambio de plan posterior (el feriado le corresponde igual).
-    const _ventanasDia = diasFijos.get(_diaKey) || [];
-    const _eraFijoFer = _ventanasDia.some(v =>
-      (!v.desde || fFer >= v.desde) && (!v.hasta || fFer <= v.hasta));
-    if (!_eraFijoFer) return;
-    if (inicioISO && fFer < inicioISO) return;   // reactivado: no arrastra feriados previos
-    const dias = diasEntre(fFer, hoy);
-    // FERIADO FUTURO: se habilita recién el 1ro de SU mes calendario (regla unificada
-    // con Mi Espacio). Ej: hoy 19/6 → un feriado de julio NO aparece hasta el 1/7.
-    // Dentro del mes actual SÍ se puede adelantar (ej: feriado 25/6 visto el 19/6).
-    if (fFer > finMesActual) return;                        // mes futuro: todavía no
-    if (dias > 30) return;                                  // FERIADO: 30 días (regla del centro; faltas y cierres siguen en 60)
-    recuperables.push({
-      fecha: fFer, diasRestantes: Math.min(30, 30 - dias),
-      mes: cicloDe(fFer, diaCorte), tipo: 'feriado',
-      motivo: FERIADOS[fFer]
-    });
-  });
-
-  // CLASES CANCELADAS POR EL CENTRO que pisan un turno FIJO de la persona.
-  // No gastan cupo (igual que feriado). Se ofrecen desde que se cancelan (incluso
-  // antes de la fecha original) y hasta 60 días después. La fila en recuperatorios_tf
-  // se crea recién al reservar.
-  const ventanasPorTurno = new Map();
-  misTurnosFijos.forEach(tf => {
-    if (!ventanasPorTurno.has(tf.turno_id)) ventanasPorTurno.set(tf.turno_id, []);
-    ventanasPorTurno.get(tf.turno_id).push(tf);
-  });
-  cierresCentroLista().forEach(cc => {
-    // ¿ERA fijo en esa clase EL DÍA del cierre? (no hace falta que siga siéndolo hoy)
-    const ventanas = ventanasPorTurno.get(String(cc.turno_id)) || [];
-    const eraFijo = ventanas.some(v =>
-      (!v.fecha_desde || v.fecha_desde <= cc.fecha) &&
-      (!v.fecha_hasta || cc.fecha <= v.fecha_hasta));
-    if (!eraFijo) return;                                  // no era su turno fijo ese día
-    if (inicioISO && cc.fecha < inicioISO) return;         // reactivado: no arrastra cierres previos
-    if (cierresYaRecuperados.has(cc.fecha)) return;        // ya lo recuperó
-    const dias = diasEntre(cc.fecha, hoy);
-    if (dias > 60) return;                                  // venció el plazo de 60 días
-    recuperables.push({
-      fecha: cc.fecha, diasRestantes: Math.max(0, 60 - dias),
-      mes: cicloDe(cc.fecha, diaCorte), tipo: 'cierre',
-      motivo: cc.motivo || 'Clase cancelada por el centro'
-    });
-  });
-
   return { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes };
 }
 
