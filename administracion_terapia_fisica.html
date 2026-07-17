@@ -2714,6 +2714,9 @@ async function abrirFichaAlumno() {
     // para evaluar feriados/cierres por ventana de fechas.
     const _misTurnosVig = (misTurnosRes.data || []).filter(t => t.activo !== false && (!t.fecha_hasta || t.fecha_hasta >= _hoyFichaTA));
     const misTurnoIds = _misTurnosVig.map(t => t.turno_id);
+    // Ventana (desde/hasta) por turno, para los chips de vigencia en la lista de horarios
+    const _ventanaFichaPorTurno = {};
+    _misTurnosVig.forEach(t => { _ventanaFichaPorTurno[t.turno_id] = { desde: t.fecha_desde || null, hasta: t.fecha_hasta || null }; });
     const asistencias = asisRes.data || [];
     const evoluciones = evoRes.data || [];
 
@@ -2813,15 +2816,27 @@ async function abrirFichaAlumno() {
 
     // Lista de horarios fijos
     const horariosHtml = misTurnos.length
-      ? misTurnos.map(t => `
+      ? misTurnos.map(t => {
+        // Chips de vigencia: horario que ARRANCA a futuro o que TERMINA pronto
+        const _v = _ventanaFichaPorTurno[t.id] || {};
+        const _fmtChip = (iso) => iso ? `${iso.slice(8,10)}/${iso.slice(5,7)}` : '';
+        let chipVig = '';
+        if (_v.desde && _v.desde > _hoyFichaTA) {
+          chipVig = `<span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;margin-top:3px;background:#fef9c3;color:#854d0e">⏳ arranca el ${_fmtChip(_v.desde)}</span>`;
+        } else if (_v.hasta) {
+          chipVig = `<span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;margin-top:3px;background:#ffedd5;color:#9a3412">🗓️ vigente hasta el ${_fmtChip(_v.hasta)}</span>`;
+        }
+        return `
         <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px">
           <div style="flex:1">
             <div style="font-weight:600;font-size:14px">${t.dia} · ${t.hora}</div>
             <div style="font-size:12px;color:var(--text-dim)">${t.servicio}</div>
+            ${chipVig}
           </div>
           <button onclick="fichaCambiarHorario(${t.id})" style="background:#eff6ff;color:#1e9fe0;border:1px solid #bfdbfe;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer">🔄 Cambiar</button>
           <button onclick="fichaQuitarHorario(${t.id},'${t.dia} ${t.hora}')" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer">🗑️ Quitar</button>
-        </div>`).join('')
+        </div>`;
+      }).join('')
       : '<div style="color:var(--text-dim);font-size:13px;padding:8px 0">Sin horarios fijos asignados.</div>';
 
     // Historial de ausencias (las últimas 20)
@@ -2924,12 +2939,12 @@ window.fichaQuitarHorario = async (turnoId, etiqueta) => {
   try {
     // Si deja de venir hoy o antes → baja inmediata (libera el cupo ya).
     // Si es a futuro → sigue fijo hasta el día antes; el cron lo da de baja al pasar la fecha.
-    // Baja inmediata: también sellamos fecha_hasta (día anterior) para conservar la
-    // VENTANA de vigencia — así no pierde los cierres/feriados que le correspondían.
-    const upd = (iso <= hoy) ? { activo: false, fecha_hasta: _diaAnterior(iso) } : { fecha_hasta: _diaAnterior(iso) };
-    const { error } = await sb.from('turno_alumnos').update(upd)
+    // Sellado SEGURO: si la fila arrancaba a futuro y se cancela antes de empezar,
+    // sellarVentanas la cancela (fecha_hasta=null) en vez de crear una ventana imposible.
+    const { data: filasQ, error: eQSel } = await sb.from('turno_alumnos').select('id')
       .eq('persona_id', alumnoActivo.persona.id).eq('turno_id', turnoId).eq('activo', true);
-    if (error) throw error;
+    if (eQSel) throw eQSel;
+    await sellarVentanas((filasQ || []).map(f => f.id), _diaAnterior(iso), iso <= hoy);
     toast(iso <= hoy ? '✓ Horario quitado' : `✓ Deja de venir desde ${fmtFechaArg(iso)}`);
     abrirFichaAlumno();
   } catch (e) { alert('No se pudo quitar: ' + e.message); }
@@ -2948,6 +2963,39 @@ function _diaAnterior(iso) {
   const d = new Date(iso + 'T00:00:00');
   d.setDate(d.getDate() - 1);
   return _isoLocal(d);
+}
+// ===== SELLADO SEGURO de ventanas (regla anti-Graciela, jul 2026) =====
+// Cierra la vigencia de filas de turno_alumnos SIN crear ventanas imposibles:
+//  · Fila que ya estaba vigente → sella fecha_hasta = diaHasta (último día inclusive).
+//  · Fila PROGRAMADA A FUTURO que se cancela antes de arrancar (fecha_desde > diaHasta)
+//    → se cancela: activo=false y fecha_hasta=null (nunca fue vigente, no hay ventana
+//    que preservar). Antes se le estampaba fecha_hasta igual → fecha_hasta < fecha_desde
+//    → el constraint chk_ventana_valida lo rechaza y el alumno quedaba invisible.
+// 'inmediata' = true apaga (activo=false) las filas selladas ya; false las deja activas
+// hasta que el cron 'sellar-turnos-vencidos' las apague al vencer la ventana.
+async function sellarVentanas(ids, diaHasta, inmediata) {
+  const lista = (ids || []).filter(Boolean);
+  if (!lista.length) return 0;
+  const { data: filas, error: eSel } = await sb.from('turno_alumnos')
+    .select('id, fecha_desde').in('id', lista);
+  if (eSel) throw eSel;
+  const cancelar = [], sellar = [];
+  (filas || []).forEach(f => {
+    if (f.fecha_desde && f.fecha_desde > diaHasta) cancelar.push(f.id);
+    else sellar.push(f.id);
+  });
+  if (cancelar.length) {
+    const { error } = await sb.from('turno_alumnos')
+      .update({ activo: false, fecha_hasta: null, pendiente_fijo: false })
+      .in('id', cancelar);
+    if (error) throw error;
+  }
+  if (sellar.length) {
+    const upd = inmediata ? { activo: false, fecha_hasta: diaHasta } : { fecha_hasta: diaHasta };
+    const { error } = await sb.from('turno_alumnos').update(upd).in('id', sellar);
+    if (error) throw error;
+  }
+  return (filas || []).length;
 }
 function _diaGetDay(diaNombre) {
   const m = {'Lunes':1,'Martes':2,'Miércoles':3,'Miercoles':3,'Jueves':4,'Viernes':5,'Sábado':6,'Sabado':6,'Domingo':0};
@@ -3037,12 +3085,13 @@ window.fichaConfirmarHorario = async (turnoViejoId) => {
     //    y las de esta semana quedan como fijas, no como recuperatorio).
     //  · Si arranca hoy o antes → baja inmediata (libera el cupo ya).
     if (turnoViejoId) {
-      // Baja inmediata: también sellamos fecha_hasta (día anterior) para conservar
-      // la ventana de vigencia (cierres/feriados que le correspondían al turno viejo).
-      const upd = futuro ? { fecha_hasta: _diaAnterior(desdeIso) } : { activo: false, fecha_hasta: _diaAnterior(desdeIso) };
-      const { error: eV } = await sb.from('turno_alumnos').update(upd)
+      // Sellado SEGURO del turno viejo: conserva la ventana de vigencia (cierres/feriados)
+      // y, si el viejo era un cambio programado que nunca llegó a arrancar, lo cancela
+      // limpio en vez de estamparle una ventana imposible (regla anti-Graciela).
+      const { data: filasV, error: eVSel } = await sb.from('turno_alumnos').select('id')
         .eq('persona_id', pid).eq('turno_id', turnoViejoId).eq('activo', true);
-      if (eV) throw eV;
+      if (eVSel) throw eVSel;
+      await sellarVentanas((filasV || []).map(f => f.id), _diaAnterior(desdeIso), !futuro);
     }
     // Turno NUEVO: arranca (fecha_desde) en la fecha elegida.
     // En un cambio a futuro lo entramos como "pendiente de fijo" hasta esa fecha para que
@@ -4295,7 +4344,7 @@ window.confirmarCambioPlan = async () => {
       const idsActualizarExtras = (existExtras || []).map(r => r.id);
       if (idsActualizarExtras.length) {
         const { error: errUpdEx } = await sb.from('turno_alumnos')
-          .update({ activo: true, fecha_desde: fechaDesdeExtras, pendiente_fijo: true, fija_desde: fijaDesde })
+          .update({ activo: true, fecha_desde: fechaDesdeExtras, fecha_hasta: null, pendiente_fijo: true, fija_desde: fijaDesde })
           .in('id', idsActualizarExtras);
         if (errUpdEx) throw errUpdEx;
       }
@@ -4323,15 +4372,9 @@ window.confirmarCambioPlan = async () => {
     if (cpQuitarSel.size > 0) {
       const hoyIso = _isoLocal(new Date());
       const efeBaja = fechaEfectivaCP;
-      // Baja inmediata: también sellamos fecha_hasta (día anterior a la fecha efectiva)
-      // para conservar la ventana de vigencia (cierres/feriados del turno que deja).
-      const updBaja = (efeBaja > hoyIso)
-        ? { fecha_hasta: _diaAnterior(efeBaja) }
-        : { activo: false, fecha_hasta: _diaAnterior(efeBaja || hoyIso) };
-      const { error: errQuitar } = await sb.from('turno_alumnos')
-        .update(updBaja)
-        .in('id', [...cpQuitarSel]);
-      if (errQuitar) throw errQuitar;
+      // Sellado SEGURO: conserva la ventana de vigencia (cierres/feriados del turno que
+      // deja) y cancela limpio las filas programadas que nunca llegaron a arrancar.
+      await sellarVentanas([...cpQuitarSel], _diaAnterior(efeBaja || hoyIso), !(efeBaja > hoyIso));
     }
 
     // MODO AMBOS: además del plan, mover el día de vencimiento (el puente ya se cobró junto)
@@ -5381,16 +5424,15 @@ window.confirmarBaja = async () => {
     }).eq('id', alumnoActivo.inscripcion.id);
     if (errIns) throw errIns;
 
-    // Liberar turnos — sellando fecha_hasta (día anterior) para conservar la
-    // ventana de vigencia por si reactiva por el camino "conserva recuperatorios".
+    // Liberar turnos — sellado SEGURO: conserva la ventana de vigencia por si reactiva
+    // por el camino "conserva recuperatorios", y cancela limpio los cambios programados
+    // que nunca llegaron a arrancar (sin ventanas imposibles).
     const { data: turnosLib, error: errTur } = await sb.from('turno_alumnos')
-      .update({ activo: false, fecha_hasta: _diaAnterior(hoyISO) })
+      .select('id')
       .eq('persona_id', alumnoActivo.persona.id)
-      .eq('activo', true)
-      .select();
+      .eq('activo', true);
     if (errTur) throw errTur;
-
-    const cantTurnos = (turnosLib || []).length;
+    const cantTurnos = await sellarVentanas((turnosLib || []).map(f => f.id), _diaAnterior(hoyISO), true);
     toast(`✓ Baja registrada. ${cantTurnos} turno(s) liberado(s)`);
     cerrarModal('modalBaja');
     await cargarTodo();
@@ -5749,7 +5791,9 @@ async function guardarTurnosReactivar() {
 
   const idsActivar = turnoIds.filter(tid => exPorTurno[tid]).map(tid => exPorTurno[tid].id);
   if (idsActivar.length) {
-    const { error } = await sb.from('turno_alumnos').update({ activo: true }).in('id', idsActivar);
+    // fecha_hasta: null → al reactivar se abre la ventana de nuevo; si quedara el sello
+    // viejo, la fila quedaría "activa pero vencida" y el alumno invisible en la agenda.
+    const { error } = await sb.from('turno_alumnos').update({ activo: true, fecha_hasta: null }).in('id', idsActivar);
     if (error) throw error;
   }
   const nuevos = turnoIds.filter(tid => !exPorTurno[tid]).map(tid => ({ turno_id: tid, persona_id: personaId, activo: true, fecha_desde: hoyIso }));
@@ -5759,9 +5803,9 @@ async function guardarTurnosReactivar() {
   }
   const idsDesactivar = (existentes || []).filter(r => r.activo && !reactivarTurnoSel.has(Number(r.turno_id))).map(r => r.id);
   if (idsDesactivar.length) {
-    // Sellamos fecha_hasta (día anterior) para conservar la ventana de vigencia.
-    const { error } = await sb.from('turno_alumnos').update({ activo: false, fecha_hasta: _diaAnterior(hoyIso) }).in('id', idsDesactivar);
-    if (error) throw error;
+    // Sellado SEGURO: conserva la ventana de vigencia y cancela limpio las filas
+    // programadas a futuro que nunca arrancaron.
+    await sellarVentanas(idsDesactivar, _diaAnterior(hoyIso), true);
   }
 }
 

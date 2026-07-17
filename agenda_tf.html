@@ -5222,7 +5222,9 @@ window.confirmarAgregar = async (tipo) => {
       const existe = await supabaseQuery('turno_alumnos',
         `?select=persona_id&turno_id=eq.${t.id}&persona_id=eq.${pid}`);
       if (existe && existe.length) {
-        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true, forzado: fz, fecha_desde: hoyIsoStr });
+        // fecha_hasta: null → al reactivar se abre la ventana de nuevo; si quedara un
+        // sello viejo la fila sería "activa pero vencida" y el alumno invisible.
+        await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${pid}`, { activo: true, forzado: fz, fecha_desde: hoyIsoStr, fecha_hasta: null });
       } else {
         await supabaseInsert('turno_alumnos', { turno_id: t.id, persona_id: pid, activo: true, forzado: fz, fecha_desde: hoyIsoStr });
       }
@@ -5269,9 +5271,19 @@ window.quitarFijo = async (personaId, nombre, dia, hora, servicio) => {
   try {
     // Sellamos fecha_hasta (día anterior) además de desactivar, para conservar la
     // VENTANA de vigencia — así no pierde los cierres/feriados que le correspondían.
+    // SELLADO SEGURO (regla anti-Graciela): si la fila arrancaba a FUTURO y se saca antes
+    // de empezar, se cancela limpio (fecha_hasta=null) en vez de estamparle una ventana
+    // imposible (fecha_hasta < fecha_desde), que el constraint chk_ventana_valida rechaza.
     const _ayer = (() => { const d = new Date(hoyIso() + 'T00:00:00'); d.setDate(d.getDate() - 1);
       return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
-    await supabaseUpdate('turno_alumnos', `turno_id=eq.${t.id}&persona_id=eq.${personaId}`, { activo: false, fecha_hasta: _ayer });
+    const _filasQF = await supabaseQuery('turno_alumnos',
+      `?select=id,fecha_desde&turno_id=eq.${t.id}&persona_id=eq.${personaId}&activo=eq.true`);
+    for (const _f of (_filasQF || [])) {
+      const _upd = (_f.fecha_desde && _f.fecha_desde > _ayer)
+        ? { activo: false, fecha_hasta: null, pendiente_fijo: false }
+        : { activo: false, fecha_hasta: _ayer };
+      await supabaseUpdate('turno_alumnos', `id=eq.${_f.id}`, _upd);
+    }
     // Sacar de memoria
     const key = `${t.dia}-${t.hora}-${t.servicio}`;
     if (ALUMNOS_POR_TURNO[key])
