@@ -2694,10 +2694,12 @@ async function abrirFichaAlumno() {
     // su inscripción (plan), los feriados del calendario y sus recuperatorios
     const [turnosRes, misTurnosRes, asisRes, evoRes, inscRes, ferRes, recupRes] = await Promise.all([
       fichaTurnosSistema.length ? {data: fichaTurnosSistema} : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
-      // Trae también los turnos TERMINADOS con fecha_hasta: los feriados/cierres se
-      // evalúan contra su fecha (¿era fijo ese día?), no contra hoy. Para la lista de
-      // horarios se filtran los vigentes abajo.
-      sb.from('turno_alumnos').select('turno_id, fecha_desde, fecha_hasta, activo').eq('persona_id', p.id).or('activo.is.true,fecha_hasta.not.is.null'),
+      // FUENTE ÚNICA (Fase 1a horarios, 17/7/26): fn_turnos_fijos reemplaza la
+      // lectura directa de turno_alumnos. Devuelve las filas ya clasificadas
+      // (estado vigente/programado/terminado), con día/hora/servicio adentro,
+      // sin ventanas imposibles. Las terminadas siguen viniendo: los
+      // feriados/cierres se evalúan contra su fecha, no contra hoy.
+      sb.rpc('fn_turnos_fijos', { p_persona_id: p.id }),
       sb.from('asistencia').select('fecha,estado,motivo,turno_id').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('evoluciones_tf').select('fecha,servicio,modulo,contenido,como_se_sintio,dolor,observacion,sala,autor_nombre').eq('persona_id', p.id).order('fecha', {ascending:false}),
       sb.from('inscripciones_tf').select('plan,estado,dia_vencimiento,creado_en,fecha_alta').eq('persona_id', p.id).order('creado_en', {ascending:false}).limit(1),
@@ -2706,9 +2708,11 @@ async function abrirFichaAlumno() {
     ]);
     if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
     const _hoyFichaTA = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
-    // VIGENTES hoy → lista de horarios fijos. Las filas terminadas quedan solo
-    // para evaluar feriados/cierres por ventana de fechas.
-    const _misTurnosVig = (misTurnosRes.data || []).filter(t => t.activo !== false && (!t.fecha_hasta || t.fecha_hasta >= _hoyFichaTA));
+    // Para la LISTA de horarios van las filas ACTIVAS de la fuente única
+    // (estado 'vigente' o 'programado'); las 'terminado' quedan solo para
+    // evaluar feriados/cierres por ventana de fechas. El cálculo de estado
+    // vive en fn_turnos_fijos — acá solo se consume.
+    const _misTurnosVig = (misTurnosRes.data || []).filter(t => t.estado !== 'terminado');
     const misTurnoIds = _misTurnosVig.map(t => t.turno_id);
     // Ventana (desde/hasta) por turno, para los chips de vigencia en la lista de horarios
     const _ventanaFichaPorTurno = {};
