@@ -1541,7 +1541,11 @@ async function cargarDatos() {
     // Efectivizar las clases "suelta (pendiente de fijo)" cuyo fija_desde ya llegó,
     // ANTES de leer, así esta misma carga ya las muestra como fijas (sin el ⏳).
     await efectivizarSueltasVencidas();
-    // Cargar alumnos por turno (incluyendo fecha_desde y pendiente_fijo)
+    // Cargar alumnos por turno (incluyendo fecha_desde y pendiente_fijo).
+    // NOTA (17/7/26): esta es la lectura MASIVA del dominio horarios (todos los
+    // alumnos de todos los turnos de un saque) — no le corresponde la función
+    // por-persona fn_turnos_fijos. Si algún día se centraliza, sería con una
+    // función masiva propia (ej. fn_alumnos_de_turnos), no llamando 250 veces.
     const alumnosTurno = await supabaseQuery('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,fecha_hasta,pendiente_fijo,personas(id,nombre,foto_perfil)&activo=eq.true');
 
     // Marca de ingreso real (NUEVO / REINGRESO) por persona, desde la inscripción TF (no de baja)
@@ -3429,41 +3433,11 @@ async function recuperatoriosDe(personaId) {
     return filas || [];
   } catch (e) { console.warn('No se pudo leer recuperatorios', e); return []; }
 }
-// Devuelve los nombres de día (Lunes..Viernes) en que la persona tiene turno FIJO activo.
-// Sirve para saber qué feriados le corresponden recuperar.
-async function diasFijosDePersona(personaId) {
-  try {
-    // Traemos también las filas terminadas (activo=false con fecha_hasta): el derecho
-    // a un feriado se evalúa contra la FECHA del feriado (¿era fijo ese día?), no contra hoy.
-    const filas = await supabaseQuery('turno_alumnos',
-      `?select=fecha_desde,fecha_hasta,activo,turnos(dia)&persona_id=eq.${personaId}&or=(activo.is.true,fecha_hasta.not.is.null)`);
-    // Map nombre-de-día -> [ {desde, hasta} ] (ventanas de vigencia; null = sin tope).
-    const m = new Map();
-    (filas || []).forEach(f => {
-      const dia = f.turnos && f.turnos.dia;
-      if (!dia) return;
-      if (!m.has(dia)) m.set(dia, []);
-      m.get(dia).push({ desde: f.fecha_desde || null, hasta: f.fecha_hasta || null });
-    });
-    return m;  // Conserva .has() para la lógica de abajo; .get() ahora devuelve ventanas.
-  } catch (e) { console.warn('No se pudo leer días fijos', e); return new Map(); }
-}
-// Turnos FIJOS (turno_id + ventana de vigencia) de la persona.
-// Sirve para saber si le corresponde el recupero de una clase cancelada por el centro.
-// IMPORTANTE: el derecho a un cierre se evalúa contra la FECHA del cierre (¿era fijo
-// ese día?), NO contra hoy — un alumno que cambió de plan conserva los cierres que
-// cayeron mientras su turno viejo seguía vigente. Por eso traemos también las filas
-// terminadas: activo=true (con o sin fecha_hasta) y activo=false CON fecha_hasta
-// (salida con fecha conocida). activo=false sin fecha_hasta no acredita (no sabemos
-// hasta cuándo fue fijo).
-async function turnosFijosDePersona(personaId) {
-  try {
-    const filas = await supabaseQuery('turno_alumnos',
-      `?select=turno_id,fecha_desde,fecha_hasta,activo&persona_id=eq.${personaId}&or=(activo.is.true,fecha_hasta.not.is.null)`);
-    return (filas || [])
-      .map(f => ({ turno_id: String(f.turno_id), fecha_desde: f.fecha_desde || null, fecha_hasta: f.fecha_hasta || null }));
-  } catch (e) { console.warn('No se pudo leer turnos fijos', e); return []; }
-}
+// (Limpieza 17/7/26 · Fase 1e horarios: acá vivían diasFijosDePersona y
+// turnosFijosDePersona, las lecturas por-persona de turno_alumnos que alimentaban
+// el cálculo manual de feriados/cierres. Quedaron sin llamadores cuando
+// estadoRecuperatorios pasó a fn_estado_recuperatorios, así que se eliminaron.
+// La verdad por-persona de horarios vive en la base: fn_turnos_fijos(persona_id).)
 // Lista de clases CANCELADAS POR EL CENTRO: [{ turno_id, fecha, motivo }]
 function cierresCentroLista() {
   const out = [];
