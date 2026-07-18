@@ -1488,15 +1488,12 @@ async function cargarEspacio(per){
     sb.from('evoluciones_tf').select('*').eq('persona_id',pid).order('fecha',{ascending:false}).limit(15),
     sb.from('historias_clinicas').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
     sb.from('evaluaciones_moplex').select('*').eq('persona_id',pid).order('completado_en',{ascending:false}).limit(1),
-    // Turnos fijos del alumno (JOIN con tabla turnos para traer dia/hora/servicio).
-    // Trae también los TERMINADOS con fecha_hasta (activo=false o vencidos): los
-    // cierres/feriados se evalúan contra la fecha del cierre, no contra hoy — un
-    // alumno que cambió de plan conserva los créditos de su turno viejo. Para la
-    // agenda/render se filtran los VIGENTES más abajo.
-    sb.from('turno_alumnos')
-      .select('turno_id, fecha_desde, fecha_hasta, activo, turnos!inner(id, dia, hora, servicio, capacidad)')
-      .eq('persona_id', pid)
-      .or('activo.is.true,fecha_hasta.not.is.null'),
+    // FUENTE ÚNICA (Fase 1d horarios, 17/7/26): fn_turnos_fijos reemplaza la
+    // lectura directa de turno_alumnos. Trae vigentes, programados y terminados
+    // con ventana sana (los cierres/feriados se evalúan contra la fecha del
+    // cierre, no contra hoy — un alumno que cambió de plan conserva los créditos
+    // de su turno viejo). El candado de la función deja pasar al propio alumno.
+    sb.rpc('fn_turnos_fijos', { p_persona_id: pid }),
     // Todos los turnos del centro (para el panel "Agenda de la semana")
     sb.from('turnos').select('id, dia, hora, servicio, capacidad'),
     // MIS agregados puntuales (sueltos/recuperatorios cargados para mí) en el rango de 2 semanas
@@ -1562,9 +1559,21 @@ async function cargarEspacio(per){
     });
   } catch(e) { window._profesPorTurno = {}; }
 
-  // Filas VIGENTES hoy (activo y sin fecha_hasta pasada) → para agenda, recibo y marcas.
-  // Las filas terminadas quedan solo para evaluar cierres/feriados por fecha (ventanas).
-  const _esVigenteTA = (r) => r.activo !== false && (!r.fecha_hasta || r.fecha_hasta >= _hoyISO);
+  // Adaptador (Fase 1d): las filas de fn_turnos_fijos vienen PLANAS (dia/hora/
+  // servicio adentro). Les armamos el objeto r.turnos que la pantalla ya consumía,
+  // así todo lo de abajo (agenda, recibo, feriados, cierres) sigue intacto.
+  misTurnosRes.data = (misTurnosRes.data || []).map(r => ({
+    turno_id: r.turno_id,
+    fecha_desde: r.fecha_desde || null,
+    fecha_hasta: r.fecha_hasta || null,
+    activo: r.activo,
+    estado: r.estado,
+    turnos: { id: r.turno_id, dia: r.dia, hora: r.hora, servicio: r.servicio, capacidad: r.capacidad }
+  }));
+  // Filas ACTIVAS (vigentes y programadas) → para agenda, recibo y marcas.
+  // El estado ya viene calculado por la fuente única; las 'terminado' quedan
+  // solo para evaluar cierres/feriados por fecha (ventanas).
+  const _esVigenteTA = (r) => r.estado !== 'terminado';
   const misTurnosVigentes = (misTurnosRes.data || []).filter(_esVigenteTA);
   // Aplanar el JOIN: cada fila de turno_alumnos trae el turno adentro
   const misTurnos = misTurnosVigentes
