@@ -2176,9 +2176,10 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes] = await Promise.all([
       sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
       sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado').eq('persona_id', p.id).neq('estado', 'cancelado'),
-      // Trae también los turnos TERMINADOS con fecha_hasta: cierres/feriados se
-      // evalúan contra su fecha (¿era fijo ese día?), no contra hoy.
-      sb.from('turno_alumnos').select('turno_id, fecha_desde, fecha_hasta, activo').eq('persona_id', p.id).or('activo.is.true,fecha_hasta.not.is.null'),
+      // FUENTE ÚNICA (Fase 1b horarios, 17/7/26): fn_turnos_fijos reemplaza la
+      // lectura directa de turno_alumnos. Trae vigentes, programados y terminados
+      // (con ventana sana): cierres/feriados se evalúan contra su fecha, no contra hoy.
+      sb.rpc('fn_turnos_fijos', { p_persona_id: p.id }),
       fichaTurnosSistema.length ? { data: fichaTurnosSistema } : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sb.from('clases_cerradas').select('turno_id,fecha,tipo,motivo').eq('tipo', 'centro'),
       sb.from('feriados').select('fecha,motivo')
@@ -2246,21 +2247,9 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const yaBooked = new Set(recups.filter(r => r.fecha_recupero).map(r => r.fecha_ausencia));   // solo faltas/cierres/feriados YA reprogramados (con fecha de recupero)
     const diasDesde = (fIso) => Math.round((new Date(hoy + 'T00:00:00') - new Date(fIso + 'T00:00:00')) / 86400000);
     const NOMBRE_DIA = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
-    const diasFijosNombres = new Set((misTurnosRes.data || []).map(t => (turnoMap[t.turno_id] || {}).dia).filter(Boolean));
-    // Ventanas de vigencia por NOMBRE de día: el derecho al feriado se evalúa
-    // contra la fecha del feriado (¿era fijo ese día?), no contra hoy.
-    const _ventPorDiaB = {};
-    (misTurnosRes.data || []).forEach(t => {
-      const dia = (turnoMap[t.turno_id] || {}).dia;
-      if (!dia) return;
-      if (!(dia in _ventPorDiaB)) _ventPorDiaB[dia] = [];
-      _ventPorDiaB[dia].push({ desde: t.fecha_desde || null, hasta: t.fecha_hasta || null });
-    });
-    const _eraFijoDia = (nd, fIso) => {
-      const k = (nd in _ventPorDiaB) ? nd : (nd === 'Miércoles' && ('Miercoles' in _ventPorDiaB)) ? 'Miercoles' : null;
-      if (!k) return false;
-      return (_ventPorDiaB[k] || []).some(v => (!v.desde || fIso >= v.desde) && (!v.hasta || fIso <= v.hasta));
-    };
+    // (Limpieza 17/7/26: acá vivían diasFijosNombres/_ventPorDiaB/_eraFijoDia,
+    // el cálculo manual de feriados de la bitácora. Quedó muerto cuando los
+    // pendientes pasaron a fn_estado_recuperatorios, así que se eliminó.)
     // FUENTE ÚNICA: los pendientes de recuperar ahora salen de fn_estado_recuperatorios
     // (la misma función que usa Mi Espacio). Antes se calculaban acá a mano; se centralizó
     // para que administración y Mi Espacio muestren SIEMPRE exactamente lo mismo.
