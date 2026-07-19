@@ -371,6 +371,16 @@
   .ec-adjs{display:flex;flex-direction:column;gap:6px;margin-top:9px}
   .ec-adjs a{font-size:12.5px;text-decoration:none !important}
   .ec-adjs audio{width:100%;max-width:380px;height:34px}
+  /* Clases sueltas dentro de un envío: una fila por clase, con su propio botón */
+  .ec-clases{margin-top:11px;border-top:1px dashed var(--gris-borde);padding-top:9px;display:flex;flex-direction:column;gap:7px}
+  .ec-clase{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .ec-clase-tit{font-size:12.5px;font-weight:700;color:var(--texto);min-width:0;flex:1}
+  .ec-clase-acc{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .ec-btn{font-size:11.5px !important;padding:5px 11px !important}
+  .ec-hecha{font-size:11.5px;font-weight:800;color:var(--verde);background:var(--verde-soft);border-radius:8px;padding:4px 9px}
+  .ec-undo{background:none;border:none;color:var(--texto-tenue);font-size:11px;text-decoration:underline;cursor:pointer;padding:2px}
+  .ec-modal-nota{font-size:12.5px;color:var(--texto-tenue);line-height:1.5;margin:0 0 12px}
+  .evo .casa-tag{display:inline-block;background:var(--verde-soft);color:var(--verde);font-size:11px;font-weight:800;border-radius:7px;padding:2px 8px;margin-left:6px}
 
   /* ---------- Mis clases fijas + Avisar falta ---------- */
   .clase-fija{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-radius:13px;border:1px solid var(--gris-borde);background:rgba(255,255,255,.025);margin-bottom:10px;flex-wrap:wrap}
@@ -3931,9 +3941,163 @@ function _renderClasesCasa(){
       <div class="ec-fecha">${_escHtmlPB(new Date(m.creado_en).toLocaleDateString('es-AR',{day:'numeric',month:'long'}))}${nueva ? ' <span class="ec-nueva-tag">NUEVA</span>' : ''}</div>
       <div class="ec-txt">${_linkifyPB(_escHtmlPB(m.contenido))}</div>
       ${adjHtml}
+      ${_ecAccionesClases(m)}
     </div>`;
   }).join('');
 }
+
+// ── Un envío puede traer VARIAS clases (ej: 4 links en un mismo mensaje).
+// La unidad no es el mensaje: es cada clase. Se corta por link, y el título
+// es lo que quedó en esa línea (o la línea de arriba). Sin links → una sola.
+function _ecClasesDe(m){
+  if (_ecClasesCache[m.id]) return _ecClasesCache[m.id];
+  const lineas = String(m.contenido || '').split('\n');
+  const tituloEnvio = (lineas[0] || '')
+    .replace('🏠 ENTRENAMIENTO EN CASA — ', '')
+    .replace('🏠 ENTRENAMIENTO EN CASA', '')
+    .trim() || 'Entrenamiento en casa';
+  const RX = /(https?:\/\/[^\s]+)/;
+  const clases = [];
+  for (let i = 0; i < lineas.length; i++){
+    const hit = lineas[i].match(RX);
+    if (!hit) continue;
+    const link = hit[1];
+    let tit = lineas[i].replace(link, '').trim();
+    if (!tit){
+      for (let j = i - 1; j > 0; j--){           // j > 0: nunca uso la línea del marker
+        const prev = (lineas[j] || '').trim();
+        if (!prev) continue;
+        if (RX.test(prev)) break;                 // otro link: esa clase ya pasó
+        tit = prev; break;
+      }
+    }
+    tit = tit.replace(/^\d+\s*[-.\)·:]\s*/, '').trim();   // saca el "1-", "2 ·", etc.
+    clases.push({ titulo: tit || tituloEnvio, link });
+  }
+  if (!clases.length) clases.push({ titulo: tituloEnvio, link: '' });
+  _ecClasesCache[m.id] = clases;
+  return clases;
+}
+
+function _ecFechaCorta(f){
+  const d = new Date(String(f).length <= 10 ? String(f) + 'T12:00:00' : f);
+  if (isNaN(d)) return '';
+  return d.toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric' });
+}
+
+// Bloque de acciones: una fila por clase con "✅ La hice" o el chip de hecha
+function _ecAccionesClases(m){
+  const yo = window._personaActual;
+  if (!yo || m.destinatario_persona_id !== yo.id) return '';   // solo el destinatario responde
+  const clases = _ecClasesDe(m);
+  const filas = clases.map((c, i) => {
+    const r = _misRespCasa[`${m.id}|${c.link || ''}`];
+    let acc;
+    if (r){
+      const bits = [];
+      if (r.dificultad != null) bits.push(`Borg ${r.dificultad}`);
+      bits.push((r.dolor_nivel || 0) > 0 ? `🩹 dolor ${r.dolor_nivel}` : 'sin dolor');
+      acc = `<span class="ec-hecha">✅ Hecha el ${_ecFechaCorta(r.fecha)} · ${bits.join(' · ')}</span>
+             <button class="ec-undo" onclick="pbDeshacerClaseCasa(${r.id})">deshacer</button>`;
+    } else {
+      acc = `<button class="ag-btn ag-btn-verde ec-btn" onclick="pbAbrirRespClase(${m.id}, ${i})">✅ La hice</button>`;
+    }
+    return `<div class="ec-clase">
+      <div class="ec-clase-tit">${clases.length > 1 ? (i + 1) + ' · ' : ''}${_escHtmlPB(c.titulo)}</div>
+      <div class="ec-clase-acc">${acc}</div>
+    </div>`;
+  }).join('');
+  return `<div class="ec-clases">${filas}</div>`;
+}
+
+// Formulario: cuánto te exigiste (Borg) + dolor (EVA), igual que "Cómo me fui sintiendo"
+window.pbAbrirRespClase = function(msjId, idx){
+  const m = _misClasesCasa.find(x => x.id === msjId);
+  if (!m) return;
+  const c = _ecClasesDe(m)[idx];
+  if (!c) return;
+  const hoyISO = (new Date()).toISOString().slice(0, 10);
+  pbAbrirModal({
+    titulo: '🏠 ¿Cómo te fue?',
+    subtitulo: c.titulo,
+    cuerpoHTML: `
+      <div class="adj-form bit-form">
+        <p class="ec-modal-nota">Queda guardado en tu historial y el equipo lo ve para ajustar tus próximas clases.</p>
+        <div class="adj-form-row">
+          <label class="adj-label" for="ec-fecha">¿Qué día la hiciste?</label>
+          <input type="date" id="ec-fecha" class="adj-input" value="${hoyISO}" max="${hoyISO}">
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label">¿Cuánto te exigiste? (Borg 0-10)</label>
+          ${renderEscala0a('ec-borg', 10, BORG_LABELS)}
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label">¿Tuviste dolor? (EVA 0-10)</label>
+          ${renderEscala0a('ec-eva', 10, EVA_LABELS)}
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="ec-zona">¿Dónde? (si tuviste dolor)</label>
+          <input type="text" id="ec-zona" class="adj-input" maxlength="80" placeholder="Ej: lumbar, rodilla derecha">
+        </div>
+        <div class="adj-form-row">
+          <label class="adj-label" for="ec-nota">¿Querés contarnos algo más?</label>
+          <textarea id="ec-nota" class="adj-input" rows="3" maxlength="500" placeholder="Opcional"></textarea>
+        </div>
+        <div id="ec-status"></div>
+      </div>`,
+    botones: [
+      { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
+      { label: 'Guardar', cls: 'confirm', onclick: `pbGuardarRespClase(${msjId}, ${idx})` },
+    ]
+  });
+};
+
+window.pbGuardarRespClase = async function(msjId, idx){
+  const m = _misClasesCasa.find(x => x.id === msjId);
+  if (!m) return;
+  const c = _ecClasesDe(m)[idx];
+  const status = document.getElementById('ec-status');
+  const borg = document.getElementById('ec-borg').value;
+  const eva  = document.getElementById('ec-eva').value;
+  const zona = (document.getElementById('ec-zona').value || '').trim();
+  const nota = (document.getElementById('ec-nota').value || '').trim();
+  const fecha = document.getElementById('ec-fecha').value || null;
+  if (borg === ''){ status.innerHTML = '<div class="adj-error">Contanos cuánto te exigiste (0 a 10)</div>'; return; }
+  status.innerHTML = '<div class="adj-info">Guardando…</div>';
+  try {
+    const { data, error } = await sb.rpc('alumno_registrar_clase_casa', {
+      p_mensaje_id: msjId,
+      p_titulo: c.titulo,
+      p_link: c.link || null,
+      p_dificultad: Number(borg),
+      p_dolor_nivel: eva === '' ? null : Number(eva),
+      p_dolor_zona: zona || null,
+      p_nota: nota || null,
+      p_fecha: fecha
+    });
+    if (error) throw error;
+    _misRespCasa[`${msjId}|${c.link || ''}`] = {
+      id: data, mensaje_id: msjId, clase_ref: c.link || '', fecha: fecha,
+      modulo: c.titulo, dificultad: Number(borg),
+      dolor_nivel: eva === '' ? null : Number(eva), dolor_zona: zona || null
+    };
+    status.innerHTML = '<div class="adj-ok">¡Listo! 💪</div>';
+    _renderClasesCasa();
+    setTimeout(pbCerrarModal, 600);
+  } catch (err){
+    status.innerHTML = `<div class="adj-error">No se pudo guardar: ${_escHtmlPB(err.message || 'error')}</div>`;
+  }
+};
+
+window.pbDeshacerClaseCasa = async function(evoId){
+  if (!confirm('¿Borrar lo que cargaste de esta clase?')) return;
+  try {
+    const { error } = await sb.rpc('alumno_deshacer_clase_casa', { p_evolucion_id: evoId });
+    if (error) throw error;
+    Object.keys(_misRespCasa).forEach(k => { if (_misRespCasa[k].id === evoId) delete _misRespCasa[k]; });
+    _renderClasesCasa();
+  } catch (err){ alert('No se pudo deshacer: ' + (err.message || 'error')); }
+};
 
 // Al abrir la tarjeta: resolver los audios (URL firmada) y marcar las clases como vistas
 window.pbClasesAbiertas = async function(){
@@ -4025,6 +4189,8 @@ function _renderPreviewMensajes(){
 let _equipoMsj = null;       // lista de profes del equipo (cache)
 let _misMensajes = [];       // mensajes míos (autor o destinatario)
 let _misClasesCasa = [];     // 🏠 clases de Entrenamiento en casa (separadas del buzón)
+let _misRespCasa = {};       // respuestas ya cargadas: "mensajeId|link" → fila de evoluciones_tf
+let _ecClasesCache = {};     // mensajeId → [{titulo, link}] (el envío partido en clases)
 let _clasesNoVistas = 0;
 let _misLecturas = new Set();
 let _msjNoLeidos = 0;
@@ -4123,6 +4289,18 @@ async function _cargarDatosMensajes(){
     _clasesNoVistas = _misClasesCasa.filter(m =>
       m.destinatario_persona_id === yo.id && !_misLecturas.has(m.id)
     ).length;
+    // Respuestas del alumno a esas clases (viven en evoluciones_tf, origen='casa').
+    // UNA sola fuente: lo mismo que ven historia clínica, la agenda y el 📚.
+    _misRespCasa = {};
+    if (_misClasesCasa.length) {
+      try {
+        const cids = _misClasesCasa.map(m => m.id);
+        const { data: resp } = await sb.from('evoluciones_tf')
+          .select('id, mensaje_id, clase_ref, fecha, modulo, dificultad, dolor, dolor_nivel, dolor_zona, observacion')
+          .eq('persona_id', yo.id).eq('origen', 'casa').in('mensaje_id', cids);
+        (resp || []).forEach(r => { _misRespCasa[`${r.mensaje_id}|${r.clase_ref || ''}`] = r; });
+      } catch (e) { console.warn('No se pudieron cargar las respuestas de clases', e); }
+    }
     _renderBadgeClases();
     _renderClasesCasa();
 
@@ -5595,22 +5773,26 @@ function bloqueEvoluciones(evos){
   let rows='';
   const CARITA_TXT = {5:'😀 Muy bien',4:'🙂 Bien',3:'😴 Cansado',2:'😐 Molesto',1:'😣 Mal'};
   evos.forEach(e=>{
+    const esCasa = e.origen === 'casa';
     const sintio = e.como_se_sintio || (e.score!=null ? CARITA_TXT[e.score] : '');
     const sintioHtml = sintio ? `<div class="sintio"><b>Cómo se sintió:</b> ${esc(sintio)}</div>` : '';
     const dolorHtml = e.dolor
-      ? `<div class="dolor-tag si">⚠️ Sintió dolor / molestia</div>`
+      ? `<div class="dolor-tag si">⚠️ ${esCasa && e.dolor_nivel!=null ? `Dolor ${e.dolor_nivel}/10${e.dolor_zona?' · '+esc(e.dolor_zona):''}` : 'Sintió dolor / molestia'}</div>`
       : `<div class="dolor-tag no">Sin dolor</div>`;
+    const borgHtml = (esCasa && e.dificultad!=null)
+      ? `<div class="sintio"><b>Cuánto se exigió:</b> Borg ${e.dificultad}/10</div>` : '';
     const mods = [e.sala, e.modulo].filter(Boolean).join(' · ');
     const ejerHtml = ejerciciosDeEvo(e).map(l=>`<div class="ejer">🏋️ ${esc(l)}</div>`).join('');
     rows += `<div class="evo">
       <div class="head">
         <span class="f">${fmtFecha(e.fecha)}</span>
-        ${e.servicio?`<span class="serv">${esc(e.servicio)}</span>`:''}
+        ${esCasa ? `<span class="serv">🏠 Entrenamiento en casa</span><span class="casa-tag">lo cargaste vos</span>` : (e.servicio?`<span class="serv">${esc(e.servicio)}</span>`:'')}
       </div>
       ${mods?`<div class="mods">${esc(mods)}</div>`:''}
       ${ejerHtml}
-      ${e.contenido?`<div class="cont">${esc(e.contenido)}</div>`:''}
+      ${e.contenido?`<div class="cont">${esCasa ? _linkifyPB(esc(e.contenido)) : esc(e.contenido)}</div>`:''}
       ${sintioHtml}
+      ${borgHtml}
       ${dolorHtml}
       ${e.observacion?`<div class="obs">📝 ${esc(e.observacion)}</div>`:''}
       ${e.autor_nombre?`<div class="autor">— ${esc(e.autor_nombre)}</div>`:''}
