@@ -1283,7 +1283,7 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR, hcR, obsR, adjR, taR, bonifR, sorR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, hcR, obsR, adjR, taR, bonifR, sorR, ecR] = await Promise.all([
       sb.from('personas').select('*'),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
@@ -1294,8 +1294,13 @@ async function cargarTodo() {
       sb.from('turno_alumnos').select('persona_id').eq('activo', true),
       sb.from('recibos_bonif').select('inscripcion_id, mes_imputado'),
       // 🎰 Sorteo de cumpleaños: ganadores (para el 25% OFF y la ficha)
-      sb.from('sorteos_cumple').select('persona_id, anio, mes, premio, mes_descuento')
+      sb.from('sorteos_cumple').select('persona_id, anio, mes, premio, mes_descuento'),
+      // FUENTE ÚNICA (Fase 1d pagos, 19/7/26): estado de cuenta de todos según
+      // fn_estado_cuenta — alimenta el chip de deuda del detalle del alumno.
+      sb.rpc('fn_estado_cuenta')
     ]);
+    window._ecAdminPorInsc = {};
+    ((ecR && ecR.data) || []).forEach(r => { window._ecAdminPorInsc[r.inscripcion_id] = r; });
     descSorteo = new Set();
     sorteosPorPersona = {};
     ((sorR && sorR.data) || []).forEach(s => {
@@ -2470,11 +2475,23 @@ function renderResumenAlumno(f) {
   //   ⭐ Respeta el día de vencimiento: si el mes en curso todavía NO venció para esta
   //   persona, lo que falta no es deuda — se muestra "vence el día N" (con lo ya
   //   entregado a cuenta si hay). Mismo criterio que morosos_tf y baja-impagos.
-  const cubreCuotaMes  = cuotaVig > 0 ? pagadoMesActual >= cuotaVig : pagadoMesActual > 0;
-  const esParcialMes   = pagadoMesActual > 0 && cuotaVig > 0 && pagadoMesActual < cuotaVig;
-  const saldoMesActual = Math.max(0, cuotaVig - pagadoMesActual);
+  // FUENTE ÚNICA (Fase 1d pagos, 19/7/26): el veredicto del chip sale de
+  // fn_estado_cuenta (respeta parciales con foto, cortesías, sorteo, tarifario
+  // por mes y alta/reingreso). Si no hay fila de la madre, respaldo local.
+  const _ecChip = (window._ecAdminPorInsc || {})[i.id];
+  const cubreCuotaMes  = _ecChip
+    ? ((Number(_ecChip.debe_mes_vencido) || 0) + (Number(_ecChip.por_vencer) || 0)) <= 0
+    : (cuotaVig > 0 ? pagadoMesActual >= cuotaVig : pagadoMesActual > 0);
+  const esParcialMes   = _ecChip
+    ? ((Number(_ecChip.debe_mes_vencido) || 0) > 0 && (Number(_ecChip.pagado_mes) || 0) > 0)
+    : (pagadoMesActual > 0 && cuotaVig > 0 && pagadoMesActual < cuotaVig);
+  const saldoMesActual = _ecChip
+    ? (Number(_ecChip.debe_mes_vencido) || 0) || Math.max(0, cuotaVig - pagadoMesActual)
+    : Math.max(0, cuotaVig - pagadoMesActual);
   const diaVencChip = Number(i.dia_vencimiento || 1);
-  const mesNoVencidoChip = HOY.getDate() <= diaVencChip;
+  const mesNoVencidoChip = _ecChip
+    ? ((Number(_ecChip.por_vencer) || 0) > 0)
+    : (HOY.getDate() <= diaVencChip);
 
   let estadoChip;
   // Si la fecha_alta es FUTURA (alumno arranca después de hoy), no es moroso — es "pendiente de arrancar".
