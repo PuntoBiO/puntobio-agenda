@@ -1128,7 +1128,7 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
   try {
-    const [perR, insR, pagosR, tarR, tratR, hcR, obsR, adjR] = await Promise.all([
+    const [perR, insR, pagosR, tarR, tratR, hcR, obsR, adjR, ecR] = await Promise.all([
       sb.from('personas').select('*'),
       sb.from('inscripciones_tf').select('*'),
       sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
@@ -1136,8 +1136,13 @@ async function cargarTodo() {
       sb.from('tratamientos').select('persona_id, estado'),
       sb.from('historias_clinicas').select('persona_id'),
       sb.from('hc_observaciones').select('persona_id'),
-      sb.from('hc_adjuntos').select('persona_id')
+      sb.from('hc_adjuntos').select('persona_id'),
+      // FUENTE ÚNICA (Fase 1c pagos, 19/7/26): estado de cuenta de todos según
+      // fn_estado_cuenta — alimenta las sugerencias del modal de cobro.
+      sb.rpc('fn_estado_cuenta')
     ]);
+    window._ecPorInsc = {};
+    ((ecR && ecR.data) || []).forEach(r => { window._ecPorInsc[r.inscripcion_id] = r; });
     if (perR.error) throw perR.error;
     if (insR.error) throw insR.error;
     if (pagosR.error) throw pagosR.error;
@@ -2377,12 +2382,15 @@ function abrirModalCobrar() {
   const p = f.persona; const i = f.inscripcion;
   // Detectar deuda: ¿pagó el mes actual?
   const pagosIns = pagosPorInsc[i.id] || [];
+  // FUENTE ÚNICA (Fase 1c pagos, 19/7/26): el arrastre y el mes sugerido salen
+  // de fn_estado_cuenta (respeta parciales, cortesías, alta/reingreso y sorteo).
+  // Si por lo que sea no hay fila de la madre, cae a la regla vieja de respaldo.
+  const _ec = (window._ecPorInsc || {})[i.id];
   const pagóMesActual = pagosIns.some(pg => pg.mes_imputado === MES_ACTUAL);
   const pagóMesAnterior = pagosIns.some(pg => pg.mes_imputado === MES_ANTERIOR);
-  // Sugerir importe: si arrastra mes anterior, cuota + 10% recargo
-  const tieneArrastre = !pagóMesActual && !pagóMesAnterior;
-  // Sugerir mes: el más antiguo sin pagar
-  const mesSugerido = !pagóMesAnterior ? MES_ANTERIOR : MES_ACTUAL;
+  const tieneArrastre = _ec ? (Number(_ec.debe_arrastre) > 0) : (!pagóMesActual && !pagóMesAnterior);
+  const mesSugerido = _ec ? (_ec.mes_adeudado || MES_ACTUAL)
+                          : (!pagóMesAnterior ? MES_ANTERIOR : MES_ACTUAL);
   const baseMesSug = valorPlanMes(i.plan, mesSugerido) || f.cuota || 0;
   const importeSugerido = tieneArrastre ? Math.round(baseMesSug * 1.10) : baseMesSug;
 
@@ -2467,9 +2475,14 @@ window.confirmarCobro = async () => {
     // Guardamos el plan vigente en la observación para que el pago quede asociado a su plan.
     const planActual = insc.plan || '';
     const obsManual = $('#cobrarObs').value.trim();
-    const tagParcial = esParcial ? ` · PARCIAL (saldo ${fmt$(saldoDespues)})` : '';
     const tagOp = usuarioNombre ? ` [Op:${usuarioNombre}]` : '';
-    const obsFinal = `[Plan: ${planActual}]` + tagOp + (obsManual ? ' ' + obsManual : '') + tagParcial;
+    // BUG FIX (Fase 1c pagos, 19/7/26): la marca de PARCIAL va ADELANTE y con
+    // saldo=NNN entero — es el formato que lee el reglamento (fn_estado_cuenta
+    // y morosos). Antes se escribía "· PARCIAL (saldo $X)" al final: invisible
+    // como parcial, y el saldo se perdonaba cuando el mes pasaba a "anterior".
+    const obsFinal = esParcial
+      ? `PARCIAL|saldo=${Math.round(saldoDespues)} | [Plan: ${planActual}]` + tagOp + (obsManual ? ' ' + obsManual : '')
+      : `[Plan: ${planActual}]` + tagOp + (obsManual ? ' ' + obsManual : '');
     const { data: pagoIns, error } = await sb.from('pagos_tf').insert({
       inscripcion_id: insc.id,
       mes_imputado: mesImp,
