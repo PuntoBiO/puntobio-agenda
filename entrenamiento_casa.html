@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Entrenamiento en casa · PuntoBiO</title>
+<style>
+  :root{ --bg:#f6f8fb; --panel:#fff; --border:#e2e8f0; --txt:#0f172a; --sub:#64748b; --azul:#2563eb; --verde:#16a34a; --rojo:#dc2626; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt);padding:22px 26px}
+  h1{font-size:22px;color:var(--azul)}
+  .sub{font-size:13px;color:var(--sub);margin:2px 0 16px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px 18px;margin-bottom:14px}
+  label.tit{display:block;font-size:12px;font-weight:800;color:var(--sub);text-transform:uppercase;letter-spacing:.4px;margin:10px 0 5px}
+  input[type=text], textarea{width:100%;border:1px solid #cbd5e1;border-radius:9px;padding:9px 12px;font-family:inherit;font-size:13.5px;background:#fff}
+  textarea{min-height:110px;resize:vertical}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{background:#dbeafe;color:#1d4ed8;border-radius:999px;padding:4px 11px;font-size:12.5px;font-weight:800;display:inline-flex;align-items:center;gap:6px}
+  .chip .x{cursor:pointer;font-weight:900}
+  .chip.todos{background:#dcfce7;color:#166534}
+  .btn{border:none;border-radius:9px;padding:9px 16px;font-weight:800;font-size:13px;cursor:pointer}
+  .btn:disabled{opacity:.55}
+  .btn-verde{background:var(--verde);color:#fff}
+  .btn-gris{background:#f1f5f9;color:#334155;border:1px solid #cbd5e1}
+  .dropres{display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #cbd5e1;border-radius:9px;margin-top:4px;max-height:220px;overflow:auto;z-index:20;box-shadow:0 8px 20px rgba(0,0,0,.1)}
+  .dropres div{padding:9px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid #f1f5f9}
+  .dropres div:hover{background:#eff6ff}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:700;display:none;z-index:50}
+  .gate{background:#fef2f2;border:1.5px solid #fca5a5;border-radius:12px;padding:24px;text-align:center;color:#991b1b;font-weight:700}
+  .hint{font-size:12px;color:var(--sub);margin-top:5px}
+</style>
+</head>
+<body>
+  <h1>🏠 Entrenamiento en casa</h1>
+  <div class="sub">Mandales una clase o rutina a tus alumnos — con video de YouTube, PDF o lo que quieras. Les llega a su Mi Espacio, con los links clickeables.</div>
+  <div id="app"><div class="card">⏳ Cargando…</div></div>
+  <div class="toast" id="toast"></div>
+
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+  const supa = createClient('https://bqpjtoiictnzcasxfucf.supabase.co', 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi', { auth: { lock: (name, acquireTimeout, fn) => fn() } });
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const toast = (t) => { const el=$('toast'); el.textContent=t; el.style.display='block'; setTimeout(()=>el.style.display='none', 2600); };
+
+  // 🔒 Lu, Jime, Pau y Ale (administración)
+  const ALLOW = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com',
+                 'paukappes@gmail.com', 'alejandraperna@gmail.com'];
+
+  let miId = null, miNombre = '';
+  let destinos = new Map();   // persona_id -> nombre (elegidos)
+  let modoTodos = false;
+  let timerB = null;
+
+  async function boot(){
+    const { data: u } = await supa.auth.getUser();
+    const email = (u && u.user && u.user.email || '').toLowerCase().trim();
+    if (!ALLOW.includes(email)){
+      $('app').innerHTML = `<div class="gate">🔒 Este módulo es solo para administración (Lu, Jime, Pau y Ale).</div>`;
+      return;
+    }
+    const { data: pid } = await supa.rpc('mi_persona_id');
+    miId = pid || null;
+    if (miId){
+      const { data: yo } = await supa.from('personas').select('nombre').eq('id', miId).single();
+      miNombre = (yo && yo.nombre) || '';
+    }
+    render();
+  }
+
+  function render(){
+    $('app').innerHTML = `
+      <div class="card">
+        <label class="tit">Para</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <div style="position:relative;flex:1;min-width:240px">
+            <input type="text" id="ecBusca" placeholder="🔍 Buscá y agregá alumnos por nombre…" autocomplete="off" oninput="ecBuscar(this.value)">
+            <div id="ecRes" class="dropres"></div>
+          </div>
+          <button class="btn btn-gris" onclick="ecTodos()">👥 Todos los TF activos</button>
+        </div>
+        <div class="chips" id="ecChips"></div>
+        <div class="hint" id="ecHint"></div>
+
+        <label class="tit">Título</label>
+        <input type="text" id="ecTitulo" placeholder="Ej: Entrenamiento en casa · Semana del 21/7">
+
+        <label class="tit">Clase / instrucciones</label>
+        <textarea id="ecTexto" placeholder="Escribí la rutina o las instrucciones… Pegá el link del video de YouTube acá: les queda clickeable."></textarea>
+
+        <label class="tit">Archivos</label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label class="btn btn-gris" style="cursor:pointer">📎 Adjuntar
+            <input id="ecArchivos" type="file" multiple style="display:none" onchange="ecArch()">
+          </label>
+          <span id="ecListaArch" style="font-size:12px;color:var(--sub)"></span>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:14px">
+          <button class="btn btn-verde" id="ecEnviarBtn" onclick="ecEnviar(this)" style="padding:10px 26px;font-size:14px">🏠 Enviar</button>
+        </div>
+      </div>`;
+    pintarChips();
+  }
+
+  function pintarChips(){
+    const cont = $('ecChips'); if (!cont) return;
+    if (modoTodos){
+      cont.innerHTML = `<span class="chip todos">👥 TODOS los TF activos <span class="x" onclick="ecLimpiar()">×</span></span>`;
+    } else {
+      cont.innerHTML = [...destinos.entries()].map(([id, nom]) =>
+        `<span class="chip">${esc(nom)} <span class="x" onclick="ecQuitar(${id})">×</span></span>`).join('');
+    }
+    $('ecHint').textContent = modoTodos ? '' : (destinos.size ? `${destinos.size} destinatario(s)` : '');
+  }
+
+  window.ecBuscar = function(q){
+    clearTimeout(timerB);
+    q = (q||'').trim();
+    if (q.length < 2){ $('ecRes').style.display='none'; return; }
+    timerB = setTimeout(async () => {
+      const { data } = await supa.from('personas').select('id, nombre, es_equipo')
+        .ilike('nombre', '%' + q + '%').neq('es_prueba', true).order('nombre').limit(8);
+      const lista = (data||[]).filter(p => !p.es_equipo || true); // el equipo también puede recibirse una clase 😄
+      const res = $('ecRes');
+      if (!lista.length){ res.style.display='none'; return; }
+      res.innerHTML = lista.map(p =>
+        `<div onclick="ecAgregar(${p.id}, '${esc(p.nombre).replace(/'/g,'&#39;')}')">${esc(p.nombre)} <span style="color:#94a3b8;font-size:11.5px">#${p.id}</span></div>`).join('');
+      res.style.display='block';
+    }, 250);
+  };
+  window.ecAgregar = function(id, nombre){
+    modoTodos = false;
+    destinos.set(id, nombre);
+    $('ecBusca').value=''; $('ecRes').style.display='none';
+    pintarChips();
+  };
+  window.ecQuitar = function(id){ destinos.delete(id); pintarChips(); };
+  window.ecLimpiar = function(){ modoTodos = false; destinos = new Map(); pintarChips(); };
+  window.ecTodos = function(){ modoTodos = true; destinos = new Map(); pintarChips(); };
+  window.ecArch = function(){
+    const fs = $('ecArchivos').files;
+    $('ecListaArch').textContent = fs.length ? [...fs].map(f=>f.name).join(' · ') : '';
+  };
+
+  window.ecEnviar = async function(btn){
+    const titulo = ($('ecTitulo').value || '').trim();
+    const texto  = ($('ecTexto').value || '').trim();
+    const archivos = [...($('ecArchivos').files || [])];
+    if (!modoTodos && !destinos.size){ toast('Elegí al menos un destinatario'); return; }
+    if (!titulo && !texto && !archivos.length){ toast('Escribí la clase o adjuntá algo'); return; }
+
+    // Resolver destinatarios
+    let ids = [];
+    if (modoTodos){
+      const { data: insc } = await supa.from('inscripciones_tf').select('persona_id').eq('estado','ACTIVO').neq('plan','COD0BON');
+      const unicos = [...new Set((insc||[]).map(i => i.persona_id))];
+      const { data: pers } = await supa.from('personas').select('id, es_prueba, es_equipo').in('id', unicos);
+      const validos = new Set((pers||[]).filter(p => !p.es_prueba && !p.es_equipo).map(p => p.id));
+      ids = unicos.filter(id => validos.has(id));
+    } else {
+      ids = [...destinos.keys()];
+    }
+    if (!ids.length){ toast('No hay destinatarios válidos'); return; }
+    if (!confirm(`¿Enviar "${titulo || 'esta clase'}" a ${ids.length} alumno(s)?`)) return;
+
+    btn.disabled = true;
+    try {
+      // Contenido: título arriba, links clickeables (el Mi Espacio los linkea)
+      const contenido = (titulo ? `🏠 ENTRENAMIENTO EN CASA — ${titulo}\n\n` : '🏠 ENTRENAMIENTO EN CASA\n\n') + (texto || '(ver adjuntos)');
+
+      // Archivos: se suben UNA sola vez (carpeta masivos/) y todos los mensajes
+      // apuntan al mismo archivo — así "Todos" no sube 200 copias.
+      let archivosSubidos = [];
+      for (const f of archivos){
+        btn.textContent = `Subiendo ${f.name}…`;
+        const safe = f.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+        const path = `masivos/${Date.now()}_${safe}`;
+        const { error: upErr } = await supa.storage.from('mensajes-adjuntos').upload(path, f, {
+          contentType: f.type || 'application/octet-stream', upsert: false });
+        if (upErr) throw upErr;
+        archivosSubidos.push({ path, nombre: f.name, mime: f.type || null, tam: f.size });
+      }
+
+      // Mensajes en tandas (para no pasarse de tamaño de request)
+      btn.textContent = 'Enviando…';
+      const filas = ids.map(pid => ({
+        autor_persona_id: miId,
+        autor_nombre: miNombre,
+        destinatario_persona_id: pid,
+        contenido,
+        enviado_desde: 'equipo'
+      }));
+      let enviados = 0;
+      const TANDA = 50;
+      let msjIds = [];
+      for (let i = 0; i < filas.length; i += TANDA){
+        const { data: nuevos, error } = await supa.from('mensajes_equipo')
+          .insert(filas.slice(i, i + TANDA)).select('id, destinatario_persona_id');
+        if (error) throw error;
+        msjIds = msjIds.concat((nuevos||[]).map(n => n.id));
+        enviados += (nuevos||[]).length;
+        btn.textContent = `Enviando… ${enviados}/${filas.length}`;
+      }
+
+      // Adjuntos: una fila por mensaje apuntando al archivo compartido
+      if (archivosSubidos.length && msjIds.length){
+        const adjFilas = [];
+        msjIds.forEach(mid => archivosSubidos.forEach(a => adjFilas.push({
+          mensaje_id: mid, storage_path: a.path, nombre_original: a.nombre,
+          tipo_mime: a.mime, tamano_bytes: a.tam })));
+        for (let i = 0; i < adjFilas.length; i += 200){
+          const { error: eA } = await supa.from('mensajes_adjuntos').insert(adjFilas.slice(i, i + 200));
+          if (eA) throw eA;
+        }
+      }
+
+      toast(`✅ Clase enviada a ${enviados} alumno(s) — les llega a su Mi Espacio`);
+      $('ecTitulo').value=''; $('ecTexto').value=''; $('ecArchivos').value=''; $('ecListaArch').textContent='';
+      ecLimpiar();
+    } catch(e){
+      toast('❌ ' + (e.message || 'No se pudo enviar'));
+    } finally {
+      btn.disabled = false; btn.textContent = '🏠 Enviar';
+    }
+  };
+
+  boot();
+</script>
+</body>
+</html>
