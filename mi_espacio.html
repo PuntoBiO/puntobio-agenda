@@ -1703,6 +1703,18 @@ async function cargarEspacio(per){
     feriadosPendientes = [];
   }
 
+  // FUENTE ÚNICA (Fase 1e pagos, 19/7/26): estado de cuenta del alumno según
+  // fn_estado_cuenta (su candado deja pasar al propio alumno y al apoderado).
+  // Alimenta el aviso de cuota y el candado visual de recuperatorios — el MISMO
+  // juez que usa el servidor al reservar (tiene_cuota_tf_al_dia ya es envoltorio
+  // de la madre), así la pantalla y el servidor no pueden discrepar. Si la
+  // llamada falla, estadoCuotaTF cae a su cálculo local de siempre.
+  try {
+    const _ecCta = await sb.rpc('fn_estado_cuenta', { p_persona_id: pid });
+    window._ecCuentaPorInsc = {};
+    ((_ecCta && _ecCta.data) || []).forEach(r => { window._ecCuentaPorInsc[r.inscripcion_id] = r; });
+  } catch (e) { window._ecCuentaPorInsc = null; }
+
   // Datos consolidados para pasarle al bloque (sin nombres ni datos personales)
   // CANDADO ANTI-ABUSO de recuperatorios: solo se pueden usar con plan ACTIVO y la cuota
   // al día (o con prórroga vigente). Si debe, NO se le ofrece "Programar acá" para recuperar.
@@ -1918,6 +1930,13 @@ function cupoRecuperatoriosPlan(cod){
 function estadoCuotaTF(insc, pagosAll){
   if (!insc) return { vencida: false, prorrogaVigente: false };
   if (/BON/i.test(insc.plan||'')) return { vencida: false, prorrogaVigente: false };
+  // FUENTE ÚNICA (Fase 1e pagos): si la madre respondió, su veredicto manda
+  // (respeta parciales, cortesías, sorteo y tarifario por mes). Lo de abajo
+  // queda como respaldo local si la llamada falló.
+  const _ecJ = (window._ecCuentaPorInsc || {})[insc.id];
+  if (_ecJ) {
+    return { vencida: (Number(_ecJ.debe_total) || 0) > 0, prorrogaVigente: !!_ecJ.prorroga_vigente };
+  }
   const pagos = (pagosAll || []).filter(p => p.inscripcion_id === insc.id);
   const hoy = new Date();
   const yyyy = hoy.getFullYear(), mm = hoy.getMonth()+1, dd = hoy.getDate();
