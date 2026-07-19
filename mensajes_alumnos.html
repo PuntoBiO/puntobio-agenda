@@ -44,6 +44,33 @@
   <h1>📥 Mensajes de alumnos</h1>
   <div class="sub">Lo que los alumnos escriben desde Mi Espacio — separado de la mensajería interna del equipo.</div>
   <div id="banner"></div>
+
+  <!-- ✉️ NUEVO MENSAJE (19/7/26): escribirle a cualquier alumno, con links
+       (quedan clickeables en su Mi Espacio) y archivos adjuntos. -->
+  <div class="conv" style="margin-bottom:18px">
+    <div class="conv-head" style="background:#eff6ff"><span style="font-size:18px">✉️</span>
+      <div class="nom">Nuevo mensaje a un alumno</div>
+    </div>
+    <div style="padding:12px 16px;display:flex;flex-direction:column;gap:9px">
+      <div style="position:relative">
+        <input id="nmBusca" placeholder="🔍 Buscá al alumno por nombre…" autocomplete="off"
+          style="width:100%;border:1px solid #cbd5e1;border-radius:9px;padding:9px 12px;font-family:inherit;font-size:13.5px"
+          oninput="nmBuscar(this.value)">
+        <div id="nmResultados" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #cbd5e1;border-radius:9px;margin-top:4px;max-height:220px;overflow:auto;z-index:20;box-shadow:0 8px 20px rgba(0,0,0,.1)"></div>
+      </div>
+      <div id="nmElegido" style="display:none;font-size:13px;font-weight:800;color:#1d4ed8"></div>
+      <textarea id="nmTexto" placeholder="Escribí el mensaje… (podés pegar links, ej. un video de YouTube: le van a quedar clickeables)"
+        style="border:1px solid #cbd5e1;border-radius:9px;padding:9px 12px;font-family:inherit;font-size:13.5px;min-height:64px;resize:vertical"></textarea>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="background:#f1f5f9;border:1px solid #cbd5e1;border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:800;cursor:pointer">📎 Adjuntar
+          <input id="nmArchivos" type="file" multiple style="display:none" onchange="nmMostrarArchivos()">
+        </label>
+        <span id="nmListaArch" style="font-size:12px;color:#64748b"></span>
+        <button onclick="nmEnviar(this)" style="margin-left:auto;background:var(--verde);color:#fff;border:none;border-radius:9px;padding:9px 20px;font-weight:800;font-size:13.5px;cursor:pointer">Enviar</button>
+      </div>
+    </div>
+  </div>
+
   <div id="lista"><div class="empty">⏳ Cargando…</div></div>
   <div id="barraBorrar" style="display:none;position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;border-radius:12px;padding:10px 16px;align-items:center;gap:12px;z-index:40;box-shadow:0 8px 24px rgba(0,0,0,.25)">
     <span style="font-size:13px;font-weight:700"><span id="cntSel">0</span> seleccionado(s)</span>
@@ -60,6 +87,9 @@
   const pila = (n) => { const p = String(n||'').trim().split(/\s+/)[0] || ''; return p ? p[0].toUpperCase() + p.slice(1).toLowerCase() : ''; };
   const fmtF = (iso) => { if(!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('es-AR',{day:'numeric',month:'numeric',year:'numeric'}) + ' · ' + d.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'}); };
   const toast = (t) => { const el=$('toast'); el.textContent=t; el.style.display='block'; setTimeout(()=>el.style.display='none', 2200); };
+  // 🔗 Sobre texto YA escapado: los links quedan clickeables, el resto inofensivo
+  const linkify = (txtEsc) => String(txtEsc||'').replace(/(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:#2563eb;font-weight:800;text-decoration:underline;word-break:break-all">$1</a>');
 
   let miId = null, miNombre = '', soySupervisora = false;
   let mapPer = {};          // persona_id -> {nombre, foto_perfil}
@@ -197,13 +227,13 @@
           const tagSup = (!paraMi && soySupervisora) ? `<span class="tag-sinleer" title="Al leerlo desde acá NO se marca como leído: su destinatario no se entera">🕵️ tu lectura no cuenta</span>` : '';
           return `<div class="msj deAlumna${sinLeerMio ? ' sinLeer' : ''}">
             <div class="meta">${check} ${esc(pila(per.nombre))} <span class="tag-para">→ ${esc(pila(dest.nombre) || '¿?')}</span> ${chipLeido} ${tagSup} <span style="margin-left:auto">${fmtF(m.creado_en)}</span></div>
-            <div>${esc(m.contenido)}</div>${adjHtml(m.id)}
+            <div>${linkify(esc(m.contenido))}</div>${adjHtml(m.id)}
           </div>`;
         } else {
           const aut = mapPer[m.autor_persona_id] || {};
           return `<div class="msj respuesta">
             <div class="meta">${check} ↩️ ${esc(pila(aut.nombre) || 'Equipo')} respondió ${chipLeido} <span style="margin-left:auto">${fmtF(m.creado_en)}</span></div>
-            <div>${esc(m.contenido)}</div>${adjHtml(m.id)}
+            <div>${linkify(esc(m.contenido))}</div>${adjHtml(m.id)}
           </div>`;
         }
       }).join('');
@@ -286,6 +316,74 @@
     if (error){ toast('❌ ' + error.message); return; }
     toast('✅ Respuesta enviada');
     await cargar();
+  };
+
+  // ── ✉️ Nuevo mensaje a cualquier alumno ──
+  let nmDestId = null, nmTimer = null;
+  window.nmBuscar = function(q){
+    clearTimeout(nmTimer);
+    q = (q || '').trim();
+    nmDestId = null; $('nmElegido').style.display = 'none';
+    if (q.length < 2){ $('nmResultados').style.display = 'none'; return; }
+    nmTimer = setTimeout(async () => {
+      const { data } = await supa.from('personas')
+        .select('id, nombre').ilike('nombre', '%' + q + '%')
+        .neq('es_prueba', true).order('nombre').limit(8);
+      const res = $('nmResultados');
+      if (!data || !data.length){ res.style.display = 'none'; return; }
+      res.innerHTML = data.map(p =>
+        `<div onclick="nmElegir(${p.id}, '${esc(p.nombre).replace(/'/g, '&#39;')}')"
+          style="padding:9px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid #f1f5f9"
+          onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background='#fff'">
+          ${esc(p.nombre)} <span style="color:#94a3b8;font-size:11.5px">#${p.id}</span></div>`).join('');
+      res.style.display = 'block';
+    }, 250);
+  };
+  window.nmElegir = function(id, nombre){
+    nmDestId = id;
+    $('nmBusca').value = nombre;
+    $('nmResultados').style.display = 'none';
+    const el = $('nmElegido'); el.textContent = '→ Para: ' + nombre + ' (#' + id + ')'; el.style.display = 'block';
+  };
+  window.nmMostrarArchivos = function(){
+    const fs = $('nmArchivos').files;
+    $('nmListaArch').textContent = fs.length ? [...fs].map(f => f.name).join(' · ') : '';
+  };
+  window.nmEnviar = async function(btn){
+    const txt = ($('nmTexto').value || '').trim();
+    const archivos = [...($('nmArchivos').files || [])];
+    if (!nmDestId){ toast('Elegí al alumno de la lista'); return; }
+    if (!txt && !archivos.length){ toast('Escribí algo o adjuntá un archivo'); return; }
+    btn.disabled = true; btn.textContent = archivos.length ? 'Subiendo…' : 'Enviando…';
+    try {
+      const { data: nuevo, error } = await supa.from('mensajes_equipo').insert({
+        autor_persona_id: miId,
+        autor_nombre: miNombre,
+        destinatario_persona_id: nmDestId,
+        contenido: txt || '(adjunto)',
+        enviado_desde: 'equipo'
+      }).select('id').single();
+      if (error) throw error;
+      for (const f of archivos){
+        const safe = f.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `${nuevo.id}/${Date.now()}_${safe}`;
+        const { error: upErr } = await supa.storage.from('mensajes-adjuntos').upload(path, f, {
+          contentType: f.type || 'application/octet-stream', upsert: false });
+        if (upErr) throw upErr;
+        const { error: insErr } = await supa.from('mensajes_adjuntos').insert({
+          mensaje_id: nuevo.id, storage_path: path, nombre_original: f.name,
+          tipo_mime: f.type || null, tamano_bytes: f.size });
+        if (insErr) throw insErr;
+      }
+      toast('✅ Mensaje enviado — le llega a su Mi Espacio');
+      $('nmTexto').value = ''; $('nmArchivos').value = ''; $('nmListaArch').textContent = '';
+      $('nmBusca').value = ''; $('nmElegido').style.display = 'none'; nmDestId = null;
+      await cargar();
+    } catch(e){
+      toast('❌ ' + (e.message || 'No se pudo enviar'));
+    } finally {
+      btn.disabled = false; btn.textContent = 'Enviar';
+    }
   };
 
   boot();
