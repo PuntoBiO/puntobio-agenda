@@ -117,19 +117,24 @@
   }
 
   async function cargar(){
-    // 1) Mensajes DE alumnos (RLS: cada uno recibe solo lo suyo; Lu/Jime todo)
-    const { data: deAlumnas, error } = await supa.from('mensajes_equipo')
-      .select('*').eq('enviado_desde', 'mi_espacio').order('creado_en', { ascending: true });
-    if (error){ $('lista').innerHTML = `<div class="empty">❌ ${esc(error.message)}</div>`; return; }
-    const alumnaIds = [...new Set((deAlumnas||[]).map(m => m.autor_persona_id))];
-    if (!alumnaIds.length){ $('lista').innerHTML = '<div class="empty">📭 Todavía no hay mensajes de alumnos.</div>'; return; }
+    // Quiénes son equipo (para separar: mensaje a un ALUMNO vs mensajería interna)
+    const { data: eqRows } = await supa.from('personas').select('id').eq('es_equipo', true);
+    const equipoIds = new Set((eqRows||[]).map(p => p.id));
 
-    // 2) Respuestas del equipo a esas alumnas (RLS: las mías; Lu/Jime todas)
-    const { data: resps } = await supa.from('mensajes_equipo')
-      .select('*').in('destinatario_persona_id', alumnaIds).neq('enviado_desde', 'mi_espacio')
+    // Todos los mensajes con destinatario que YO puedo ver (RLS escopa:
+    // cada uno lo suyo; Lu/Jime todo). De acá salen los DOS lados del hilo:
+    //  · de alumnos (enviado_desde='mi_espacio')
+    //  · del staff HACIA un alumno (destinatario que no es del equipo)
+    // La mensajería interna (staff→staff) queda AFUERA de este módulo.
+    const { data: todosMsj, error } = await supa.from('mensajes_equipo')
+      .select('*').not('destinatario_persona_id', 'is', null)
       .order('creado_en', { ascending: true });
+    if (error){ $('lista').innerHTML = `<div class="empty">❌ ${esc(error.message)}</div>`; return; }
+    const deAlumnas = (todosMsj||[]).filter(m => m.enviado_desde === 'mi_espacio');
+    const resps = (todosMsj||[]).filter(m => m.enviado_desde !== 'mi_espacio' && !equipoIds.has(m.destinatario_persona_id));
+    if (!deAlumnas.length && !resps.length){ $('lista').innerHTML = '<div class="empty">📭 Todavía no hay mensajes con alumnos.</div>'; return; }
 
-    const todos = [...(deAlumnas||[]), ...(resps||[])];
+    const todos = [...deAlumnas, ...resps];
 
     // 3) Personas (alumnas + profes que aparecen) con fotos firmadas
     const perIds = [...new Set(todos.flatMap(m => [m.autor_persona_id, m.destinatario_persona_id]).filter(Boolean))];
@@ -194,7 +199,7 @@
     // Conversaciones por alumna, la de actividad más reciente arriba
     const conv = {};
     deAlumnas.forEach(m => { (conv[m.autor_persona_id] = conv[m.autor_persona_id] || []).push(m); });
-    resps.forEach(m => { if (conv[m.destinatario_persona_id]) conv[m.destinatario_persona_id].push(m); });
+    resps.forEach(m => { (conv[m.destinatario_persona_id] = conv[m.destinatario_persona_id] || []).push(m); });
     const orden = Object.keys(conv).sort((a,b) => {
       const ua = Math.max(...conv[a].map(m => +new Date(m.creado_en)));
       const ub = Math.max(...conv[b].map(m => +new Date(m.creado_en)));
