@@ -1855,6 +1855,7 @@ async function cargarEspacio(per){
     bloqueBitacora(bitacoraAlumno),
     // Mensajes con el equipo, pegado a "Cómo me fui sintiendo"
     bloqueMensajesEquipo(),
+    bloqueClasesCasa(),
     // 2) Bloque del plan + plata (recibos pegados al plan)
     bloquePlan(inscripcion),
     (inscBonif && (!misPagos || !misPagos.length) ? '' : bloquePagos(misPagos)),
@@ -3868,6 +3869,81 @@ function bloqueMensajesEquipo(){
   `;
 }
 
+// ============================================================
+// BLOQUE: 🏠 ENTRENAMIENTO EN CASA (clases que manda el centro)
+// Debajo de Mensajes con el equipo. Globito rojo con las no vistas;
+// al abrir la tarjeta se marcan vistas y el globito se apaga.
+// ============================================================
+function bloqueClasesCasa(){
+  return `
+    <details class="card reveal d4 col" id="pb-clases-card" style="border:2px solid #16a34a" ontoggle="if(this.open) pbClasesAbiertas()">
+      <summary class="col-sum">
+        <h2 style="margin:0"><span class="dot"></span>🏠 Entrenamiento en casa</h2>
+        <span id="pb-clases-badge" class="col-cont"></span>
+        <span class="col-right"><span class="col-chev">›</span></span>
+      </summary>
+      <div class="col-body"><div id="pb-clases-body" style="display:flex;flex-direction:column;gap:10px"></div></div>
+    </details>
+  `;
+}
+
+function _renderBadgeClases(){
+  const b = document.getElementById('pb-clases-badge');
+  if(!b) return;
+  b.innerHTML = _clasesNoVistas > 0
+    ? ` <span style="display:inline-block;background:#dc2626;color:#fff;font-size:12px;font-weight:800;padding:3px 10px;border-radius:12px;margin-left:6px;box-shadow:0 2px 6px rgba(220,38,38,.35);animation:pulse-rojo 1.8s infinite">🔴 ${_clasesNoVistas} sin ver</span>`
+    : '';
+}
+
+function _renderClasesCasa(){
+  const cont = document.getElementById('pb-clases-body');
+  if(!cont) return;
+  const yo = window._personaActual;
+  if(!_misClasesCasa.length){
+    cont.innerHTML = '<p class="empty" style="margin:0">Cuando el centro te mande una clase o rutina para hacer en casa, la vas a ver acá. 💪</p>';
+    return;
+  }
+  cont.innerHTML = _misClasesCasa.map(m => {
+    const nueva = m.destinatario_persona_id === yo.id && !_misLecturas.has(m.id);
+    const adj = (_adjPorMsj[m.id] || []);
+    const adjHtml = adj.length ? `<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">` + adj.map(a => {
+      const mime = a.tipo_mime || '';
+      if (mime.startsWith('audio/')) return `<audio controls data-path="${_escHtmlPB(a.storage_path)}" style="width:100%;max-width:380px;height:34px"></audio>`;
+      return `<a href="#" data-path="${_escHtmlPB(a.storage_path)}" onclick="event.preventDefault();pbAbrirAdj(this.getAttribute('data-path'))" style="color:#2563eb;font-weight:700;font-size:12.5px;text-decoration:none">📎 ${_escHtmlPB(a.nombre_original || 'archivo')}</a>`;
+    }).join('') + `</div>` : '';
+    return `<div style="background:${nueva ? 'linear-gradient(90deg,#dcfce7 0%,#fff 15%)' : '#f8fafc'};border:1px solid #e2e8f0;border-left:4px solid #16a34a;border-radius:10px;padding:11px 13px">
+      <div style="font-size:11.5px;color:#64748b;font-weight:700;margin-bottom:4px">${_escHtmlPB(new Date(m.creado_en).toLocaleDateString('es-AR',{day:'numeric',month:'long'}))}${nueva ? ' <span style="background:#dc2626;color:#fff;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-left:4px">NUEVA</span>' : ''}</div>
+      <div style="font-size:13.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word">${_linkifyPB(_escHtmlPB(m.contenido))}</div>
+      ${adjHtml}
+    </div>`;
+  }).join('');
+}
+
+// Al abrir la tarjeta: resolver los audios (URL firmada) y marcar las clases como vistas
+window.pbClasesAbiertas = async function(){
+  const cont = document.getElementById('pb-clases-body');
+  if (cont){
+    for (const el of cont.querySelectorAll('audio[data-path]')){
+      if (el.src) continue;
+      const u = await _pbObtenerUrl(el.getAttribute('data-path'));
+      if (u) el.src = u;
+    }
+  }
+  const yo = window._personaActual;
+  if(!yo || !yo.id) return;
+  const sinVer = _misClasesCasa
+    .filter(m => m.destinatario_persona_id === yo.id && !_misLecturas.has(m.id))
+    .map(m => ({ mensaje_id: m.id, persona_id: yo.id }));
+  if(!sinVer.length) return;
+  try {
+    await sb.from('mensajes_lecturas').upsert(sinVer, { onConflict: 'mensaje_id,persona_id', ignoreDuplicates: true });
+    sinVer.forEach(r => _misLecturas.add(r.mensaje_id));
+    _clasesNoVistas = 0;
+    _renderBadgeClases();
+    _renderClasesCasa();
+  } catch(e){ console.warn('No se pudieron marcar las clases vistas:', e); }
+};
+
 // Llama esto después de cargar datos: pinta un preview de las últimas conversaciones
 function _renderPreviewMensajes(){
   const cont = document.getElementById('pb-msj-preview');
@@ -3932,6 +4008,8 @@ function _renderPreviewMensajes(){
 
 let _equipoMsj = null;       // lista de profes del equipo (cache)
 let _misMensajes = [];       // mensajes míos (autor o destinatario)
+let _misClasesCasa = [];     // 🏠 clases de Entrenamiento en casa (separadas del buzón)
+let _clasesNoVistas = 0;
 let _misLecturas = new Set();
 let _msjNoLeidos = 0;
 let _adminsIds = new Set();  // ids de personas con admin_total — sus mensajes se ven en rojo
@@ -4020,6 +4098,18 @@ async function _cargarDatosMensajes(){
         _adjPorMsj[a.mensaje_id].push(a);
       });
     }
+    // 🏠 ENTRENAMIENTO EN CASA (19/7/26): las clases enviadas por el centro se
+    // separan del buzón — viven en su propia tarjeta, con su propio globito.
+    const _esClaseCasa = (m) => String(m.contenido || '').startsWith('🏠 ENTRENAMIENTO EN CASA');
+    _misClasesCasa = _misMensajes.filter(_esClaseCasa)
+      .sort((a, b) => new Date(b.creado_en) - new Date(a.creado_en));
+    _misMensajes = _misMensajes.filter(m => !_esClaseCasa(m));
+    _clasesNoVistas = _misClasesCasa.filter(m =>
+      m.destinatario_persona_id === yo.id && !_misLecturas.has(m.id)
+    ).length;
+    _renderBadgeClases();
+    _renderClasesCasa();
+
     // Contar no leídos: SOLO los dirigidos a mí personalmente (no anuncios generales)
     // Mi Espacio es vista de alumna, no de staff
     _msjNoLeidos = _misMensajes.filter(m =>
