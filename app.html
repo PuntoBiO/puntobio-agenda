@@ -1253,6 +1253,8 @@ async function init() {
 
   // Badge dinámico del sidebar Morosos TF (se calcula en vivo, no hardcoded)
   actualizarBadgeMorososTF()
+  // Badge de Mensajes de alumnos (solo los dirigidos a MÍ, sin leer)
+  actualizarBadgeMsjAlumnos()
   // Badge de Cumpleaños: saludos de WhatsApp pendientes (hoy + atrasados 7 días)
   actualizarBadgeCumple()
   // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
@@ -1352,6 +1354,31 @@ async function contarMorososTF() {
     return null
   }
 }
+
+// 📥 Badge de Mensajes de alumnos: cuenta SOLO los mensajes de Mi Espacio
+// dirigidos a MÍ que todavía no leí. (La lectura sigilosa de Lu/Jime sobre
+// mensajes ajenos no toca lecturas, así que este contador nunca delata nada.)
+async function actualizarBadgeMsjAlumnos() {
+  const badge = document.getElementById('badge-msj-alumnos')
+  if (!badge) return
+  try {
+    const { data: miId } = await supabase.rpc('mi_persona_id')
+    if (!miId) { badge.style.display = 'none'; return }
+    const { data: msjs } = await supabase.from('mensajes_equipo')
+      .select('id').eq('enviado_desde', 'mi_espacio').eq('destinatario_persona_id', miId)
+    const ids = (msjs || []).map(m => m.id)
+    let noLeidos = ids.length
+    if (ids.length) {
+      const { data: lec } = await supabase.from('mensajes_lecturas')
+        .select('mensaje_id').eq('persona_id', miId).in('mensaje_id', ids)
+      const leidos = new Set((lec || []).map(l => l.mensaje_id))
+      noLeidos = ids.filter(i => !leidos.has(i)).length
+    }
+    if (noLeidos > 0) { badge.textContent = noLeidos; badge.style.display = 'inline-flex' }
+    else badge.style.display = 'none'
+  } catch (e) { /* sin badge no pasa nada */ }
+}
+window.actualizarBadgeMsjAlumnos = actualizarBadgeMsjAlumnos
 
 async function actualizarBadgeMorososTF() {
   if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
@@ -1647,8 +1674,14 @@ function buildNav() {
     if (!esProfe) {
       areas.push({ icon: '💵', label: 'Caja TF', id: 'caja-tf', sub: true })
       areas.push({ icon: '🔔', label: 'Morosos TF', id: 'morosos-tf', sub: true, badgeId: 'badge-morosos-tf' })
+      // 📥 Buzón de ALUMNOS (19/7/26, pedido de Lu): separado de la mensajería
+      // interna. RLS ya escopa: cada uno ve solo lo dirigido a él; Lu/Jime todo.
+      areas.push({ icon: '📥', label: 'Mensajes alumnos', id: 'mensajes-alumnos', sub: true, badgeId: 'badge-msj-alumnos' })
       areas.push({ icon: '📊', label: 'Altas y Bajas TF', id: 'altas-bajas-tf', sub: true })
       areas.push({ icon: '📋', label: 'Ausentes TF', id: 'ausentes-tf', sub: true })
+    } else {
+      // Los profes también tienen su buzón de alumnos (es SU bandeja de entrada).
+      areas.push({ icon: '📥', label: 'Mensajes alumnos', id: 'mensajes-alumnos', sub: true, badgeId: 'badge-msj-alumnos' })
     }
     // Alertas Paciente: cómo se vienen sintiendo (dolor/Borg desde Mi Espacio).
     // Va FUERA del bloque !esProfe a propósito, así Santi/Lean/Lauti también lo ven.
@@ -1852,6 +1885,7 @@ window.irA = function(modulo) {
   else if (modulo === 'vald') renderVALD()
   else if (modulo === 'moplex') renderMoplex()
   else if (modulo === 'mensajes') renderMensajes()
+  else if (modulo === 'mensajes-alumnos') renderMensajesAlumnos()
   else if (modulo === 'tratamientos') renderTratamientosHub()
   else if (modulo === 'agenda') renderAgenda()
   else if (modulo === 'auditoria') renderAuditoria()
@@ -1880,6 +1914,9 @@ window.irA = function(modulo) {
 window.addEventListener('message', (ev) => {
   const data = ev.data || {};
   // Refrescar badge de morosos cuando un iframe avisa que cambió algo (cobro, baja, etc.)
+  if (data.tipo === 'REFRESCAR_BADGE_MSJ_ALUMNOS') {
+    actualizarBadgeMsjAlumnos()
+  }
   if (data.tipo === 'REFRESCAR_BADGE_MOROSOS') {
     actualizarBadgeMorososTF();
     return;
@@ -3076,6 +3113,14 @@ function renderAumentos() {
 // ======================
 // MODULO: MENSAJES DEL EQUIPO (muro común para el staff)
 // ======================
+function renderMensajesAlumnos() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.add('module-embed')
+  contentEl.innerHTML = `
+    <iframe src="mensajes_alumnos.html" class="module-iframe-tab" title="Mensajes de alumnos"></iframe>
+  `
+}
+
 function renderMensajes() {
   const contentEl = document.getElementById('content')
   contentEl.classList.add('module-embed')

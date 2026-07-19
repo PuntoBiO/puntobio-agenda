@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mensajes de alumnos · PuntoBiO</title>
+<style>
+  :root{
+    --bg:#f6f8fb; --panel:#ffffff; --border:#e2e8f0; --txt:#0f172a; --sub:#64748b;
+    --azul:#2563eb; --verde:#16a34a; --amarillo:#f59e0b; --rojo:#dc2626;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt);padding:22px 26px}
+  h1{font-size:22px;color:var(--azul);display:flex;align-items:center;gap:8px}
+  .sub{font-size:13px;color:var(--sub);margin:2px 0 16px}
+  .banner-sup{background:#fef9c3;border:1.5px solid #f59e0b;border-radius:10px;padding:10px 14px;font-size:13px;color:#713f12;margin-bottom:16px}
+  .conv{background:var(--panel);border:1px solid var(--border);border-radius:14px;margin-bottom:14px;overflow:hidden}
+  .conv-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);background:#f8fafc}
+  .conv-head img,.conv-head .ini{width:36px;height:36px;border-radius:50%;object-fit:cover;flex:none}
+  .conv-head .ini{background:#dbeafe;color:#1d4ed8;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px}
+  .conv-head .nom{font-weight:800;font-size:15px}
+  .conv-head .pid{font-size:12px;color:var(--sub);font-weight:600}
+  .chip-nuevo{background:var(--rojo);color:#fff;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:800;margin-left:auto}
+  .msj{padding:11px 16px;border-bottom:1px solid #f1f5f9;font-size:13.5px;line-height:1.55}
+  .msj:last-of-type{border-bottom:none}
+  .msj .meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);font-weight:700;margin-bottom:3px}
+  .msj.deAlumna{border-left:4px solid var(--azul)}
+  .msj.deAlumna.sinLeer{background:#eff6ff}
+  .msj.respuesta{border-left:4px solid var(--verde);background:#f7fdf9}
+  .tag-para{background:#e0e7ff;color:#3730a3;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:800}
+  .tag-sinleer{background:#fee2e2;color:#b91c1c;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:800}
+  .adj{margin-top:6px;display:flex;flex-direction:column;gap:6px}
+  .adj a{color:var(--azul);font-weight:700;font-size:12.5px;text-decoration:none}
+  .adj audio{width:100%;max-width:380px;height:34px}
+  .resp-box{display:flex;gap:8px;padding:10px 16px;background:#f8fafc;border-top:1px solid var(--border)}
+  .resp-box textarea{flex:1;border:1px solid #cbd5e1;border-radius:9px;padding:8px 10px;font-family:inherit;font-size:13px;resize:vertical;min-height:38px;background:#fff}
+  .resp-box button{background:var(--verde);color:#fff;border:none;border-radius:9px;padding:0 18px;font-weight:800;font-size:13px;cursor:pointer}
+  .resp-box button:disabled{opacity:.6}
+  .empty{background:var(--panel);border:1px dashed var(--border);border-radius:14px;padding:36px;text-align:center;color:var(--sub);font-size:14px}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:700;display:none;z-index:50}
+</style>
+</head>
+<body>
+  <h1>📥 Mensajes de alumnos</h1>
+  <div class="sub">Lo que los alumnos escriben desde Mi Espacio — separado de la mensajería interna del equipo.</div>
+  <div id="banner"></div>
+  <div id="lista"><div class="empty">⏳ Cargando…</div></div>
+  <div id="barraBorrar" style="display:none;position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;border-radius:12px;padding:10px 16px;align-items:center;gap:12px;z-index:40;box-shadow:0 8px 24px rgba(0,0,0,.25)">
+    <span style="font-size:13px;font-weight:700"><span id="cntSel">0</span> seleccionado(s)</span>
+    <button onclick="borrarSeleccionados(this)" style="background:#dc2626;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:800;font-size:13px;cursor:pointer">🗑️ Borrar seleccionados</button>
+  </div>
+  <div class="toast" id="toast"></div>
+
+<script type="module">
+  import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+  const supa = createClient('https://bqpjtoiictnzcasxfucf.supabase.co', 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi', { auth: { lock: (name, acquireTimeout, fn) => fn() } });
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const iniDe = (n) => (String(n||'?').trim().split(/\s+/).slice(0,2).map(p=>p[0]||'').join('') || '?').toUpperCase();
+  const pila = (n) => { const p = String(n||'').trim().split(/\s+/)[0] || ''; return p ? p[0].toUpperCase() + p.slice(1).toLowerCase() : ''; };
+  const fmtF = (iso) => { if(!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('es-AR',{day:'numeric',month:'numeric',year:'numeric'}) + ' · ' + d.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'}); };
+  const toast = (t) => { const el=$('toast'); el.textContent=t; el.style.display='block'; setTimeout(()=>el.style.display='none', 2200); };
+
+  let miId = null, miNombre = '', soySupervisora = false;
+  let mapPer = {};          // persona_id -> {nombre, foto_perfil}
+  let urlFoto = {};         // path -> signedUrl (fotos-perfil)
+  let adjPorMsj = {};       // mensaje_id -> [adjuntos con url firmada]
+  let misLecturas = new Set();
+  let lecPorMsj = {};       // mensaje_id -> Set(persona_id que lo leyeron)
+  let seleccion = new Set();  // ids marcados para borrar
+
+  async function boot(){
+    const { data: u } = await supa.auth.getUser();
+    if (!u || !u.user){ $('lista').innerHTML = '<div class="empty">Iniciá sesión desde el sistema.</div>'; return; }
+    const { data: pid } = await supa.rpc('mi_persona_id');
+    miId = pid || null;
+    if (miId) {
+      const { data: yo } = await supa.from('personas').select('nombre').eq('id', miId).single();
+      miNombre = (yo && yo.nombre) || '';
+      const { data: perm } = await supa.from('permisos_equipo').select('admin_total, ve_todos_mensajes').eq('persona_id', miId).maybeSingle();
+      soySupervisora = !!(perm && (perm.admin_total || perm.ve_todos_mensajes));
+    }
+    if (soySupervisora) {
+      $('banner').innerHTML = `<div class="banner-sup">👑 <b>Vista supervisora:</b> ves los mensajes de todo el equipo. Solo se marca como leído lo que va dirigido a vos — lo del resto queda <b>sin leer</b> para su destinatario.</div>`;
+    }
+    await cargar();
+  }
+
+  async function cargar(){
+    // 1) Mensajes DE alumnos (RLS: cada uno recibe solo lo suyo; Lu/Jime todo)
+    const { data: deAlumnas, error } = await supa.from('mensajes_equipo')
+      .select('*').eq('enviado_desde', 'mi_espacio').order('creado_en', { ascending: true });
+    if (error){ $('lista').innerHTML = `<div class="empty">❌ ${esc(error.message)}</div>`; return; }
+    const alumnaIds = [...new Set((deAlumnas||[]).map(m => m.autor_persona_id))];
+    if (!alumnaIds.length){ $('lista').innerHTML = '<div class="empty">📭 Todavía no hay mensajes de alumnos.</div>'; return; }
+
+    // 2) Respuestas del equipo a esas alumnas (RLS: las mías; Lu/Jime todas)
+    const { data: resps } = await supa.from('mensajes_equipo')
+      .select('*').in('destinatario_persona_id', alumnaIds).neq('enviado_desde', 'mi_espacio')
+      .order('creado_en', { ascending: true });
+
+    const todos = [...(deAlumnas||[]), ...(resps||[])];
+
+    // 3) Personas (alumnas + profes que aparecen) con fotos firmadas
+    const perIds = [...new Set(todos.flatMap(m => [m.autor_persona_id, m.destinatario_persona_id]).filter(Boolean))];
+    const { data: pers } = await supa.from('personas').select('id, nombre, foto_perfil').in('id', perIds);
+    mapPer = {}; (pers||[]).forEach(p => { mapPer[p.id] = p; });
+    const paths = [...new Set((pers||[]).map(p => p.foto_perfil).filter(Boolean))];
+    urlFoto = {};
+    if (paths.length){
+      try { const { data: f } = await supa.storage.from('fotos-perfil').createSignedUrls(paths, 60*60);
+        (f||[]).forEach(x => { if (x && x.signedUrl && x.path) urlFoto[x.path] = x.signedUrl; }); } catch(e){}
+    }
+
+    // 4) Adjuntos (audios y archivos) con URL firmada
+    const msjIds = todos.map(m => m.id);
+    adjPorMsj = {};
+    if (msjIds.length){
+      const { data: adj } = await supa.from('mensajes_adjuntos').select('*').in('mensaje_id', msjIds);
+      const rutas = (adj||[]).map(a => a.storage_path).filter(Boolean);
+      let urlAdj = {};
+      if (rutas.length){
+        try { const { data: f } = await supa.storage.from('mensajes-adjuntos').createSignedUrls(rutas, 60*60);
+          (f||[]).forEach(x => { if (x && x.signedUrl && x.path) urlAdj[x.path] = x.signedUrl; }); } catch(e){}
+      }
+      (adj||[]).forEach(a => {
+        if (!adjPorMsj[a.mensaje_id]) adjPorMsj[a.mensaje_id] = [];
+        adjPorMsj[a.mensaje_id].push({ ...a, url: urlAdj[a.storage_path] || null });
+      });
+    }
+
+    // 5) Lecturas: TODAS las visibles según permisos (supervisoras ven todas;
+    // cada profe las de sus propios mensajes + las suyas). Sirven para el
+    // resaltado de "nuevo" Y para los chips ✓ Leído / Sin leer.
+    const { data: lec } = await supa.from('mensajes_lecturas').select('mensaje_id, persona_id').in('mensaje_id', msjIds);
+    lecPorMsj = {};
+    (lec||[]).forEach(l => { (lecPorMsj[l.mensaje_id] = lecPorMsj[l.mensaje_id] || new Set()).add(l.persona_id); });
+    misLecturas = new Set((lec||[]).filter(l => l.persona_id === miId).map(l => l.mensaje_id));
+
+    render(deAlumnas || [], resps || []);
+    marcarLeidosMios(deAlumnas || []);
+  }
+
+  function avatarDe(pid){
+    const p = mapPer[pid] || {};
+    const url = p.foto_perfil ? urlFoto[p.foto_perfil] : null;
+    return url
+      ? `<img src="${esc(url)}" alt="">`
+      : `<span class="ini">${esc(iniDe(p.nombre))}</span>`;
+  }
+
+  function adjHtml(msjId){
+    const lista = adjPorMsj[msjId] || [];
+    if (!lista.length) return '';
+    return `<div class="adj">` + lista.map(a => {
+      const mime = a.tipo_mime || '';
+      if (a.url && mime.startsWith('audio/')) return `<audio controls src="${esc(a.url)}"></audio>`;
+      if (a.url) return `<a href="${esc(a.url)}" target="_blank" rel="noopener">📎 ${esc(a.nombre_original || 'archivo')}</a>`;
+      return `<span style="font-size:12px;color:#94a3b8">📎 ${esc(a.nombre_original || 'archivo')} (no disponible)</span>`;
+    }).join('') + `</div>`;
+  }
+
+  function render(deAlumnas, resps){
+    // Conversaciones por alumna, la de actividad más reciente arriba
+    const conv = {};
+    deAlumnas.forEach(m => { (conv[m.autor_persona_id] = conv[m.autor_persona_id] || []).push(m); });
+    resps.forEach(m => { if (conv[m.destinatario_persona_id]) conv[m.destinatario_persona_id].push(m); });
+    const orden = Object.keys(conv).sort((a,b) => {
+      const ua = Math.max(...conv[a].map(m => +new Date(m.creado_en)));
+      const ub = Math.max(...conv[b].map(m => +new Date(m.creado_en)));
+      return ub - ua;
+    });
+
+    let html = '';
+    orden.forEach(aid => {
+      const per = mapPer[aid] || {};
+      const msjs = conv[aid].sort((x,y) => new Date(x.creado_en) - new Date(y.creado_en));
+      const nuevosMios = msjs.filter(m => m.enviado_desde === 'mi_espacio' && m.destinatario_persona_id === miId && !misLecturas.has(m.id)).length;
+      const filas = msjs.map(m => {
+        const esDeAlumna = m.enviado_desde === 'mi_espacio';
+        // Chip ✓ Leído / Sin leer = estado del DESTINATARIO del mensaje.
+        // Lo ve la supervisora en todos; el resto, en lo propio.
+        const destId = m.destinatario_persona_id;
+        const loLeyoDest = !!(lecPorMsj[m.id] && lecPorMsj[m.id].has(destId));
+        const puedoVerEstado = soySupervisora || m.autor_persona_id === miId || destId === miId;
+        const chipLeido = !puedoVerEstado ? '' : (loLeyoDest
+          ? `<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:800">✓ Leído</span>`
+          : `<span style="background:#f1f5f9;color:#64748b;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:800">○ Sin leer</span>`);
+        // Casilla de borrado múltiple: supervisora en todos; el resto en lo suyo
+        const puedoBorrar = soySupervisora || m.autor_persona_id === miId;
+        const check = puedoBorrar ? `<input type="checkbox" class="sel-msj" data-id="${m.id}" onchange="toggleSel(${m.id}, this.checked)" style="width:15px;height:15px;cursor:pointer">` : '';
+        if (esDeAlumna){
+          const dest = mapPer[destId] || {};
+          const paraMi = destId === miId;
+          const sinLeerMio = paraMi && !misLecturas.has(m.id);
+          // Vista supervisora: aviso honesto de que a ese mensaje NO se lo marca leído
+          const tagSup = (!paraMi && soySupervisora) ? `<span class="tag-sinleer" title="Al leerlo desde acá NO se marca como leído: su destinatario no se entera">🕵️ tu lectura no cuenta</span>` : '';
+          return `<div class="msj deAlumna${sinLeerMio ? ' sinLeer' : ''}">
+            <div class="meta">${check} ${esc(pila(per.nombre))} <span class="tag-para">→ ${esc(pila(dest.nombre) || '¿?')}</span> ${chipLeido} ${tagSup} <span style="margin-left:auto">${fmtF(m.creado_en)}</span></div>
+            <div>${esc(m.contenido)}</div>${adjHtml(m.id)}
+          </div>`;
+        } else {
+          const aut = mapPer[m.autor_persona_id] || {};
+          return `<div class="msj respuesta">
+            <div class="meta">${check} ↩️ ${esc(pila(aut.nombre) || 'Equipo')} respondió ${chipLeido} <span style="margin-left:auto">${fmtF(m.creado_en)}</span></div>
+            <div>${esc(m.contenido)}</div>${adjHtml(m.id)}
+          </div>`;
+        }
+      }).join('');
+      html += `<div class="conv">
+        <div class="conv-head">${avatarDe(aid)}
+          <div><div class="nom">${esc(per.nombre || ('Persona #' + aid))}</div></div>
+          <span class="pid">#${esc(aid)}</span>
+          ${nuevosMios ? `<span class="chip-nuevo">${nuevosMios} nuevo${nuevosMios>1?'s':''}</span>` : ''}
+        </div>
+        ${filas}
+        <div class="resp-box">
+          <textarea id="resp-${esc(aid)}" placeholder="Responderle a ${esc(pila(per.nombre))}… (le llega a su Mi Espacio)"></textarea>
+          <button onclick="responder(${Number(aid)}, this)">Enviar</button>
+        </div>
+      </div>`;
+    });
+    $('lista').innerHTML = html || '<div class="empty">📭 Todavía no hay mensajes de alumnos.</div>';
+  }
+
+  // 🕵️ LECTURA SIGILOSA: SOLO se marcan leídos los mensajes dirigidos A MÍ.
+  // Si soy supervisora y leo mensajes ajenos, NO se crea la lectura: para su
+  // destinatario (y para el alumno) siguen figurando como sin leer.
+  async function marcarLeidosMios(deAlumnas){
+    const pendientes = deAlumnas.filter(m => m.destinatario_persona_id === miId && !misLecturas.has(m.id));
+    if (!pendientes.length) return;
+    try {
+      await supa.from('mensajes_lecturas').insert(pendientes.map(m => ({ mensaje_id: m.id, persona_id: miId })));
+      pendientes.forEach(m => misLecturas.add(m.id));
+      try { window.parent && window.parent.postMessage({ tipo: 'REFRESCAR_BADGE_MSJ_ALUMNOS' }, '*'); } catch(e){}
+    } catch(e){ /* si falla, quedarán como nuevos: inofensivo */ }
+  }
+
+  // ── Borrado múltiple ──
+  window.toggleSel = function(id, on){
+    if (on) seleccion.add(id); else seleccion.delete(id);
+    const barra = $('barraBorrar');
+    if (seleccion.size){ barra.style.display='flex'; $('cntSel').textContent = seleccion.size; }
+    else barra.style.display='none';
+  };
+  window.borrarSeleccionados = async function(btn){
+    if (!seleccion.size) return;
+    if (!confirm(`¿Borrar ${seleccion.size} mensaje(s)? Esto no se puede deshacer.`)) return;
+    btn.disabled = true; btn.textContent = 'Borrando…';
+    const ids = [...seleccion];
+    try {
+      // Adjuntos primero (filas + archivos del storage, best-effort)
+      const { data: adj } = await supa.from('mensajes_adjuntos').select('id, storage_path').in('mensaje_id', ids);
+      if (adj && adj.length){
+        try { await supa.storage.from('mensajes-adjuntos').remove(adj.map(a => a.storage_path).filter(Boolean)); } catch(e){}
+        await supa.from('mensajes_adjuntos').delete().in('mensaje_id', ids);
+      }
+      // Lecturas asociadas (si la política no deja, no rompe: quedan huérfanas inocuas)
+      try { await supa.from('mensajes_lecturas').delete().in('mensaje_id', ids); } catch(e){}
+      const { error } = await supa.from('mensajes_equipo').delete().in('id', ids);
+      if (error) throw error;
+      toast(`🗑️ ${ids.length} mensaje(s) borrados`);
+      seleccion = new Set(); $('barraBorrar').style.display='none';
+      try { window.parent && window.parent.postMessage({ tipo: 'REFRESCAR_BADGE_MSJ_ALUMNOS' }, '*'); } catch(e){}
+      await cargar();
+    } catch(e){
+      toast('❌ ' + (e.message || 'No se pudo borrar'));
+    } finally {
+      btn.disabled = false; btn.textContent = '🗑️ Borrar seleccionados';
+    }
+  };
+
+  window.responder = async function(alumnaId, btn){
+    const ta = $('resp-' + alumnaId);
+    const txt = (ta && ta.value || '').trim();
+    if (!txt){ toast('Escribí la respuesta primero'); return; }
+    btn.disabled = true; btn.textContent = 'Enviando…';
+    const { error } = await supa.from('mensajes_equipo').insert({
+      autor_persona_id: miId,
+      autor_nombre: miNombre,
+      destinatario_persona_id: alumnaId,
+      contenido: txt,
+      enviado_desde: 'equipo'
+    });
+    btn.disabled = false; btn.textContent = 'Enviar';
+    if (error){ toast('❌ ' + error.message); return; }
+    toast('✅ Respuesta enviada');
+    await cargar();
+  };
+
+  boot();
+</script>
+</body>
+</html>
