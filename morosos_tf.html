@@ -216,8 +216,7 @@
   const $ = (id) => document.getElementById(id);
   const fmt = (n) => '$' + Math.round(n).toLocaleString('es-AR');
 
-  let inscripciones = [], pagos = [], tarifario = {}, tarifarioMeta = {};
-  let descSorteo = new Set();   // 'persona_id|YYYY-MM' de ganadores del sorteo con 25% OFF
+  let inscripciones = [], ecPorInsc = {};   // ecPorInsc: fila de fn_estado_cuenta por inscripción
   // persona_id de quienes vinieron (presente) o avisaron su ausencia (ausente_just) en
   // los últimos 7 días. A estos NO se los da de baja automática → se les habilita el
   // botón de WhatsApp en Morosos para recordarles el pago. Al resto NO se le muestra.
@@ -243,20 +242,8 @@
     }
   }
 
-  // Precio (plan+actividad) para un MES dado (YYYY-MM), según el aumento programado.
-  function valorPlanMesKey(key, mes) {
-    let m = tarifarioMeta[key];
-    if (!m) {
-      // Fallback por plan (igual que administración): si la actividad no matchea
-      // exacto con el tarifario, buscamos el precio por el plan solo.
-      const planSolo = String(key).split('__')[0];
-      m = tarifarioMeta[planSolo];
-    }
-    if (!m) return 0;
-    const ref = (mes && mes.length === 7) ? mes + '-01' : new Date().toISOString().slice(0, 10);
-    if (m.desde && m.nuevo != null && ref >= m.desde) return m.nuevo;
-    return m.base;
-  }
+  // (Fase 1a pagos, 18/7/26: valorPlanMesKey se eliminó — el tarifario por mes,
+  // los aumentos programados y el sorteo viven ahora en fn_estado_cuenta.)
 
   function calcMesActual() {
     const hoy = new Date();
@@ -310,36 +297,19 @@
   async function cargarTodo() {
     await resolverPermisoTotal();
     $('tabla-wrap').innerHTML = '<div class="loading">Cargando...</div>';
-    const mesAnt = mesAnterior(mesActual);
-    const [insR, pagR, tarR, sorR] = await Promise.all([
-      supa.from('inscripciones_tf').select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso, pago_excepcion_hasta').eq('estado', 'ACTIVO').neq('plan', 'COD0BON'),
-      supa.from('pagos_tf').select('id, fecha, inscripcion_id, mes_imputado, importe, descuento_temporal, tipo_cobro, observaciones').in('mes_imputado', [mesActual, mesAnt]),
-      supa.from('tarifario_tf').select('plan, actividad, valor_lista, valor_nuevo, aumento_desde'),
-      // 🎰 Ganadores del sorteo de cumpleaños con premio 25% OFF en estos meses
-      supa.from('sorteos_cumple').select('persona_id, mes_descuento').eq('premio', 'DESCUENTO').in('mes_descuento', [mesActual, mesAnt])
-    ]);
-    descSorteo = new Set((sorR.data || []).map(s => s.persona_id + '|' + s.mes_descuento));
-    if (insR.error || pagR.error || tarR.error) {
-      $('tabla-wrap').innerHTML = '<div class="empty">❌ Error: ' + (insR.error?.message || pagR.error?.message || tarR.error?.message) + '</div>';
+    // FUENTE ÚNICA (Fase 1a pagos, 18/7/26): la calculadora local (pagos +
+    // tarifario + sorteos + calcularDeudaMes/clasificar) se reemplazó por
+    // fn_estado_cuenta(null, mes), que trae el reglamento completo ya resuelto
+    // desde la base. Acá solo quedan las inscripciones: hacen falta para
+    // efectivizar cambios programados, para el modal de cobro y para el contacto.
+    const { data: insData, error: insErr } = await supa.from('inscripciones_tf')
+      .select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso, pago_excepcion_hasta')
+      .eq('estado', 'ACTIVO').neq('plan', 'COD0BON');
+    if (insErr) {
+      $('tabla-wrap').innerHTML = '<div class="empty">❌ Error: ' + insErr.message + '</div>';
       return;
     }
-    inscripciones = insR.data || [];
-    pagos = pagR.data || [];
-    tarifario = {};
-    tarifarioMeta = {};
-    const _hoyTar = new Date().toISOString().slice(0, 10);
-    (tarR.data || []).forEach(t => {
-      const k = `${t.plan}__${t.actividad}`;
-      const base = Number(t.valor_lista) || 0;
-      const nuevo = (t.valor_nuevo != null) ? Number(t.valor_nuevo) : null;
-      const desde = t.aumento_desde || null;
-      const meta = { base, nuevo, desde };
-      tarifarioMeta[k] = meta;
-      // Fallback por plan: guardamos el precio también con la clave del plan solo
-      // (preferimos TERAPIA_FISICA si existe) para los casos donde la actividad no matchea.
-      if (tarifarioMeta[t.plan] == null || t.actividad === 'TERAPIA_FISICA') tarifarioMeta[t.plan] = meta;
-      tarifario[k] = valorPlanMesKey(k, mesActual); // precio del mes elegido (para mostrar)
-    });
+    inscripciones = insData || [];
 
     // === EFECTIVIZAR CAMBIOS DE PLAN PROGRAMADOS ===
     // Si un alumno tiene un cambio programado (plan_futuro + mes_aplica_plan) y ya llegó
@@ -348,6 +318,17 @@
     // La comparación es de strings YYYY-MM (ordena igual que cronológicamente).
     const mesHoy = calcMesActual();
     await efectivizarCambiosDePlan(mesHoy);
+
+    // Estado de cuenta de TODOS los activos según la fuente única, con el mes
+    // del selector. Se pide DESPUÉS de efectivizar, así la madre calcula con
+    // los planes ya al día.
+    const { data: ecData, error: ecErr } = await supa.rpc('fn_estado_cuenta', { p_mes: mesActual });
+    if (ecErr) {
+      $('tabla-wrap').innerHTML = '<div class="empty">❌ Error: ' + ecErr.message + '</div>';
+      return;
+    }
+    ecPorInsc = {};
+    (ecData || []).forEach(r => { ecPorInsc[r.inscripcion_id] = r; });
 
     const ids = [...new Set(inscripciones.map(i => i.persona_id))];
     if (ids.length) {
@@ -426,133 +407,52 @@
     }
   }
 
-  // Un pago se considera PARCIAL (deja saldo) si sus observaciones empiezan con "PARCIAL".
-  // Ese texto lo escribe el modal de cobro cuando se tilda "pago parcial", e incluye el saldo: "PARCIAL|saldo=65000|..."
-  function saldoParcial(p) {
-    const obs = (p.observaciones || '').trim();
-    if (!obs.toUpperCase().startsWith('PARCIAL')) return null;
-    const m = obs.match(/saldo=(\d+)/i);
-    return m ? Number(m[1]) : 0;
-  }
+  // (Fase 1a pagos, 18/7/26: acá vivían saldoParcial y calcularDeudaMes — el
+  // reglamento de deuda por mes. Ahora vive en la base: fn_deuda_mes_tf, usado
+  // por fn_estado_cuenta. El modal de cobro sigue escribiendo la marca
+  // "PARCIAL|saldo=..." igual que siempre; la lee la madre.)
 
-  // mes: el mes a evaluar. montoMensual: cuota actual del plan. esMesAnterior: true para meses ya pasados.
-  // Para meses YA PASADOS, un pago NORMAL (no parcial) salda el mes sin importar el monto,
-  // porque ese pago se cobró en su momento con el plan que la persona tenía entonces.
-  // Esto evita deudas falsas cuando alguien cambió de plan (la cuota de hoy != la de ese mes).
-  // Si el pago se marcó como PARCIAL, se respeta el saldo que quedó debiendo.
-  function calcularDeudaMes(inscripcionId, mes, montoMensual, esMesAnterior) {
-    const pagosMes = pagos.filter(p => p.inscripcion_id === inscripcionId && p.mes_imputado === mes);
-    if (pagosMes.length === 0) return { pagado: 0, descuento: 0, cortesia: false, debe: montoMensual };
-    const cortesia = pagosMes.some(p => p.tipo_cobro === 'CORTESIA');
-    if (cortesia) return { pagado: 0, descuento: 0, cortesia: true, debe: 0 };
-    const pagado = pagosMes.reduce((s, p) => s + Number(p.importe || 0), 0);
-    const descuento = pagosMes.reduce((s, p) => s + Number(p.descuento_temporal || 0), 0);
-    // ¿Hay algún pago marcado como parcial este mes?
-    // El saldo que importa es el del ÚLTIMO parcial (foto de la deuda en ese momento),
-    // y se le restan los pagos que vinieron DESPUÉS (saldan total o parcialmente esa deuda).
-    // Así, si alguien pagó $60.000 (parcial, saldo=25000) y después abonó los $25.000
-    // restantes como cobro normal, la deuda queda en $0 y sale de morosos.
-    const conOrden = pagosMes.slice().sort((a, b) => {
-      const fa = a.fecha || '', fb = b.fecha || '';
-      if (fa !== fb) return fa < fb ? -1 : 1;
-      return Number(a.id || 0) - Number(b.id || 0);
-    });
-    let idxUltimoParcial = -1, saldoUltimoParcial = null;
-    conOrden.forEach((p, i) => {
-      const s = saldoParcial(p);
-      if (s !== null) { idxUltimoParcial = i; saldoUltimoParcial = s; }
-    });
-    if (idxUltimoParcial >= 0) {
-      const pagadoDespues = conOrden.slice(idxUltimoParcial + 1).reduce((s, p) => s + Number(p.importe || 0), 0);
-      const descDespues = conOrden.slice(idxUltimoParcial + 1).reduce((s, p) => s + Number(p.descuento_temporal || 0), 0);
-      return { pagado, descuento, cortesia: false, debe: Math.max(0, saldoUltimoParcial - pagadoDespues - descDespues) };
-    }
-    if (esMesAnterior) {
-      // Mes pasado con pago NORMAL y sin marca de parcial => saldado (pagó lo de su plan de entonces).
-      return { pagado, descuento, cortesia: false, debe: 0 };
-    }
-    // Mes en curso: se calcula contra la cuota actual del plan (que es la correcta para hoy).
-    return { pagado, descuento, cortesia: false, debe: Math.max(0, montoMensual - pagado - descuento) };
-  }
-
+  // ADAPTADOR (Fase 1a pagos): toma la fila de fn_estado_cuenta de esta
+  // inscripción y la sirve con los nombres que la pantalla ya consumía.
+  // Todo el reglamento (tarifario por mes, sorteo 25%, parciales con foto,
+  // cortesías, alta/reingreso, vencimientos, buckets) vive en la base.
   function clasificar(insc) {
-    const _key = `${insc.plan}__${insc.actividad}`;
-    const precio = valorPlanMesKey(_key, mesActual);
-    const montoMensual = Math.max(0, precio - Number(insc.descuento_libre || 0));
-    // Base del mes según vigencia: junio paga junio aunque se cobre en julio.
-    function montoMesBase(mesStr) {
-      return Math.max(0, valorPlanMesKey(_key, mesStr) - Number(insc.descuento_libre || 0));
+    const ec = ecPorInsc[insc.id];
+    if (!ec) {
+      // Sin fila de la madre (no debería pasar con inscripciones ACTIVAS):
+      // se muestra sin deuda antes que inventar números.
+      return { ...insc, precio: 0, montoMensual: 0,
+        deudaActual: { pagado: 0, descuento: 0, cortesia: false, debe: 0 },
+        debeActual: 0, debeArrastre: 0, debeTotal: 0, yaVencioMesActual: false,
+        diasVencido: 0, bucket: null, fechaInicio: null,
+        mesAdeudadoMasViejo: mesActual, montoMesAdeudado: 0,
+        porVencer: 0, diasParaVencer: null };
     }
-
-    // 🎰 GANADORES DEL SORTEO DE CUMPLEAÑOS: si la persona ganó el 25% OFF
-    // para un mes (premio del sorteo de fin de mes), su cuota efectiva de ese
-    // mes es el 75%. Así, el que pagó su 75% NO figura como deudor del resto.
-    function cuotaEfectiva(mesStr) {
-      const base = montoMesBase(mesStr);
-      return descSorteo.has(insc.persona_id + '|' + mesStr)
-        ? Math.round(base * 0.75)
-        : base;
-    }
-
-    const fechaInicioStr = insc.fecha_reingreso || insc.fecha_alta;
-    const fechaInicio = fechaInicioStr ? new Date(fechaInicioStr + 'T00:00:00') : null;
-    function debeEseMes(mesStr) {
-      if (!fechaInicio) return true;
-      const [y, m] = mesStr.split('-').map(Number);
-      const ultDiaMes = new Date(y, m, 0);
-      return fechaInicio <= ultDiaMes;
-    }
-    const deudaActual = debeEseMes(mesActual) ? calcularDeudaMes(insc.id, mesActual, cuotaEfectiva(mesActual), false) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
-    const deudaAnt = debeEseMes(mesAnterior(mesActual)) ? calcularDeudaMes(insc.id, mesAnterior(mesActual), cuotaEfectiva(mesAnterior(mesActual)), true) : { pagado: 0, descuento: 0, cortesia: false, debe: 0 };
-    const hoy = new Date();
-    const mesHoyStr = calcMesActual();
-    // Clasificar el mes elegido en el selector respecto al mes real de hoy (comparación YYYY-MM).
-    const esMesEnCurso = mesActual === mesHoyStr;
-    const esMesFuturo = mesActual > mesHoyStr;   // el mes elegido todavía no empezó
-    // Un mes FUTURO nunca está vencido: la cuota no se puede deber si el mes no llegó.
-    // Mes en curso: vencido solo si ya pasó el día de vencimiento. Mes pasado: vencido.
-    const yaVencioMesActual = esMesFuturo ? false
-      : (esMesEnCurso ? hoy.getDate() > Number(insc.dia_vencimiento || 1) : true);
-    const debeActual = yaVencioMesActual ? deudaActual.debe : 0;
-    // Si el mes elegido es futuro, el "mes anterior" del selector también puede ser futuro o el actual:
-    // solo contamos arrastre real de meses que ya vencieron de verdad.
-    const debeArrastre = esMesFuturo ? 0 : deudaAnt.debe;
-    const debeTotal = debeActual + debeArrastre;
-    let diasVencido = 0;
-    if (debeArrastre > 0) {
-      const [y, m] = mesActual.split('-').map(Number);
-      let mesAntN = m - 1, anioAnt = y;
-      if (mesAntN === 0) { mesAntN = 12; anioAnt--; }
-      let vencDate = new Date(anioAnt, mesAntN - 1, Number(insc.dia_vencimiento || 1));
-      if (fechaInicio && fechaInicio > vencDate) vencDate = fechaInicio;
-      diasVencido = Math.floor((hoy - vencDate) / 86400000);
-    } else if (debeActual > 0) {
-      const [y, m] = mesActual.split('-').map(Number);
-      let vencDate = new Date(y, m - 1, Number(insc.dia_vencimiento || 1));
-      if (fechaInicio && fechaInicio > vencDate) vencDate = fechaInicio;
-      diasVencido = Math.floor((hoy - vencDate) / 86400000);
-    }
-    // Resguardo final: nunca mostrar días vencidos negativos (no tiene sentido "vencido hace -N días").
-    if (diasVencido < 0) diasVencido = 0;
-    // 🔵 POR VENCER: cuota del mes seleccionado que todavía falta pagar pero cuyo
-    // vencimiento aún no llegó (mes en curso antes del día de vencimiento, o mes futuro).
-    // Si ya venció (o es mes pasado), esto es 0 porque ya cae en la deuda vencida de arriba.
-    const porVencer = !yaVencioMesActual ? deudaActual.debe : 0;
-    let diasParaVencer = null;
-    if (porVencer > 0) {
-      const [yv, mv] = mesActual.split('-').map(Number);
-      let vDate = new Date(yv, mv - 1, Number(insc.dia_vencimiento || 1));
-      if (fechaInicio && fechaInicio > vDate) vDate = fechaInicio;
-      diasParaVencer = Math.ceil((vDate - hoy) / 86400000);
-      if (diasParaVencer < 0) diasParaVencer = 0;
-    }
-    let bucket;
-    if (diasVencido <= 1) bucket = 'recien';
-    else if (diasVencido <= 6) bucket = 'primer_aviso';
-    else bucket = 'segundo_aviso';
-    const mesAdeudadoMasViejo = debeArrastre > 0 ? mesAnterior(mesActual) : mesActual;
-    const montoMesAdeudado = debeArrastre > 0 ? debeArrastre : debeActual;
-    return { ...insc, precio, montoMensual, deudaActual, deudaAnt, debeActual, debeArrastre, debeTotal, yaVencioMesActual, diasVencido, bucket, fechaInicio, mesAdeudadoMasViejo, montoMesAdeudado, porVencer, diasParaVencer };
+    const debeActual = Number(ec.debe_mes_vencido) || 0;
+    const debeArrastre = Number(ec.debe_arrastre) || 0;
+    const porVencer = Number(ec.por_vencer) || 0;
+    return {
+      ...insc,
+      precio: Number(ec.cuota_efectiva) || 0,
+      montoMensual: Number(ec.cuota_efectiva) || 0,
+      deudaActual: {
+        pagado: Number(ec.pagado_mes) || 0,
+        descuento: Number(ec.descuento_mes) || 0,
+        cortesia: !!ec.cortesia_mes,
+        debe: debeActual + porVencer
+      },
+      debeActual,
+      debeArrastre,
+      debeTotal: Number(ec.debe_total) || 0,
+      yaVencioMesActual: debeActual > 0 || porVencer <= 0,
+      diasVencido: Number(ec.dias_vencido) || 0,
+      bucket: ec.bucket || null,
+      fechaInicio: insc.fecha_reingreso || insc.fecha_alta || null,
+      mesAdeudadoMasViejo: ec.mes_adeudado || mesActual,
+      montoMesAdeudado: Number(ec.monto_mes_adeudado) || 0,
+      porVencer,
+      diasParaVencer: (ec.dias_para_vencer == null) ? null : Number(ec.dias_para_vencer)
+    };
   }
 
   function render() {
