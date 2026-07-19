@@ -2627,37 +2627,43 @@ window.pbFaltaDeshacerFecha = async function(turnoId, fecha, dia, hora, serv){
   }
 };
 
-// 👥 Compañeros de clase (pedido 3): nombres de pila + foto de quienes van a
-// ESA clase ese día. La RPC usa el MISMO reglamento que el contador de cupos
-// (fn_presentes_dia), así los nombres siempre cierran con el "N lugares", y
-// tiene candado: solo se puede preguntar por clases propias.
-window.pbVerCompas = async function(turnoId, fechaISO, btn){
+// 👥 PEDIDO 3 · Quién va a cada clase del día (política del centro: nombre de
+// pila y foto, nada más). Mismo reglamento que el contador de cupos
+// (fn_presentes_dia), así los nombres cierran siempre con el "N lugares".
+// Las fotos viven en un bucket privado: se firman las URLs igual que el avatar.
+window.pbPintarAsistentes = async function(fechaISO){
   try {
-    btn.disabled = true; btn.textContent = '👥 Cargando…';
-    const { data, error } = await sb.rpc('alumno_companeros_clase', {
-      p_persona_id: (window._pidActivo() || (window._personaActual || {}).id),
-      p_turno_id: turnoId,
-      p_fecha: fechaISO
+    const { data, error } = await sb.rpc('alumno_asistentes_dia', { p_fecha: fechaISO });
+    if (error || !data) return;   // sin drama: la agenda queda como siempre
+    // Agrupar por turno
+    const porTurno = {};
+    data.forEach(r => {
+      if (!porTurno[r.turno_id]) porTurno[r.turno_id] = [];
+      porTurno[r.turno_id].push(r);
     });
-    if (error) throw error;
-    const compas = data || [];
-    const cont = document.createElement('div');
-    cont.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:#475569;width:100%;margin-top:4px';
-    if (!compas.length) {
-      cont.textContent = '👥 Por ahora sos el único anotado en esta clase.';
-    } else {
-      const avatars = compas.slice(0, 8).map(c => c.foto_perfil
-        ? `<img src="${esc(c.foto_perfil)}" style="width:22px;height:22px;border-radius:50%;object-fit:cover;border:1.5px solid #e2e8f0" title="${esc(c.nombre_pila)}">`
-        : `<span style="width:22px;height:22px;border-radius:50%;background:#e2e8f0;color:#475569;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700" title="${esc(c.nombre_pila)}">${esc((c.nombre_pila || '?')[0])}</span>`
-      ).join('');
-      const nombres = compas.map(c => esc(c.nombre_pila)).join(', ');
-      cont.innerHTML = `<span style="display:inline-flex;gap:2px">${avatars}</span><span>Vas con <b>${nombres}</b></span>`;
+    // URLs firmadas de las fotos (bucket privado, igual que el avatar propio)
+    const paths = [...new Set(data.map(r => r.foto_perfil).filter(Boolean))];
+    const urlPorPath = {};
+    if (paths.length) {
+      try {
+        const { data: firmadas } = await sb.storage.from(FOTO_BUCKET).createSignedUrls(paths, 60*60);
+        (firmadas || []).forEach(f => { if (f && f.signedUrl && f.path) urlPorPath[f.path] = f.signedUrl; });
+      } catch(e) { /* sin fotos, quedan las iniciales */ }
     }
-    btn.replaceWith(cont);
-  } catch(e) {
-    btn.textContent = '👥 No se pudo cargar';
-    setTimeout(() => { btn.disabled = false; btn.textContent = '👥 Compañeros'; }, 1800);
-  }
+    document.querySelectorAll('.ag-compas').forEach(slot => {
+      const lista = porTurno[slot.dataset.cmp] || [];
+      if (!lista.length) { slot.style.display = 'none'; slot.innerHTML = ''; return; }
+      const avatars = lista.slice(0, 8).map(c => {
+        const url = c.foto_perfil ? urlPorPath[c.foto_perfil] : null;
+        return url
+          ? `<img src="${esc(url)}" style="width:20px;height:20px;border-radius:50%;object-fit:cover;border:1.5px solid #cbd5e1" title="${esc(c.nombre_pila)}">`
+          : `<span style="width:20px;height:20px;border-radius:50%;background:#e2e8f0;color:#475569;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700" title="${esc(c.nombre_pila)}">${esc((c.nombre_pila || '?')[0])}</span>`;
+      }).join('');
+      const nombres = lista.map(c => esc(c.nombre_pila)).join(', ');
+      slot.innerHTML = `<span style="display:inline-flex;gap:2px">${avatars}</span><span>${lista.length === 1 ? 'Va' : 'Van'}: <b style="color:#64748b">${nombres}</b></span>`;
+      slot.style.display = 'flex';
+    });
+  } catch(e) { /* mejor sin nombres que romper la agenda */ }
 };
 
 // Avisar falta a MI CLASE FIJA desde la agenda (para una fecha puntual)
@@ -3092,14 +3098,6 @@ function renderAgendaDia(fechaISO){
         botonesHtml += `<button class="ag-btn ag-btn-naranja" onclick="pbAbrirRevertir(${t.id}, '${fechaISO}')">↩️ Revertir</button>`;
       }
 
-      // 👥 COMPAÑEROS (19/7/26, pedido 3 de Lu — política del centro: nombre de
-      // pila y foto, visible entre quienes comparten la clase). El botón solo
-      // aparece en MIS clases activas de ese día (fija vigente sin falta, o
-      // con anotación: recupero / suelta / cambio de área hacia acá).
-      const _voyEseDia = (esMiTurnoFijo && !miAusenciaFija && !meCambieDeAca) || !!miTipoAnot;
-      if (_voyEseDia && !estaBloqueado) {
-        botonesHtml += `<button class="ag-btn" style="background:#f1f5f9;color:#334155" onclick="pbVerCompas(${t.id}, '${fechaISO}', this)">👥 Compañeros</button>`;
-      }
 
       // Etiqueta del turno fijo del alumno.
       // Si ese día me ausenté (avisé falta / me cambié de área), la mostramos en
@@ -3147,6 +3145,7 @@ function renderAgendaDia(fechaISO){
           <div class="ag-bar"><div class="ag-bar-fill ${niv.cls}" style="width:${niv.pct}%"></div></div>
         </div>
         ${botonesHtml ? `<div class="ag-acciones">${botonesHtml}</div>` : ''}
+        <div class="ag-compas" data-cmp="${t.id}" style="flex-basis:100%;display:none;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;color:#94a3b8;margin-top:3px"></div>
       </div>`;
     });
 
@@ -3161,6 +3160,9 @@ function renderAgendaDia(fechaISO){
   if (htmlManana) html += periodoAgenda('Mañana', nManana, htmlManana);
   if (htmlTarde)  html += periodoAgenda('Tarde', nTarde, htmlTarde);
   cont.innerHTML = html;
+  // 👥 PEDIDO 3 (19/7/26, política del centro): quién va, en TODAS las clases
+  // del día — nombre de pila y foto, nada más. Una sola llamada por día.
+  pbPintarAsistentes(fechaISO);
 }
 
 // Renderizar el día por defecto apenas se construye el bloque (corre al final del cargarEspacio)
