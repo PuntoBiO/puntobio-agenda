@@ -99,8 +99,67 @@
         <div style="display:flex;justify-content:flex-end;margin-top:14px">
           <button class="btn btn-verde" id="ecEnviarBtn" onclick="ecEnviar(this)" style="padding:10px 26px;font-size:14px">🏠 Enviar</button>
         </div>
+      </div>
+      <div class="card">
+        <div style="font-size:15px;font-weight:800;margin-bottom:4px">📚 Clases enviadas</div>
+        <div class="hint" style="margin:0 0 10px">Registro de lo que mandaste (agrupado por envío), con cuántos la vieron.</div>
+        <div id="ecHistorial">⏳ Cargando…</div>
       </div>`;
     pintarChips();
+    cargarHistorial();
+  }
+
+  // ── 📚 Historial: los envíos quedan ASENTADOS (agrupados por contenido+minuto)
+  async function cargarHistorial(){
+    const cont = $('ecHistorial');
+    try {
+      const { data: msjs, error } = await supa.from('mensajes_equipo')
+        .select('id, autor_persona_id, autor_nombre, destinatario_persona_id, contenido, creado_en')
+        .eq('enviado_desde', 'equipo')
+        .like('contenido', '🏠 ENTRENAMIENTO EN CASA%')
+        .order('creado_en', { ascending: false })
+        .limit(400);
+      if (error) throw error;
+      if (!msjs || !msjs.length){ cont.innerHTML = '<div class="hint">Todavía no enviaste ninguna clase.</div>'; return; }
+
+      // Lecturas de esos mensajes (supervisoras ven todas; Pau/Ale las de lo suyo)
+      const ids = msjs.map(m => m.id);
+      let lecSet = new Set();
+      for (let i = 0; i < ids.length; i += 300){
+        const { data: lec } = await supa.from('mensajes_lecturas')
+          .select('mensaje_id, persona_id').in('mensaje_id', ids.slice(i, i + 300));
+        (lec||[]).forEach(l => lecSet.add(l.mensaje_id + '|' + l.persona_id));
+      }
+
+      // Agrupar por envío: mismo contenido + mismo minuto
+      const grupos = new Map();
+      msjs.forEach(m => {
+        const k = String(m.creado_en).slice(0, 16) + '§' + m.contenido;
+        if (!grupos.has(k)) grupos.set(k, { contenido: m.contenido, creado_en: m.creado_en, autor: m.autor_nombre, filas: [] });
+        grupos.get(k).filas.push(m);
+      });
+
+      cont.innerHTML = [...grupos.values()].slice(0, 25).map(g => {
+        const total = g.filas.length;
+        const vistos = g.filas.filter(m => lecSet.has(m.id + '|' + m.destinatario_persona_id)).length;
+        const primeraLinea = String(g.contenido).split('\n')[0].replace('🏠 ENTRENAMIENTO EN CASA — ', '').replace('🏠 ENTRENAMIENTO EN CASA', '(sin título)');
+        const fecha = new Date(g.creado_en).toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric', year: 'numeric' }) + ' · ' + new Date(g.creado_en).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+        const chipV = vistos >= total && total > 0
+          ? `<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:800">✓ La vieron todos (${vistos}/${total})</span>`
+          : `<span style="background:#f1f5f9;color:#64748b;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:800">👀 ${vistos}/${total} la vieron</span>`;
+        const dests = total === 1
+          ? `a 1 alumno`
+          : `a ${total} alumnos`;
+        return `<div style="border:1px solid var(--border);border-left:4px solid var(--verde);border-radius:10px;padding:10px 13px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <b style="font-size:13.5px">${esc(primeraLinea)}</b> ${chipV}
+          </div>
+          <div class="hint" style="margin-top:3px">${esc(fecha)} · ${esc(g.autor || '')} · ${dests}</div>
+        </div>`;
+      }).join('');
+    } catch(e){
+      cont.innerHTML = '<div class="hint">No se pudo cargar el historial: ' + esc(e.message || '') + '</div>';
+    }
   }
 
   function pintarChips(){
@@ -216,6 +275,7 @@
       }
 
       toast(`✅ Clase enviada a ${enviados} alumno(s) — les llega a su Mi Espacio`);
+      cargarHistorial();
       $('ecTitulo').value=''; $('ecTexto').value=''; $('ecArchivos').value=''; $('ecListaArch').textContent='';
       ecLimpiar();
     } catch(e){
