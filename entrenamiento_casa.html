@@ -104,6 +104,14 @@
         <div style="font-size:15px;font-weight:800;margin-bottom:4px">📚 Clases enviadas</div>
         <div class="hint" style="margin:0 0 10px">Registro de lo que mandaste (agrupado por envío), con cuántos la vieron.</div>
         <div id="ecHistorial">⏳ Cargando…</div>
+        <style>
+          .ec-ver{background:none;border:1px solid var(--border);border-radius:8px;padding:3px 10px;font-size:11.5px;font-weight:700;color:#0c80b8;cursor:pointer}
+          .ec-ver:hover{background:#f1f5f9}
+          .ec-sub{font-size:11px;font-weight:800;letter-spacing:.4px;color:#64748b;margin:9px 0 4px;text-transform:uppercase}
+          .ec-envio{background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#0f172a}
+          .ec-res-clase{font-size:12.5px;padding:4px 0;border-bottom:1px dotted var(--border)}
+          .ec-dest{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:3px 0;border-bottom:1px dotted var(--border)}
+        </style>
       </div>`;
     pintarChips();
     cargarHistorial();
@@ -131,6 +139,26 @@
         (lec||[]).forEach(l => lecSet.add(l.mensaje_id + '|' + l.persona_id));
       }
 
+      // Nombres de los destinatarios (para mostrar A QUIÉN se lo mandaste)
+      const pids = [...new Set(msjs.map(m => m.destinatario_persona_id).filter(Boolean))];
+      const nombrePersona = {};
+      for (let i = 0; i < pids.length; i += 300){
+        const { data: ps } = await supa.from('personas').select('id, nombre').in('id', pids.slice(i, i + 300));
+        (ps||[]).forEach(p => { nombrePersona[p.id] = p.nombre; });
+      }
+
+      // RESPUESTAS de los alumnos. NO se cuentan acá: son las mismas filas de
+      // evoluciones_tf (origen='casa') que ven la agenda y la historia clínica.
+      const resp = [];
+      for (let i = 0; i < ids.length; i += 300){
+        const { data: rs } = await supa.from('evoluciones_tf')
+          .select('id, persona_id, mensaje_id, clase_ref, modulo, fecha, dificultad, dolor, dolor_nivel, dolor_zona')
+          .eq('origen', 'casa').in('mensaje_id', ids.slice(i, i + 300));
+        (rs||[]).forEach(r => resp.push(r));
+      }
+      const respPorMsj = {};                       // mensaje_id -> [respuestas]
+      resp.forEach(r => { (respPorMsj[r.mensaje_id] = respPorMsj[r.mensaje_id] || []).push(r); });
+
       // Agrupar por envío: mismo contenido + mismo minuto
       const grupos = new Map();
       msjs.forEach(m => {
@@ -139,7 +167,7 @@
         grupos.get(k).filas.push(m);
       });
 
-      cont.innerHTML = [...grupos.values()].slice(0, 25).map(g => {
+      cont.innerHTML = [...grupos.values()].slice(0, 25).map((g, gi) => {
         const total = g.filas.length;
         const vistos = g.filas.filter(m => lecSet.has(m.id + '|' + m.destinatario_persona_id)).length;
         const primeraLinea = String(g.contenido).split('\n')[0].replace('🏠 ENTRENAMIENTO EN CASA — ', '').replace('🏠 ENTRENAMIENTO EN CASA', '(sin título)');
@@ -147,20 +175,101 @@
         const chipV = vistos >= total && total > 0
           ? `<span style="background:#dcfce7;color:#166534;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:800">✓ La vieron todos (${vistos}/${total})</span>`
           : `<span style="background:#f1f5f9;color:#64748b;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:800">👀 ${vistos}/${total} la vieron</span>`;
-        const dests = total === 1
-          ? `a 1 alumno`
-          : `a ${total} alumnos`;
+        const dests = total === 1 ? 'a 1 alumno' : `a ${total} alumnos`;
+
+        // Todas las respuestas de este envío (juntando todas sus filas/destinatarios)
+        const rsG = g.filas.flatMap(m => respPorMsj[m.id] || []);
+        const hechasPorPersona = {};
+        rsG.forEach(r => { hechasPorPersona[r.persona_id] = (hechasPorPersona[r.persona_id] || 0) + 1; });
+        const clases = ecClasesDe(g.contenido);
+
+        // Resumen por clase: cuántos la hicieron, dificultad promedio, con dolor
+        const resumen = clases.map(c => {
+          const rr = rsG.filter(r => (r.clase_ref || '') === (c.link || ''));
+          if (!rr.length) return `<div class="ec-res-clase"><b>${esc(c.titulo)}</b> <span class="hint">· todavía no la hizo nadie</span></div>`;
+          const difs = rr.map(r => r.dificultad).filter(v => v !== null && v !== undefined);
+          const prom = difs.length ? (difs.reduce((a,b)=>a+b,0)/difs.length).toFixed(1).replace('.0','') : null;
+          const conDolor = rr.filter(r => r.dolor || (r.dolor_nivel||0) > 0).length;
+          return `<div class="ec-res-clase"><b>${esc(c.titulo)}</b>
+            <span style="color:#166534;font-weight:700">la hicieron ${rr.length}/${total}</span>
+            ${prom !== null ? `· dificultad promedio ${prom}` : ''}
+            ${conDolor ? `· <span style="color:#b91c1c;font-weight:700">${conDolor} con dolor ⚠️</span>` : '· sin dolor'}
+          </div>`;
+        }).join('');
+
+        // A quién se lo mandaste, uno por uno
+        const listaDest = g.filas.map(m => {
+          const vio = lecSet.has(m.id + '|' + m.destinatario_persona_id);
+          const hechas = hechasPorPersona[m.destinatario_persona_id] || 0;
+          const nom = nombrePersona[m.destinatario_persona_id] || ('#' + m.destinatario_persona_id);
+          const estado = hechas
+            ? `<span style="color:#166534;font-weight:700">✅ hizo ${hechas} de ${clases.length}</span>`
+            : (vio ? `<span style="color:#64748b">👀 la vio</span>` : `<span style="color:#94a3b8">○ sin ver</span>`);
+          return `<div class="ec-dest"><span>${esc(nom)}</span> ${estado}</div>`;
+        }).join('');
+
         return `<div style="border:1px solid var(--border);border-left:4px solid var(--verde);border-radius:10px;padding:10px 13px;margin-bottom:8px">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <b style="font-size:13.5px">${esc(primeraLinea)}</b> ${chipV}
           </div>
           <div class="hint" style="margin-top:3px">${esc(fecha)} · ${esc(g.autor || '')} · ${dests}</div>
+          <div style="margin-top:6px">
+            <button class="ec-ver" onclick="ecVerEnvio(${gi})">👁️ Ver lo que mandé y quién la hizo</button>
+          </div>
+          <div id="ecDet${gi}" style="display:none;margin-top:9px;border-top:1px dashed var(--border);padding-top:9px">
+            <div class="ec-sub">📄 Lo que mandaste</div>
+            <div class="ec-envio">${ecLinkify(esc(g.contenido))}</div>
+            <div class="ec-sub">📊 Cómo les fue</div>
+            ${resumen}
+            <div class="ec-sub">👥 A quiénes se lo mandaste</div>
+            ${listaDest}
+          </div>
         </div>`;
       }).join('');
     } catch(e){
       cont.innerHTML = '<div class="hint">No se pudo cargar el historial: ' + esc(e.message || '') + '</div>';
     }
   }
+
+  // Un envío puede traer VARIAS clases (un link = una clase). Mismo criterio
+  // que Mi Espacio, para que los números coincidan de los dos lados.
+  function ecClasesDe(contenido){
+    const lineas = String(contenido || '').split('\n');
+    const tituloEnvio = (lineas[0] || '')
+      .replace('🏠 ENTRENAMIENTO EN CASA — ', '')
+      .replace('🏠 ENTRENAMIENTO EN CASA', '').trim() || 'Entrenamiento en casa';
+    const RX = /(https?:\/\/[^\s]+)/;
+    const clases = [];
+    for (let i = 0; i < lineas.length; i++){
+      const hit = lineas[i].match(RX);
+      if (!hit) continue;
+      const link = hit[1];
+      let tit = lineas[i].replace(link, '').trim();
+      if (!tit){
+        for (let j = i - 1; j > 0; j--){
+          const prev = (lineas[j] || '').trim();
+          if (!prev) continue;
+          if (RX.test(prev)) break;
+          tit = prev; break;
+        }
+      }
+      tit = tit.replace(/^\d+\s*[-.\)·:]\s*/, '').trim();
+      clases.push({ titulo: tit || tituloEnvio, link });
+    }
+    if (!clases.length) clases.push({ titulo: tituloEnvio, link: '' });
+    return clases;
+  }
+
+  function ecLinkify(txtEscapado){
+    return String(txtEscapado || '').replace(/(https?:\/\/[^\s<]+)/g,
+      m => `<a href="${m}" target="_blank" rel="noopener" style="color:#2563eb;font-weight:700">${m}</a>`);
+  }
+
+  window.ecVerEnvio = function(gi){
+    const el = document.getElementById('ecDet' + gi);
+    if (!el) return;
+    el.style.display = (el.style.display === 'none' ? 'block' : 'none');
+  };
 
   function pintarChips(){
     const cont = $('ecChips'); if (!cont) return;
