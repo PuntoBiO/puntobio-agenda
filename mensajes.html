@@ -253,6 +253,15 @@ html, body {
   .msj-head { flex-direction: column; align-items: flex-start; gap: 6px; }
   .msj-acciones { align-self: flex-end; }
 }
+  /* Borrado múltiple */
+  .mail-check{width:16px;height:16px;flex:0 0 16px;cursor:pointer;accent-color:#dc2626;margin-right:2px}
+  .mail-check-hueco{width:16px;flex:0 0 16px;margin-right:2px}
+  .barra-sel{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9999;
+    background:#0f172a;color:#fff;border-radius:999px;padding:9px 14px;display:flex;align-items:center;gap:10px;
+    box-shadow:0 8px 26px rgba(15,23,42,.35);font-size:13px}
+  .barra-sel-txt{margin-right:2px}
+  .barra-sel .mini-btn{background:rgba(255,255,255,.14);color:#fff;border-color:transparent}
+  .barra-sel .mini-btn.peligro{background:#dc2626;color:#fff}
 </style>
 </head>
 <body>
@@ -274,6 +283,7 @@ let esAdmin = false;     // admin_total OR ve_todos_mensajes
 let mensajes = [];       // todos los mensajes
 let leidasPorMi = new Set(); // ids de mensajes ya leídos por mí
 let equipo = [];         // lista de personas del equipo (para el dropdown de destinatarios)
+let selMsj = new Set();  // hilos tildados para el borrado múltiple
 let filtroDestId = '';   // filtro de bandeja (para admin: ver solo conversación con X)
 let ADMINS_IDS = new Set(); // ids de personas con admin_total — sus mensajes se ven en rojo
 let adjuntosPorMsj = {}; // { mensaje_id: [{...adjunto}] }
@@ -800,7 +810,18 @@ async function cargarMensajes() {
       sb.from('permisos_equipo').select('persona_id').eq('admin_total', true)
     ]);
     if (msjRes.error) throw msjRes.error;
-    mensajes = msjRes.data || [];
+    // ── SEPARACIÓN (19/7/26): esta bandeja es la INTERNA del equipo.
+    // Las conversaciones con alumnos viven en su propio módulo (📥 Mensajes
+    // alumnos). Se sacan de acá las que escribió un alumno desde Mi Espacio y
+    // las dirigidas a alguien que no es del equipo. Todo lo interno queda,
+    // incluidos los mensajes viejos y los generales.
+    const EQUIPO_IDS = new Set([yo.id].concat((equipo || []).map(p => p.id)));
+    const esHiloDeAlumno = (m) =>
+      m.enviado_desde === 'mi_espacio' ||
+      (m.destinatario_persona_id != null && !EQUIPO_IDS.has(m.destinatario_persona_id));
+    const todos = msjRes.data || [];
+    // Guarda: si la lista del equipo no cargó, NO filtramos (mejor de más que de menos)
+    mensajes = EQUIPO_IDS.size > 1 ? todos.filter(m => !esHiloDeAlumno(m)) : todos;
     leidasPorMi = new Set((lecRes.data || []).map(r => r.mensaje_id));
     ADMINS_IDS = new Set((admRes.data || []).map(r => r.persona_id));
     // Adjuntos de los mensajes
@@ -813,16 +834,22 @@ async function cargarMensajes() {
         if (!adjuntosPorMsj[a.mensaje_id]) adjuntosPorMsj[a.mensaje_id] = [];
         adjuntosPorMsj[a.mensaje_id].push(a);
       });
-      // Confirmaciones de lectura de MIS mensajes (para mostrar "✓ Leído")
-      const misIds = mensajes.filter(m => m.autor_persona_id === yo.id).map(m => m.id);
-      if (misIds.length) {
+      // Confirmaciones de lectura. Cada uno ve las de SUS mensajes; las
+      // supervisoras (admin_total) ven las de TODOS — la política
+      // supervisoras_ven_todas_las_lecturas de la base lo permite.
+      const idsLect = esAdmin
+        ? mensajes.map(m => m.id)
+        : mensajes.filter(m => m.autor_persona_id === yo.id).map(m => m.id);
+      if (idsLect.length) {
         try {
-          const { data: lec } = await sb.from('mensajes_lecturas')
-            .select('mensaje_id, persona_id').in('mensaje_id', misIds);
-          (lec || []).forEach(r => {
-            if (!lecturasPorMsj[r.mensaje_id]) lecturasPorMsj[r.mensaje_id] = new Set();
-            lecturasPorMsj[r.mensaje_id].add(r.persona_id);
-          });
+          for (let i = 0; i < idsLect.length; i += 300) {
+            const { data: lec } = await sb.from('mensajes_lecturas')
+              .select('mensaje_id, persona_id').in('mensaje_id', idsLect.slice(i, i + 300));
+            (lec || []).forEach(r => {
+              if (!lecturasPorMsj[r.mensaje_id]) lecturasPorMsj[r.mensaje_id] = new Set();
+              lecturasPorMsj[r.mensaje_id].add(r.persona_id);
+            });
+          }
         } catch (e) { /* sin permiso de ver lecturas: se muestra sin confirmación */ }
       }
     }
@@ -856,7 +883,11 @@ function pintarMensajes() {
     return;
   }
   const hilos = agruparHilos(lista);
+  // Si un hilo tildado ya no está (se borró o cambió el filtro), sale de la selección
+  const visibles = new Set(hilos.map(h => h.rep.id));
+  selMsj.forEach(id => { if (!visibles.has(id)) selMsj.delete(id); });
   cont.innerHTML = '<div class="bandeja">' + hilos.map(h => renderHilo(h)).join('') + '</div>';
+  pintarBarraSel();
   // Después del HTML, traer las URLs firmadas para imágenes/audios/videos
   _hidratarAdjuntos();
 }
@@ -941,8 +972,9 @@ function renderHilo(h) {
   const autorEsAdmin = ADMINS_IDS.has(m.autor_persona_id);          // Lu / Jime
   const autorEsVocera = !autorEsAdmin && VOCERA_IDS.has(m.autor_persona_id); // Paula
 
-  // Confirmación de lectura (solo en mis mensajes)
-  const lect = esMio ? estadoLectura(h) : null;
+  // Confirmación de lectura: en mis mensajes siempre; en los ajenos, solo las
+  // supervisoras (para saber si el equipo leyó lo que se mandó).
+  const lect = (esMio || esAdmin) ? estadoLectura(h) : null;
 
   // Línea "Para:" (solo se ve al abrir el correo). Marca ✓/○ por destinatario si es mío.
   let paraLinea;
@@ -993,10 +1025,16 @@ function renderHilo(h) {
 
   const leidoCls = sinLeer ? 'no-leido' : 'leido';
   const dot = sinLeer ? '<span class="mail-dot"></span>' : '<span class="mail-dot vacio"></span>';
+  // Casilla para el borrado múltiple (solo donde tengo permiso de borrar)
+  const check = puedeBorrar
+    ? `<input type="checkbox" class="mail-check" ${selMsj.has(m.id) ? 'checked' : ''}
+         onclick="event.stopPropagation();toggleSelMsj(${m.id}, this.checked)" title="Seleccionar">`
+    : '<span class="mail-check-hueco"></span>';
 
   return `<div class="mail-item ${leidoCls} ${nivelCls}" id="hilo-${m.id}">
     <div class="banda" style="background:${bandaColor}"></div>
     <div class="mail-row" onclick="toggleHilo(${m.id})">
+      ${check}
       ${dot}
       <div class="mail-av" style="background:${avatarBg}">${ini}</div>
       <div class="mail-main">
@@ -1024,6 +1062,58 @@ function renderHilo(h) {
     </div>
   </div>`;
 }
+
+// ============= BORRADO MÚLTIPLE =============
+// Selección por hilo: se guarda el id representante y al borrar se expande
+// a todos los hermanos del lote (todos los destinatarios de ese envío).
+window.toggleSelMsj = function(repId, marcado) {
+  if (marcado) selMsj.add(repId); else selMsj.delete(repId);
+  pintarBarraSel();
+};
+
+window.limpiarSelMsj = function() {
+  selMsj = new Set();
+  pintarBarraSel();
+  document.querySelectorAll('.mail-check').forEach(c => { c.checked = false; });
+};
+
+function pintarBarraSel() {
+  let barra = document.getElementById('barraSelMsj');
+  if (!selMsj.size) { if (barra) barra.remove(); return; }
+  if (!barra) {
+    barra = document.createElement('div');
+    barra.id = 'barraSelMsj';
+    barra.className = 'barra-sel';
+    document.body.appendChild(barra);
+  }
+  barra.innerHTML = `
+    <span class="barra-sel-txt"><b>${selMsj.size}</b> seleccionado${selMsj.size > 1 ? 's' : ''}</span>
+    <button class="mini-btn" onclick="limpiarSelMsj()">Cancelar</button>
+    <button class="mini-btn peligro" onclick="borrarSeleccionados()">🗑️ Borrar</button>`;
+}
+
+window.borrarSeleccionados = async function() {
+  if (!selMsj.size) return;
+  // Cada hilo puede tener varias copias (una por destinatario): se borran todas
+  const ids = [];
+  selMsj.forEach(rep => { (idToLote[rep] || [rep]).forEach(id => { if (!ids.includes(id)) ids.push(id); }); });
+  const txt = selMsj.size === 1
+    ? `¿Borrar el correo seleccionado?${ids.length > 1 ? ` (son ${ids.length} copias, una por destinatario)` : ''}`
+    : `¿Borrar los ${selMsj.size} correos seleccionados? Son ${ids.length} mensajes en total.`;
+  if (!confirm(txt + ' Esta acción no se puede deshacer.')) return;
+  try {
+    for (let i = 0; i < ids.length; i += 200) {
+      const { error } = await sb.from('mensajes_equipo').delete().in('id', ids.slice(i, i + 200));
+      if (error) throw error;
+    }
+    selMsj = new Set();
+    pintarBarraSel();
+    mostrarToast(`✓ ${ids.length} mensaje${ids.length > 1 ? 's' : ''} borrado${ids.length > 1 ? 's' : ''}`);
+    await cargarMensajes();
+  } catch (e) {
+    mostrarToast('Error: ' + e.message);
+  }
+};
 
 // Abrir / cerrar un correo (acordeón estilo bandeja)
 window.toggleHilo = function(repId) {
