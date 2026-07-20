@@ -451,9 +451,11 @@
           </select>
         </div>
 
-        <!-- El "profesional" del cobro ya NO se pregunta: el reparto real lo hace
-             Liquidaciones según quién hizo cada SESIÓN. El select queda oculto solo
-             para que el tarifario calcule un split de referencia. -->
+        <!-- El "profesional" del cobro NO se pregunta ni se infiere (regla del 03/07/2026):
+             un pago se aplica al tratamiento entero y un tratamiento puede tener
+             sesiones de varios profesionales, asi que "el profesional del pago" no existe.
+             La atribucion real vive en las SESIONES y la resuelve Liquidaciones.
+             El select queda solo por compatibilidad y SIEMPRE viaja vacio. -->
         <div class="field" style="display:none">
           <label for="profesional">Profesional que corresponde</label>
           <select id="profesional"></select>
@@ -672,13 +674,9 @@
     $('fecha').value = hoy();
 
     // Llenar selector de profesional
+    // Solo la opcion vacia: la caja ya no elige profesional (ver comentario del campo).
     const sel = $('profesional');
-    sel.innerHTML = '';
-    state.profesionales.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p; opt.textContent = p;
-      sel.appendChild(opt);
-    });
+    sel.innerHTML = '<option value=""></option>';
 
     // Pre-cargar lista liviana de pacientes para buscador rápido
     try {
@@ -933,29 +931,11 @@
     $('resSaldo').classList.toggle('warn', saldo > 0);
     $('resSesiones').textContent = t.total_sesiones || 0;
 
-    // Profesional (OCULTO, solo para el split de referencia del tarifario):
-    // el reparto real lo hace Liquidaciones según quién hizo cada SESIÓN.
-    // - Práctica de profesional fijo → el del tratamiento.
-    // - Práctica variable (Fisio, etc.) → el de la ÚLTIMA sesión; si no hay, el del tratamiento; si no, queda el primero.
-    const esVariable = profesionalEsVariable(t.practica_codigo);
-    $('profVariableMsg').hidden = true;   // ya no se pregunta
-
-    if (!esVariable && t.profesional && state.profesionales.includes(t.profesional)) {
-      $('profesional').value = t.profesional;
-    } else if (esVariable) {
-      try {
-        const { data: ultSes } = await sb.from('sesiones')
-          .select('profesional, fecha')
-          .eq('tratamiento_id', t.id)
-          .order('fecha', { ascending: false })
-          .limit(1);
-        const pSes = ultSes && ultSes[0] && ultSes[0].profesional;
-        if (pSes && state.profesionales.includes(pSes)) $('profesional').value = pSes;
-        else if (t.profesional && state.profesionales.includes(t.profesional)) $('profesional').value = t.profesional;
-      } catch(_) {
-        if (t.profesional && state.profesionales.includes(t.profesional)) $('profesional').value = t.profesional;
-      }
-    }
+    // La caja NO adivina un profesional. Antes lo hacia (del tratamiento o de la
+    // ultima sesion) y cuando no podia resolverlo quedaba en el primero de la lista
+    // -> todos los cobros terminaban a nombre de Lu. Ahora viaja vacio siempre.
+    $('profesional').value = '';
+    $('profVariableMsg').hidden = true;
 
     // Reset campos
     $('importe').value = '';
@@ -1091,6 +1071,11 @@
       }
     }
 
+    // En NORMAL no se muestra reparto: al momento del cobro no se sabe de quien es
+    // la plata (depende de que profesional atienda cada sesion). Solo en LIBRE,
+    // donde la admin carga los montos a mano, tiene sentido previsualizarlo.
+    const prevBox = $('preview');
+    if (prevBox) prevBox.style.display = esLibre ? '' : 'none';
     $('prevProf').textContent = fmt(montoProfesional);
     $('prevCentro').textContent = fmt(montoCentro);
     $('prevMoplex').textContent = fmt(montoMoplex);
@@ -1252,9 +1237,12 @@
     };
     const payload = Object.assign({}, base, {
       importe: importe,
-      profesional: $('profesional').value,
       tipo_cobro: esLibre ? 'MANUAL' : tipoCobro,
     });
+    // Solo viaja si alguien lo eligio a mano (hoy nunca). Si va vacio no se manda:
+    // la atribucion por profesional sale de las SESIONES, no del pago.
+    const profElegido = ($('profesional').value || '').trim();
+    if (profElegido) payload.profesional = profElegido;
     // En LIBRE mandamos los montos a mano (que NO los recalcule el tarifario)
     if (esLibre) {
       payload.monto_profesional = libreProf;
@@ -1274,15 +1262,9 @@
       if (error) throw error;
       const primera = Array.isArray(data) ? data[0] : data;
 
-      if (tipoCobro === 'NORMAL' && importe > 0
-          && primera && Number(primera.monto_centro || 0) === 0
-          && Number(primera.monto_profesional || 0) === 0) {
-        // Verificar que guardó los montos correctos (defensa contra bug histórico)
-        console.warn('⚠️ Pago guardado con splits en 0. Verificá tarifario_splits para', t.practica_codigo, '+', payload.profesional, primera);
-        toast('⚠️ Pago guardado pero splits en 0. Revisá tarifario.', 'warn', 6000);
-      } else {
-        toast(`✅ Cobrado ${fmt(importe)} de ${state.pacienteSel.nombre}`, 'ok');
-      }
+      // Ya no se avisa por "splits en 0": monto_centro/monto_profesional del PAGO
+      // son un resto del modelo viejo y no los usa ningun calculo de plata.
+      toast(`✅ Cobrado ${fmt(importe)} de ${state.pacienteSel.nombre}`, 'ok');
 
       // Refrescar tratamientos del paciente (saldo cambió)
       await cargarTratamientos(state.pacienteSel.id);
