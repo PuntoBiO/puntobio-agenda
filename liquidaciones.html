@@ -1355,6 +1355,100 @@ function render(pagos, sesiones, filtroProf){
   }
   const hayRegalos = totalRegalos > 0.5;
 
+  // ===== DESGLOSE DE LO RECIBIDO EN MANO: ¿de quien es esa plata? =====
+  // SOLO LECTURA: no modifica ningun calculo de la liquidacion. Reconstruye, a partir
+  // de las sesiones ya liquidables y de los pagos ya cargados, a quien le corresponde
+  // cada peso que un profesional recibio en mano. Si algo falla, no se dibuja nada.
+  const desgloseRecibido = {};
+  try {
+    // 1) Agrupar las sesiones liquidables por el pago que las salda (tratamiento + fecha de abono)
+    const porClave = {};
+    for (const f of liquidables){
+      if (!f.fechaAbono || f.tratId == null) continue;
+      const k = f.tratId + '|' + f.fechaAbono;
+      (porClave[k] = porClave[k] || []).push(f);
+    }
+    // 2) Agrupar los pagos por esa misma clave, anotando cuanto puso cada receptor
+    const pagosPorClave = {};
+    for (const p of pagos){
+      if (p.tratamiento_id == null) continue;
+      const k = p.tratamiento_id + '|' + p.fecha;
+      const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
+      const imp = Number(p.importe) || 0;
+      if (imp <= 0.5) continue;
+      const e = (pagosPorClave[k] = pagosPorClave[k] || { total: 0, porQuien: {} });
+      e.total += imp;
+      e.porQuien[quien] = (e.porQuien[quien] || 0) + imp;
+    }
+    // 3) Repartir. Si una misma clave la pagaron dos personas, se prorratea.
+    for (const k of Object.keys(pagosPorClave)){
+      const filas = porClave[k];
+      if (!filas || !filas.length) continue;
+      const e = pagosPorClave[k];
+      for (const quien of Object.keys(e.porQuien)){
+        const parte = e.total > 0.5 ? (e.porQuien[quien] / e.total) : 0;
+        if (parte <= 0) continue;
+        const d = (desgloseRecibido[quien] = desgloseRecibido[quien] || { porDuenio: {}, detalle: [], atribuido: 0 });
+        for (const f of filas){
+          const mp = (Number(f.mProf) || 0) * parte;
+          const mc = (Number(f.mCentro) || 0) * parte;
+          if (mp > 0.5){
+            d.porDuenio[f.prof] = (d.porDuenio[f.prof] || 0) + mp;
+            d.atribuido += mp;
+          }
+          if (mc > 0.5){
+            d.porDuenio['centro (PuntoBiO)'] = (d.porDuenio['centro (PuntoBiO)'] || 0) + mc;
+            d.atribuido += mc;
+          }
+          d.detalle.push({ fecha: f.fecha, paciente: f.paciente, prof: f.prof,
+                           mProf: mp, mCentro: mc, codigo: f.codigo });
+        }
+      }
+    }
+  } catch (e) { console.warn('No se pudo armar el desglose de lo recibido:', e && e.message); }
+
+  // Dibuja el desglose de UN profesional (o cadena vacia si no hay datos).
+  const pintarDesglose = (prof) => {
+    try {
+      const d = desgloseRecibido[prof];
+      const totalRecibido = Number(recibido[prof]) || 0;
+      if (!d || totalRecibido <= 0.5) return '';
+      const ordenD = ['Bruno','Male','Vero','Jime','Lu','centro (PuntoBiO)'];
+      const duenios = Object.keys(d.porDuenio).sort((a,b)=>{
+        const ia=ordenD.indexOf(a), ib=ordenD.indexOf(b);
+        return (ia===-1?99:ia)-(ib===-1?99:ib);
+      });
+      if (!duenios.length) return '';
+      const custodia = totalRecibido - d.atribuido;
+      let out = `<div style="margin:4px 0 10px 18px;padding-left:12px;border-left:2px solid #e5e7eb;font-size:13px;color:#374151;">`;
+      out += `<div style="color:#6b7280;margin-bottom:3px;">De los <b>${fmt(totalRecibido)}</b> que recibió en mano:</div>`;
+      for (const dn of duenios){
+        const cuantas = d.detalle.filter(x => (dn === 'centro (PuntoBiO)' ? x.mCentro > 0.5 : (x.prof === dn && x.mProf > 0.5))).length;
+        const propio = (dn === prof) ? ' <span style="color:#059669;">(suyo)</span>' : '';
+        out += `<div>└ <b>${fmt(d.porDuenio[dn])}</b> de <b>${dn}</b>${propio} <span style="color:#9ca3af;">· ${cuantas} sesión${cuantas===1?'':'es'}</span></div>`;
+      }
+      if (custodia > 0.5){
+        out += `<div>└ <b>${fmt(custodia)}</b> en <b>custodia</b> <span style="color:#9ca3af;">· pagado por sesiones que todavía no se hicieron</span></div>`;
+      }
+      const det = d.detalle.slice().sort((a,b)=> String(a.fecha||'').localeCompare(String(b.fecha||'')));
+      if (det.length){
+        out += `<details style="margin-top:6px;"><summary style="cursor:pointer;color:#2563eb;font-size:12.5px;">Ver sesión por sesión (${det.length})</summary>`;
+        out += `<table style="margin:6px 0 2px;font-size:12px;width:auto;"><thead><tr>
+          <th style="text-align:left;">Fecha</th><th style="text-align:left;">Paciente</th>
+          <th style="text-align:left;">Atendió</th><th class="num">Del profe</th><th class="num">Del centro</th>
+        </tr></thead><tbody>`;
+        for (const x of det){
+          out += `<tr><td>${x.fecha || '—'}</td><td>${x.paciente || '—'}</td><td>${x.prof || '—'}</td>
+                  <td class="num">${fmt(x.mProf)}</td><td class="num">${fmt(x.mCentro)}</td></tr>`;
+        }
+        out += `</tbody></table></details>`;
+      }
+      out += `<div style="color:#9ca3af;font-size:11.5px;margin-top:5px;">El neto de arriba además considera las sesiones propias que cobró otro.</div>`;
+      out += `</div>`;
+      return out;
+    } catch (e) { console.warn('No se pudo pintar el desglose de', prof, e && e.message); return ''; }
+  };
+
   const hayDeudasCentro = Object.keys(deudasCentroVista).some(p => deudasCentroVista[p] > 0.5);
   if (!esModoMoplex && (netosFinalesVista.length > 0 || hayDeudasCentro || hayRegalos)){
     html += `<div class="resumen-cruces"><div class="rc-tit-cruces">💸 Cobros a devolver</div>`;
@@ -1362,6 +1456,7 @@ function render(pagos, sesiones, filtroProf){
     Object.keys(deudasCentroVista).sort((a,b)=>{const ia=ordenRC.indexOf(a),ib=ordenRC.indexOf(b);return (ia===-1?99:ia)-(ib===-1?99:ib);}).forEach(prof=>{
       if (deudasCentroVista[prof] > 0.5){
         html += `<div class="cruce-linea"><b>${prof}</b> cobró de más y debe <b>${fmt(deudasCentroVista[prof])}</b> al <b>centro (PuntoBiO)</b></div>`;
+        html += pintarDesglose(prof);
       }
     });
     for (const n of netosFinalesVista){
