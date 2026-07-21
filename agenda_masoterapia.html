@@ -69,6 +69,7 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-s
 body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .grid-cell.is-bloqueo{background:var(--bloqueo-bg);background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.04) 4px,rgba(0,0,0,.04) 8px)}
 .grid-cell.is-bloqueo .bloqueo-label{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--bloqueo-text);text-align:center;padding-top:24px;letter-spacing:.04em}
+.grid-cell.is-fuera-horario{background:var(--bloqueo-bg);background-image:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(214,51,108,.10) 5px,rgba(214,51,108,.10) 10px);box-shadow:inset 0 0 0 1px rgba(214,51,108,.28)}
 .grid-cell.is-feriado{background:var(--feriado-bg)}
 .grid-cell.is-feriado .feriado-label{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--feriado-text);text-align:center;padding-top:18px;letter-spacing:.04em;text-transform:uppercase}
 .grid-header.is-feriado .day-name{color:var(--feriado-text)}
@@ -1026,15 +1027,27 @@ function renderWeek(container) {
     dias.forEach((d, idx) => {
       const diaNumero = idx+1;
       const iso = toISODate(d);
-      if (feriadosMap.has(iso)) { cells.push(`<div class="grid-cell is-feriado"><div class="feriado-label">Feriado</div></div>`); return; }
+      // Los turnos se calculan ANTES de los cortes por feriado/bloqueo.
+      // Si no, un turno cargado en un horario que hoy figura CERRADO (o en feriado)
+      // se cargaba de la base pero nunca se pintaba: quedaba invisible en la grilla.
+      const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
+      const turnosHTML = slotTurnos.map(renderTurno).join('');
+      const hayFeriado = feriadosMap.has(iso);
       const bloqueo = esBloqueoFijo(diaNumero, h, iso);
+
+      // Slot cerrado o feriado PERO con turnos → se pintan igual, marcados como fuera de horario.
+      // Clase propia (no is-libre) para que el turno se vea y se clickee,
+      // pero la celda no habilite cargar turnos nuevos en un horario cerrado.
+      if ((hayFeriado || bloqueo) && slotTurnos.length > 0) {
+        cells.push(`<div class="grid-cell is-fuera-horario" data-fecha="${iso}" data-hora="${h}" title="Turno fuera del horario habilitado">${turnosHTML}</div>`);
+        return;
+      }
+      if (hayFeriado) { cells.push(`<div class="grid-cell is-feriado"><div class="feriado-label">Feriado</div></div>`); return; }
       if (bloqueo) {
         const gest = (modoGestion && esAdminGeneral() && bloqueo === 'CERRADO');
         cells.push(`<div class="grid-cell is-bloqueo ${gest?'gest-cerrado':''}" ${gest?`data-fecha="${iso}" data-hora="${h}"`:''}><div class="bloqueo-label">${bloqueo}</div></div>`);
         return;
       }
-      const slotTurnos = turnosFil.filter(t => t.fecha===iso && parseInt(t.hora_inicio.slice(0,2),10)===h);
-      const turnosHTML = slotTurnos.map(renderTurno).join('');
       const selCls = isSlotSelected(iso, h) ? 'is-multi-sel' : '';
       // Si hay práctica filtrada, atenuar celdas donde nadie atiende esa práctica (considerando turnos existentes)
       let noDispCls = '';
