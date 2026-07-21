@@ -535,7 +535,7 @@ async function cargar(){
       .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
     if (sesData) sesAll.push(...sesData);
     const { data: pagData } = await sb.from('pagos_consultorio')
-      .select('id, tratamiento_id, fecha, importe')
+      .select('id, tratamiento_id, fecha, importe, quien_cobro')
       .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
     if (pagData) pagosAll.push(...pagData);
   }
@@ -733,7 +733,13 @@ function render(pagos, sesiones, filtroProf){
     const ses = sesPorTrat[tid].slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
     const pgs = (pagosPorTrat[tid] || []).slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
     const acum = []; let run = 0;
-    for (const p of pgs){ run += Number(p.importe) || 0; acum.push({ fecha: p.fecha, cum: run }); }
+    for (const p of pgs){
+      const desdeCum = run;
+      run += Number(p.importe) || 0;
+      // `quien` y `desdeCum` son datos NUEVOS: no cambian el calculo de fechaAbono,
+      // solo permiten saber que tramo de plata cubrio cada sesion y quien lo cobro.
+      acum.push({ fecha: p.fecha, cum: run, desdeCum, quien: String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO' });
+    }
     let cumVal = 0;
     for (const s of ses){
       const mProf = Number(s.monto_profesional) || 0, mCentro = Number(s.monto_centro) || 0;
@@ -742,11 +748,21 @@ function render(pagos, sesiones, filtroProf){
       cumVal += valor;
       let fechaAbono = null;
       for (const a of acum){ if (a.cum >= cumVal - 0.5){ fechaAbono = a.fecha; break; } }
+      // Tramo de plata que cubre ESTA sesion: [cumVal - valor, cumVal].
+      // Se cruza con el tramo de cada pago para saber quien tiene esa plata en la mano.
+      // No hay prorrateo: si un pago cubre la sesion entera, ese pago se la lleva entera.
+      const tenedores = [];
+      const iniSes = cumVal - valor;
+      for (const a of acum){
+        const ini = Math.max(iniSes, a.desdeCum);
+        const fin = Math.min(cumVal, a.cum);
+        if (fin - ini > 0.5) tenedores.push({ quien: a.quien, monto: fin - ini });
+      }
       const t = s.tratamientos || {};
       const fila = {
         fecha: s.fecha, fechaAbono, prof: normProf(s.profesional), valor, mProf, mCentro,
         paciente: ((t.personas || {}).nombre) || '—', codigo: t.codigo_id || '—',
-        practica: t.practica_codigo || '', tratId: tid
+        practica: t.practica_codigo || '', tratId: tid, tenedores
       };
       if (!fila.prof) continue;
       if (fechaAbono){ const kAb = tid + '|' + fechaAbono; (abonoProf[kAb] = abonoProf[kAb] || new Set()).add(fila.prof); }
@@ -1356,53 +1372,26 @@ function render(pagos, sesiones, filtroProf){
   const hayRegalos = totalRegalos > 0.5;
 
   // ===== DESGLOSE DE LO RECIBIDO EN MANO: ¿de quien es esa plata? =====
-  // SOLO LECTURA: no modifica ningun calculo de la liquidacion. Reconstruye, a partir
-  // de las sesiones ya liquidables y de los pagos ya cargados, a quien le corresponde
-  // cada peso que un profesional recibio en mano. Si algo falla, no se dibuja nada.
+  // Regla (Lu, 20/07/2026): la plata que entra salda las sesiones en ORDEN CRONOLOGICO
+  // de la sesion, y cada sesion saldada le corresponde ENTERA a quien la atendio.
+  // Quien cobro el pago no cambia de quien es la sesion: solo dice quien tiene la plata.
+  // Por eso no se prorratea nada: cada sesion ya sabe quien la tiene (fila.tenedores).
+  // SOLO LECTURA: no modifica ningun calculo de la liquidacion.
   const desgloseRecibido = {};
   try {
-    // 1) Agrupar las sesiones liquidables por el pago que las salda (tratamiento + fecha de abono)
-    const porClave = {};
     for (const f of liquidables){
-      if (!f.fechaAbono || f.tratId == null) continue;
-      const k = f.tratId + '|' + f.fechaAbono;
-      (porClave[k] = porClave[k] || []).push(f);
-    }
-    // 2) Agrupar los pagos por esa misma clave, anotando cuanto puso cada receptor
-    const pagosPorClave = {};
-    for (const p of pagos){
-      if (p.tratamiento_id == null) continue;
-      const k = p.tratamiento_id + '|' + p.fecha;
-      const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
-      const imp = Number(p.importe) || 0;
-      if (imp <= 0.5) continue;
-      const e = (pagosPorClave[k] = pagosPorClave[k] || { total: 0, porQuien: {} });
-      e.total += imp;
-      e.porQuien[quien] = (e.porQuien[quien] || 0) + imp;
-    }
-    // 3) Repartir. Si una misma clave la pagaron dos personas, se prorratea.
-    for (const k of Object.keys(pagosPorClave)){
-      const filas = porClave[k];
-      if (!filas || !filas.length) continue;
-      const e = pagosPorClave[k];
-      for (const quien of Object.keys(e.porQuien)){
-        const parte = e.total > 0.5 ? (e.porQuien[quien] / e.total) : 0;
+      const lista = f.tenedores || [];
+      if (!lista.length) continue;
+      for (const tn of lista){
+        const parte = f.valor > 0.5 ? (tn.monto / f.valor) : 0;
         if (parte <= 0) continue;
-        const d = (desgloseRecibido[quien] = desgloseRecibido[quien] || { porDuenio: {}, detalle: [], atribuido: 0 });
-        for (const f of filas){
-          const mp = (Number(f.mProf) || 0) * parte;
-          const mc = (Number(f.mCentro) || 0) * parte;
-          if (mp > 0.5){
-            d.porDuenio[f.prof] = (d.porDuenio[f.prof] || 0) + mp;
-            d.atribuido += mp;
-          }
-          if (mc > 0.5){
-            d.porDuenio['centro (PuntoBiO)'] = (d.porDuenio['centro (PuntoBiO)'] || 0) + mc;
-            d.atribuido += mc;
-          }
-          d.detalle.push({ fecha: f.fecha, paciente: f.paciente, prof: f.prof,
-                           mProf: mp, mCentro: mc, codigo: f.codigo });
-        }
+        const d = (desgloseRecibido[tn.quien] = desgloseRecibido[tn.quien] || { porDuenio: {}, detalle: [], atribuido: 0 });
+        const mp = (Number(f.mProf) || 0) * parte;
+        const mc = (Number(f.mCentro) || 0) * parte;
+        if (mp > 0.5){ d.porDuenio[f.prof] = (d.porDuenio[f.prof] || 0) + mp; d.atribuido += mp; }
+        if (mc > 0.5){ d.porDuenio['centro (PuntoBiO)'] = (d.porDuenio['centro (PuntoBiO)'] || 0) + mc; d.atribuido += mc; }
+        d.detalle.push({ fecha: f.fecha, paciente: f.paciente, prof: f.prof,
+                         mProf: mp, mCentro: mc, codigo: f.codigo, parte: parte });
       }
     }
   } catch (e) { console.warn('No se pudo armar el desglose de lo recibido:', e && e.message); }
@@ -1437,11 +1426,18 @@ function render(pagos, sesiones, filtroProf){
           <th style="text-align:left;">Fecha</th><th style="text-align:left;">Paciente</th>
           <th style="text-align:left;">Atendió</th><th class="num">Del profe</th><th class="num">Del centro</th>
         </tr></thead><tbody>`;
+        let hayCompartido = false;
         for (const x of det){
-          out += `<tr><td>${x.fecha || '—'}</td><td>${x.paciente || '—'}</td><td>${x.prof || '—'}</td>
+          const comp = (x.parte < 0.999);
+          if (comp) hayCompartido = true;
+          out += `<tr><td>${x.fecha || '—'}</td><td>${x.paciente || '—'}${comp ? ' <span style="color:#b45309;" title="Esta sesión quedó cubierta entre dos pagos distintos">◆</span>' : ''}</td><td>${x.prof || '—'}</td>
                   <td class="num">${fmt(x.mProf)}</td><td class="num">${fmt(x.mCentro)}</td></tr>`;
         }
-        out += `</tbody></table></details>`;
+        out += `</tbody></table>`;
+        if (hayCompartido){
+          out += `<div style="color:#b45309;font-size:11.5px;margin:2px 0 4px;">◆ Esa sesión quedó cubierta entre dos pagos distintos, así que solo una parte la tiene ${prof}. El resto lo tiene quien hizo el otro pago.</div>`;
+        }
+        out += `</details>`;
       }
       out += `<div style="color:#9ca3af;font-size:11.5px;margin-top:5px;">El neto de arriba además considera las sesiones propias que cobró otro.</div>`;
       out += `</div>`;
