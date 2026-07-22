@@ -510,6 +510,30 @@
   /* Ejercicio principal: series + repeticiones lado a lado */
   .evo-ej-sr { display: flex; gap: 8px; margin-top: 4px; }
   .evo-ej-sr-campo { flex: 1; min-width: 0; }
+  /* Interruptor Iguales / Piramidal */
+  .evo-ej-modo { display: inline-flex; gap: 0; margin: 6px 0 2px; border: 1px solid var(--gris-borde); border-radius: 8px; overflow: hidden; }
+  .evo-ej-modo button {
+    padding: 5px 12px; font-size: 12px; font-weight: 600; border: none;
+    background: #fff; color: var(--texto-suave); cursor: pointer; line-height: 1;
+  }
+  .evo-ej-modo button + button { border-left: 1px solid var(--gris-borde); }
+  .evo-ej-modo button.sel { background: var(--celeste); color: #fff; }
+  /* Reps piramidales: una casilla por serie */
+  .evo-ej-reps-multi { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .evo-ej-reps-multi .evo-rep-box { display: flex; flex-direction: column; align-items: center; width: 54px; }
+  .evo-ej-reps-multi .evo-rep-box .evo-rep-nro { font-size: 10px; font-weight: 700; color: var(--texto-suave); margin-bottom: 2px; }
+  .evo-ej-reps-multi .evo-rep-box input {
+    width: 100%; text-align: center; padding: 6px 4px; font-size: 14px;
+    border: 1px solid var(--gris-borde); border-radius: 8px; box-sizing: border-box;
+  }
+  .evo-ej-reps-hint { font-size: 11px; color: var(--texto-suave); margin-top: 3px; }
+  /* Campo Contenido de la sesión destacado (para no escribir por error en Observación) */
+  .evo-sublabel-destacado { color: var(--celeste); font-weight: 700; }
+  #evo-contenido { border: 1.5px solid var(--celeste); background: #f0f9ff; }
+  #evo-contenido:focus { background: #fff; }
+  /* Observación: campo secundario, más apagado */
+  .evo-sublabel-obs { color: var(--texto-suave); }
+  #evo-obs { background: #fafafa; }
   /* Lista dinámica de ejercicios principales */
   .evo-ej-item {
     border: 1px solid var(--gris-borde); border-radius: 10px;
@@ -3589,37 +3613,106 @@ function pintarChipsModulos() {
 // en el guardado general (leerPanelEvo → columna jsonb "ejercicios").
 let evoEjercicios = [{ ej:'', series:'', reps:'', carga:'' }];
 function _escAttr(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+// Modo de un ejercicio: 'piram' si tiene flag o si las reps traen guiones (10-8-6); si no, 'igual'.
+function _ejModo(r){ return (r && (r.modo === 'piram' || String(r.reps||'').includes('-'))) ? 'piram' : 'igual'; }
+// Normaliza reps piramidales: acepta guión, coma, barra o espacio como separador y deja "10-8-6".
+function _cleanReps(s){
+  return String(s||'').trim()
+    .replace(/[\/,;]+/g,'-')   // barras, comas, punto y coma → guión
+    .replace(/\s+/g,'-')        // espacios → guión
+    .replace(/-+/g,'-')         // guiones repetidos → uno
+    .replace(/^-+|-+$/g,'');    // guiones colgantes al inicio/fin
+}
 function renderEjercicios(){
   const cont = document.getElementById('evo-ejercicios');
   if (!cont) return;
   if (!evoEjercicios.length) evoEjercicios = [{ ej:'', series:'', reps:'', carga:'' }];
   const opts = (max, sel) => ['', ...Array.from({length:max}, (_,k)=>String(k+1))]
     .map(v => `<option value="${v}" ${String(sel||'')===v?'selected':''}>${v||'—'}</option>`).join('');
-  cont.innerHTML = evoEjercicios.map((r,i) => `
+  cont.innerHTML = evoEjercicios.map((r,i) => {
+    const modo = _ejModo(r);
+    // Bloque Series + Reps según el modo
+    let bloqueSR;
+    if (modo === 'piram') {
+      const nParts = String(r.reps||'').split('-').filter(x => x.trim()).length;
+      bloqueSR = `
+      <div class="evo-sublabel">Repeticiones por serie</div>
+      <input class="evo-input" type="text" value="${_escAttr(r.reps)}" oninput="evoEjSet(${i},'reps',this.value)" placeholder="Ej: 10-8-6 (a tu criterio)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
+      <div class="evo-ej-reps-hint">Escribí una por serie separadas por guión, coma o espacio.${nParts>0 ? ` — ${nParts} serie${nParts>1?'s':''}` : ''}</div>`;
+    } else {
+      bloqueSR = `
+      <div class="evo-ej-sr">
+        <div class="evo-ej-sr-campo">
+          <div class="evo-sublabel">Series</div>
+          <select class="evo-input evo-select" onchange="evoEjSetSeries(${i},this.value)">${opts(10, r.series)}</select>
+        </div>
+        <div class="evo-ej-sr-campo">
+          <div class="evo-sublabel">Repeticiones</div>
+          <select class="evo-input evo-select" onchange="evoEjSet(${i},'reps',this.value)">${opts(20, r.reps)}</select>
+        </div>
+      </div>`;
+    }
+    return `
     <div class="evo-ej-item">
       <div class="evo-ej-item-head">
         <div class="evo-sublabel" style="margin:0">Ejercicio ${evoEjercicios.length>1 ? ('#'+(i+1)) : 'principal'}</div>
         ${evoEjercicios.length>1 ? `<button type="button" class="evo-ej-del" onclick="evoEjQuitar(${i})" title="Quitar ejercicio">×</button>` : ''}
       </div>
       <input class="evo-input" type="text" value="${_escAttr(r.ej)}" oninput="evoEjSet(${i},'ej',this.value)" placeholder="Ej: Sentadilla" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
-      <div class="evo-ej-sr">
-        <div class="evo-ej-sr-campo">
-          <div class="evo-sublabel">Series</div>
-          <select class="evo-input evo-select" onchange="evoEjSet(${i},'series',this.value)">${opts(10, r.series)}</select>
-        </div>
-        <div class="evo-ej-sr-campo">
-          <div class="evo-sublabel">Repeticiones</div>
-          <select class="evo-input evo-select" onchange="evoEjSet(${i},'reps',this.value)">${opts(20, r.reps)}</select>
-        </div>
+      <div class="evo-ej-modo">
+        <button type="button" class="${modo==='igual'?'sel':''}" onclick="evoEjModo(${i},'igual')">Iguales</button>
+        <button type="button" class="${modo==='piram'?'sel':''}" onclick="evoEjModo(${i},'piram')">Piramidal</button>
       </div>
+      ${bloqueSR}
       <div class="evo-sublabel">Carga</div>
       <div class="evo-ej-carga">
         <input class="evo-input" type="text" inputmode="decimal" value="${_escAttr(r.carga)}" oninput="evoEjSet(${i},'carga',this.value)" placeholder="Ej: 40 (o banda roja / peso corporal)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other">
         <span class="evo-ej-unidad">Kg</span>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 window.evoEjSet = (i, campo, val) => { if (evoEjercicios[i]) evoEjercicios[i][campo] = val; };
+// Cambiar la cantidad de series. En piramidal reajusta (y re-dibuja) los casilleros de reps.
+window.evoEjSetSeries = (i, val) => {
+  const r = evoEjercicios[i]; if (!r) return;
+  r.series = val;
+  if (_ejModo(r) === 'piram') {
+    const N = parseInt(val,10) || 0;
+    if (N > 0) {
+      const partes = String(r.reps||'').split('-');
+      r.reps = Array.from({length:N}, (_,k) => (partes[k]||'').trim()).join('-');
+    }
+    renderEjercicios();
+  }
+};
+// Setear la rep de la serie k (modo piramidal). No re-dibuja: preserva el foco mientras se tipea.
+window.evoEjSetRep = (i, k, val) => {
+  const r = evoEjercicios[i]; if (!r) return;
+  const N = Math.max(parseInt(r.series,10) || 0, 1);
+  let partes = Array.from({length:N}, (_,x) => (String(r.reps||'').split('-')[x]||'').trim());
+  partes[k] = String(val).trim();
+  r.reps = partes.join('-');
+};
+// Cambiar de modo Iguales ↔ Piramidal.
+window.evoEjModo = (i, modo) => {
+  const r = evoEjercicios[i]; if (!r || _ejModo(r) === modo) return;
+  if (modo === 'igual') {
+    // Colapsar: me quedo con la primera rep como valor único.
+    r.reps = (String(r.reps||'').split('-')[0] || '').trim();
+    r.modo = 'igual';
+  } else {
+    // Piramidal: siembro cada serie con el valor que ya había (si era uno solo, lo repito en todas).
+    const nSer = parseInt(r.series,10) || 0;
+    const base = String(r.reps||'').split('-').map(s => s.trim());
+    if (nSer > 0) {
+      const unico = (base.length === 1 && base[0]) ? base[0] : '';
+      r.reps = Array.from({length:nSer}, (_,x) => (base[x] || unico || '')).join('-');
+    }
+    r.modo = 'piram';
+  }
+  renderEjercicios();
+};
 window.evoEjAgregar = () => {
   evoEjercicios.push({ ej:'', series:'', reps:'', carga:'' });
   renderEjercicios();
@@ -3673,7 +3766,7 @@ window.evoGuardarNotaPred = async () => {
   const contenido = (document.getElementById('evo-contenido')?.value || '').trim();
   const sala = esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null;
   const _ejer = (evoEjercicios || [])
-    .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: (r.reps||'').trim(), carga: (r.carga||'').trim() }))
+    .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: _cleanReps(r.reps), carga: (r.carga||'').trim() }))
     .filter(r => r.ej || r.series || r.reps || r.carga);
   if (!modulos && !contenido && !sala && !_ejer.length) { toast('Elegí sala, módulos, ejercicios o escribí contenido antes de guardar', 'err'); return; }
   const titulo = [sala, modulos].filter(Boolean).join(' · ') || (_ejer[0]?.ej) || contenido.slice(0,30);
@@ -4187,7 +4280,13 @@ function ejerciciosDe(f){
     arr = [{ ej: f.ejercicio_principal, series: f.ejercicio_series, reps: f.ejercicio_reps, carga: f.carga }];
   return arr.map(r => {
     const nombre = (r.ej||'').trim();
-    const sr = [(r.series||'').trim(), (r.reps||'').trim()].filter(Boolean).join('×');
+    const ser = (r.series||'').trim();
+    const reps = (r.reps||'').trim();
+    // Piramidal (reps distintas por serie, ej "10-8-6") vs iguales ("3×10").
+    const nP = reps.split('-').filter(Boolean).length;
+    const sr = reps.includes('-')
+      ? `${reps} (${nP} series)`
+      : [ser, reps].filter(Boolean).join('×');
     const carga = (r.carga||'').trim();
     const cargaFmt = carga ? (/^\d+([.,]\d+)?$/.test(carga) ? (carga+' Kg') : carga) : '';
     const detalle = [sr, cargaFmt ? ('carga '+cargaFmt) : ''].filter(Boolean).join(' · ');
@@ -5252,7 +5351,7 @@ function formatearFechaLarga(iso) {
 }
 function leerPanelEvo() {
   const _ejer = (evoEjercicios || [])
-    .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: (r.reps||'').trim(), carga: (r.carga||'').trim() }))
+    .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: _cleanReps(r.reps), carga: (r.carga||'').trim() }))
     .filter(r => r.ej || r.series || r.reps || r.carga);
   return {
     modulo: evoModulosSel.join(', '),
@@ -5279,6 +5378,8 @@ window.evoSetCarita = (c) => {
   document.querySelectorAll('[data-evo-carita]').forEach(el => {
     el.classList.toggle('sel', el.getAttribute('data-evo-carita') === evoCaritaSel);
   });
+  // Si se sintió Molesto o Mal, marcar Dolor/molestia = Sí (queda editable si querés cambiarlo).
+  if (evoCaritaSel && /Molesto|Mal/.test(evoCaritaSel)) evoSetDolor(true);
 };
 window.evoSetDolor = (v) => {
   evoDolorSel = v;
@@ -5761,7 +5862,7 @@ function renderPanelEvo() {
       <div class="evo-sublabel" style="margin-top:10px">Ejercicios principales</div>
       <div id="evo-ejercicios"></div>
       <button type="button" class="evo-ej-add" onclick="evoEjAgregar()">＋ Agregar ejercicio</button>
-      <div class="evo-sublabel" style="margin-top:8px">Contenido de la sesión</div>
+      <div class="evo-sublabel evo-sublabel-destacado" style="margin-top:8px">📝 Contenido de la sesión</div>
       <textarea id="evo-contenido" class="evo-input" rows="2" placeholder="Notas o detalle de la sesión (opcional)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other"></textarea>
       <div class="evo-fila">
         <div class="evo-grupo">
@@ -5778,6 +5879,7 @@ function renderPanelEvo() {
           </div>
         </div>
       </div>
+      <div class="evo-sublabel evo-sublabel-obs" style="margin-top:8px">Observación (opcional · interna)</div>
       <textarea id="evo-obs" class="evo-input" rows="2" placeholder="Observación (opcional)" autocomplete="off" spellcheck="false" data-lpignore="true" data-form-type="other"></textarea>
       <button class="evo-guardar-pred" onclick="evoGuardarNotaPred()">💾 Guardar esta combinación como predeterminada</button>
     </div>
