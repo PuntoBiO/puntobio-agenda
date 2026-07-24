@@ -1510,7 +1510,7 @@ function pintarEvaluacion(datos, normas) {
       det = `⚠️ medición de UN SOLO LADO (L ${f.izquierda_N ?? '—'} / R ${f.derecha_N ?? '—'} N) — posible fallo de equipo, revisar o excluir`;
       fuente = 'toma incompleta';
     } else {
-      det = `${f.asimetria_pct}% asim · L ${f.izquierda_N} / R ${f.derecha_N} N · débil: ${debil}`;
+      det = `${f.asimetria_pct}% asim · L ${f.izquierda_N} / R ${f.derecha_N} N · lado MÁS DÉBIL: ${(debil || '—').toUpperCase()}`;
       fuente = 'Noyes_1991';
       if (/Prensi/i.test(f.grupo)) {
         const Lkg = f.izquierda_N / N_PER_KG, Rkg = f.derecha_N / N_PER_KG;
@@ -1578,7 +1578,11 @@ function pintarEvaluacion(datos, normas) {
         const asim = (A != null) ? A : Math.round((R - L) / (mag || 1) * 1000) / 10;
         const c = colorAsim(asim); cnt(c);
         const nota = (esTasa && (L < 0 || R < 0)) ? ' · ⚠️ un lado muy bajo/negativo (revisar)' : '';
-        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${asim}% asim · L ${L} / R ${R} ${u || (esTasa ? '' : 'N')}${nota}`.trim(), fuente: 'asimetría VALD', asim: asim, L: L, R: R, unidad: (u || (esTasa ? '' : 'N')), cat: 'ForceDecks' });
+        const ladoMenorFD = (L != null && R != null)
+          ? (L < R ? 'IZQUIERDO' : (R < L ? 'DERECHO' : 'simétrico'))
+          : null;
+        const sufLadoFD = ladoMenorFD ? ` · lado con MENOR valor: ${ladoMenorFD}` : '';
+        forceDecks.push({ em: c, nom: `${star}${t.prueba} · ${nombre}`, det: `${asim}% asim · L ${L} / R ${R} ${u || (esTasa ? '' : 'N')}${sufLadoFD}${nota}`.trim(), fuente: 'asimetría VALD', asim: asim, L: L, R: R, unidad: (u || (esTasa ? '' : 'N')), cat: 'ForceDecks' });
         continue;
       }
       // No gradeable → informativo (⚪, no marca rojo).
@@ -1625,7 +1629,12 @@ function pintarEvaluacion(datos, normas) {
         continue;
       }
       const c = colorAsim(m.asimetria_pct); cnt(c);
-      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}`, fuente: fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
+      // El lado afectado se calcula EN CÓDIGO (nunca lo deduce la IA): menor ROM = lado restringido.
+      const ladoMenor = (m.izquierda != null && m.derecha != null)
+        ? (m.izquierda < m.derecha ? 'IZQUIERDO' : (m.derecha < m.izquierda ? 'DERECHO' : 'simétrico'))
+        : null;
+      const sufLado = ladoMenor ? ` · lado con MENOR valor: ${ladoMenor}` : '';
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}${sufLado}`, fuente: fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
     }
   }
 
@@ -1879,28 +1888,33 @@ async function generar() {
       if (!evolucion) toast('Marcaste Reevaluación pero no encontré una evaluación anterior comparable. El informe sale sin sección de evolución.');
     }
     // Observaciones clínicas del profesional (lo que escribió Lu en la HC): limitaciones, indicaciones médicas, qué no se pudo hacer.
-    // Se excluyen los informes auto-generados (que empiezan con "INFORME BIOMECÁNICO FUNCIONAL"). Con red: si falla, sigue sin ellas.
+    // FIX: los informes auto-generados se excluyen EN LA CONSULTA (antes se filtraban después del limit y se comían el cupo).
     let observaciones = [];
     try {
       const { data: obs } = await sb.from('hc_observaciones')
         .select('texto, creado_en, autor_nombre')
         .eq('persona_id', pacienteSel.id)
         .eq('tipo', 'observacion')
+        .not('texto', 'ilike', 'INFORME BIOMEC%')
         .order('creado_en', { ascending: false })
-        .limit(8);
+        .limit(5);
       observaciones = (obs || [])
         .filter(o => !/^\s*INFORME BIOMEC[ÁA]NICO FUNCIONAL/i.test(o.texto || ''))
-        .slice(0, 3)
         .map(o => ({ fecha: (o.creado_en || '').slice(0, 10), autor: o.autor_nombre || '', texto: (o.texto || '').trim() }));
     } catch (_) { /* sin acceso: sigue sin observaciones */ }
-    // Documentos médicos (estudios / indicaciones / apto físico) para que la IA los tenga de contexto.
-    // Solo PDF, solo esas categorías (NO los de VALD ni la evaluación generada), con topes de tamaño/cantidad.
+    // Documentos médicos del paciente (estudios, indicaciones, aptos) para que la IA los lea como contexto clínico.
+    // FIX: antes se filtraba por 'categoria', pero esa columna nunca se completa → no llegaba ningún PDF.
+    // Ahora: se toman los PDF del paciente EXCLUYENDO los generados por VALD/el sistema (esos datos ya vienen por API).
     let documentos = [];
     try {
       const { data: adjs } = await sb.from('hc_adjuntos')
-        .select('nombre_original, storage_path, categoria, tipo_mime, tamano_bytes')
+        .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
         .eq('persona_id', pacienteSel.id)
-        .in('categoria', ['estudio', 'consideracion', 'apto_fisico']);
+        .order('creado_en', { ascending: false });
+      const esDeVald = (a) => {
+        const n = ((a.nombre_original || '') + ' ' + (a.storage_path || '')).toLowerCase();
+        return /vald|hub|humantrak|forcedeck|dynamo|evaluaci[oó]n[_\s-]/.test(n);
+      };
       const blobABase64 = (blob) => new Promise((res) => {
         const r = new FileReader();
         r.onload = () => { const s = String(r.result || ''); const i = s.indexOf(','); res(i >= 0 ? s.slice(i + 1) : ''); };
@@ -1909,8 +1923,9 @@ async function generar() {
       });
       const candidatos = (adjs || [])
         .filter(a => ((a.tipo_mime || '').toLowerCase().includes('pdf')) || /\.pdf$/i.test(a.nombre_original || ''))
-        .filter(a => !a.tamano_bytes || a.tamano_bytes <= 6 * 1024 * 1024) // hasta ~6 MB c/u
-        .slice(0, 3); // máximo 3 para controlar el costo
+        .filter(a => !esDeVald(a))
+        .filter(a => !a.tamano_bytes || a.tamano_bytes <= 6 * 1024 * 1024)
+        .slice(0, 3);
       for (const a of candidatos) {
         try {
           const { data: blob } = await sb.storage.from('hc-adjuntos').download(a.storage_path);
@@ -1919,6 +1934,7 @@ async function generar() {
           if (b64) documentos.push({ nombre: a.nombre_original, base64: b64 });
         } catch (_) { /* un PDF que falla no frena el resto */ }
       }
+      if (documentos.length) toast('📎 Se envían ' + documentos.length + ' documento(s) del paciente a la IA.');
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
     const body = {
       paciente: {
