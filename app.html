@@ -1259,6 +1259,8 @@ async function init() {
   actualizarBadgeCumple()
   // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
   actualizarBadgeMensajes()
+  // Badge de Agenda Secretaría: pendientes míos o comunes (solo admin/operativo)
+  actualizarBadgeAgendaSec()
 
   // Botón de cobro flotante: SOLO Jime/Lu/Ale/Pau (equipo sin solo_lo_mio).
   // Los profes/profesionales (Bruno, Male, Vero) y clientes NO lo ven.
@@ -1394,6 +1396,43 @@ async function actualizarBadgeMorososTF() {
   }
 }
 window.actualizarBadgeMorososTF = actualizarBadgeMorososTF
+
+// ============================================================
+// 📝 BADGE AGENDA SECRETARÍA: tareas pendientes o en curso que
+// son mías o comunes (asignada_a null). Solo admin/operativo
+// (Lu, Jime, Ale, Pau). Mismo mapa mail→nombre que usa
+// agenda_secretaria.html en su CONFIG.
+// ============================================================
+const NOMBRES_AGENDA_SEC = {
+  'paukappes@gmail.com': 'Pau',
+  'alejandraperna@gmail.com': 'Ale',
+  'jimenahllorente@gmail.com': 'Jime',
+  'liclucianavelaz@gmail.com': 'Lu'
+}
+async function actualizarBadgeAgendaSec() {
+  if (!permisos || !(permisos.admin_total || permisos.operativo_general)) return
+  const badge = document.getElementById('badge-agenda-sec')
+  if (!badge) return
+  try {
+    const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+    const yo = NOMBRES_AGENDA_SEC[miEmail]
+    let q = supabase.from('tareas_secretaria')
+      .select('id', { count: 'exact', head: true })
+      .eq('archivada', false)
+      .in('estado', ['pendiente', 'en_curso'])
+    if (yo) q = q.or(`asignada_a.is.null,asignada_a.eq.${yo}`)
+    else q = q.is('asignada_a', null)
+    const { count, error } = await q
+    if (error) { console.warn('No se pudo leer badge agenda secretaría:', error.message); return }
+    if (count > 0) {
+      badge.style.display = 'inline-block'
+      badge.textContent = count > 99 ? '99+' : String(count)
+    } else {
+      badge.style.display = 'none'
+    }
+  } catch (e) { /* sin badge no pasa nada */ }
+}
+window.actualizarBadgeAgendaSec = actualizarBadgeAgendaSec
 
 // ============================================================
 // 🎂 BADGE CUMPLEAÑOS: saludos de WhatsApp pendientes.
@@ -1553,6 +1592,17 @@ function buildNav() {
       <span class="nav-icon">🏠</span>
       <span class="nav-label">Inicio</span>
     </div>`)
+
+  // Agenda Secretaría (jornada 142): pendientes compartidos de Pau/Ale/Jime/Lu.
+  // Reemplaza los papelitos de secretaría. SOLO admin/operativo. El badge rojo
+  // con pendientes (míos o comunes) lo agrega actualizarBadgeAgendaSec() después.
+  if (permisos.admin_total || permisos.operativo_general) {
+    items.push(`<div class="nav-item" onclick="irA('agenda-secretaria')">
+      <span class="nav-icon">📝</span>
+      <span class="nav-label">Agenda Secretaría</span>
+      <span class="nav-badge" id="badge-agenda-sec" style="display:none"></span>
+    </div>`)
+  }
 
   // (Tratamientos, Sesiones, Padrón e Historias Clínicas se movieron a la sección
   //  "Pacientes", abajo de General. VALD se movió a Áreas → BioLab.)
@@ -1910,6 +1960,7 @@ window.irA = function(modulo) {
   else if (modulo === 'coberturas') renderCoberturas()
   else if (modulo === 'cumpleanos') renderCumpleanos()
   else if (modulo === 'comunicados') renderComunicados()
+  else if (modulo === 'agenda-secretaria') renderAgendaSecretaria()
   else if (modulo === 'aumentos') renderAumentos()
   else renderPlaceholder(modulo)
 }
@@ -1923,6 +1974,11 @@ window.addEventListener('message', (ev) => {
   }
   if (data.tipo === 'REFRESCAR_BADGE_MOROSOS') {
     actualizarBadgeMorososTF();
+    return;
+  }
+  // Refrescar badge de Agenda Secretaría (el iframe avisa tras crear/resolver tareas)
+  if (data.tipo === 'REFRESCAR_BADGE_AGENDA_SEC') {
+    actualizarBadgeAgendaSec();
     return;
   }
   // Refrescar badge de mensajes (cuando el iframe de mensajes los marca como leídos)
@@ -2058,6 +2114,7 @@ function renderHome() {
   }
   if (permisos.admin_total || permisos.operativo_general) {
     accesos.push({ icon: '💵', title: 'Caja diaria', desc: 'Cobros del día', id: 'caja-diaria' })
+    accesos.push({ icon: '📝', title: 'Agenda Secretaría', desc: 'Pendientes del equipo', id: 'agenda-secretaria' })
   }
   // Profes/kines (vista acotada): solo la tarjeta "Agendas" (el selector ya los
   // lleva a su agenda); los paneles administrativos de área son solo para admin.
@@ -3070,6 +3127,17 @@ function renderFeriados() {
   contentEl.classList.add('module-embed')
   contentEl.innerHTML = `
     <iframe src="feriados.html" class="module-iframe-tab" title="Feriados"></iframe>
+  `
+}
+
+// ======================
+// MODULO: AGENDA SECRETARÍA (pendientes compartidos Pau/Ale/Jime/Lu, archivo aparte)
+// ======================
+function renderAgendaSecretaria() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.add('module-embed')
+  contentEl.innerHTML = `
+    <iframe src="agenda_secretaria.html" class="module-iframe-tab" title="Agenda Secretaría"></iframe>
   `
 }
 
