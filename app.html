@@ -4208,7 +4208,11 @@ window.pintarMiBonoSala = async function(mesStr) {
   if (!cont) return
   const hoyMes = new Date().toISOString().slice(0, 7)
   if (mesStr !== hoyMes) { cont.innerHTML = ''; return } // por ahora, solo mes en curso
-  const PROFES_SALA = ['Santi', 'Lautaro', 'Lean']
+  // Ojo: acá se compara contra p.nombre, que sale de NOMBRES_RANKING → 'Lauti', no
+  // 'Lautaro' (ese nombre es el de las tablas sueldos_profes_tf / tarifas_hora_extra y
+  // solo vale en el calculador admin). Con 'Lautaro' el cartel nunca le aparecía a Lauti
+  // y su conteo de faltas no entraba en el reparto que se le muestra a los otros dos.
+  const PROFES_SALA = ['Santi', 'Lauti', 'Lean']
   const lista = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
   const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
   const yo = lista.find(p => (p.email || '').toLowerCase() === miEmail)
@@ -4397,6 +4401,18 @@ async function cargarEquipoDesempeno(mesVer) {
     ;((cfR && cfR.data) || []).forEach(c => {
       const eAus = c.falta ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.falta)) : null
       const eCub = c.cubre ? emails.find(em => esTurnoDe(aliasPorEmail[em], c.cubre)) : null
+      // 🔒 REGLA DEL VIERNES (día de hora extra fija: viernes 15-18 de Lean). Manda SOBRE
+      // el tipo elegido en el desplegable: la hora extra y su 2% van SIEMPRE al que
+      // efectivamente hace esas horas, y los alumnos de ese día quedan 100% del que los
+      // evolucionó (no se re-reparten). 'cubre' y cualquier tipo desconocido ya caen en la
+      // rama de abajo, que resuelve bien el día extra-fija; los únicos que se escapaban
+      // eran 'cambio' y 'cumple', que salían por su return y dejaban la hora extra y el 2%
+      // en manos del titular ausente. El titular NO suma falta: los dos son neutrales.
+      if (eCub && eAus && (c.tipo === 'cambio' || c.tipo === 'cumple') && esDiaExtraFija(eAus, diaPorFecha[c.fecha] || '')) {
+        ;(extraCubreFechas[eCub] = extraCubreFechas[eCub] || {})[c.fecha] = eAus
+        ;(cobCubriEmail[eCub] = cobCubriEmail[eCub] || {})[c.fecha] = { aus: eAus, nombre: NOMBRES_RANKING[eAus] || c.falta }
+        return
+      }
       if (c.tipo === 'cambio') {
         // CAMBIO (devuelve horas): NEUTRAL. Los alumnos que evoluciona el cubridor en
         // los turnos del titular ausente se acreditan 100% al titular (día completo).
@@ -4569,6 +4585,13 @@ async function cargarEquipoDesempeno(mesVer) {
         }
         if (hs > 0) {
           (extraGanadas[eCub] = extraGanadas[eCub] || {})[f] = ((extraGanadas[eCub] && extraGanadas[eCub][f]) || 0) + hs
+          // El cubridor TRABAJÓ esas horas → van a SU denominador, así el promedio de
+          // alumnos/hora es real. Antes se le restaban al titular y no se le sumaban a
+          // nadie: los alumnos de ese día le inflaban el promedio al que cubrió.
+          if (st[eCub]) {
+            st[eCub].horas += hs
+            st[eCub].horasPorFecha[f] = (st[eCub].horasPorFecha[f] || 0) + hs
+          }
           // el viernes cubierto suma 2% al cubridor (es día fuera de sueldo del ausente)
           if (eAus && esDiaExtraFija(eAus, diaPorFecha[f] || '')) (dias2pct[eCub] = dias2pct[eCub] || new Set()).add(f)
         }
