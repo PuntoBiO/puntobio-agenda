@@ -3790,12 +3790,13 @@ function cpCalcularFecha(i) {
     pintar('<span style="color:var(--text-dim)">El nuevo día es igual al actual. No hay nada que cambiar.</span>');
     cpFechaCache = { clases: 0, importe: 0 }; return null;
   }
-  if (diaNuevo < diaActual) {
-    pintar(`<div style="font-weight:600;margin-bottom:6px">Movés la fecha más temprano (día ${diaActual} → ${diaNuevo})</div>
-      <div style="color:var(--text-dim);font-size:13px">No se cobra puente: el mes entero pasa a arrancar el día ${diaNuevo}.</div>`);
-    cpFechaCache = { clases: 0, importe: 0, diaNuevo, desde: null, hasta: null };
-    return { importe: 0, diaNuevo, clases: 0, mes: MES_ACTUAL };
-  }
+  // NOTA (27/7/26): acá había un atajo — si el día NUEVO era menor que el actual se
+  // asumía "movés la fecha más temprano" y se devolvía puente $0. Compara NÚMEROS de
+  // día, no fechas: el caso que cruza fin de mes (día 23 → día 2 del mes siguiente) es
+  // un corrimiento HACIA ADELANTE de 10 días y se comía el puente. Ahora manda siempre
+  // la cuenta por fechas de abajo (desde/hasta) y, cuando el día baja, el cuadro avisa
+  // qué lectura hizo para que la secretaria decida (si de verdad es hacia atrás →
+  // tildar "No cobrar el proporcional").
 
   const hasta = cpProxFechaConDia(HOY, diaNuevo);
   const desde = cpFechaConDiaNoMayor(hasta, diaActual);
@@ -3825,6 +3826,26 @@ function cpCalcularFecha(i) {
   const lista = clasesEnPuente.length
     ? clasesEnPuente.map(c => `<div style="font-size:12px;color:#1e40af">• ${cpFmtDiaCorto(c)}</div>`).join('')
     : '<div style="font-size:12px;color:var(--text-dim)">No hay clases fijas en el puente.</div>';
+
+  // Cuando el día de pago BAJA (ej: 23 → 2) hay dos lecturas posibles y solo la
+  // secretaria sabe cuál es: corrimiento hacia adelante cruzando fin de mes (puente
+  // corto, se cobra) o adelantar la fecha (no se cobra nada). Se muestra la cuenta
+  // hecha y, si el puente da casi un mes entero, se avisa fuerte.
+  const diasPuente = Math.round((hasta - desde) / 86400000);
+  let avisoDireccion = '';
+  if (diaNuevo < diaActual) {
+    avisoDireccion = (diasPuente >= 20)
+      ? `<div style="margin-top:8px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;padding:8px;font-size:12px;color:#92400e">
+           ⚠️ El puente da <b>${diasPuente} días</b> (casi un mes entero). Si lo que querés es
+           <b>adelantar</b> la fecha (día ${diaActual} → ${diaNuevo}) y <b>no cobrar</b> nada,
+           tildá "No cobrar el proporcional" abajo.
+         </div>`
+      : `<div style="margin-top:8px;background:#eff6ff;border:1px solid #93c5fd;border-radius:6px;padding:8px;font-size:12px;color:#1e40af">
+           ℹ️ La fecha se corre <b>hacia adelante cruzando fin de mes</b>: del día ${diaActual} al día ${diaNuevo}
+           del mes siguiente son <b>${diasPuente} días</b>. Si en realidad la querés adelantar sin cobrar,
+           tildá "No cobrar el proporcional".
+         </div>`;
+  }
   pintar(`
     <div style="font-weight:600;margin-bottom:8px">📅 Puente: ${cpFmtDiaCorto(desde)} → arranca ${cpFmtDiaCorto(hasta)}</div>
     <table style="width:100%;font-size:13px;border-collapse:collapse">
@@ -3838,7 +3859,8 @@ function cpCalcularFecha(i) {
       <span style="font-weight:700">Puente a cobrar</span>
       <span style="font-weight:700;font-size:15px;color:var(--azul)">${fmt$(importe)}</span>
     </div>
-    <div style="font-size:11.5px;color:var(--text-dim);margin-top:6px">El mes entero arranca el ${cpFmtDiaCorto(hasta)} (día ${diaNuevo} → día ${diaNuevo} del mes siguiente).</div>`);
+    <div style="font-size:11.5px;color:var(--text-dim);margin-top:6px">El mes entero arranca el ${cpFmtDiaCorto(hasta)} (día ${diaNuevo} → día ${diaNuevo} del mes siguiente).</div>
+    ${avisoDireccion}`);
   return { importe, diaNuevo, clases: clasesEnPuente.length, mes };
 }
 
