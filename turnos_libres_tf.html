@@ -99,6 +99,23 @@
   .rank .donde { font-size: 11.5px; opacity: .75; }
   .rank .dato { font-size: 12px; font-weight: 700; text-align: right; }
 
+  /* ---------- estado de las clases (la prueba de "no siempre al palo") ---------- */
+  .estado-box { background: #f8fafc; border: 1.5px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 8px; }
+  .estado-frase { font-size: 14.5px; line-height: 1.5; margin-bottom: 12px; }
+  .estado-frase b { font-size: 16px; }
+  .apilada { height: 30px; border-radius: 9px; overflow: hidden; display: flex; border: 1px solid var(--border); }
+  .apilada > div { display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; color: #fff; }
+  .estado-pies { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 9px; font-size: 12px; }
+  .estado-pies span { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .estado-pies i { width: 13px; height: 13px; border-radius: 4px; display: inline-block; }
+
+  /* ---------- clicables ---------- */
+  td.celda { cursor: pointer; transition: transform .08s, box-shadow .08s; }
+  td.celda:hover { transform: translateY(-2px); box-shadow: 0 5px 14px rgba(0,0,0,.16); }
+  .rank .item { cursor: pointer; border-radius: 7px; }
+  .rank .item:hover { background: rgba(255,255,255,.75); }
+  .pista-click { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; font-style: italic; }
+
   .loading { padding: 50px; text-align: center; color: var(--text-dim); font-size: 15px; }
   .aviso { background: #fef3c7; border: 1.5px solid #fcd34d; color: #92400e; padding: 18px 20px; border-radius: 12px; font-size: 14px; line-height: 1.6; }
   code { background: rgba(0,0,0,.07); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
@@ -109,6 +126,7 @@
     .fila-b .num { grid-column: 2; }
   }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body>
 
@@ -127,7 +145,8 @@
     <button id="m-ocup" onclick="setModo('ocup')">% ocupado</button>
   </span>
   <button class="btn btn-azul" onclick="cargar()">↻ Actualizar</button>
-  <button class="btn btn-verde" onclick="copiarResumen()">📋 Copiar resumen</button>
+  <button class="btn" style="border-color:#b91c1c;color:#b91c1c;font-weight:700" onclick="descargarPDF()">📄 Descargar informe PDF</button>
+  <button class="btn btn-verde" onclick="copiarResumen()">📋 Copiar para WhatsApp</button>
   <span id="sello" style="font-size:12px;color:var(--text-dim)"></span>
 </div>
 
@@ -141,6 +160,8 @@
   <div class="ley"><div class="box" style="background:#e0f2fe;border-color:#0ea5e9"></div>
     <div><div class="t" style="color:#075985">FLOJO — menos del 40%</div><div class="d">Sala desaprovechada. Acá hay que llenar.</div></div></div>
 </div>
+
+<div class="pista-click">💡 Tocá cualquier casillero (o cualquier fila de los rankings) para abrir esa clase en la Agenda TF.</div>
 
 <div id="cuerpo"><div class="loading">⏳ Calculando ocupación...</div></div>
 
@@ -182,6 +203,40 @@ function color(pct, libres) {
   if (pct >= 40)   return { bg:'#dcfce7', bd:'#22c55e', tx:'#166534', barra:'#22c55e' };
   return             { bg:'#e0f2fe', bd:'#0ea5e9', tx:'#075985', barra:'#0ea5e9' };
 }
+
+// Cuenta cuántas clases de un área están llenas / casi / sanas / flojas.
+// Es la respuesta concreta a "demostrar que no siempre están al palo".
+function estadoClases(A) {
+  let lleno = 0, casi = 0, sana = 0, floja = 0, total = 0;
+  Object.keys(A.horas).forEach(h => DIAS.forEach(d => {
+    const c = A.horas[h][d];
+    if (!c) return;
+    total++;
+    const p = c.cap ? 100 * c.ocup / c.cap : 0;
+    if (c.libres <= 0) lleno++;
+    else if (p >= 80) casi++;
+    else if (p >= 40) sana++;
+    else floja++;
+  }));
+  return { lleno, casi, sana, floja, total,
+           pctLleno: total ? Math.round(100 * lleno / total) : 0 };
+}
+
+// Saltar a la Agenda TF en ese día/hora/servicio.
+// La pantalla vive dentro de un iframe de app.html: le mandamos un mensaje al
+// padre y él navega y abre la clase. NO se toca agenda_tf.html.
+function irAAgenda(dia, hora, servicio) {
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ tipo:'ABRIR_AGENDA_TF', dia, hora, servicio }, '*');
+    } else {
+      window.location.href = 'agenda_tf.html';   // abierta suelta, fuera del sistema
+    }
+  } catch (e) { console.warn('irAAgenda', e); }
+}
+window.irAAgenda = irAAgenda;
+
+const q = s => String(s == null ? '' : s).replace(/'/g, "\\'");
 
 function agrupar(filas) {
   const areas = {};
@@ -233,6 +288,66 @@ function barraChart(etiqueta, pct, textoDer, colorBarra) {
   </div>`;
 }
 
+// Recuadro "cuántas clases están realmente llenas" + barra apilada
+function cajaEstado(A) {
+  const e = estadoClases(A);
+  if (!e.total) return '';
+  const seg = (n, color, texto) => {
+    const p = 100 * n / e.total;
+    return n ? `<div style="width:${p}%;background:${color}" title="${n} ${texto}">${p >= 9 ? n : ''}</div>` : '';
+  };
+  const noLlenas = e.total - e.lleno;
+  return `<div class="estado-box">
+    <div class="estado-frase">
+      De las <b>${e.total}</b> clases de la semana, <b style="color:#991b1b">${e.lleno}</b>
+      ${e.lleno === 1 ? 'está llena' : 'están llenas'} (<b>${e.pctLleno}%</b>) —
+      o sea que en <b style="color:#075985">${noLlenas}</b> todavía entra gente.
+    </div>
+    <div class="apilada">
+      ${seg(e.lleno, '#ef4444', 'llenas')}
+      ${seg(e.casi, '#f97316', 'casi llenas')}
+      ${seg(e.sana, '#22c55e', 'sanas')}
+      ${seg(e.floja, '#0ea5e9', 'flojas')}
+    </div>
+    <div class="estado-pies">
+      <span><i style="background:#ef4444"></i>${e.lleno} llenas</span>
+      <span><i style="background:#f97316"></i>${e.casi} casi llenas (80%+)</span>
+      <span><i style="background:#22c55e"></i>${e.sana} sanas (40-79%)</span>
+      <span><i style="background:#0ea5e9"></i>${e.floja} flojas (menos del 40%)</span>
+    </div>
+  </div>`;
+}
+
+// Fila de un ranking (clicable, salta a la agenda)
+function filaRank(c, rojo) {
+  return `<div class="item" onclick="irAAgenda('${q(c.dia)}','${q(c.hora)}','${q(c.serv)}')"
+      title="Abrir ${c.dia} ${c.hora} en la Agenda TF">
+      <div><div class="cuando">${c.dia} ${c.hora}</div><div class="donde">${c.serv}</div></div>
+      <div class="dato" style="color:${rojo ? '#991b1b' : '#075985'}">${rojo ? c.cap + ' de ' + c.cap : c.libres + ' libres'}<br>
+        <span style="font-weight:600;opacity:.7">${Math.round(c.pct)}% ocupado</span></div>
+    </div>`;
+}
+
+// Los dos rankings de un área
+function rankingsDe(celdas, serv) {
+  const del = celdas.filter(c => c.serv === serv);
+  const tope = del.filter(c => c.libres === 0).sort((a,b) => b.cap - a.cap).slice(0,8);
+  const flojo = del.slice().sort((a,b) => a.pct - b.pct || b.libres - a.libres).slice(0,8);
+  return `<div class="ranks" style="margin-top:22px">
+    <div class="rank" style="border:1.5px solid #fecaca;background:#fef2f2">
+      <div class="tit" style="color:#991b1b">🔴 ${serv} — horarios al tope</div>
+      <div class="exp" style="color:#991b1b">Llenos: no entra un turno fijo más. Acá hay que reforzar.</div>
+      ${tope.length ? tope.map(c => filaRank(c, true)).join('')
+        : '<div style="font-size:13px;color:var(--text-dim)">Ninguna clase de esta área está llena.</div>'}
+    </div>
+    <div class="rank" style="border:1.5px solid #bae6fd;background:#f0f9ff">
+      <div class="tit" style="color:#075985">🔵 ${serv} — horarios para llenar</div>
+      <div class="exp" style="color:#075985">Las más vacías del área. Acá conviene ofrecer o mover gente.</div>
+      ${flojo.map(c => filaRank(c, false)).join('')}
+    </div>
+  </div>`;
+}
+
 function render() {
   const nombres = Object.keys(AREAS || {}).sort();
   if (!nombres.length) { $('#cuerpo').innerHTML = '<div class="loading">Sin turnos con capacidad cargada.</div>'; return; }
@@ -263,6 +378,16 @@ function render() {
   nombres.forEach(s => { html += kpi(s, AREAS[s].libres, AREAS[s].ocup, AREAS[s].cap, false); });
   html += `</div>`;
 
+  // Aplanar todas las clases una sola vez: lo usan los rankings por área y el consolidado
+  const celdas = [];
+  nombres.forEach(serv => {
+    const A = AREAS[serv];
+    Object.keys(A.horas).forEach(h2 => DIAS.forEach(d => {
+      const c = A.horas[h2][d];
+      if (c) celdas.push({ serv, dia:d, hora:h2, ...c, pct: c.cap ? 100 * c.ocup / c.cap : 0 });
+    }));
+  });
+
   // ============ una tarjeta por área ============
   nombres.forEach(serv => {
     const A = AREAS[serv];
@@ -274,6 +399,7 @@ function render() {
     html += `<div class="area">
       <h2>${serv}</h2>
       <div class="meta">${A.ocup} de ${A.cap} lugares fijos ocupados · <strong style="color:var(--celeste)">${A.libres} libres</strong> · ${pctArea}% de ocupación</div>
+      ${cajaEstado(A)}
       <div class="bloque-tit">Grilla de la semana — ${MODO === 'libres' ? 'lugares libres en cada clase' : 'porcentaje ocupado de cada clase'}</div>
       <div class="scroll"><table class="grid"><thead><tr><th style="text-align:right">Hora</th>`;
     DIAS.forEach(d => { html += `<th class="dia">${d}</th>`; });
@@ -294,7 +420,8 @@ function render() {
         const etiqueta = MODO === 'libres'
           ? (c.libres === 1 ? 'lugar libre' : 'lugares libres')
           : 'ocupado';
-        html += `<td class="celda" title="${d} ${h} · ${serv} — ${c.ocup} de ${c.cap} ocupados, ${c.libres} libres"
+        html += `<td class="celda" onclick="irAAgenda('${q(d)}','${q(h)}','${q(serv)}')"
+          title="${d} ${h} · ${serv} — ${c.ocup} de ${c.cap} ocupados, ${c.libres} libres. Tocá para abrirlo en la Agenda TF."
           style="background:${col.bg};border-color:${col.bd}">
           <div class="n" style="color:${col.tx}">${grande}</div>
           <div class="lbl" style="color:${col.tx}">${etiqueta}</div>
@@ -326,36 +453,25 @@ function render() {
       const col = color(pct, p.libres);
       html += barraChart(h, pct, `<b>${p.libres}</b> libres de ${p.cap}`, col.barra);
     });
-    html += `</div></div>`;
+    html += `</div>`;
+    html += rankingsDe(celdas, serv);
+    html += `</div>`;
   });
 
-  // ============ rankings ============
-  const celdas = [];
-  nombres.forEach(serv => {
-    const A = AREAS[serv];
-    Object.keys(A.horas).forEach(h => DIAS.forEach(d => {
-      const c = A.horas[h][d];
-      if (c) celdas.push({ serv, dia:d, hora:h, ...c, pct: c.cap ? 100 * c.ocup / c.cap : 0 });
-    }));
-  });
+  // ============ rankings consolidados ============
   const llenos = celdas.filter(c => c.libres === 0).sort((a,b) => b.cap - a.cap).slice(0,8);
   const vacios = celdas.slice().sort((a,b) => a.pct - b.pct || b.libres - a.libres).slice(0,8);
-  const item = (c, rojo) => `<div class="item">
-      <div><div class="cuando">${c.dia} ${c.hora}</div><div class="donde">${c.serv}</div></div>
-      <div class="dato" style="color:${rojo ? '#991b1b' : '#075985'}">${rojo ? c.cap + ' de ' + c.cap : c.libres + ' libres'}<br>
-        <span style="font-weight:600;opacity:.7">${Math.round(c.pct)}% ocupado</span></div>
-    </div>`;
 
   html += `<div class="ranks">
     <div class="rank" style="border:1.5px solid #fecaca;background:#fef2f2">
-      <div class="tit" style="color:#991b1b">🔴 Horarios al tope</div>
+      <div class="tit" style="color:#991b1b">🔴 Todo TF — horarios al tope</div>
       <div class="exp" style="color:#991b1b">Están llenos: no podés dar un turno fijo más. Acá hay que reforzar.</div>
-      ${llenos.length ? llenos.map(c => item(c, true)).join('') : '<div style="font-size:13px;color:var(--text-dim)">Ningún horario está lleno.</div>'}
+      ${llenos.length ? llenos.map(c => filaRank(c, true)).join('') : '<div style="font-size:13px;color:var(--text-dim)">Ningún horario está lleno.</div>'}
     </div>
     <div class="rank" style="border:1.5px solid #bae6fd;background:#f0f9ff">
-      <div class="tit" style="color:#075985">🔵 Horarios flojos</div>
+      <div class="tit" style="color:#075985">🔵 Todo TF — horarios flojos</div>
       <div class="exp" style="color:#075985">Sala desaprovechada. Acá conviene ofrecer o mover gente.</div>
-      ${vacios.map(c => item(c, false)).join('')}
+      ${vacios.map(c => filaRank(c, false)).join('')}
     </div>
   </div>`;
 
@@ -387,6 +503,337 @@ function copiarResumen() {
     .catch(() => alert('No se pudo copiar.'));
 }
 window.copiarResumen = copiarResumen;
+
+/* ============================================================
+   INFORME PDF — "Ocupación de sala · Terapia Física"
+   Pedido de Lu (29/7/26): una tabla PDF descargable, usable en
+   REUNIÓN (no el texto para WhatsApp). Con el resumen general y
+   además la división por área (Entrenamiento / Kinefilaxia).
+   Se dibuja a mano con jsPDF (sin autotable) para no depender de
+   otra librería. A4 vertical, margen 14mm.
+   ============================================================ */
+
+const PDF_MARGEN = 14;
+const PDF_ANCHO = 210;
+const PDF_ALTO = 297;
+const PDF_UTIL = PDF_ANCHO - PDF_MARGEN * 2;   // 182 mm
+const AZUL = [30, 159, 224];
+const GRIS = [100, 116, 139];
+const NEGRO = [15, 23, 42];
+
+function pdfColor(pct, libres) {
+  if (libres <= 0) return { bg:[254,226,226], tx:[153,27,27] };
+  if (pct >= 80)   return { bg:[255,237,213], tx:[154,52,18] };
+  if (pct >= 40)   return { bg:[220,252,231], tx:[22,101,52] };
+  return             { bg:[224,242,254], tx:[7,89,133] };
+}
+
+// Encabezado de página (se repite en cada hoja)
+function pdfEncabezado(doc, fecha) {
+  doc.setFillColor(...AZUL);
+  doc.rect(0, 0, PDF_ANCHO, 20, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+  doc.text('PuntoBiO · Ocupación de sala — Terapia Física', PDF_MARGEN, 9);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+  doc.text('Solo turnos fijos · no incluye recuperatorios ni clases sueltas    |    ' + fecha, PDF_MARGEN, 15);
+  doc.setTextColor(...NEGRO);
+  return 28;
+}
+
+function pdfPie(doc) {
+  const total = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5);
+    doc.setTextColor(...GRIS);
+    doc.text('Generado por el Ecosistema PuntoBiO', PDF_MARGEN, PDF_ALTO - 8);
+    doc.text('Página ' + i + ' de ' + total, PDF_ANCHO - PDF_MARGEN, PDF_ALTO - 8, { align: 'right' });
+  }
+}
+
+// Título de bloque
+function pdfTitulo(doc, y, texto, sub) {
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...NEGRO);
+  doc.text(texto, PDF_MARGEN, y);
+  y += 5;
+  if (sub) {
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRIS);
+    doc.text(sub, PDF_MARGEN, y);
+    y += 4;
+  }
+  doc.setTextColor(...NEGRO);
+  return y + 2;
+}
+
+/* Tabla genérica.
+   cols: [{ t:'Título', w:mm, a:'left'|'right'|'center' }]
+   filas: [[ {t:'texto', bg:[r,g,b], tx:[r,g,b], b:true} , ... ]]
+   Devuelve la Y siguiente. Maneja el salto de página solo. */
+function pdfTabla(doc, y, cols, filas, fecha) {
+  const ALTO_FILA = 7;
+  const dibujarCabecera = (yy) => {
+    let x = PDF_MARGEN;
+    doc.setFillColor(...AZUL);
+    doc.rect(PDF_MARGEN, yy, PDF_UTIL, ALTO_FILA, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(255,255,255);
+    cols.forEach(c => {
+      const tx = c.a === 'right' ? x + c.w - 2 : c.a === 'center' ? x + c.w / 2 : x + 2;
+      doc.text(String(c.t), tx, yy + 4.8, { align: c.a === 'left' ? 'left' : c.a });
+      x += c.w;
+    });
+    doc.setTextColor(...NEGRO);
+    return yy + ALTO_FILA;
+  };
+
+  y = dibujarCabecera(y);
+
+  filas.forEach((fila, i) => {
+    if (y + ALTO_FILA > PDF_ALTO - 16) {
+      doc.addPage();
+      y = pdfEncabezado(doc, fecha);
+      y = dibujarCabecera(y);
+    }
+    let x = PDF_MARGEN;
+    if (i % 2 === 1) { doc.setFillColor(248, 250, 252); doc.rect(PDF_MARGEN, y, PDF_UTIL, ALTO_FILA, 'F'); }
+    fila.forEach((cel, j) => {
+      const c = cols[j];
+      if (cel.bg) { doc.setFillColor(...cel.bg); doc.rect(x + 0.6, y + 0.6, c.w - 1.2, ALTO_FILA - 1.2, 'F'); }
+      doc.setFont('helvetica', cel.b ? 'bold' : 'normal'); doc.setFontSize(8.5);
+      doc.setTextColor(...(cel.tx || NEGRO));
+      const tx = c.a === 'right' ? x + c.w - 2.5 : c.a === 'center' ? x + c.w / 2 : x + 2.5;
+      doc.text(String(cel.t), tx, y + 4.8, { align: c.a === 'left' ? 'left' : c.a });
+      x += c.w;
+    });
+    doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.15);
+    doc.line(PDF_MARGEN, y + ALTO_FILA, PDF_MARGEN + PDF_UTIL, y + ALTO_FILA);
+    y += ALTO_FILA;
+  });
+  doc.setTextColor(...NEGRO);
+  return y + 6;
+}
+
+function pdfSaltoSiHaceFalta(doc, y, necesario, fecha) {
+  if (y + necesario > PDF_ALTO - 16) { doc.addPage(); return pdfEncabezado(doc, fecha); }
+  return y;
+}
+
+function descargarPDF() {
+  if (!AREAS) { alert('Todavía no se calculó la ocupación.'); return; }
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    alert('No se pudo cargar el generador de PDF. Revisá la conexión y volvé a intentar.');
+    return;
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+  const hoy = new Date();
+  const fecha = hoy.toLocaleDateString('es-AR', { day:'2-digit', month:'long', year:'numeric' });
+  const nombres = Object.keys(AREAS).sort();
+
+  let y = pdfEncabezado(doc, fecha);
+
+  // ============ 1. RESUMEN GENERAL ============
+  let capT = 0, ocupT = 0, libT = 0;
+  nombres.forEach(s => { capT += AREAS[s].cap; ocupT += AREAS[s].ocup; libT += AREAS[s].libres; });
+  const pctT = capT ? Math.round(100 * ocupT / capT) : 0;
+
+  y = pdfTitulo(doc, y, '1. Resumen general del centro',
+    'Cuántos lugares fijos tiene la sala, cuántos están tomados y cuántos quedan libres.');
+
+  const colsRes = [
+    { t:'Área', w:52, a:'left' },
+    { t:'Lugares totales', w:32, a:'right' },
+    { t:'Ocupados', w:28, a:'right' },
+    { t:'Libres', w:26, a:'right' },
+    { t:'% ocupación', w:28, a:'right' },
+    { t:'Estado', w:16, a:'center' }
+  ];
+  const estadoTxt = p => p >= 90 ? 'Al tope' : p >= 75 ? 'Alta' : p >= 45 ? 'Sana' : 'Baja';
+  const filasRes = nombres.map(s => {
+    const A = AREAS[s];
+    const p = A.cap ? Math.round(100 * A.ocup / A.cap) : 0;
+    const c = pdfColor(p, A.libres);
+    return [
+      { t:s, b:true },
+      { t:A.cap }, { t:A.ocup },
+      { t:A.libres, b:true, tx:[7,89,133] },
+      { t:p + '%', b:true, bg:c.bg, tx:c.tx },
+      { t:estadoTxt(p), bg:c.bg, tx:c.tx }
+    ];
+  });
+  filasRes.push([
+    { t:'TOTAL TERAPIA FÍSICA', b:true },
+    { t:capT, b:true }, { t:ocupT, b:true },
+    { t:libT, b:true, tx:[7,89,133] },
+    { t:pctT + '%', b:true },
+    { t:estadoTxt(pctT), b:true }
+  ]);
+  y = pdfTabla(doc, y, colsRes, filasRes, fecha);
+
+  // ============ 2. RANKINGS ============
+  const celdas = [];
+  nombres.forEach(serv => {
+    const A = AREAS[serv];
+    Object.keys(A.horas).forEach(h => DIAS.forEach(d => {
+      const c = A.horas[h][d];
+      if (c) celdas.push({ serv, dia:d, hora:h, ...c, pct: c.cap ? 100 * c.ocup / c.cap : 0 });
+    }));
+  });
+  const llenos = celdas.filter(c => c.libres === 0).sort((a,b) => b.cap - a.cap).slice(0,10);
+  const vacios = celdas.slice().sort((a,b) => a.pct - b.pct || b.libres - a.libres).slice(0,10);
+
+  const colsRank = [
+    { t:'Día', w:34, a:'left' }, { t:'Hora', w:24, a:'left' },
+    { t:'Área', w:44, a:'left' }, { t:'Ocupados', w:30, a:'right' },
+    { t:'Libres', w:24, a:'right' }, { t:'%', w:26, a:'right' }
+  ];
+  const filaRank = c => {
+    const p = Math.round(c.pct); const col = pdfColor(p, c.libres);
+    return [ { t:c.dia, b:true }, { t:c.hora, b:true }, { t:c.serv },
+             { t:c.ocup + ' de ' + c.cap }, { t:c.libres, b:true },
+             { t:p + '%', b:true, bg:col.bg, tx:col.tx } ];
+  };
+
+  y = pdfSaltoSiHaceFalta(doc, y, 60, fecha);
+  y = pdfTitulo(doc, y, '2. Horarios al tope — dónde hay que reforzar',
+    'Clases llenas: no entra un turno fijo más. Ordenadas por tamaño de la clase.');
+  y = llenos.length
+    ? pdfTabla(doc, y, colsRank, llenos.map(filaRank), fecha)
+    : (doc.setFontSize(9), doc.text('Ningún horario está lleno.', PDF_MARGEN, y), y + 10);
+
+  y = pdfSaltoSiHaceFalta(doc, y, 60, fecha);
+  y = pdfTitulo(doc, y, '3. Horarios flojos — dónde hay que llenar',
+    'Sala desaprovechada. Conviene ofrecer estos horarios o mover gente.');
+  y = pdfTabla(doc, y, colsRank, vacios.map(filaRank), fecha);
+
+  // ============ 4+. UNA SECCIÓN POR ÁREA ============
+  let n = 4;
+  nombres.forEach(serv => {
+    const A = AREAS[serv];
+    const horas = Object.keys(A.horas).sort();
+    const pctArea = A.cap ? Math.round(100 * A.ocup / A.cap) : 0;
+    const porDia = {}; DIAS.forEach(d => porDia[d] = { cap:0, ocup:0, libres:0 });
+    const porHora = {}; horas.forEach(h => porHora[h] = { cap:0, ocup:0, libres:0 });
+    horas.forEach(h => DIAS.forEach(d => {
+      const c = A.horas[h][d]; if (!c) return;
+      porDia[d].cap += c.cap; porDia[d].ocup += c.ocup; porDia[d].libres += c.libres;
+      porHora[h].cap += c.cap; porHora[h].ocup += c.ocup; porHora[h].libres += c.libres;
+    }));
+
+    doc.addPage();
+    y = pdfEncabezado(doc, fecha);
+    y = pdfTitulo(doc, y, n + '. ' + serv,
+      `${A.ocup} de ${A.cap} lugares fijos ocupados · ${A.libres} libres · ${pctArea}% de ocupación`);
+    n++;
+
+    // --- cuántas clases están llenas y cuántas no (la prueba de "no siempre al palo") ---
+    const est = estadoClases(A);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...NEGRO);
+    doc.text(`De las ${est.total} clases de la semana: ${est.lleno} están llenas (${est.pctLleno}%), `
+      + `${est.casi} casi llenas, ${est.sana} con ocupación sana y ${est.floja} flojas.`, PDF_MARGEN, y);
+    y += 9;
+
+    // --- grilla: lugares libres ---
+    y = pdfTitulo(doc, y, n - 1 + '.a  Lugares libres en cada clase', 'Cuántos turnos fijos se pueden dar todavía en cada franja.');
+    const anchoHora = 27;
+    const anchoDia = (PDF_UTIL - anchoHora - 22) / DIAS.length;
+    const colsGrilla = [{ t:'Hora', w:anchoHora, a:'left' }]
+      .concat(DIAS.map(d => ({ t:d, w:anchoDia, a:'center' })))
+      .concat([{ t:'Total', w:22, a:'right' }]);
+
+    const filasLibres = horas.map(h => {
+      let tot = 0;
+      const f = [{ t:h, b:true }];
+      DIAS.forEach(d => {
+        const c = A.horas[h][d];
+        if (!c) { f.push({ t:'—', tx:GRIS }); return; }
+        const p = c.cap ? Math.round(100 * c.ocup / c.cap) : 0;
+        const col = pdfColor(p, c.libres);
+        tot += c.libres;
+        f.push({ t:String(c.libres), b:true, bg:col.bg, tx:col.tx });
+      });
+      f.push({ t:String(tot), b:true, tx:[7,89,133] });
+      return f;
+    });
+    filasLibres.push([{ t:'TOTAL', b:true }]
+      .concat(DIAS.map(d => ({ t:String(porDia[d].libres), b:true })))
+      .concat([{ t:String(A.libres), b:true, tx:[7,89,133] }]));
+    y = pdfTabla(doc, y, colsGrilla, filasLibres, fecha);
+
+    // --- grilla: % ocupación ---
+    y = pdfSaltoSiHaceFalta(doc, y, 70, fecha);
+    y = pdfTitulo(doc, y, n - 1 + '.b  Porcentaje ocupado en cada clase', 'Rojo = lleno · Naranja = 80% o más · Verde = sano · Celeste = flojo.');
+    const filasPct = horas.map(h => {
+      const f = [{ t:h, b:true }];
+      DIAS.forEach(d => {
+        const c = A.horas[h][d];
+        if (!c) { f.push({ t:'—', tx:GRIS }); return; }
+        const p = c.cap ? Math.round(100 * c.ocup / c.cap) : 0;
+        const col = pdfColor(p, c.libres);
+        f.push({ t:p + '%', b:true, bg:col.bg, tx:col.tx });
+      });
+      const ph = porHora[h].cap ? Math.round(100 * porHora[h].ocup / porHora[h].cap) : 0;
+      f.push({ t:ph + '%', b:true });
+      return f;
+    });
+    filasPct.push([{ t:'TOTAL', b:true }]
+      .concat(DIAS.map(d => ({ t:(porDia[d].cap ? Math.round(100*porDia[d].ocup/porDia[d].cap) : 0) + '%', b:true })))
+      .concat([{ t:pctArea + '%', b:true }]));
+    y = pdfTabla(doc, y, colsGrilla, filasPct, fecha);
+
+    // --- por día ---
+    const colsDetalle = [
+      { t:'', w:40, a:'left' }, { t:'Lugares totales', w:36, a:'right' },
+      { t:'Ocupados', w:30, a:'right' }, { t:'Libres', w:28, a:'right' },
+      { t:'% ocupación', w:30, a:'right' }, { t:'Estado', w:18, a:'center' }
+    ];
+    const filaDet = (etiqueta, p) => {
+      const pct = p.cap ? Math.round(100 * p.ocup / p.cap) : 0;
+      const col = pdfColor(pct, p.libres);
+      return [ { t:etiqueta, b:true }, { t:p.cap }, { t:p.ocup },
+               { t:p.libres, b:true, tx:[7,89,133] },
+               { t:pct + '%', b:true, bg:col.bg, tx:col.tx },
+               { t:estadoTxt(pct), bg:col.bg, tx:col.tx } ];
+    };
+
+    y = pdfSaltoSiHaceFalta(doc, y, 70, fecha);
+    y = pdfTitulo(doc, y, n - 1 + '.c  Ocupación por día', '¿Qué día tenés la sala más llena?');
+    y = pdfTabla(doc, y, colsDetalle, DIAS.filter(d => porDia[d].cap).map(d => filaDet(d, porDia[d])), fecha);
+
+    y = pdfSaltoSiHaceFalta(doc, y, 70, fecha);
+    y = pdfTitulo(doc, y, n - 1 + '.d  Ocupación por horario', '¿Qué hora es pico y cuál está floja?');
+    y = pdfTabla(doc, y, colsDetalle, horas.filter(h => porHora[h].cap).map(h => filaDet(h, porHora[h])), fecha);
+
+    // --- rankings propios del área ---
+    const delArea = celdas.filter(c => c.serv === serv);
+    const topeArea = delArea.filter(c => c.libres === 0).sort((a,b) => b.cap - a.cap);
+    const flojoArea = delArea.slice().sort((a,b) => a.pct - b.pct || b.libres - a.libres).slice(0, 10);
+    const colsRankArea = [
+      { t:'Día', w:38, a:'left' }, { t:'Hora', w:28, a:'left' },
+      { t:'Ocupados', w:38, a:'right' }, { t:'Libres', w:38, a:'right' }, { t:'%', w:40, a:'right' }
+    ];
+    const filaRankArea = c => {
+      const pp = Math.round(c.pct); const col = pdfColor(pp, c.libres);
+      return [ { t:c.dia, b:true }, { t:c.hora, b:true }, { t:c.ocup + ' de ' + c.cap },
+               { t:c.libres, b:true }, { t:pp + '%', b:true, bg:col.bg, tx:col.tx } ];
+    };
+
+    y = pdfSaltoSiHaceFalta(doc, y, 70, fecha);
+    y = pdfTitulo(doc, y, n - 1 + `.e  ${serv}: horarios al tope`, 'Clases llenas de esta área. Acá hay que reforzar.');
+    y = topeArea.length
+      ? pdfTabla(doc, y, colsRankArea, topeArea.map(filaRankArea), fecha)
+      : (doc.setFont('helvetica','normal'), doc.setFontSize(9), doc.text('Ninguna clase de esta área está llena.', PDF_MARGEN, y), y + 10);
+
+    y = pdfSaltoSiHaceFalta(doc, y, 70, fecha);
+    y = pdfTitulo(doc, y, n - 1 + `.f  ${serv}: horarios para llenar`, 'Las clases más vacías de esta área.');
+    y = pdfTabla(doc, y, colsRankArea, flojoArea.map(filaRankArea), fecha);
+  });
+
+  pdfPie(doc);
+  const stamp = hoy.toISOString().slice(0, 10);
+  doc.save(`PuntoBiO_Ocupacion_TF_${stamp}.pdf`);
+}
+window.descargarPDF = descargarPDF;
 
 cargar();
 </script>

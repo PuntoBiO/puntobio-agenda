@@ -2015,6 +2015,58 @@ window.addEventListener('message', (ev) => {
     }
     return;
   }
+  // "Abrir en Agenda TF": desde Turnos libres TF, tocar un casillero abre esa
+  // clase (día + hora + servicio) en la Agenda TF.
+  // Uso: window.parent.postMessage({tipo:'ABRIR_AGENDA_TF', dia, hora, servicio}, '*')
+  // NO se toca agenda_tf.html: como los dos iframes son del mismo dominio,
+  // desde acá llamamos a sus funciones globales seleccionarDia y abrirModalDesde.
+  if (data.tipo === 'ABRIR_AGENDA_TF' && data.dia && data.hora) {
+    const _dia = String(data.dia), _hora = String(data.hora), _serv = String(data.servicio || '');
+    const navTF = Array.from(document.querySelectorAll('.nav-item'))
+      .find(n => (n.getAttribute('onclick') || '').includes("irA('agenda-tf')"));
+    if (navTF) { navTF.click(); }
+    else {
+      try {
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        const fakeEvt = { target: { closest: () => null } };
+        const origEvent = window.event;
+        Object.defineProperty(window, 'event', { value: fakeEvt, configurable: true, writable: true });
+        window.irA('agenda-tf');
+        if (origEvent !== undefined) window.event = origEvent;
+      } catch (e) { console.warn('ABRIR_AGENDA_TF nav', e); }
+    }
+    // La agenda carga sus datos de forma asíncrona: esperamos a que la grilla
+    // esté pintada de verdad antes de abrir la clase. Se rinde a los ~15 s.
+    let _intentos = 0;
+    const _reloj = setInterval(() => {
+      _intentos++;
+      let w = null;
+      try {
+        const fr = document.querySelector('#content iframe');
+        w = fr ? fr.contentWindow : null;
+      } catch (e) { w = null; }
+      let listo = false;
+      try {
+        const grid = w && w.document ? w.document.getElementById('turnos-grid') : null;
+        listo = !!(w && typeof w.seleccionarDia === 'function'
+                     && typeof w.abrirModalDesde === 'function'
+                     && grid && grid.querySelector('[onclick*="abrirModalDesde"]'));
+      } catch (e) { listo = false; }
+      if (listo) {
+        clearInterval(_reloj);
+        try {
+          w.seleccionarDia(_dia);
+          setTimeout(() => {
+            try { w.abrirModalDesde(_dia, _hora, _serv); }
+            catch (e) { console.warn('ABRIR_AGENDA_TF modal', e); }
+          }, 80);
+        } catch (e) { console.warn('ABRIR_AGENDA_TF dia', e); }
+      } else if (_intentos > 75) {
+        clearInterval(_reloj);   // se queda en la agenda, sin abrir el modal
+      }
+    }, 200);
+    return;
+  }
   if (data.tipo === 'NAVEGAR_MODULO' && typeof data.modulo === 'string') {
     // Llamar a irA sin depender de "event" (que no existe en este contexto)
     // Encontrar el nav-item del módulo de destino y simular click para mantener UI sincronizada
