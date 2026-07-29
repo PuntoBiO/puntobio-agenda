@@ -208,11 +208,14 @@
       </div>
       <textarea id="env-texto" spellcheck="false"></textarea>
       <div style="font-size:11.5px;color:var(--text-dim);margin-top:6px">
-        Pod&eacute;s editarlo antes de mandarlo &middot; <span id="env-cuenta"></span>
+        Pod&eacute;s editarlo antes de mandarlo &middot; <span id="env-cuenta"></span><br>
+        Si un horario tiene lugar fijo pero est&aacute; completo las pr&oacute;ximas semanas por recuperatorios,
+        aparece como <em>&laquo;(desde el DD/MM)&raquo;</em>.
       </div>
       <div class="env-pie">
         <button class="btn env-wsp" onclick="whatsappParaAlumno()">&#128172; Abrir WhatsApp</button>
         <button class="btn btn-azul" onclick="copiarParaAlumno()">&#128203; Copiar texto</button>
+        <button class="btn" style="border-color:#b91c1c;color:#b91c1c;font-weight:700" onclick="descargarPDFAlumno()">&#128196; PDF para el alumno</button>
         <button class="btn" style="margin-left:auto" onclick="cerrarEnviarAlumno()">Cerrar</button>
       </div>
     </div>
@@ -260,6 +263,20 @@ function color(pct, libres) {
   return             { bg:'#e0f2fe', bd:'#0ea5e9', tx:'#075985', barra:'#0ea5e9' };
 }
 
+// ¿Ese horario recién tiene lugar más adelante? (tapado por recuperatorios)
+// Devuelve null si ya entra alguien esta misma semana, o la fecha desde la cual entra.
+function disponibleDesde(celda) {
+  if (!celda || !celda.desde) return null;
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  const f = new Date(celda.desde + 'T00:00:00');
+  const dias = Math.round((f - hoy) / 86400000);
+  return dias > 7 ? f : null;     // dentro de la semana = disponible ya
+}
+
+function fechaCorta(f) {
+  return String(f.getDate()).padStart(2,'0') + '/' + String(f.getMonth()+1).padStart(2,'0');
+}
+
 // Cuenta cuántas clases de un área están llenas / casi / sanas / flojas.
 // Es la respuesta concreta a "demostrar que no siempre están al palo".
 function estadoClases(A) {
@@ -302,7 +319,8 @@ function agrupar(filas) {
     if (!areas[r.servicio]) areas[r.servicio] = { horas:{}, cap:0, ocup:0, libres:0 };
     const A = areas[r.servicio];
     if (!A.horas[hora]) A.horas[hora] = {};
-    A.horas[hora][r.dia] = { cap:r.capacidad, ocup:r.fijos, libres:r.libres };
+    A.horas[hora][r.dia] = { cap:r.capacidad, ocup:r.fijos, libres:r.libres,
+                             desde: r.primera_fecha_con_lugar || null };
     A.cap += r.capacidad; A.ocup += r.fijos; A.libres += r.libres;
   });
   return areas;
@@ -916,7 +934,10 @@ function horariosOfrecibles(area) {
       DIAS.forEach(d => {
         const c = A.horas[h][d];
         if (!c || c.libres <= 0) return;      // sin lugar → no se ofrece
-        (porDia[d] = porDia[d] || []).push(h);
+        // Si está tapado por recuperatorios las próximas semanas, se ofrece
+        // igual pero aclarando desde cuándo puede empezar.
+        const dsd = disponibleDesde(c);
+        (porDia[d] = porDia[d] || []).push(dsd ? `${h} (desde el ${fechaCorta(dsd)})` : h);
       });
     });
     if (Object.keys(porDia).length) out[serv] = porDia;
@@ -987,6 +1008,96 @@ function whatsappParaAlumno() {
   window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 }
 window.whatsappParaAlumno = whatsappParaAlumno;
+
+/* ============================================================
+   PDF DE HORARIOS PARA EL ALUMNO (29/7/26, pedido de Lu)
+   Es la versión imprimible/enviable del mensaje: SOLO días y horas.
+   No lleva cupos, ni porcentajes, ni "X de Y" — nada interno.
+   Distinto del informe de ocupación, que sí es interno.
+   ============================================================ */
+
+function pdfAlumnoEncabezado(doc) {
+  doc.setFillColor(30, 159, 224);
+  doc.rect(0, 0, 210, 34, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(22);
+  doc.text('PuntoBiO', 16, 15);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+  doc.text('Centro de Rehabilitación & Entrenamiento', 16, 22);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+  doc.text('Horarios disponibles', 16, 30);
+  doc.setTextColor(15, 23, 42);
+  return 46;
+}
+
+function descargarPDFAlumno() {
+  if (!AREAS) { alert('Todavía no se calculó la ocupación.'); return; }
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    alert('No se pudo cargar el generador de PDF. Revisá la conexión y volvé a intentar.');
+    return;
+  }
+  const datos = horariosOfrecibles(_areaEnvio);
+  const servicios = Object.keys(datos);
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+  let y = pdfAlumnoEncabezado(doc);
+
+  if (!servicios.length) {
+    doc.setFontSize(12);
+    doc.text('Por el momento no tenemos horarios con lugar disponible.', 16, y);
+    doc.text('Escribinos y te avisamos apenas se libere uno.', 16, y + 7);
+    doc.save('PuntoBiO_Horarios.pdf');
+    return;
+  }
+
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(11.5);
+  doc.text('Estos son los horarios en los que tenemos lugar para vos:', 16, y);
+  y += 12;
+
+  servicios.forEach(serv => {
+    if (y > 250) { doc.addPage(); y = pdfAlumnoEncabezado(doc); }
+
+    // Título del área con banda suave
+    doc.setFillColor(219, 234, 254);
+    doc.rect(16, y - 6, 178, 11, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(13);
+    doc.setTextColor(30, 111, 160);
+    doc.text(serv.toUpperCase(), 20, y + 1.5);
+    doc.setTextColor(15, 23, 42);
+    y += 14;
+
+    DIAS.forEach(d => {
+      const hs = datos[serv][d];
+      if (!hs || !hs.length) return;
+      if (y > 275) { doc.addPage(); y = pdfAlumnoEncabezado(doc); }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+      doc.text(d, 20, y);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5);
+      // Las horas se parten en varias líneas si no entran
+      const lineas = doc.splitTextToSize(hs.join('   ·   '), 132);
+      doc.text(lineas, 58, y);
+      y += Math.max(lineas.length * 5.5, 7) + 1.5;
+    });
+    y += 6;
+  });
+
+  if (y > 258) { doc.addPage(); y = pdfAlumnoEncabezado(doc); }
+  y += 4;
+  doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.4);
+  doc.line(16, y, 194, y);
+  y += 9;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5);
+  doc.text('Decinos cuál te sirve y te reservamos el lugar.', 16, y);
+  y += 8;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text('Libertad 1549 · Barrio General Paz · Córdoba', 16, y);
+  doc.text('Horarios sujetos a disponibilidad al momento de la consulta.', 16, y + 5);
+
+  const hoy = new Date();
+  doc.save(`PuntoBiO_Horarios_${hoy.toISOString().slice(0,10)}.pdf`);
+}
+window.descargarPDFAlumno = descargarPDFAlumno;
 
 cargar();
 </script>
