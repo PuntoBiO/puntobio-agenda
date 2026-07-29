@@ -931,6 +931,28 @@ const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
 
+// ============================================================
+// LEER UNA TABLA COMPLETA (29/7/26)
+// Supabase devuelve como máximo 1000 filas por lectura: pasado ese número
+// la lectura viene TRUNCADA en silencio (no da error, faltan filas).
+// Le pasás una función que arma la query; el paginado lo hace esto.
+// La query DEBE tener orden determinista (.order('id') de desempate) o
+// las páginas pueden repetir o saltear filas.
+// ============================================================
+async function sbLeerTodo(armarQuery) {
+  const PAGE = 1000;
+  let desde = 0;
+  let todo = [];
+  for (let i = 0; i < 50; i++) {          // tope de seguridad: 50.000 filas
+    const { data, error } = await armarQuery().range(desde, desde + PAGE - 1);
+    if (error) return { data: null, error };
+    todo = todo.concat(data || []);
+    if (!data || data.length < PAGE) break;
+    desde += PAGE;
+  }
+  return { data: todo, error: null };
+}
+
 // ===== ESTADO =====
 let personas = [];       // 1 fila por persona (las 420)
 let pagosPorInsc = {};   // id_inscripcion -> [pagos]
@@ -1131,7 +1153,11 @@ async function cargarTodo() {
     const [perR, insR, pagosR, tarR, tratR, hcR, obsR, adjR, ecR] = await Promise.all([
       sb.from('personas').select('*'),
       sb.from('inscripciones_tf').select('*'),
-      sb.from('pagos_tf').select('*').order('fecha', { ascending: false }),
+      // 29/7/26 — PAGINADO: pagos_tf tiene 1214 filas; sin paginar se caían
+      // los pagos más viejos y el historial del alumno salía incompleto.
+      sbLeerTodo(() => sb.from('pagos_tf').select('*')
+        .order('fecha', { ascending: false })
+        .order('id', { ascending: false })),
       sb.from('tarifario_tf').select('*'),
       sb.from('tratamientos').select('persona_id, estado'),
       sb.from('historias_clinicas').select('persona_id'),
@@ -2006,7 +2032,8 @@ async function cpCargarTurnos() {
     const [{ data: turnos, error: e1 }, { data: profes }, { data: ocup }] = await Promise.all([
       sb.from('turnos').select('*').order('dia').order('hora'),
       sb.from('turno_profes').select('turno_id, nombre_profe'),
-      sb.from('turno_alumnos').select('turno_id').eq('activo', true)
+      sbLeerTodo(() => sb.from('turno_alumnos').select('turno_id')
+        .eq('activo', true).order('id', { ascending: true }))
     ]);
     if (e1) throw e1;
     const mapaProfe = {};
@@ -2713,7 +2740,8 @@ async function cargarTurnosWiz() {
     const [{ data: turnos, error: e1 }, { data: profes, error: e2 }, { data: ocup, error: e3 }] = await Promise.all([
       sb.from('turnos').select('*').order('dia').order('hora'),
       sb.from('turno_profes').select('turno_id, nombre_profe'),
-      sb.from('turno_alumnos').select('turno_id').eq('activo', true)
+      sbLeerTodo(() => sb.from('turno_alumnos').select('turno_id')
+        .eq('activo', true).order('id', { ascending: true }))
     ]);
     if (e1) throw e1;
     const mapaProfe = {};
