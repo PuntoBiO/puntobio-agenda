@@ -727,8 +727,11 @@ function render(pagos, sesiones, filtroProf){
     (pagosPorTrat[tid] = pagosPorTrat[tid] || []).push(p);
   }
 
-  // Cascada por tratamiento: cada sesión queda ABONADA cuando la plata acumulada del
-  // tratamiento la cubre (las sesiones se saldan en orden, de la más vieja a la más nueva).
+  // Cascada por tratamiento: la plata salda las sesiones en orden, de la más vieja a la
+  // más nueva. PRORRATEO (regla de Lu, 29/07/2026): una sesión ya NO necesita estar
+  // cubierta entera para liquidarse. Cada tramo de plata que la toca se reparte con el
+  // porcentaje de ESA sesión y se liquida en el mes en que quedó realizada Y cobrada;
+  // lo que falta cobrar queda como deuda del paciente y se liquida cuando entre.
   for (const tid of Object.keys(sesPorTrat)){
     const ses = sesPorTrat[tid].slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
     const pgs = (pagosPorTrat[tid] || []).slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id - b.id));
@@ -746,35 +749,65 @@ function render(pagos, sesiones, filtroProf){
       const valor = mProf + mCentro;
       if (valor <= 0.5) continue;
       cumVal += valor;
-      let fechaAbono = null;
-      for (const a of acum){ if (a.cum >= cumVal - 0.5){ fechaAbono = a.fecha; break; } }
-      // Tramo de plata que cubre ESTA sesion: [cumVal - valor, cumVal].
-      // Se cruza con el tramo de cada pago para saber quien tiene esa plata en la mano.
-      // No hay prorrateo: si un pago cubre la sesion entera, ese pago se la lleva entera.
-      const tenedores = [];
       const iniSes = cumVal - valor;
+
+      // Tramos de plata que tocan ESTA sesion: se cruza su tramo [cumVal-valor, cumVal]
+      // con el de cada pago. Cada tramo sabe QUIEN cobro esa plata y CUANDO entro.
+      const tramos = [];
       for (const a of acum){
         const ini = Math.max(iniSes, a.desdeCum);
         const fin = Math.min(cumVal, a.cum);
-        if (fin - ini > 0.5) tenedores.push({ quien: a.quien, monto: fin - ini });
+        if (fin - ini > 0.5) tramos.push({ fecha: a.fecha, monto: fin - ini, quien: a.quien });
       }
+      const cubiertoTotal = tramos.reduce((x, tr) => x + tr.monto, 0);
+      const deuda = Math.max(0, valor - cubiertoTotal);
+
       const t = s.tratamientos || {};
-      const fila = {
-        fecha: s.fecha, fechaAbono, prof: normProf(s.profesional), valor, mProf, mCentro,
+      const base = {
+        fecha: s.fecha, prof: normProf(s.profesional),
         paciente: ((t.personas || {}).nombre) || '—', codigo: t.codigo_id || '—',
-        practica: t.practica_codigo || '', tratId: tid, tenedores
+        practica: t.practica_codigo || '', tratId: tid,
+        valorSesion: valor, cubiertoTotal, deuda
       };
-      if (!fila.prof) continue;
-      if (fechaAbono){ const kAb = tid + '|' + fechaAbono; (abonoProf[kAb] = abonoProf[kAb] || new Set()).add(fila.prof); }
-      if (!fechaAbono){
-        if ((s.fecha || '') <= hasta) pendientes.push(fila);   // realizada sin abonar → próxima liquidación
-        continue;
+      if (!base.prof) continue;
+
+      // Cada tramo se liquida en el mes en que la sesion quedo realizada Y cobrada.
+      const delMes = []; let huboAntes = false;
+      for (const tr of tramos){
+        if (tr.fecha < CORTE_MOTOR) continue;                 // ya liquidado con el sistema viejo
+        const fLiq = (tr.fecha > (s.fecha || '')) ? tr.fecha : s.fecha;
+        if (fLiq < desde){ huboAntes = true; continue; }      // ya liquidado en un mes anterior
+        if (fLiq > hasta) continue;                           // liquidara en un mes posterior
+        delMes.push(tr);
+        const kAb = tid + '|' + tr.fecha;
+        (abonoProf[kAb] = abonoProf[kAb] || new Set()).add(base.prof);
       }
-      // Abonada ANTES del corte → ya liquidada con el sistema viejo (por pagos) en ese mes
-      if (fechaAbono < CORTE_MOTOR) continue;
-      const fLiq = (fechaAbono > (s.fecha || '')) ? fechaAbono : s.fecha;   // realizada Y abonada
-      if (fLiq >= desde && fLiq <= hasta) liquidables.push(fila);
-      // (fLiq < desde: ya liquidada en un mes anterior · fLiq > hasta: liquidará en un mes posterior)
+
+      if (delMes.length){
+        const cubiertoMes = delMes.reduce((x, tr) => x + tr.monto, 0);
+        const parteMes = cubiertoMes / valor;
+        liquidables.push(Object.assign({}, base, {
+          valor: cubiertoMes,
+          mProf: mProf * parteMes,
+          mCentro: mCentro * parteMes,
+          fechaAbono: delMes[delMes.length - 1].fecha,
+          tenedores: delMes.map(tr => ({ quien: tr.quien, monto: tr.monto })),
+          parcial: deuda > 0.5,        // el paciente todavia debe parte de esta sesion
+          vieneDeDeuda: huboAntes      // ya se le liquido una parte en un mes anterior
+        }));
+      }
+
+      // Lo que el paciente todavia no pago pasa a la proxima liquidacion (solo el resto).
+      if (deuda > 0.5 && (s.fecha || '') <= hasta){
+        const parteDeuda = deuda / valor;
+        pendientes.push(Object.assign({}, base, {
+          valor: deuda,
+          mProf: mProf * parteDeuda,
+          mCentro: mCentro * parteDeuda,
+          fechaAbono: null, tenedores: [],
+          parcialmenteCobrada: cubiertoTotal > 0.5
+        }));
+      }
     }
   }
 
@@ -1162,7 +1195,7 @@ function render(pagos, sesiones, filtroProf){
     } else {
       const pp = {};
       for (const x of pendVista){ if (!pp[x.prof]) pp[x.prof] = {cant:0, valor:0, mProf:0}; pp[x.prof].cant++; pp[x.prof].valor += x.valor; pp[x.prof].mProf += x.mProf; }
-      html += `<table><thead><tr><th>Profesional</th><th class="num">Sesiones</th><th class="num">Valor total</th><th class="num">$ Profesional (a futuro)</th></tr></thead><tbody>`;
+      html += `<table><thead><tr><th>Profesional</th><th class="num">Sesiones</th><th class="num">Falta cobrar</th><th class="num">$ Profesional (a futuro)</th></tr></thead><tbody>`;
       let tc=0, tv=0, tp=0;
       for (const prof of ordenarProfs(Object.keys(pp))){
         tc+=pp[prof].cant; tv+=pp[prof].valor; tp+=pp[prof].mProf;
@@ -1171,7 +1204,7 @@ function render(pagos, sesiones, filtroProf){
       html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td>TOTAL pendiente de abono</td><td class="num">${fmtNum(tc)}</td><td class="num">${fmt(tv)}</td><td class="num">${fmt(tp)}</td></tr>`;
       html += `</tbody></table>`;
       html += `<details style="margin:-2px 0 16px;"><summary style="cursor:pointer;color:#92400e;font-size:13px;">Ver el detalle de cada sesión sin abonar</summary>
-        <table style="margin-top:8px;"><thead><tr><th>Fecha sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Profesional</th><th class="num">Valor</th><th class="num">$ Prof (a futuro)</th></tr></thead><tbody>`;
+        <table style="margin-top:8px;"><thead><tr><th>Fecha sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Profesional</th><th class="num">Falta cobrar</th><th class="num">$ Prof (a futuro)</th></tr></thead><tbody>`;
       for (const x of pendVista.slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''))){
         html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td>${badge(x.prof)}</td><td class="num">${fmt(x.valor)}</td><td class="num">${fmt(x.mProf)}</td></tr>`;
       }
@@ -1541,6 +1574,15 @@ function toggleDetalle(prof){
         <td class="num">${fmt(x.mProf)}</td>
         ${_solo ? '' : `<td class="num">${fmt(x.mCentro)}</td>`}
       </tr>`;
+      // Prorrateo: si el monto es menor al valor de la sesion, decir por que.
+      if (x.parcial || x.vieneDeDeuda){
+        const pctCub = x.valorSesion > 0.5 ? Math.round((x.cubiertoTotal / x.valorSesion) * 100) : 100;
+        let nota = '';
+        if (x.vieneDeDeuda) nota += `<b>Deuda saldada</b> de la sesión del ${x.fecha}. `;
+        nota += `Cubierta al <b>${pctCub}%</b>: se abonaron ${fmt(x.cubiertoTotal)} de ${fmt(x.valorSesion)}.`;
+        if (x.deuda > 0.5) nota += ` El paciente debe <b>${fmt(x.deuda)}</b> de esta sesión.`;
+        html += `<tr><td colspan="${_solo?7:8}" style="font-size:12px;color:#1e40af;background:#eff6ff;padding-top:2px;padding-bottom:2px;">↳ ${nota}</td></tr>`;
+      }
     }
     if (!filas.length && !(g.pend||[]).length) html += `<tr><td colspan="${_solo?7:8}" style="color:#888;">Sin sesiones liquidables este mes (lo suyo puede venir de MOPLEX: ver bloque 5, o recibió plata en custodia: ver bloque 3).</td></tr>`;
     // Sesiones realizadas pero AÚN NO abonadas: van en $0 y pasan a la próxima liquidación
@@ -1551,8 +1593,8 @@ function toggleDetalle(prof){
         <td>${x.paciente}</td>
         <td>${x.codigo}</td>
         <td>${practicaLabel(x.practica)}</td>
-        <td><span class="est" style="background:#fef3c7;color:#92400e;">Aún no abonada</span></td>
-        <td class="num">$0</td>
+        <td><span class="est" style="background:#fef3c7;color:#92400e;">${x.parcialmenteCobrada ? 'Falta cobrar' : 'Aún no abonada'}</span></td>
+        <td class="num">${x.parcialmenteCobrada ? `<span style="color:#92400e;font-size:11px;">debe ${fmt(x.valor)}</span>` : '$0'}</td>
         <td class="num">$0 <span style="color:#92400e;font-size:11px;white-space:nowrap;">(serán ${fmt(x.mProf)})</span></td>
         ${_solo ? '' : `<td class="num">$0</td>`}
       </tr>`;
