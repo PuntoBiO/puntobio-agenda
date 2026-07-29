@@ -650,7 +650,14 @@
     </div>
     <div class="modal-body">
       <div class="modal-info" id="cobrarInfo"></div>
-      <div class="form-group"><label>Importe a cobrar</label><input type="number" id="cobrarImporte" step="500" min="0"></div>
+      <div id="cobrarPuenteBox" style="display:none; margin:0 0 12px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px 12px;">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; color:#78350f;">
+          <input type="checkbox" id="cobrarSumarPuente" checked>
+          <span>➕ Sumar el <b>prorrateo de cambio de fecha</b> (<span id="cobrarPuenteMonto"></span>)</span>
+        </label>
+        <div id="cobrarPuenteTotal" style="margin-top:6px; font-size:13px; font-weight:700; color:#166534;"></div>
+      </div>
+      <div class="form-group"><label>Importe a cobrar<span id="cobrarImporteLbl" style="font-weight:400;color:var(--text-dim);"> (cuota del mes)</span></label><input type="number" id="cobrarImporte" step="500" min="0"></div>
       <div id="cobrarSaldoHint" style="margin:-4px 0 2px;"></div>
       <div class="form-group" style="margin-top:14px;"><label>Mes a imputar</label><select id="cobrarMesImputado"></select></div>
       <div class="form-group" style="margin-top:14px;"><label>Medio de pago</label><select id="cobrarMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
@@ -2575,7 +2582,13 @@ function renderResumenAlumno(f) {
 function renderPlanesYCobros(f) {
   const i = f.inscripcion;
   if (!i) return '';
-  const pagos = (pagosPorInsc[i.id] || []).slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+  // Los cierres por cambio de fecha (CORTESIA $0) son marcadores internos que sacan al
+  // alumno de Morosos, NO cobros — no van en la lista de "Cobros anteriores".
+  const esCierreCambioFecha = (pg) =>
+    pg.tipo_cobro === 'CORTESIA' && (Number(pg.importe) || 0) === 0 &&
+    /CIERRE ciclo por cambio de fecha/i.test(pg.observaciones || '');
+  const pagos = (pagosPorInsc[i.id] || []).filter(pg => !esCierreCambioFecha(pg))
+    .slice().sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
 
   // Agrupar por código de plan guardado. Los que no lo tienen van a '__SIN__'.
   const grupos = {};
@@ -4205,6 +4218,7 @@ window.confirmarCambioPlan = async () => {
   if (cpModo === 'fecha') {
     const r = cpRecalcular();
     if (!r || !r.diaNuevo) { toast('Escribí el nuevo día de pago.', true); return; }
+    const diaViejoFecha = i.dia_vencimiento; // guardar ANTES de que el update lo pise
     const sinCobro = $('#cpSinCobro').checked;
     const importe = sinCobro ? 0 : (parseFloat($('#cpImporte').value) || 0);
     const ok = confirm(
@@ -4243,11 +4257,31 @@ window.confirmarCambioPlan = async () => {
       // Reflejar también en memoria por si el reabrir usa la fila cacheada
       i.dia_vencimiento = updRows[0].dia_vencimiento;
       const diaGuardado = updRows[0].dia_vencimiento;
+      // CIERRE del mes de transición: su cuota queda reemplazada por el puente.
+      // Sin esto, fn_estado_cuenta evalúa ese mes con el día NUEVO y lo marca como
+      // morosa fantasma (le pasó a Clara Chiapero el 29/7). Solo cuando hubo puente
+      // (r.importe>0, ya sea cobrado o dejado como deuda). Idempotente: no repite el
+      // cierre si ese mes ya lo tiene.
+      if ((r.importe || 0) > 0) {
+        const mesCierre = r.mes || MES_ACTUAL;
+        const yaCerrado = (pagosPorInsc[i.id] || []).some(pg =>
+          pg.mes_imputado === mesCierre && pg.tipo_cobro === 'CORTESIA' &&
+          /CIERRE ciclo por cambio de fecha/i.test(pg.observaciones || ''));
+        if (!yaCerrado) {
+          const { error: eCierre } = await sb.from('pagos_tf').insert({
+            inscripcion_id: i.id, mes_imputado: mesCierre, fecha: HOY.toISOString().split('T')[0],
+            importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+            observaciones: `CIERRE ciclo por cambio de fecha (día ${diaViejoFecha||'—'}→${r.diaNuevo}) · cuota reemplazada por puente`,
+            cargado_por: usuarioId
+          });
+          if (eCierre) console.warn('No se pudo cerrar el mes de transición:', eCierre.message);
+        }
+      }
       // Histórico: registrar el cambio de fecha (no rompe si la tabla no existe)
       try {
         await sb.from('cambios_inscripcion').insert({
           inscripcion_id: i.id, persona_id: p.id, tipo: 'fecha',
-          descripcion: `Día de pago: ${i.dia_vencimiento||'—'} → ${r.diaNuevo}`,
+          descripcion: `Día de pago: ${diaViejoFecha||'—'} → ${r.diaNuevo}`,
           importe_puente: (r.importe || 0) || null,
           mes_imputado: (r.importe||0) > 0 ? (r.mes || MES_ACTUAL) : null,
           vigente_desde: HOY.toISOString().split('T')[0],
@@ -4673,12 +4707,39 @@ function abrirModalCobrar() {
     .join('');
   $('#cobrarMedio').value = 'TRANSFERENCIA';
   $('#cobrarObs').value = '';
+  // Puente pendiente por cambio de fecha: si lo hay, se ofrece cobrarlo JUNTO con la cuota.
+  const _puente = deudaCambioDe(i);
+  const box = $('#cobrarPuenteBox');
+  if (_puente && _puente.importe > 0) {
+    $('#cobrarPuenteMonto').textContent = fmt$(_puente.importe);
+    $('#cobrarSumarPuente').checked = true;
+    box.style.display = 'block';
+    $('#cobrarSumarPuente').onchange = actualizarTotalConPuente;
+  } else {
+    box.style.display = 'none';
+  }
   // Saldo en vivo: recalcula al cambiar importe o mes (idempotente, no apila listeners).
-  $('#cobrarImporte').oninput = actualizarSaldoCobro;
+  $('#cobrarImporte').oninput = () => { actualizarSaldoCobro(); actualizarTotalConPuente(); };
   $('#cobrarMesImputado').onchange = onCobroMesChange;
   actualizarSaldoCobro();
+  actualizarTotalConPuente();
   $('#modalCobrar').classList.add('activo');
 }
+
+// Muestra el total combinado (cuota del mes + puente) cuando hay puente pendiente y está tildado.
+window.actualizarTotalConPuente = () => {
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  const box = document.getElementById('cobrarPuenteBox');
+  if (!i || !box || box.style.display === 'none') return;
+  const d = deudaCambioDe(i);
+  const sumar = document.getElementById('cobrarSumarPuente').checked;
+  const cuota = parseFloat($('#cobrarImporte').value) || 0;
+  const total = cuota + (sumar && d ? d.importe : 0);
+  const el = document.getElementById('cobrarPuenteTotal');
+  el.textContent = sumar && d
+    ? `Total a cobrar: ${fmt$(total)}  (cuota ${fmt$(cuota)} + puente ${fmt$(d.importe)})`
+    : `Total a cobrar: ${fmt$(cuota)}  (solo cuota — puente queda pendiente)`;
+};
 
 // Al cambiar el mes a imputar, re-sugiero el importe con el precio de ESE mes.
 // Así, si cobrás un mes con aumento (ej: julio), el importe se rellena solo con el
@@ -4765,7 +4826,31 @@ window.confirmarCobro = async () => {
       try { await sb.functions.invoke('enviar_recibo', { body: { pago_id: pagoIns.id } }); }
       catch (eMail) { console.warn('No se pudo enviar el recibo por mail:', eMail); }
     }
-    toast(`✓ Cobro de ${fmt$(importe)} registrado para ${alumnoActivo.persona.nombre}${esParcial ? ` · saldo ${fmt$(saldoDespues)}` : ''}`);
+    // ➕ Puente pendiente por cambio de fecha: si se tildó, se cobra JUNTO con la cuota
+    // (queda como un pago propio imputado a SU mes) y se limpia la etiqueta DEUDA_CAMBIO.
+    let msgPuente = '';
+    const _pboxVisible = document.getElementById('cobrarPuenteBox').style.display !== 'none';
+    const _sumarPuente = _pboxVisible && document.getElementById('cobrarSumarPuente').checked;
+    if (_sumarPuente) {
+      const d = deudaCambioDe(insc);
+      if (d && d.importe > 0) {
+        const { error: ep } = await sb.from('pagos_tf').insert({
+          inscripcion_id: insc.id, mes_imputado: d.mes, fecha: hoyISO,
+          importe: d.importe, medio: $('#cobrarMedio').value, tipo_cobro: 'NORMAL',
+          observaciones: `PUENTE cambio de fecha (saldo cobrado)${d.venc ? ' · venc ' + d.venc : ''}`,
+          cargado_por: usuarioId
+        });
+        if (ep) {
+          console.warn('No se pudo cobrar el puente:', ep.message);
+          toast('La cuota se cobró, pero el puente falló: ' + ep.message + ' — cobralo con "Cobrar saldo".', true);
+        } else {
+          const obsLimpia = (insc.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
+          await sb.from('inscripciones_tf').update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() }).eq('id', insc.id);
+          msgPuente = ` + puente ${fmt$(d.importe)}`;
+        }
+      }
+    }
+    toast(`✓ Cobro de ${fmt$(importe)}${msgPuente} registrado para ${alumnoActivo.persona.nombre}${esParcial ? ` · saldo ${fmt$(saldoDespues)}` : ''}`);
     cerrarModal('modalCobrar');
     await cargarTodo();
   } catch (e) {
