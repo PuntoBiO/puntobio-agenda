@@ -189,6 +189,30 @@ const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
 
+// ============================================================
+// LEER UNA CONSULTA COMPLETA (29/7/26)
+// OJO: Supabase corta en 1000 filas por lectura y ese tope MANDA por
+// encima del .limit() que pidas — un .limit(5000) igual devuelve 1000.
+// Cuando pasa no hay error: simplemente faltan filas, y en esta pantalla
+// eso significa liquidar de menos.
+// Se le pasa una FUNCIÓN QUE ARMA LA QUERY DE CERO (no el objeto ya armado:
+// los builders de supabase-js se mutan, y reusar el mismo iría apilando
+// parámetros en cada página). La query debe traer orden determinista.
+// ============================================================
+async function sbLeerTodo(armarQuery) {
+  const PAGE = 1000;
+  let desde = 0;
+  let todo = [];
+  for (let i = 0; i < 50; i++) {          // tope de seguridad: 50.000 filas
+    const { data, error } = await armarQuery().range(desde, desde + PAGE - 1);
+    if (error) return { data: null, error };
+    todo = todo.concat(data || []);
+    if (!data || data.length < PAGE) break;
+    desde += PAGE;
+  }
+  return { data: todo, error: null };
+}
+
 const fmt = n => '$' + (Number(n)||0).toLocaleString('es-AR',{maximumFractionDigits:0});
 const fmtNum = n => (Number(n)||0).toLocaleString('es-AR');
 const badge = (prof) => {
@@ -453,30 +477,34 @@ async function cargar(){
   const hasta = new Date(year, parseInt(month), 0).toISOString().split('T')[0]; // último día del mes
 
   // Traemos pagos del mes con su tratamiento y persona
-  let q = sb.from('pagos_consultorio')
-    .select(`
-      id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro,
-      monto_centro, monto_profesional, monto_moplex, tratamiento_id,
-      tratamientos (
-        id, codigo_id, practica_codigo, modalidad, obra_social,
-        moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
-        personas ( id, nombre )
-      )
-    `)
-    .gte('fecha', desde)
-    .lte('fecha', hasta)
-    .order('fecha');
+  // 29/7/26 — se arma en una FUNCIÓN para poder paginarla: cada página
+  // necesita un builder nuevo (los de supabase-js se mutan al encadenar).
+  const armarQPagos = () => {
+    let qq = sb.from('pagos_consultorio')
+      .select(`
+        id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro,
+        monto_centro, monto_profesional, monto_moplex, tratamiento_id,
+        tratamientos (
+          id, codigo_id, practica_codigo, modalidad, obra_social,
+          moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+          personas ( id, nombre )
+        )
+      `)
+      .gte('fecha', desde)
+      .lte('fecha', hasta);
+    if (filtroProf && window._soloLoMioLiq) {
+      qq = qq.or(`profesional.eq.${filtroProf},quien_cobro.eq.${filtroProf}`);
+    }
+    return qq.order('fecha').order('id', { ascending: true });
+  };
 
   // Para que los CRUCES salgan completos hay que mirar TODO el mes (un cruce involucra a dos personas).
   // - Admin (sin restricción): traemos todo el mes y filtramos la VISTA en JS. Los números de cada profe no cambian,
   //   pero los cruces se calculan sobre el panorama completo (correcto).
   // - Profesional con "solo lo mío": NO le bajamos datos del resto. Traemos solo lo que lo involucra (atendió O cobró).
-  if (filtroProf && window._soloLoMioLiq) {
-    q = q.or(`profesional.eq.${filtroProf},quien_cobro.eq.${filtroProf}`);
-  }
   // (si es admin con un profesional elegido, NO filtramos en la consulta: se filtra en render con `filtroProf`)
 
-  const { data, error } = await q;
+  const { data, error } = await sbLeerTodo(armarQPagos);
   if (error) {
     document.getElementById('resultado').innerHTML = `<div class="empty">❌ Error: ${error.message}</div>`;
     return;
@@ -515,8 +543,9 @@ async function cargar(){
   const tratIdsPagos = [...new Set((data || []).map(p => p.tratamiento_id).filter(x => x != null))];
   let tratIdsSes = [];
   try {
-    const { data: sesMes } = await sb.from('sesiones')
-      .select('tratamiento_id').gte('fecha', desde).lte('fecha', hasta).limit(5000);
+    const { data: sesMes } = await sbLeerTodo(() => sb.from('sesiones')
+      .select('id, tratamiento_id').gte('fecha', desde).lte('fecha', hasta)
+      .order('id', { ascending: true }));
     tratIdsSes = [...new Set((sesMes || []).map(x => x.tratamiento_id).filter(x => x != null))];
   } catch (e) { console.warn('No se pudieron leer las sesiones del mes:', e.message); }
   const tratIds = [...new Set([...tratIdsPagos, ...tratIdsSes])];
@@ -530,13 +559,13 @@ async function cargar(){
   let sesAll = [], pagosAll = [];
   for (let i = 0; i < tratIds.length; i += 150){
     const lote = tratIds.slice(i, i + 150);
-    const { data: sesData } = await sb.from('sesiones')
+    const { data: sesData } = await sbLeerTodo(() => sb.from('sesiones')
       .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, personas(nombre))')
-      .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
+      .in('tratamiento_id', lote).order('fecha').order('id'));
     if (sesData) sesAll.push(...sesData);
-    const { data: pagData } = await sb.from('pagos_consultorio')
+    const { data: pagData } = await sbLeerTodo(() => sb.from('pagos_consultorio')
       .select('id, tratamiento_id, fecha, importe, quien_cobro')
-      .in('tratamiento_id', lote).order('fecha').order('id').limit(5000);
+      .in('tratamiento_id', lote).order('fecha').order('id'));
     if (pagData) pagosAll.push(...pagData);
   }
   const sesionesData = sesAll;
@@ -657,7 +686,9 @@ async function cargar(){
         // ¿está cobrado? (busca pagos de estos tratamientos, de cualquier fecha)
         const listIds = lista.map(x=>x.tratId);
         if (listIds.length){
-          const { data: pagQ } = await sb.from('pagos_consultorio').select('tratamiento_id, importe').in('tratamiento_id', listIds);
+          const { data: pagQ } = await sbLeerTodo(() => sb.from('pagos_consultorio')
+            .select('id, tratamiento_id, importe').in('tratamiento_id', listIds)
+            .order('id', { ascending: true }));
           const cobradoSet = new Set((pagQ||[]).filter(p=> Number(p.importe)>0).map(p=>p.tratamiento_id));
           lista.forEach(x=> x.cobrado = cobradoSet.has(x.tratId));
         }
