@@ -272,6 +272,21 @@
 <div class="resumen" id="resumen"></div>
 <div id="tabla-wrap"></div>
 
+<!-- ===================== SECCIÓN: TURNOS FIJOS LIBRES ===================== -->
+<div id="tlf-seccion" style="margin-top:28px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);overflow:hidden">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 16px;background:var(--bg);border-bottom:1px solid var(--border);cursor:pointer" onclick="toggleTurnosLibres()">
+    <span id="tlf-flecha" style="font-size:13px;color:var(--text-dim)">&#9656;</span>
+    <div style="flex:1;min-width:190px">
+      <div style="font-size:15px;font-weight:700;color:var(--text)">&#128202; Turnos fijos libres por &aacute;rea</div>
+      <div id="tlf-sub" style="font-size:11.5px;color:var(--text-dim)">Tocá para ver la ocupación de la sala</div>
+    </div>
+    <span style="font-size:11px;color:var(--text-dim);background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;padding:3px 10px;font-weight:600">solo fijos &middot; sin recuperatorios</span>
+    <button class="filtro-btn" onclick="event.stopPropagation();cargarTurnosLibres(true)" style="border-color:var(--azul);color:var(--azul);font-weight:600">&#8635; Actualizar</button>
+    <button class="filtro-btn" onclick="event.stopPropagation();copiarTurnosLibres()" style="border-color:var(--verde);color:var(--verde);font-weight:600">&#128203; Copiar resumen</button>
+  </div>
+  <div id="tlf-body" style="padding:16px 18px;display:none"></div>
+</div>
+
 <!-- MODAL MENÚ WHATSAPP -->
 <div class="modal-backdrop" id="modalWsp">
   <div class="modal">
@@ -6560,6 +6575,215 @@ async function iniciarRealtime() {
           console.warn('[REALTIME admin-tf] ⚠️ no conectó:', status, err || '');
       });
   } catch (e) { console.warn('[REALTIME admin-tf] error al iniciar', e); }
+}
+
+/* ============================================================
+   SECCIÓN "TURNOS FIJOS LIBRES" — capacidad ociosa estructural
+   Pedido de Lu (29/7/26). Es para MÉTRICAS, no para dar turno:
+   qué horarios son pico, dónde reforzar y dónde persuadir para llenar.
+
+   REGLA (definida por Lu): cuenta SOLO turnos FIJOS (turno_alumnos).
+   NO cuenta recuperatorios, sueltas ni cambios de área (turno_agregados),
+   porque son eventuales y no reflejan la ocupación real de la sala.
+
+   FUENTE ÚNICA: fn_turnos_libres_fijos() — la regla de "quién ocupa"
+   vive adentro de la función, no acá. Si cambia la regla, se toca el SQL.
+   ============================================================ */
+const TLF_DIAS = ['Lunes','Martes','Miércoles','Jueves','Viernes'];
+let _tlfCargado = false;
+let _tlfDatosCache = null;
+
+function _tlfColor(pct, libres) {
+  if (libres <= 0)  return { bg:'#fee2e2', bd:'#ef4444', tx:'#991b1b' }; // lleno
+  if (pct >= 80)    return { bg:'#ffedd5', bd:'#f97316', tx:'#9a3412' }; // casi lleno
+  if (pct >= 40)    return { bg:'var(--verde-soft)', bd:'var(--verde)', tx:'#166534' };
+  return              { bg:'#e0f2fe', bd:'#0ea5e9', tx:'#075985' };      // flojo
+}
+
+// Agrupa las filas planas de la RPC en { servicio: { horas:{hora:{dia:celda}}, ... } }
+function _tlfAgrupar(filas) {
+  const areas = {};
+  (filas || []).forEach(r => {
+    if (!TLF_DIAS.includes(r.dia)) return;
+    const hora = String(r.hora || '').slice(0,5);
+    if (!areas[r.servicio]) areas[r.servicio] = { horas:{}, cap:0, ocup:0, libres:0 };
+    const A = areas[r.servicio];
+    if (!A.horas[hora]) A.horas[hora] = {};
+    A.horas[hora][r.dia] = { cap:r.capacidad, ocup:r.fijos, libres:r.libres };
+    A.cap += r.capacidad; A.ocup += r.fijos; A.libres += r.libres;
+  });
+  return areas;
+}
+
+async function cargarTurnosLibres(forzar) {
+  const cont = $('#tlf-body');
+  if (!cont) return;
+  if (_tlfCargado && !forzar) return;
+  cont.innerHTML = '<div class="loading">⏳ Calculando ocupación...</div>';
+  try {
+    const { data, error } = await sb.rpc('fn_turnos_libres_fijos');
+    if (error) throw error;
+    _tlfDatosCache = _tlfAgrupar(data);
+    _tlfCargado = true;
+    renderTurnosLibres();
+  } catch (e) {
+    console.error('fn_turnos_libres_fijos:', e);
+    cont.innerHTML = `<div class="aviso-amarillo">No se pudo calcular la ocupación (${e.message || e}). Revisá que la función fn_turnos_libres_fijos esté creada en Supabase.</div>`;
+  }
+}
+
+function renderTurnosLibres() {
+  const cont = $('#tlf-body');
+  const areas = _tlfDatosCache;
+  if (!cont || !areas) return;
+  const nombres = Object.keys(areas).sort();
+  if (!nombres.length) { cont.innerHTML = '<div class="loading">Sin turnos con capacidad cargada.</div>'; return; }
+
+  let html = '';
+
+  // ---------- matriz hora x día, una por área ----------
+  nombres.forEach(serv => {
+    const A = areas[serv];
+    const horas = Object.keys(A.horas).sort();
+    const pctArea = A.cap ? Math.round(100*A.ocup/A.cap) : 0;
+    const porDia = {};
+    TLF_DIAS.forEach(d => porDia[d] = { cap:0, ocup:0, libres:0 });
+
+    html += `<div style="margin-bottom:24px">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <div style="font-size:15px;font-weight:700;color:var(--text)">${serv}</div>
+        <div style="font-size:12px;color:var(--text-dim)">
+          ${A.ocup}/${A.cap} lugares fijos ocupados · <strong style="color:#0369a1">${A.libres} libres</strong> · ${pctArea}% de ocupación
+        </div>
+      </div>
+      <div style="overflow-x:auto">
+      <table style="border-collapse:separate;border-spacing:4px;min-width:520px">
+        <thead><tr>
+          <th style="font-size:11px;color:var(--text-dim);text-align:left;padding:0 6px;font-weight:600">Hora</th>`;
+    TLF_DIAS.forEach(d => {
+      html += `<th style="font-size:11px;color:var(--text-dim);width:78px;font-weight:600">${d.slice(0,3)}</th>`;
+    });
+    html += `<th style="font-size:11px;color:var(--text-dim);width:64px;font-weight:600">Libres</th></tr></thead><tbody>`;
+
+    horas.forEach(h => {
+      let libresFila = 0;
+      html += `<tr><td style="font-size:12px;font-weight:700;color:var(--text);padding:0 6px;white-space:nowrap">${h}</td>`;
+      TLF_DIAS.forEach(d => {
+        const c = A.horas[h][d];
+        if (!c) { html += `<td style="background:var(--bg);border-radius:7px"></td>`; return; }
+        const pct = c.cap ? Math.round(100*c.ocup/c.cap) : 0;
+        const col = _tlfColor(pct, c.libres);
+        libresFila += c.libres;
+        porDia[d].cap += c.cap; porDia[d].ocup += c.ocup; porDia[d].libres += c.libres;
+        html += `<td title="${d} ${h} · ${serv} — ${c.ocup} de ${c.cap} ocupados"
+          style="background:${col.bg};border:1.5px solid ${col.bd};border-radius:7px;text-align:center;padding:5px 2px">
+          <div style="font-size:17px;font-weight:700;color:${col.tx};line-height:1">${c.libres}</div>
+          <div style="font-size:10px;color:${col.tx};opacity:.75">${c.ocup}/${c.cap}</div>
+        </td>`;
+      });
+      html += `<td style="text-align:center;font-size:14px;font-weight:700;color:#0369a1">${libresFila}</td></tr>`;
+    });
+
+    html += `<tr><td style="font-size:11px;font-weight:600;color:var(--text-dim);padding:6px">Total día</td>`;
+    TLF_DIAS.forEach(d => {
+      const p = porDia[d];
+      const pct = p.cap ? Math.round(100*p.ocup/p.cap) : 0;
+      html += `<td style="text-align:center;padding-top:4px">
+        <div style="font-size:14px;font-weight:700;color:#0369a1">${p.libres}</div>
+        <div style="font-size:10px;color:var(--text-dim)">${pct}%</div></td>`;
+    });
+    html += `<td style="text-align:center;font-size:15px;font-weight:700;color:#0369a1">${A.libres}</td></tr>`;
+    html += `</tbody></table></div></div>`;
+  });
+
+  // ---------- rankings: reforzar / llenar ----------
+  const celdas = [];
+  nombres.forEach(serv => {
+    const A = areas[serv];
+    Object.keys(A.horas).forEach(h => TLF_DIAS.forEach(d => {
+      const c = A.horas[h][d];
+      if (c) celdas.push({ serv, dia:d, hora:h, ...c, pct: c.cap ? 100*c.ocup/c.cap : 0 });
+    }));
+  });
+  const llenos = celdas.filter(c => c.libres === 0).sort((a,b) => b.cap - a.cap).slice(0,6);
+  const vacios = celdas.slice().sort((a,b) => a.pct - b.pct || b.libres - a.libres).slice(0,6);
+  const chip = (c, rojo) => `<span style="display:inline-block;background:${rojo?'#fee2e2':'#e0f2fe'};
+    border:1px solid ${rojo?'#ef4444':'#0ea5e9'};color:${rojo?'#991b1b':'#075985'};
+    border-radius:12px;padding:3px 10px;font-size:11.5px;font-weight:600;margin:0 5px 5px 0">
+    ${c.serv.slice(0,4)} · ${c.dia.slice(0,3)} ${c.hora} ${rojo?`(${c.cap} full)`:`(${c.libres} libres)`}</span>`;
+
+  html += `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:20px">
+    <div style="border:1px solid #fecaca;background:#fef2f2;border-radius:8px;padding:12px 14px">
+      <div style="font-size:12.5px;font-weight:700;color:#991b1b;margin-bottom:8px">🔴 Horarios pico — a reforzar</div>
+      ${llenos.length ? llenos.map(c => chip(c, true)).join('') : '<div style="font-size:12px;color:var(--text-dim)">Ningún horario está lleno.</div>'}
+    </div>
+    <div style="border:1px solid #bae6fd;background:#f0f9ff;border-radius:8px;padding:12px 14px">
+      <div style="font-size:12.5px;font-weight:700;color:#075985;margin-bottom:8px">🔵 Horarios flojos — a llenar</div>
+      ${vacios.map(c => chip(c, false)).join('')}
+    </div>
+  </div>`;
+
+  // ---------- conteo final por área ----------
+  html += `<div style="border-top:2px solid var(--border);padding-top:14px">
+    <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:10px">📊 Total de turnos fijos libres por área</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px">`;
+  let capT = 0, ocupT = 0, libT = 0;
+  nombres.forEach(serv => {
+    const A = areas[serv];
+    capT += A.cap; ocupT += A.ocup; libT += A.libres;
+    const pct = A.cap ? Math.round(100*A.ocup/A.cap) : 0;
+    html += `<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:var(--bg-card)">
+      <div style="font-size:12px;font-weight:600;color:var(--text-dim)">${serv}</div>
+      <div style="font-size:30px;font-weight:700;color:#0369a1;line-height:1.1">${A.libres}</div>
+      <div style="font-size:11.5px;color:var(--text-dim)">lugares fijos libres · ${A.ocup}/${A.cap} ocupados (${pct}%)</div>
+      <div style="height:6px;background:var(--border);border-radius:99px;margin-top:7px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:${pct>=90?'var(--rojo)':pct>=70?'var(--naranja)':'var(--verde)'}"></div></div>
+    </div>`;
+  });
+  const pctT = capT ? Math.round(100*ocupT/capT) : 0;
+  html += `<div style="border:1px solid var(--azul);border-radius:8px;padding:12px 14px;background:var(--azul-soft)">
+      <div style="font-size:12px;font-weight:600;color:#1e6fa0">TOTAL TF</div>
+      <div style="font-size:30px;font-weight:700;color:#1e6fa0;line-height:1.1">${libT}</div>
+      <div style="font-size:11.5px;color:#1e6fa0">lugares fijos libres · ${ocupT}/${capT} ocupados (${pctT}%)</div>
+    </div></div></div>`;
+
+  cont.innerHTML = html;
+  const sub = $('#tlf-sub');
+  if (sub) sub.textContent = `${libT} lugares fijos libres · ${pctT}% de ocupación general`;
+}
+
+function toggleTurnosLibres() {
+  const b = $('#tlf-body'), f = $('#tlf-flecha');
+  if (!b) return;
+  const abrir = b.style.display === 'none';
+  b.style.display = abrir ? 'block' : 'none';
+  if (f) f.textContent = abrir ? '▾' : '▸';
+  if (abrir) cargarTurnosLibres();
+}
+
+// Resumen en texto plano, listo para pegar en WhatsApp
+function copiarTurnosLibres() {
+  const areas = _tlfDatosCache;
+  if (!areas) { toast('Todavía no se calculó la ocupación.', true); return; }
+  const hoy = new Date().toLocaleDateString('es-AR');
+  let txt = `TURNOS FIJOS LIBRES — PuntoBiO TF (${hoy})\n(solo turnos fijos, no incluye recuperatorios)\n`;
+  let libT = 0;
+  Object.keys(areas).sort().forEach(serv => {
+    const A = areas[serv];
+    libT += A.libres;
+    txt += `\n== ${serv.toUpperCase()} ==\n`;
+    TLF_DIAS.forEach(d => {
+      const partes = Object.keys(A.horas).sort()
+        .filter(h => A.horas[h][d])
+        .map(h => `${h} ${A.horas[h][d].libres}`);
+      if (partes.length) txt += `${d}: ${partes.join(' · ')}\n`;
+    });
+    txt += `Total ${serv}: ${A.libres} libres (${A.ocup}/${A.cap} ocupados)\n`;
+  });
+  txt += `\nTOTAL TF: ${libT} lugares fijos libres`;
+  navigator.clipboard.writeText(txt)
+    .then(() => toast('✓ Resumen copiado'))
+    .catch(() => toast('No se pudo copiar', true));
 }
 
 (async () => {
