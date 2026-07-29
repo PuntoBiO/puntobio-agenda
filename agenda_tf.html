@@ -3060,7 +3060,12 @@ async function cargarMensajesPendientes(t) {
 // Carga todas las clases cerradas de la semana visible (para los ✓/✗ de la grilla)
 async function cargarClasesCerradas() {
   try {
-    const filas = await supabaseQuery('clases_cerradas', `?select=turno_id,fecha,tipo,motivo`);
+    // 29/7/26 — PAGINADO OBLIGATORIO: clases_cerradas crece todos los días y ya
+    // pasó las 1000 filas. Con supabaseQuery (una sola página) el Map quedaba
+    // incompleto: la agenda creía que una clase YA CERRADA seguía abierta, ofrecía
+    // "Cerrar clase" y el INSERT reventaba con 23505 (duplicate key
+    // clases_cerradas_turno_id_fecha_key). Con supabaseQueryAll trae todo.
+    const filas = await supabaseQueryAll('clases_cerradas', `?select=turno_id,fecha,tipo,motivo`, 'turno_id.asc');
     CLASES_CERRADAS = new Map((filas || []).map(f => [
       `${f.turno_id}-${f.fecha}`,
       // El motivo puede traer el tag interno [bloqueo#N] (para deshacer el cierre):
@@ -3991,7 +3996,18 @@ async function cerrarClaseFinal(t, fecha) {
     renderModalBody(t.dia, t.hora, t.servicio);
     renderTurnos();
   } catch (e) {
-    toast('No se pudo cerrar la clase: ' + e.message, 'err');
+    // 29/7/26 — Si la clase YA estaba cerrada en la base (23505 = unique
+    // violation), no es un error para la usuaria: ponemos al día el Map y
+    // repintamos, en vez de dejarla trabada con un cartel rojo.
+    const msg = String((e && e.message) || e);
+    if (msg.includes('23505') || msg.includes('duplicate key')) {
+      CLASES_CERRADAS.set(`${t.id}-${fecha}`, { tipo: 'finalizada', motivo: null });
+      toast('✓ Esta clase ya estaba cerrada');
+      renderModalBody(t.dia, t.hora, t.servicio);
+      renderTurnos();
+      return;
+    }
+    toast('No se pudo cerrar la clase: ' + msg, 'err');
     if (btn) { btn.disabled = false; btn.textContent = '🔒 Cerrar clase'; }
   }
 }
