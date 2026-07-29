@@ -1253,6 +1253,9 @@ async function init() {
 
   // Badge dinámico del sidebar Morosos TF (se calcula en vivo, no hardcoded)
   actualizarBadgeMorososTF()
+  // Lista de espera de turnos: badge + cartel emergente si se liberó alguno
+  chequearEsperaTurnos(true)
+  setInterval(() => chequearEsperaTurnos(true), 10 * 60 * 1000)
   // Badge de Mensajes de alumnos (solo los dirigidos a MÍ, sin leer)
   actualizarBadgeMsjAlumnos()
   // Badge de Cumpleaños: saludos de WhatsApp pendientes (hoy + atrasados 7 días)
@@ -1381,6 +1384,82 @@ async function actualizarBadgeMsjAlumnos() {
   } catch (e) { /* sin badge no pasa nada */ }
 }
 window.actualizarBadgeMsjAlumnos = actualizarBadgeMsjAlumnos
+
+// ============================================================
+// 🔔 LISTA DE ESPERA DE TURNOS (29/7/26, pedido de Lu)
+// Alumnos anotados esperando que se libere un lugar fijo. Cuando el
+// turno que piden queda con lugar, salta un cartel EMERGENTE en el
+// sistema (no hace falta entrar a la pantalla) y el ítem del menú
+// muestra el globito con cuántos hay.
+// Se chequea al entrar y cada 10 minutos. Un mismo aviso no se repite
+// en la misma sesión (se recuerda en _esperaAvisados).
+// ============================================================
+const _esperaAvisados = new Set()
+
+async function chequearEsperaTurnos(mostrarCartel) {
+  if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
+  let filas = []
+  try {
+    const { data, error } = await supabase.rpc('fn_lista_espera')
+    if (error) throw error
+    filas = data || []
+  } catch (e) {
+    // Si la tabla/función todavía no existe, no molestamos: se ignora.
+    return
+  }
+  const conLugar = filas.filter(f => f.hay_lugar)
+
+  const badge = document.getElementById('badge-espera-tf')
+  if (badge) {
+    if (conLugar.length > 0) {
+      badge.style.display = 'inline-block'
+      badge.textContent = String(conLugar.length)
+      badge.style.background = 'var(--green, #16a34a)'
+    } else {
+      badge.style.display = 'none'
+    }
+  }
+
+  if (!mostrarCartel) return
+  const nuevos = conLugar.filter(f => !_esperaAvisados.has(f.id))
+  if (!nuevos.length) return
+  nuevos.forEach(f => _esperaAvisados.add(f.id))
+  mostrarCartelEspera(nuevos)
+}
+window.chequearEsperaTurnos = chequearEsperaTurnos
+
+function mostrarCartelEspera(filas) {
+  const viejo = document.getElementById('espera-pop-overlay')
+  if (viejo) viejo.remove()
+  const item = f => `<div style="padding:13px 0;border-bottom:1px dashed #e2e8f0">
+      <div style="font-size:15px;font-weight:800;color:#0f172a">${f.servicio} · ${f.dia} ${String(f.hora||'').slice(0,5)}</div>
+      <div style="font-size:13.5px;color:#64748b"><strong>${f.alumno}</strong> está esperando este turno${f.nota ? ' · ' + f.nota : ''}</div>
+    </div>`
+  const div = document.createElement('div')
+  div.id = 'espera-pop-overlay'
+  div.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px'
+  div.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:520px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.35);overflow:hidden">
+      <div style="background:#16a34a;color:#fff;padding:18px 22px">
+        <h3 style="margin:0;font-size:18px">🎉 ${filas.length === 1 ? 'Se liberó un turno que alguien estaba esperando' : 'Se liberaron ' + filas.length + ' turnos esperados'}</h3>
+        <div style="font-size:13px;opacity:.9;margin-top:3px">Avisale al alumno antes de que alguien tome el lugar.</div>
+      </div>
+      <div style="padding:16px 22px;max-height:50vh;overflow:auto">${filas.map(item).join('')}</div>
+      <div style="padding:0 22px 20px;display:flex;gap:10px;justify-content:flex-end">
+        <button id="espera-pop-ir" style="padding:9px 16px;border-radius:9px;border:1.5px solid #1e9fe0;background:#fff;color:#1e9fe0;font-weight:700;cursor:pointer;font-family:inherit">Ver la lista</button>
+        <button id="espera-pop-ok" style="padding:9px 16px;border-radius:9px;border:none;background:#16a34a;color:#fff;font-weight:700;cursor:pointer;font-family:inherit">Entendido</button>
+      </div>
+    </div>`
+  document.body.appendChild(div)
+  div.addEventListener('click', ev => { if (ev.target === div) div.remove() })
+  div.querySelector('#espera-pop-ok').onclick = () => div.remove()
+  div.querySelector('#espera-pop-ir').onclick = () => {
+    div.remove()
+    const nav = Array.from(document.querySelectorAll('.nav-item'))
+      .find(n => (n.getAttribute('onclick') || '').includes("irA('turnos-libres-tf')"))
+    if (nav) nav.click()
+  }
+}
 
 async function actualizarBadgeMorososTF() {
   if (!permisos || !permisos.ve_terapia_fisica || permisos.es_cliente || permisos.solo_lo_mio === true) return
@@ -1730,7 +1809,7 @@ function buildNav() {
       // sala para métricas — horarios pico, dónde reforzar y dónde hay lugar para
       // llenar. Cuenta SOLO turnos fijos (no recuperatorios). Administrativo:
       // si algún día lo quieren ver los profes, mové esta línea FUERA del !esProfe.
-      areas.push({ icon: '📈', label: 'Turnos libres TF', id: 'turnos-libres-tf', sub: true })
+      areas.push({ icon: '📈', label: 'Turnos libres TF', id: 'turnos-libres-tf', sub: true, badgeId: 'badge-espera-tf' })
       areas.push({ icon: '💵', label: 'Caja TF', id: 'caja-tf', sub: true })
       areas.push({ icon: '🔔', label: 'Morosos TF', id: 'morosos-tf', sub: true, badgeId: 'badge-morosos-tf' })
       // 📥 Buzón de ALUMNOS (19/7/26, pedido de Lu): separado de la mensajería
