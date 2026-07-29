@@ -2147,28 +2147,29 @@ function waFechaBonita(fechaISO){
 function waNombrePractica(codigo){
   return { MOPLEX:'MOPLEX', EVALUACION_INGRESO:'Evaluación de Ingreso', EVALUACION_DEPORTISTA:'Evaluación Deportista', SARKMED:'SARKMED' }[codigo] || codigo;
 }
+// Firma formal del profesional para el mensaje al paciente.
+// La clave se busca en MAYUSCULAS, asi entra tanto el codigo ('LU') como el nombre ('Lu').
+// Si un profesional no esta en la tabla, sale su nombre tal cual (sin credenciales).
+const WA_PROF_FORMAL = {
+  LU: { nombre:'Lic. Luciana Velaz', detalle:'Especialista en Reeducación Postural y Kinesiología del Deporte · MP 5131' }
+};
+function waProfFormal(prof){
+  const k = String(prof == null ? '' : prof).trim().toUpperCase();
+  return WA_PROF_FORMAL[k] || { nombre: (CODE_TO_NOMBRE[k] || String(prof == null ? '' : prof)), detalle:'' };
+}
 // Indicaciones de vestimenta segun la practica del turno.
-// COMPLETA: Evaluacion de Ingreso y Deportista (postura + plataformas de fuerza).
-// REDUCIDA: SARKMED (adultos mayores: sin la parte de top / sin remera).
-// SIN indicaciones: MOPLEX (podologia / plantillas).
+// SOLO Evaluacion de Ingreso y Evaluacion Deportista (postura + plataformas de fuerza).
+// SARKMED y MOPLEX NO llevan indicaciones (decidido con Lu 29/07/26).
 function waIndicaciones(turnos){
   const practicas = new Set((turnos || []).map(t => t.practica));
-  const completa = practicas.has('EVALUACION_INGRESO') || practicas.has('EVALUACION_DEPORTISTA');
-  const reducida = practicas.has('SARKMED');
-  if(!completa && !reducida) return '';
-  let b = `\n*Como venir el dia de la evaluacion:*\n`;
-  if(completa){
-    b += `• Pantalon corto, no muy holgado, para poder ver bien rodilla y tobillo.\n`;
-    b += `• Remera clara (evitar negro) y que no quede grande.\n`;
-    b += `• Para la parte de postura necesitamos ver la espalda: las mujeres pueden traer top y los varones se evaluan sin remera.\n`;
-    b += `• Zapatillas, para la evaluacion de fuerza sobre las plataformas.\n`;
-    b += `• Si tenes pelo largo, traete una colita o un broche para recogerlo.\n`;
-  } else {
-    b += `• Pantalon corto o calza, no muy holgado, para poder ver bien rodilla y tobillo.\n`;
-    b += `• Remera clara (evitar negro) y comoda, que no quede grande.\n`;
-    b += `• Zapatillas, para la evaluacion de fuerza sobre las plataformas.\n`;
-    b += `• Si tenes pelo largo, traete una colita o un broche para recogerlo.\n`;
-  }
+  const aplica = practicas.has('EVALUACION_INGRESO') || practicas.has('EVALUACION_DEPORTISTA');
+  if(!aplica) return '';
+  let b = `\n*Cómo venir el día de la evaluación:*\n`;
+  b += `• Pantalón corto, no muy holgado, para poder ver bien rodilla y tobillo.\n`;
+  b += `• Remera clara (evitar negro) y que no quede grande.\n`;
+  b += `• Para la parte de postura necesitamos ver la espalda: las mujeres pueden traer top y los varones se evalúan sin remera.\n`;
+  b += `• Zapatillas, para la evaluación de fuerza sobre las plataformas.\n`;
+  b += `• Si tenés pelo largo, traete una colita o un broche para recogerlo.\n`;
   return b;
 }
 function waArmarMensaje(paciente, turnos){
@@ -2180,11 +2181,14 @@ function waArmarMensaje(paciente, turnos){
     const f = waFechaBonita(t.fecha);
     const hora = String(t.hora_inicio).substring(0,5);
     const practica = waNombrePractica(t.practica).replace(/&/g,'y');
+    const pf = waProfFormal(t.profesional);
     msg += `> ${f.diaSem} ${f.fechaCorta} - ${hora}hs\n`;
-    msg += `  ${practica} con ${t.profesional}\n\n`;
+    msg += `  ${practica} con ${pf.nombre}\n`;
+    if(pf.detalle) msg += `  _${pf.detalle}_\n`;
+    msg += `\n`;
   });
-  msg += `Direccion: Libertad 1549, Bo Gral Paz\n`;
-  msg += `Si no podes venir, avisanos con 24hs de anticipacion.\n`;
+  msg += `Dirección: Libertad 1549, Barrio General Paz\n`;
+  msg += `Si no podés venir, avisanos con 24hs de anticipación.\n`;
   msg += waIndicaciones(turnos);
   return msg;
 }
@@ -2201,14 +2205,17 @@ function mostrarModalWhatsAppTurnos(paciente, turnos){
   const turnosHTML = ord.map(t => {
     const f = waFechaBonita(t.fecha);
     const hora = String(t.hora_inicio).substring(0,5);
+    const pf = waProfFormal(t.profesional);
+    const detHTML = pf.detalle ? `<div style="font-size:11px;color:#888;margin-top:2px;font-style:italic;">${waEscapeHtml(pf.detalle)}</div>` : '';
     return `
       <div style="padding:12px 14px;border-left:4px solid #1e9fe0;background:#f5f9fc;margin-bottom:8px;border-radius:6px;">
         <div style="font-weight:600;color:#111;font-size:15px;">📅 ${f.diaSem} ${f.fechaCorta} · ${hora}hs</div>
-        <div style="font-size:13px;color:#555;margin-top:4px;">${waEscapeHtml(waNombrePractica(t.practica))} con <strong>${waEscapeHtml(t.profesional)}</strong></div>
+        <div style="font-size:13px;color:#555;margin-top:4px;">${waEscapeHtml(waNombrePractica(t.practica))} con <strong>${waEscapeHtml(pf.nombre)}</strong></div>
+        ${detHTML}
       </div>`;
   }).join('');
   const indic = waIndicaciones(ord);
-  const indicHTML = !indic ? '' : `<div style="background:#f7f7f7;border:1px dashed #ccc;border-radius:6px;padding:10px 12px;margin-bottom:16px;font-size:12px;color:#555;white-space:pre-wrap;line-height:1.5;"><strong style="color:#111;">Se envian tambien las indicaciones de vestimenta:</strong>\n${waEscapeHtml(indic.replace(/\*/g,'').trim().replace(/^Como venir el dia de la evaluacion:\n/,''))}</div>`;
+  const indicHTML = !indic ? '' : `<div style="background:#f7f7f7;border:1px dashed #ccc;border-radius:6px;padding:10px 12px;margin-bottom:16px;font-size:12px;color:#555;white-space:pre-wrap;line-height:1.5;"><strong style="color:#111;">Se envían también las indicaciones de vestimenta:</strong>\n${waEscapeHtml(indic.replace(/\*/g,'').trim().split('\n').slice(1).join('\n'))}</div>`;
   const tieneTel = !!waLimpiarCelular(paciente.celular);
   const avisoTel = tieneTel ? '' : `<div style="background:#fff4e5;border:1px solid #ffb74d;color:#7a4a00;padding:10px 12px;border-radius:6px;margin-bottom:15px;font-size:13px;">⚠️ El paciente no tiene celular cargado en el Padrón. Cargalo para poder enviar por WhatsApp.</div>`;
   const modal = document.createElement('div');
