@@ -364,23 +364,37 @@ function splitPortionMoplex(rep, portion, fact){
 // sin contar la evaluación dos veces cuando se paga en varias cuotas.
 function prepararMoplex(monthPagos){
   const byId = (window._moplexCat && window._moplexCat.byId) || {};
+  const prevPagos = window._moplexPrevPagos || [];   // cuotas de meses ANTERIORES (para no recontar la consulta)
+  const desde = window._moplexDesde || '';           // primer día del mes liquidado (YYYY-MM-01)
   const out = { detalle:{}, franquicia:[], sinTipo:[], totalMoplex:0 };
   const cerca = (a,b)=> Math.abs(a-b) < 1;
+  const esMoplex = (p)=> (((p.tratamientos||{}).practica_codigo)||'') === 'MOPLEX';
+  const keyTid = (p)=> (p.tratamiento_id != null) ? ('t'+p.tratamiento_id) : ('p'+p.id);
+  const enMes = (p)=> !desde || String(p.fecha||'') >= desde;   // ¿es una cuota del mes que estoy liquidando?
 
-  // 1) Agrupar los cobros MOPLEX por tratamiento (un tratamiento = varias cuotas posibles)
+  // 1) Agrupar los cobros MOPLEX del MES por tratamiento (un tratamiento = varias cuotas posibles)
   const grupos = {};
   for (const p of monthPagos){
-    const t = p.tratamientos || {};
-    if ((t.practica_codigo||'') !== 'MOPLEX') continue;
-    const tid = (p.tratamiento_id != null) ? ('t'+p.tratamiento_id) : ('p'+p.id);
+    if (!esMoplex(p)) continue;
+    const tid = keyTid(p);
     (grupos[tid] = grupos[tid] || []).push(p);
+  }
+  // 1b) Cuotas de meses ANTERIORES de esos mismos tratamientos: NO se liquidan de nuevo,
+  //     pero se consumen primero para arrancar con el presupuesto correcto de la evaluación.
+  const previos = {};
+  for (const p of prevPagos){
+    const tid = keyTid(p);
+    if (!grupos[tid]) continue;      // solo tratamientos con actividad este mes
+    (previos[tid] = previos[tid] || []).push(p);
   }
 
   // 2) Repartir cada grupo (tratamiento)
   for (const tid of Object.keys(grupos)){
-    // Ordenar las cuotas por fecha (para que la evaluación se cubra con las primeras)
-    const pagos = grupos[tid].slice().sort((a,b)=> (String(a.fecha||'')).localeCompare(String(b.fecha||'')) || ((a.id||0)-(b.id||0)));
-    const p0 = pagos[0];
+    const delMes = grupos[tid].slice();
+    // TODAS las cuotas (anteriores + del mes) ordenadas por fecha: primero se cubre lo viejo
+    const pagos = (previos[tid]||[]).concat(delMes)
+      .sort((a,b)=> (String(a.fecha||'')).localeCompare(String(b.fecha||'')) || ((a.id||0)-(b.id||0)));
+    const p0 = delMes[0];               // referencia del MES (profesional, fecha y tratId salen de acá)
     const t  = p0.tratamientos || {};
     const fact = moplexFacturable(p0.fecha);
     const evalItem  = byId[t.moplex_consulta_id];
@@ -393,9 +407,9 @@ function prepararMoplex(monthPagos){
 
     // Sin tipo asignado → no se puede repartir bien
     if (!evalRep && !plantRep){
-      const totalPaid = pagos.reduce((s,p)=> s + (Number(p.importe)||0), 0);
+      const totalPaid = delMes.reduce((s,p)=> s + (Number(p.importe)||0), 0);
       out.sinTipo.push({ fecha:p0.fecha, paciente, prof, importe:totalPaid, tratId:p0.tratamiento_id });
-      for (const p of pagos){ p._moplexInfo = { sinTipo:true }; p.monto_profesional = 0; p.monto_centro = Number(p.importe)||0; p._monto_moplex = 0; }
+      for (const p of delMes){ p._moplexInfo = { sinTipo:true }; p.monto_profesional = 0; p.monto_centro = Number(p.importe)||0; p._monto_moplex = 0; }
       continue;
     }
 
@@ -424,6 +438,11 @@ function prepararMoplex(monthPagos){
 
       const se = splitPortionMoplex(evalRep,  evalPortion,  fact);
       const sp = splitPortionMoplex(plantRep, plantPortion, fact);
+
+      // Solo las cuotas del MES entran en la liquidación (y se les pisa el split).
+      // Las de meses anteriores ya consumieron su presupuesto arriba: no se recuentan.
+      if (!enMes(p)) continue;
+
       p.monto_profesional = se.prof + sp.prof;
       p.monto_centro      = se.centro + sp.centro + (leftover>0?leftover:0);
       p._monto_moplex     = se.moplex + sp.moplex;
@@ -616,6 +635,35 @@ async function cargar(){
   } catch (e) {
     window._moplexSaldos = {};
     console.warn('No se pudieron cargar saldos MOPLEX (falta tabla moplex_franquicia_saldos?):', e.message);
+  }
+
+  // ===== MOPLEX: cuotas de MESES ANTERIORES de los tratamientos con actividad este mes =====
+  // Necesario para NO volver a contar la evaluación cuando una cuota de la plantilla se paga
+  // en un mes posterior al de la consulta. Se consumen primero al repartir (ver prepararMoplex).
+  window._moplexDesde = desde;
+  window._moplexPrevPagos = [];
+  try {
+    const mopTratIds = [...new Set((data||[])
+      .filter(p => ((p.tratamientos||{}).practica_codigo||'') === 'MOPLEX')
+      .map(p => p.tratamiento_id).filter(x => x != null))];
+    if (mopTratIds.length){
+      const { data: prev } = await sbLeerTodo(() => sb.from('pagos_consultorio')
+        .select(`
+          id, fecha, importe, profesional, tratamiento_id,
+          tratamientos (
+            id, practica_codigo,
+            moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+            personas ( id, nombre )
+          )
+        `)
+        .in('tratamiento_id', mopTratIds)
+        .lt('fecha', desde)
+        .order('fecha').order('id', { ascending: true }));
+      window._moplexPrevPagos = prev || [];
+    }
+  } catch (e) {
+    window._moplexPrevPagos = [];
+    console.warn('No se pudieron cargar cuotas MOPLEX de meses anteriores:', e.message);
   }
 
   // ===== MOPLEX: TODAS las consultas del mes (por fecha de consulta) — SOLO INFORMATIVO =====
