@@ -213,12 +213,38 @@ let TURNOS = [];          // todos los turnos cargados
 let FIJOS_POR_TURNO = {}; // turno_id -> cantidad de alumnos fijos activos
 let filtroActivo = 'todos';
 
-// ---- Token del usuario logueado (compartido con el resto del sistema vía sessionStorage) ----
-// Usamos siempre la key publishable (sb_publishable_...), que NO vence.
-// Antes esta página agarraba el token de sesión (pb_token) que caduca al rato
-// y hacía fallar todo con "JWT expired". Ahora funciona igual que el resto del sistema.
+// ---- Token del usuario logueado ----
+// HISTORIA DE ESTE BLOQUE (para que no se rompa de nuevo):
+//  v1: agarraba pb_token de sessionStorage -> caducaba y tiraba "JWT expired".
+//  v2: usaba siempre la publishable key -> las LECTURAS andaban (policy
+//      turnos_lectura es para anon) pero las ESCRITURAS se caían calladas,
+//      porque turnos_equipo_write exige es_equipo() y sin sesión da falso.
+//  v3 (esta): usamos el cliente supabase-js, que guarda la sesión igual que
+//      el resto del Ecosistema y RENUEVA el token solo. Nada de caducar.
+const sbCli = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { lock: (name, acquireTimeout, fn) => fn() }
+});
+
+let TOKEN = SUPABASE_KEY;   // fallback: alcanza para leer, no para escribir
+let HAY_SESION = false;
+
+// getSession() renueva el access_token solo si está por vencer.
+async function refrescarToken() {
+  try {
+    const { data: { session } } = await sbCli.auth.getSession();
+    if (session && session.access_token) {
+      TOKEN = session.access_token;
+      HAY_SESION = true;
+      return true;
+    }
+  } catch (e) { console.warn('No se pudo leer la sesión', e); }
+  TOKEN = SUPABASE_KEY;
+  HAY_SESION = false;
+  return false;
+}
+
 function authBearer() {
-  return SUPABASE_KEY;
+  return TOKEN;
 }
 
 // ---- Helpers Supabase ----
@@ -229,14 +255,23 @@ async function sbQuery(tabla, params = '') {
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return res.json();
 }
+// OJO: con 'return=minimal' PostgREST contesta 204 aunque RLS haya bloqueado
+// el cambio y no se haya tocado NINGUNA fila. Un 204 NO prueba que se guardó.
+// Por eso pedimos las filas de vuelta y exigimos que venga al menos una.
 async function sbUpdate(tabla, filtro, data) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
     method: 'PATCH',
-    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
-  return true;
+  const filas = await res.json();
+  if (!Array.isArray(filas) || filas.length === 0) {
+    throw new Error(HAY_SESION
+      ? 'la base no dejó modificar esa fila (tu usuario no figura como equipo).'
+      : 'no estás logueada en esta pantalla. Entrá desde el panel y probá de nuevo.');
+  }
+  return filas;
 }
 async function sbInsert(tabla, data) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${tabla}`, {
@@ -245,7 +280,29 @@ async function sbInsert(tabla, data) {
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
-  return res.json();
+  const filas = await res.json();
+  if (!Array.isArray(filas) || filas.length === 0) {
+    throw new Error(HAY_SESION
+      ? 'la base no dejó crear el turno (tu usuario no figura como equipo).'
+      : 'no estás logueada en esta pantalla. Entrá desde el panel y probá de nuevo.');
+  }
+  return filas;
+}
+
+// ---- Lectura paginada (el tope de 1000 filas de Supabase manda por encima
+// de cualquier .limit(); una lectura truncada acá contaría MENOS fijos de los
+// reales y te dejaría poner un cupo por debajo de la gente anotada) ----
+async function sbQueryAll(tabla, params = '') {
+  const PASO = 1000;
+  const out = [];
+  for (let desde = 0; ; desde += PASO) {
+    const sep = params.includes('?') ? '&' : '?';
+    const pagina = await sbQuery(tabla, `${params}${sep}limit=${PASO}&offset=${desde}`);
+    if (!Array.isArray(pagina) || pagina.length === 0) break;
+    out.push(...pagina);
+    if (pagina.length < PASO) break;
+  }
+  return out;
 }
 
 // ---- Toast ----
@@ -262,8 +319,8 @@ function toast(msg, tipo = '') {
 async function cargarTurnos() {
   try {
     const [filas, fijos] = await Promise.all([
-      sbQuery('turnos', '?select=id,dia,hora,servicio,capacidad&order=dia,hora,servicio'),
-      sbQuery('turno_alumnos', '?select=turno_id&activo=eq.true')
+      sbQueryAll('turnos', '?select=id,dia,hora,servicio,capacidad&order=id.asc'),
+      sbQueryAll('turno_alumnos', '?select=turno_id&activo=eq.true&order=id.asc')
     ]);
     TURNOS = filas || [];
     FIJOS_POR_TURNO = {};
@@ -363,14 +420,18 @@ window.guardarCapacidad = async (id) => {
   }
   btn.disabled = true; btn.textContent = '⟳';
   try {
-    await sbUpdate('turnos', `id=eq.${id}`, { capacidad: nueva });
-    input.setAttribute('data-original', String(nueva));
+    await refrescarToken();
+    const filas = await sbUpdate('turnos', `id=eq.${id}`, { capacidad: nueva });
+    // Nos quedamos con lo que quedó REALMENTE en la base, no con lo que pedimos.
+    const guardada = (filas[0] && filas[0].capacidad != null) ? filas[0].capacidad : nueva;
+    input.value = String(guardada);
+    input.setAttribute('data-original', String(guardada));
     input.classList.remove('cambiado');
     btn.textContent = '✓ Listo'; btn.classList.add('ok');
     // Actualizar el dato local
     const t = TURNOS.find(x => x.id === id);
-    if (t) t.capacidad = nueva;
-    toast('Capacidad actualizada', 'ok');
+    if (t) t.capacidad = guardada;
+    toast(`Capacidad guardada en ${guardada}`, 'ok');
     setTimeout(() => { btn.textContent = 'Guardar'; btn.classList.remove('ok'); }, 1600);
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Guardar';
@@ -407,6 +468,7 @@ window.crearTurno = async () => {
   if (yaExiste) { err.textContent = `Ya existe un turno de ${servicio} el ${dia} a las ${hora}. Cambiá su capacidad desde la lista.`; return; }
   btn.disabled = true; btn.textContent = 'Creando…';
   try {
+    await refrescarToken();
     const filas = await sbInsert('turnos', { dia, hora, servicio, capacidad });
     const nuevo = (filas && filas[0]) ? filas[0] : { id: Date.now(), dia, hora, servicio, capacidad };
     TURNOS.push({ id: nuevo.id, dia, hora, servicio, capacidad });
@@ -421,7 +483,18 @@ window.crearTurno = async () => {
 };
 
 // ---- Inicio ----
-cargarTurnos();
+(async () => {
+  const logueada = await refrescarToken();
+  if (!logueada) {
+    const aviso = document.createElement('div');
+    aviso.className = 'gt-aviso';
+    aviso.style.cssText = 'background:#fef2f2;border-color:#fecaca;color:#991b1b';
+    aviso.innerHTML = '⛔ <b>No hay sesión activa en esta pantalla.</b> Vas a poder ver los cupos pero ' +
+      'NO guardarlos. Entrá a la pantalla desde el panel (app.html) estando logueada.';
+    document.querySelector('.gt-filtros').before(aviso);
+  }
+  await cargarTurnos();
+})();
 </script>
 </body>
 </html>
