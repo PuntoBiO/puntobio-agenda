@@ -59,8 +59,31 @@
   }
   .gt-card {
     background: var(--card); border: 1px solid var(--borde); border-radius: 12px;
-    padding: 13px 15px; display: flex; align-items: center; gap: 12px; transition: .15s;
+    padding: 13px 15px; display: flex; flex-direction: column; gap: 9px; transition: .15s;
   }
+  .gt-card-fila { display: flex; align-items: center; gap: 12px; }
+  /* Alerta de sobrecupo: hay más fijos que lugares */
+  .gt-alerta {
+    background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+    border-radius: 8px; padding: 6px 10px; font-size: 11.5px; font-weight: 700;
+  }
+  /* Cambio de cupo ya programado a futuro */
+  .gt-prog {
+    background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;
+    border-radius: 8px; padding: 6px 10px; font-size: 11.5px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .gt-prog-x {
+    border: none; background: transparent; color: #1e40af; cursor: pointer;
+    font-size: 13px; font-weight: 800; padding: 0 3px; line-height: 1; flex-shrink: 0;
+  }
+  .gt-prog-x:hover { color: var(--rojo); }
+  .gt-prog-btn {
+    border: 1px dashed var(--borde); background: transparent; color: var(--texto-suave);
+    border-radius: 8px; padding: 6px; font-size: 11.5px; font-weight: 600;
+    cursor: pointer; font-family: inherit; transition: .15s; width: 100%;
+  }
+  .gt-prog-btn:hover { border-color: var(--celeste); color: var(--celeste); border-style: solid; }
   .gt-card:hover { box-shadow: 0 2px 10px rgba(30,159,224,.10); }
   .gt-card-info { flex: 1; min-width: 0; }
   .gt-card-hora { font-size: 16px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
@@ -132,9 +155,10 @@
 </div>
 
 <div class="gt-aviso">
-  ⚠️ <b>Importante:</b> cambiar la capacidad afecta los cupos de la agenda. Si bajás la capacidad por debajo
-  de los alumnos ya anotados, el turno va a quedar en sobrecupo (no se borra a nadie). Para "cerrar" un turno,
-  ponele capacidad <b>0</b> en vez de borrarlo.
+  ⚠️ <b>Importante:</b> el campo <b>cupo</b> cambia la capacidad <b>desde hoy</b>. Si querés que el cambio
+  arranque más adelante (ej: la semana que viene), usá <b>Programar cambio</b> — lo que pase antes de esa
+  fecha queda tal cual está. Si dejás menos lugares que alumnos fijos, el turno queda marcado en sobrecupo:
+  no se borra a nadie, pero no se puede anotar gente nueva ahí. Para "cerrar" un turno, ponele cupo <b>0</b>.
 </div>
 
 <div class="gt-filtros">
@@ -198,6 +222,35 @@
     <div class="gt-modal-acciones">
       <button class="gt-cancelar" onclick="cerrarNuevo()">Cancelar</button>
       <button class="gt-crear" id="nuevo-crear" onclick="crearTurno()">Crear turno</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal programar cambio de cupo -->
+<div class="gt-overlay" id="prog-overlay" onclick="if(event.target===this)cerrarProgramar()">
+  <div class="gt-modal">
+    <h2>📅 Programar cambio de cupo</h2>
+    <div class="gt-modal-sub" id="prog-titulo"></div>
+    <div class="gt-aviso" style="margin:0 0 16px">
+      Lo que pase <b>antes</b> de esta fecha queda como está. El cambio arranca el día que elijas.
+      <div id="prog-actual" style="margin-top:5px;font-weight:700"></div>
+    </div>
+    <div class="gt-campo">
+      <label>A partir de qué día</label>
+      <input type="date" id="prog-fecha">
+    </div>
+    <div class="gt-campo">
+      <label>Cupo nuevo</label>
+      <input type="number" id="prog-cap" min="0" max="50">
+    </div>
+    <div class="gt-campo">
+      <label>Nota (opcional)</label>
+      <input type="text" id="prog-nota" placeholder="Ej: se va Lauti los martes">
+    </div>
+    <div class="gt-modal-error" id="prog-error"></div>
+    <div class="gt-modal-acciones">
+      <button class="gt-cancelar" onclick="cerrarProgramar()">Cancelar</button>
+      <button class="gt-crear" id="prog-ok" onclick="confirmarProgramar()">Programar</button>
     </div>
   </div>
 </div>
@@ -289,6 +342,24 @@ async function sbInsert(tabla, data) {
   return filas;
 }
 
+// ---- Llamar una función de la base (RPC) ----
+// Las escrituras de capacidad van por acá y no por PATCH directo: la función
+// devuelve la fila o tira excepción, así que nunca hay un "guardado" mudo.
+async function sbRpc(fn, args = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${authBearer()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args)
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    let msg = txt;
+    try { const j = JSON.parse(txt); msg = j.message || j.hint || txt; } catch (e) {}
+    throw new Error(msg);
+  }
+  return txt ? JSON.parse(txt) : null;
+}
+
 // ---- Lectura paginada (el tope de 1000 filas de Supabase manda por encima
 // de cualquier .limit(); una lectura truncada acá contaría MENOS fijos de los
 // reales y te dejaría poner un cupo por debajo de la gente anotada) ----
@@ -315,23 +386,48 @@ function toast(msg, tipo = '') {
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = '.3s'; setTimeout(() => el.remove(), 300); }, 2600);
 }
 
-// ---- Cargar turnos + cantidad de alumnos fijos de cada uno ----
+// ---- Cargar el estado de cada turno desde la base ----
+// fn_estado_capacidades() trae de un saque: capacidad vigente HOY, fijos
+// vigentes hoy, si está en sobrecupo, y el próximo cambio programado.
 async function cargarTurnos() {
   try {
-    const [filas, fijos] = await Promise.all([
-      sbQueryAll('turnos', '?select=id,dia,hora,servicio,capacidad&order=id.asc'),
-      sbQueryAll('turno_alumnos', '?select=turno_id&activo=eq.true&order=id.asc')
-    ]);
-    TURNOS = filas || [];
-    FIJOS_POR_TURNO = {};
-    (fijos || []).forEach(f => {
-      FIJOS_POR_TURNO[f.turno_id] = (FIJOS_POR_TURNO[f.turno_id] || 0) + 1;
-    });
+    await refrescarToken();
+    const filas = await sbRpc('fn_estado_capacidades');
+    TURNOS = (filas || []).map(r => ({
+      id: r.turno_id,
+      dia: r.dia,
+      hora: r.hora,
+      servicio: r.servicio,
+      capacidad: r.capacidad_hoy,
+      fijos: r.fijos_hoy,
+      sobrecupo: r.en_sobrecupo,
+      progId: r.programado_id,
+      progDesde: r.programado_desde,
+      progCap: r.programado_capacidad,
+      progNota: r.programado_nota
+    }));
     render();
   } catch (e) {
     document.getElementById('gt-contenido').innerHTML =
       `<div class="gt-estado" style="color:var(--rojo)">No se pudieron cargar los turnos.<br><span style="font-size:12px">${e.message}</span></div>`;
   }
+}
+
+// ---- Fecha de hoy en Córdoba, en formato AAAA-MM-DD ----
+function hoyISO() {
+  const f = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Argentina/Cordoba' }));
+  const m = String(f.getMonth() + 1).padStart(2, '0');
+  const d = String(f.getDate()).padStart(2, '0');
+  return `${f.getFullYear()}-${m}-${d}`;
+}
+function fmtFecha(iso) {
+  if (!iso) return '';
+  const p = String(iso).slice(0, 10).split('-');
+  return `${p[2]}/${p[1]}`;
+}
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ---- Render ----
@@ -356,34 +452,55 @@ function render() {
     }
     const servCls = t.servicio === 'Entrenamiento' ? 'gt-serv-ent' : 'gt-serv-kine';
     const servTxt = t.servicio === 'Entrenamiento' ? 'ENTRENAMIENTO' : 'KINEFILAXIA';
-    const fijos = FIJOS_POR_TURNO[t.id] || 0;
+    const fijos = t.fijos || 0;
     // Color del contador de fijos según qué tan lleno está
     let fijosColor = 'var(--texto-suave)';
     if (fijos >= t.capacidad && t.capacidad > 0) fijosColor = 'var(--rojo)';
     else if (fijos >= t.capacidad - 2) fijosColor = 'var(--ambar)';
+
+    // Alerta: hay MÁS fijos que lugares. Queda marcado hasta que se acomode.
+    const alerta = t.sobrecupo
+      ? `<div class="gt-alerta">⚠️ SOBRECUPO · sobran ${fijos - t.capacidad} — hay que acomodar</div>`
+      : '';
+
+    // Cambio ya programado a futuro
+    const prog = t.progId
+      ? `<div class="gt-prog">
+           <span>📅 Desde el <b>${fmtFecha(t.progDesde)}</b> pasa a <b>${t.progCap}</b>${t.progNota ? ' · ' + esc(t.progNota) : ''}</span>
+           <button class="gt-prog-x" onclick="cancelarProgramado(${t.progId})" title="Cancelar este cambio">✕</button>
+         </div>`
+      : '';
+
     html += `
       <div class="gt-card">
-        <div class="gt-card-info">
-          <div class="gt-card-hora">${t.hora}</div>
-          <span class="gt-card-serv ${servCls}">${servTxt}</span>
-          <div style="font-size:11.5px;font-weight:700;margin-top:5px;color:${fijosColor}">
-            👤 ${fijos} fijo${fijos!==1?'s':''} de ${t.capacidad}
+        <div class="gt-card-fila">
+          <div class="gt-card-info">
+            <div class="gt-card-hora">${t.hora}</div>
+            <span class="gt-card-serv ${servCls}">${servTxt}</span>
+            <div style="font-size:11.5px;font-weight:700;margin-top:5px;color:${fijosColor}">
+              👤 ${fijos} fijo${fijos!==1?'s':''} de ${t.capacidad}
+            </div>
           </div>
+          <div class="gt-cap-control">
+            <span class="gt-cap-label">cupo</span>
+            <input class="gt-cap-input" type="number" min="0" max="50"
+                   id="cap-${t.id}" value="${t.capacidad}"
+                   data-original="${t.capacidad}" data-fijos="${fijos}" oninput="marcarCambio(${t.id})">
+          </div>
+          <button class="gt-guardar" id="btn-${t.id}" onclick="guardarCapacidad(${t.id})" disabled>Guardar</button>
         </div>
-        <div class="gt-cap-control">
-          <span class="gt-cap-label">cupo</span>
-          <input class="gt-cap-input" type="number" min="0" max="50"
-                 id="cap-${t.id}" value="${t.capacidad}"
-                 data-original="${t.capacidad}" data-fijos="${fijos}" oninput="marcarCambio(${t.id})">
-        </div>
-        <button class="gt-guardar" id="btn-${t.id}" onclick="guardarCapacidad(${t.id})" disabled>Guardar</button>
+        ${alerta}
+        ${prog}
+        <button class="gt-prog-btn" onclick="abrirProgramar(${t.id})">📅 Programar cambio para más adelante</button>
       </div>`;
   });
   if (diaActual !== null) html += '</div>';
   cont.innerHTML = html;
 }
 
-// ---- Marcar cambio (habilita el botón guardar, salvo que quede bajo los fijos) ----
+// ---- Marcar cambio (habilita el botón guardar) ----
+// REGLA DE LU (4/8/26): bajar el cupo por debajo de los fijos SE PERMITE.
+// El turno queda con alerta hasta que se acomode; no se saca a nadie.
 function marcarCambio(id) {
   const input = document.getElementById(`cap-${id}`);
   const btn = document.getElementById(`btn-${id}`);
@@ -392,50 +509,120 @@ function marcarCambio(id) {
   const valor = input.value;
   const num = parseInt(valor, 10);
   const cambiado = valor !== original && valor !== '';
-  // No se puede dejar la capacidad por debajo de los alumnos fijos anotados
-  const bajoFijos = !isNaN(num) && num < fijos;
-  input.classList.toggle('cambiado', cambiado && !bajoFijos);
-  input.classList.toggle('error', bajoFijos);
+  const quedaCorto = !isNaN(num) && num < fijos;
+  input.classList.toggle('cambiado', cambiado && !quedaCorto);
+  input.classList.toggle('error', cambiado && quedaCorto);
   btn.classList.remove('ok');
-  if (bajoFijos) {
-    btn.disabled = true;
-    btn.textContent = `Mín. ${fijos}`;
-  } else {
-    btn.disabled = !cambiado;
-    btn.textContent = 'Guardar';
-  }
+  btn.disabled = !cambiado;
+  btn.textContent = (cambiado && quedaCorto) ? '⚠️ Guardar' : 'Guardar';
 }
 
-// ---- Guardar capacidad de un turno ----
+// ---- Guardar capacidad de un turno (efecto: HOY) ----
+// Va por la RPC capacidad_programar con fecha = hoy, NO por un PATCH directo a
+// `turnos`. Motivo: la fuente de verdad ahora es la linea de tiempo
+// turnos_capacidad; si escribieramos derecho en turnos.capacidad, el
+// sincronizador nos lo pisaria de vuelta en la proxima entrada al sistema.
 window.guardarCapacidad = async (id) => {
   const input = document.getElementById(`cap-${id}`);
   const btn = document.getElementById(`btn-${id}`);
   const nueva = parseInt(input.value, 10);
   const fijos = parseInt(input.getAttribute('data-fijos'), 10) || 0;
-  if (isNaN(nueva) || nueva < 0) { toast('Poné un número válido (0 o más)', 'err'); return; }
-  // Seguridad: no permitir bajar la capacidad por debajo de los fijos anotados
+  if (isNaN(nueva) || nueva < 0) { toast('Pone un numero valido (0 o mas)', 'err'); return; }
+
+  // Si queda por debajo de los fijos, se avisa pero se permite (regla de Lu).
   if (nueva < fijos) {
-    toast(`No se puede: hay ${fijos} alumno${fijos!==1?'s':''} fijo${fijos!==1?'s':''} anotado${fijos!==1?'s':''}`, 'err');
-    return;
+    const ok = confirm(
+      `Este turno tiene ${fijos} alumno${fijos!==1?'s':''} fijo${fijos!==1?'s':''} y le vas a dejar ${nueva} lugar${nueva!==1?'es':''}.\n\n` +
+      `El turno va a quedar marcado en SOBRECUPO hasta que acomodes. No se saca a nadie, ` +
+      `pero no se va a poder anotar gente nueva ahi.\n\n` +
+      `Guardo igual?`
+    );
+    if (!ok) return;
   }
-  btn.disabled = true; btn.textContent = '⟳';
+
+  btn.disabled = true; btn.textContent = '\u27f3';
   try {
     await refrescarToken();
-    const filas = await sbUpdate('turnos', `id=eq.${id}`, { capacidad: nueva });
-    // Nos quedamos con lo que quedó REALMENTE en la base, no con lo que pedimos.
-    const guardada = (filas[0] && filas[0].capacidad != null) ? filas[0].capacidad : nueva;
-    input.value = String(guardada);
-    input.setAttribute('data-original', String(guardada));
-    input.classList.remove('cambiado');
-    btn.textContent = '✓ Listo'; btn.classList.add('ok');
-    // Actualizar el dato local
-    const t = TURNOS.find(x => x.id === id);
-    if (t) t.capacidad = guardada;
+    const fila = await sbRpc('capacidad_programar', {
+      p_turno_id: id, p_desde: hoyISO(), p_capacidad: nueva, p_nota: null
+    });
+    const guardada = (fila && fila.capacidad != null) ? fila.capacidad : nueva;
     toast(`Capacidad guardada en ${guardada}`, 'ok');
-    setTimeout(() => { btn.textContent = 'Guardar'; btn.classList.remove('ok'); }, 1600);
+    await cargarTurnos();   // repinta con lo que quedo en la base
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Guardar';
     toast('No se pudo guardar: ' + e.message, 'err');
+  }
+};
+
+// ---- Programar un cambio para mas adelante ----
+let turnoProgramando = null;
+
+window.abrirProgramar = (id) => {
+  const t = TURNOS.find(x => x.id === id);
+  if (!t) return;
+  turnoProgramando = id;
+  // Minimo: manana. Sugerido: el proximo lunes.
+  const hoy = new Date(hoyISO() + 'T12:00:00');
+  const manana = new Date(hoy.getTime() + 86400000);
+  const lunes = new Date(hoy.getTime());
+  lunes.setDate(lunes.getDate() + ((8 - lunes.getDay()) % 7 || 7));
+  const iso = (d) => d.toISOString().slice(0, 10);
+  document.getElementById('prog-titulo').textContent = `${t.servicio} - ${t.dia} ${t.hora}`;
+  document.getElementById('prog-actual').textContent =
+    `Hoy: ${t.fijos} fijo${t.fijos!==1?'s':''} de ${t.capacidad}`;
+  const fecha = document.getElementById('prog-fecha');
+  fecha.min = iso(manana);
+  fecha.value = t.progDesde ? String(t.progDesde).slice(0, 10) : iso(lunes);
+  document.getElementById('prog-cap').value = t.progCap != null ? t.progCap : t.capacidad;
+  document.getElementById('prog-nota').value = t.progNota || '';
+  document.getElementById('prog-error').textContent = '';
+  document.getElementById('prog-overlay').classList.add('activo');
+};
+
+window.cerrarProgramar = () => {
+  document.getElementById('prog-overlay').classList.remove('activo');
+  turnoProgramando = null;
+};
+
+window.confirmarProgramar = async () => {
+  const id = turnoProgramando;
+  if (!id) return;
+  const fecha = document.getElementById('prog-fecha').value;
+  const cap = parseInt(document.getElementById('prog-cap').value, 10);
+  const nota = document.getElementById('prog-nota').value.trim() || null;
+  const err = document.getElementById('prog-error');
+  const btn = document.getElementById('prog-ok');
+  err.textContent = '';
+  if (!fecha) { err.textContent = 'Elegi desde que fecha.'; return; }
+  if (fecha <= hoyISO()) { err.textContent = 'La fecha tiene que ser posterior a hoy.'; return; }
+  if (isNaN(cap) || cap < 0) { err.textContent = 'Pone un cupo valido (0 o mas).'; return; }
+  btn.disabled = true; btn.textContent = 'Programando...';
+  try {
+    await refrescarToken();
+    await sbRpc('capacidad_programar', {
+      p_turno_id: id, p_desde: fecha, p_capacidad: cap, p_nota: nota
+    });
+    cerrarProgramar();
+    toast(`Programado: desde el ${fmtFecha(fecha)} pasa a ${cap}`, 'ok');
+    await cargarTurnos();
+  } catch (e) {
+    err.textContent = 'No se pudo programar: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Programar';
+  }
+};
+
+// ---- Cancelar un cambio programado (solo si todavia no llego) ----
+window.cancelarProgramado = async (progId) => {
+  if (!confirm('Cancelar este cambio programado?')) return;
+  try {
+    await refrescarToken();
+    await sbRpc('capacidad_cancelar_programado', { p_id: progId });
+    toast('Cambio cancelado', 'ok');
+    await cargarTurnos();
+  } catch (e) {
+    toast('No se pudo cancelar: ' + e.message, 'err');
   }
 };
 
@@ -470,11 +657,19 @@ window.crearTurno = async () => {
   try {
     await refrescarToken();
     const filas = await sbInsert('turnos', { dia, hora, servicio, capacidad });
-    const nuevo = (filas && filas[0]) ? filas[0] : { id: Date.now(), dia, hora, servicio, capacidad };
-    TURNOS.push({ id: nuevo.id, dia, hora, servicio, capacidad });
+    const nuevo = (filas && filas[0]) ? filas[0] : null;
+    // Sembrar el turno nuevo en la línea de tiempo, para que quede igual que
+    // los demás y el sincronizador lo contemple.
+    if (nuevo && nuevo.id) {
+      try {
+        await sbRpc('capacidad_programar', {
+          p_turno_id: nuevo.id, p_desde: hoyISO(), p_capacidad: capacidad, p_nota: 'Turno nuevo'
+        });
+      } catch (eS) { console.warn('No se pudo sembrar la capacidad del turno nuevo', eS); }
+    }
     cerrarNuevo();
-    render();
     toast(`Turno creado: ${servicio} ${dia} ${hora}`, 'ok');
+    await cargarTurnos();
   } catch (e) {
     err.textContent = 'No se pudo crear: ' + e.message;
   } finally {
