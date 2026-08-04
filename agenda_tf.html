@@ -1631,6 +1631,26 @@ function fechaRealDiaActivo() {
 }
 
 // Cache de datos
+// LINEA DE TIEMPO DE CAPACIDAD (tabla turnos_capacidad).
+// turno_id -> [{desde:'YYYY-MM-DD', capacidad:N}, ...] ordenado por desde asc.
+// Permite que cada fecha muestre la capacidad que REALMENTE tenia ese dia:
+// si el turno pasa de 12 a 8 desde el 11/08, el 04/08 sigue diciendo /12.
+let CAPACIDADES = {};
+// Capacidad de un turno en una fecha (YYYY-MM-DD).
+function capEn(turnoId, fecha) {
+  const linea = CAPACIDADES[turnoId];
+  if (linea && linea.length) {
+    const f = fecha || fechaRealDiaActivo();
+    for (let i = linea.length - 1; i >= 0; i--) {
+      if (linea[i].desde <= f) return linea[i].capacidad;
+    }
+  }
+  // Sin linea de tiempo (o fecha anterior a la siembra): el valor de turnos.capacidad
+  const t = HORARIOS.find(x => x.id === turnoId);
+  return t ? t.capacidad : 0;
+}
+// Atajo comodo: capT(turno, fecha). Sin fecha usa el dia que se esta mirando.
+function capT(t, fecha) { return capEn(t.id, fecha); }
 let HORARIOS = [];
 let ALUMNOS_POR_TURNO = {};
 // Agregados puntuales (recuperatorio/suelto) de la semana visible.
@@ -1644,6 +1664,21 @@ async function cargarDatos() {
   try {
     // Cargar turnos
     const turnos = await supabaseQuery('turnos', '?select=*&order=dia,hora,servicio');
+
+    // Linea de tiempo de capacidad. Si la tabla todavia no existe, seguimos
+    // andando con turnos.capacidad (la agenda no se rompe por esto).
+    CAPACIDADES = {};
+    try {
+      const lineas = await supabaseQueryAll('turnos_capacidad',
+        '?select=turno_id,desde,capacidad', 'turno_id.asc');
+      (lineas || []).forEach(r => {
+        (CAPACIDADES[r.turno_id] = CAPACIDADES[r.turno_id] || [])
+          .push({ desde: String(r.desde).slice(0, 10), capacidad: r.capacidad });
+      });
+      Object.values(CAPACIDADES).forEach(l => l.sort((a, b) => a.desde < b.desde ? -1 : 1));
+    } catch (eCap) {
+      console.warn('Sin linea de tiempo de capacidad, se usa turnos.capacidad', eCap);
+    }
     
     // Cargar profes por turno
     const profes = await supabaseQuery('turno_profes', '?select=*');
@@ -1939,7 +1974,7 @@ function fechaDelDia(diaNombre) {
 }
 function renderResumen() {
   const turnos = getTurnosDia();
-  const totalCap = turnos.reduce((s,t)=>s+t.capacidad,0);
+  const totalCap = turnos.reduce((s,t)=>s+capT(t),0);
   // Anotados = todos (fijos + agregados + ausentes). Es el total de inscriptos del día.
   const totalOcup = turnos.reduce((s,t)=>s+getAlumnos(t).length,0);
   // PRESENTES = anotados que NO están ausentes ese día. Misma regla que la barra
@@ -2457,7 +2492,8 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
   // Los ausentes NO suman al numerador: ej. cupo 8, 2 ausentes → 6/8.
   const presentes = anotados - ev.ausentes;
   const ocup = presentes;
-  const pct = Math.round(ocup/t.capacidad*100);
+  const capDia = capT(t, fechaIso);
+  const pct = capDia ? Math.round(ocup/capDia*100) : 0;
   const colorFill = pct>=100?'fill-rojo':pct>=75?'fill-amarillo':'fill-celeste';
   const colorTexto = pct>=100?'var(--rojo)':pct>=75?'var(--amarillo)':'var(--celeste-oscuro)';
   const tipoClass = t.servicio==='Entrenamiento'?'tipo-entrenamiento':'tipo-kinefilaxia';
@@ -2516,7 +2552,7 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
         <div class="turno-profes">${t.profes.map(p=>`<span class="profe-tag">${p}</span>`).join('')}</div>
         <div class="turno-ocupacion">
           <div class="ocupacion-barra"><div class="ocupacion-fill ${colorFill}" style="width:${Math.min(pct,100)}%"></div></div>
-          <span class="ocupacion-texto" style="color:${colorTexto}">${ocup}/${t.capacidad}</span>
+          <span class="ocupacion-texto" style="color:${colorTexto}">${ocup}/${capDia}</span>
         </div>
       </div>
       <div class="turno-footer">
@@ -3397,7 +3433,8 @@ function lugarParaVolver(t, fecha, personaId) {
     if (_liberaLugarTF(key, est)) return;  // ausentes firmes liberan lugar; recién avisados (5 min) NO
     vienen++;
   });
-  return { puede: (vienen + 1) <= t.capacidad, vienen, capacidad: t.capacidad };
+  const capDia = capT(t, fecha);
+  return { puede: (vienen + 1) <= capDia, vienen, capacidad: capDia };
 }
 
 // Control al des-marcar una ausencia (volver a reservado o marcar presente):
@@ -4817,7 +4854,8 @@ function chequearCupo(t, accionTexto, esPuntual, fecha) {
   SOBRECUPO_AUTORIZADO = false;           // arranca siempre en false
   const alumnos = getAlumnos(t);          // ya incluye fijos + agregados del día
   const ocup = alumnos.length;
-  let libres = t.capacidad - ocup;
+  const capDia = capT(t, fecha || fechaDelDia(t.dia));
+  let libres = capDia - ocup;
   let ausentesHoy = 0;
   if (esPuntual) {
     // Sumar los lugares que liberan los ausentes de ESE día (solo para puntuales)
@@ -4834,7 +4872,7 @@ function chequearCupo(t, accionTexto, esPuntual, fecha) {
     alert(
       `🚫 TURNO COMPLETO\n\n` +
       `${t.servicio} · ${t.hora} · ${t.dia}\n` +
-      `Cupo: ${t.capacidad} · Anotados: ${ocup}${infoAusentes}\n\n` +
+      `Cupo: ${capDia} · Anotados: ${ocup}${infoAusentes}\n\n` +
       `Este turno ya está lleno y no se puede sobrepasar el cupo.\n` +
       `Si hace falta agregar a alguien igual, lo tiene que autorizar Lu.`
     );
@@ -4844,8 +4882,8 @@ function chequearCupo(t, accionTexto, esPuntual, fecha) {
   const ok = confirm(
     `⚠️ ESTE TURNO YA ESTÁ COMPLETO\n\n` +
     `${t.servicio} · ${t.hora} · ${t.dia}\n` +
-    `Cupo: ${t.capacidad} · Anotados: ${ocup}\n\n` +
-    `Si ${accionTexto}, vas a SUPERAR la capacidad operativa (quedaría ${ocup+1}/${t.capacidad}).\n\n` +
+    `Cupo: ${capDia} · Anotados: ${ocup}\n\n` +
+    `Si ${accionTexto}, vas a SUPERAR la capacidad operativa (quedaría ${ocup+1}/${capDia}).\n\n` +
     `¿Querés autorizar el sobrecupo igual?`
   );
   // Si la admin confirmó, marcamos que este agregado va FORZADO.
@@ -4975,19 +5013,20 @@ function renderGrillaSemana() {
       (grillaFiltroServicio === 'ambos' || t.servicio === grillaFiltroServicio));
   }
   // ¿Este turno tiene lugar fijo disponible? (para el filtro "solo disponibles")
-  function tieneLugar(t) {
+  function tieneLugar(t, fecha) {
     const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
-    return (t.capacidad - fijos) > 0;
+    return (capT(t, fecha) - fijos) > 0;
   }
   // Arma la celda de un turno con su color según lugares libres
   function celdaTurno(t, fecha) {
     const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
     // Lugar FIJO real: capacidad − alumnos fijos (lo que sirve para anotar permanente)
-    const libreFijo = t.capacidad - fijos;
+    const capDia = capT(t, fecha);
+    const libreFijo = capDia - fijos;
     // Lugar del DÍA: además se libera el lugar de los fijos ausentes (solo para recuperatorio)
     const ausentes = ausentesDelDia(t, fecha);
     const ocupDia = getAlumnos(t, fecha).length - ausentes;  // los que realmente van ese día
-    const libreDia = t.capacidad - ocupDia;
+    const libreDia = capDia - ocupDia;
     // Color según el cupo FIJO (que es el que importa para turno permanente)
     let cls = 'gs-libre';
     if (libreFijo < 0) cls = 'gs-sobre';
@@ -4998,8 +5037,8 @@ function renderGrillaSemana() {
     // Si hay ausentes, hay lugar extra solo para recuperatorio
     const extra = (libreDia > libreFijo)
       ? `<small style="color:#7c3aed">+${libreDia - libreFijo} recupe</small>` : '';
-    return `<div class="gs-celda ${cls}" style="border-radius:7px;padding:4px 3px;margin:2px 0" title="${ini} ${t.hora} · Capacidad ${t.capacidad} · Fijos ${fijos}${ausentes?` · ${ausentes} ausente(s) este día`:''}">
-      ${grande}<small>${ini} · ${fijos}/${t.capacidad}</small>${extra}</div>`;
+    return `<div class="gs-celda ${cls}" style="border-radius:7px;padding:4px 3px;margin:2px 0" title="${ini} ${t.hora} · Capacidad ${capDia} · Fijos ${fijos}${ausentes?` · ${ausentes} ausente(s) este día`:''}">
+      ${grande}<small>${ini} · ${fijos}/${capDia}</small>${extra}</div>`;
   }
 
   // Botones de filtro (servicio + solo disponibles)
@@ -5066,7 +5105,7 @@ function renderGrillaSemana() {
     const celdas = DIAS.map((dia, i) => {
       const motivo = feriadoDe(fechas[i]);
       let turnos = turnosDe(dia, hora);
-      if (grillaSoloDisponibles) turnos = turnos.filter(t => tieneLugar(t));
+      if (grillaSoloDisponibles) turnos = turnos.filter(t => tieneLugar(t, fechas[i]));
       if (motivo && !grillaSoloDisponibles) {
         // Día feriado: la celda muestra FERIADO (clase cerrada)
         return `<td class="gs-celda gs-feriado" style="background:repeating-linear-gradient(45deg,#fff7ed,#fff7ed 8px,#ffedd5 8px,#ffedd5 16px);color:#9a3412;font-weight:700">🟠<small>FERIADO</small></td>`;
@@ -5130,7 +5169,7 @@ function datosDisponibles() {
         (compartirServicio === 'ambos' || t.servicio === compartirServicio))
       .filter(t => {
         const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
-        return (t.capacidad - fijos) > 0;   // hay lugar para anotar permanente
+        return (capT(t, fechas[i]) - fijos) > 0;   // hay lugar para anotar permanente
       })
       .sort((a, b) => parseInt(a.hora.replace(':','')) - parseInt(b.hora.replace(':','')) || a.servicio.localeCompare(b.servicio))
       .map(t => ({ hora: t.hora, servicio: t.servicio }));
@@ -5644,7 +5683,9 @@ function renderModalBody(dia, hora, servicio) {
   // OCUPACIÓN: los ausentes (justificados o no) NO ocupan lugar ese día → no suman al contador.
   // (mismo criterio que la tarjeta de la grilla: anotados - ausentes)
   const ocup = alumnos.length - ausentes;   // = presentes + sin marcar
-  const pct = t.capacidad ? Math.round(ocup/t.capacidad*100) : 0;
+  const _fMod = fechaDelDia(dia);
+  const capDia = capT(t, _fMod);
+  const pct = capDia ? Math.round(ocup/capDia*100) : 0;
   const colorOcup = pct>=100?'var(--rojo)':pct>=75?'var(--amarillo)':'var(--celeste)';
   const tipoClass = servicio==='Entrenamiento'?'tipo-entrenamiento':'tipo-kinefilaxia';
   const iconoServicio = servicio==='Entrenamiento' ? '🏋️' : '🤸';
@@ -5669,9 +5710,9 @@ function renderModalBody(dia, hora, servicio) {
     <div class="modal-chips">
       <span class="turno-tipo ${tipoClass}">${iconoServicio} ${servicio}</span>
       ${t.profes.map(p=>`<span class="modal-chip">${p}</span>`).join('')}
-      <span class="modal-chip">Cap. ${t.capacidad}</span>
+      <span class="modal-chip">Cap. ${capDia}</span>
     </div>
-    <div class="ocupacion-grande" style="color:${colorOcup}">${ocup}<span style="font-size:16px;color:var(--texto-suave)">/${t.capacidad}</span></div>
+    <div class="ocupacion-grande" style="color:${colorOcup}">${ocup}<span style="font-size:16px;color:var(--texto-suave)">/${capDia}</span></div>
     ${_cierreCentro
       ? `<div class="resumen-asistencia" style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:9px 11px;color:#b91c1c;font-weight:700;line-height:1.4">🚫 Clase cancelada por el centro — no se toma asistencia.${_cierreCentro.motivo ? ` (${_cierreCentro.motivo})` : ''}<br><span style="font-weight:500;font-size:12px;color:#9a3412">Los alumnos la recuperan sin gastar cupo.</span></div>`
       : `<div class="resumen-asistencia">
@@ -6303,13 +6344,13 @@ function seleccionarJustif(opcion) {
       .filter(t => {
         const anotados = getAlumnos(t, fechaSel).length;
         const ausentes = ausentesDelDia(t, fechaSel);
-        const libres = t.capacidad - anotados + ausentes;
+        const libres = capT(t, fechaSel) - anotados + ausentes;
         return libres > 0;   // solo los que tienen al menos 1 lugar real
       })
       .sort((a,b) => (a.hora||'').localeCompare(b.hora||''));
     sel.innerHTML = conLugar.length
       ? conLugar.map(t => {
-          const libres = t.capacidad - getAlumnos(t, fechaSel).length + ausentesDelDia(t, fechaSel);
+          const libres = capT(t, fechaSel) - getAlumnos(t, fechaSel).length + ausentesDelDia(t, fechaSel);
           return `<option value="${t.id}">${t.servicio} · ${t.hora} — ${libres} lugar${libres!==1?'es':''}</option>`;
         }).join('')
       : '<option value="">(no hay clases con lugar ese día)</option>';
