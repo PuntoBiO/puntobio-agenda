@@ -300,6 +300,8 @@
   .slot.slot-bloqueado-gestion::after{content:attr(data-bloqueo-motivo); position:absolute; inset:0;
     display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700;
     color:#b91c1c; text-align:center; padding:2px 4px; line-height:1.1;}
+  /* Turno que quedó fuera del horario abierto: se dibuja igual, marcado */
+  .slot.slot-fuera{ box-shadow: inset 0 0 0 2px #f59e0b; background:#fffbeb; }
   /* Cierre PERMANENTE (todas las semanas) = gris, como el CERRADO de la grilla base */
   .slot.slot-bloqueado-perm{position:relative; background:#eef0f3;
     background-image:repeating-linear-gradient(45deg, transparent 0 4px, rgba(0,0,0,.045) 4px 8px);
@@ -903,6 +905,19 @@ function render(){
       const apProf = ap ? (EMAIL_TO_CODE[ap.profesional_email] || null) : null;
       if(ap && tipo === 'cerrado') tipo = 'libre';
 
+      // 05/08/2026 — UN TURNO NUNCA PUEDE QUEDAR INVISIBLE.
+      // La grilla da 18 y 19hs por cerradas, y las aperturas puntuales dejan de
+      // cargarse al día siguiente (cargarAperturas filtra fecha_hasta >= hoy).
+      // Resultado: un turno agendado en un slot abierto a mano desaparecía de la
+      // vista al otro día, aunque siguiera existiendo (con su sesión y su cobro).
+      // Si hay turnos en este casillero, se dibuja igual y se marca.
+      const mChk = hMin(hora);
+      const hayTurnos = turnosSemana.some(t =>
+        t.fecha === fStr && t.estado !== 'CANCELADO' &&
+        hMin(t.hora_inicio) >= mChk && hMin(t.hora_inicio) < mChk + 60);
+      const fueraDeHorario = (tipo === 'cerrado' && hayTurnos);
+      if(fueraDeHorario) tipo = 'libre';
+
       if(tipo === 'cerrado'){
         slot.classList.add('cerrado');
         slot.textContent = 'CERRADO';
@@ -935,6 +950,7 @@ function render(){
       if(turnosEval.length > 0){
         // EVAL / SARKMED → ocupa TODO el casillero (turno completo, no permite otros)
         if(ap) slot.classList.add('slot-apertura');
+        if(fueraDeHorario){ slot.classList.add('slot-fuera'); slot.title = 'Turno fuera del horario abierto (el horario se abrió a mano y ya venció)'; }
         slot.classList.add('slot-eval-full');
         turnosEval.sort((a,b)=>hMin(a.hora_inicio)-hMin(b.hora_inicio));
         turnosEval.forEach(t => slot.appendChild(crearChipTurno(t)));
@@ -942,6 +958,7 @@ function render(){
       } else if(turnosMoplex.length > 0){
         // MOPLEX → dividir el casillero: 4 (Bruno, 15') o 2 (Male/Lu/Jime, 30')
         if(ap) slot.classList.add('slot-apertura');
+        if(fueraDeHorario){ slot.classList.add('slot-fuera'); slot.title = 'Turno fuera del horario abierto (el horario se abrió a mano y ya venció)'; }
         const profM = turnosMoplex[0].profesional;
         const cap = capacidadMoplex(profM) || turnosMoplex.length;
         const step = duracionMin('MOPLEX', profM) || 30;
