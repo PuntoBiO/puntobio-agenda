@@ -523,6 +523,7 @@
       </div>
 
       <div class="preview" id="preview">
+        <div id="avisoBonif" style="display:none; grid-column:1/-1; background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; border-radius:8px; padding:8px 10px; font-size:12.5px; font-weight:600;">🎗️ Bonificación del centro — todo lo cobrado es del profesional (Centro $0)</div>
         <div><span class="k">Profesional</span><span class="v" id="prevProf">$0</span></div>
         <div><span class="k">Centro</span><span class="v" id="prevCentro">$0</span></div>
         <div><span class="k">Moplex</span><span class="v" id="prevMoplex">$0</span></div>
@@ -1239,6 +1240,12 @@
     setTimeout(() => $('importe').focus(), 50);
   }
 
+  // ¿Este tratamiento es una bonificación del centro? Es la ÚNICA fuente de
+  // verdad: el tipo de cobro del tratamiento, no lo que diga el selector.
+  function esBonifCentro(t){
+    return String((t && t.tipo_cobro) || '').toUpperCase() === 'BONIF_CENTRO';
+  }
+
   async function cargarSplit() {
     const t = state.ttoSel;
     if (!t) { state.splitCache = null; return; }
@@ -1384,15 +1391,25 @@
       const factorMoplex = pm > 1 ? pm / 100 : pm;
 
       if (tipo === 'NORMAL') {
-        montoCentro = importe * factorCentro;
-        montoMoplex = importe * factorMoplex;
-        montoProfesional = importe - montoCentro - montoMoplex;
+        // 05/08/2026 — BONIFICACIÓN DEL CENTRO: el tratamiento manda sobre el
+        // tarifario. PuntoBiO bonifica SU parte, así que todo lo cobrado es del
+        // profesional y el centro se lleva $0.
+        if (esBonifCentro(t)) {
+          montoCentro = 0;
+          montoMoplex = 0;
+          montoProfesional = importe;
+        } else {
+          montoCentro = importe * factorCentro;
+          montoMoplex = importe * factorMoplex;
+          montoProfesional = importe - montoCentro - montoMoplex;
+        }
       }
     }
 
     $('prevProf').textContent = fmt(montoProfesional);
     $('prevCentro').textContent = fmt(montoCentro);
     $('prevMoplex').textContent = fmt(montoMoplex);
+    if ($('avisoBonif')) $('avisoBonif').style.display = (esBonifCentro(t) && !esLibre) ? 'block' : 'none';
 
     // VALIDACIÓN: bloquear si paga de más
     let valido = true;
@@ -1579,6 +1596,15 @@
       payload.monto_profesional = s.prof;
       payload.monto_centro      = s.centro;
       payload.monto_moplex      = s.moplex;
+    }
+
+    // 🎗️ Bonificación del centro: el reparto va a mano (todo al profesional).
+    // tipo_cobro='MANUAL' evita que el trigger del tarifario lo recalcule 50/50.
+    if (!esLibre && !esMoplex && esBonifCentro(t)) {
+      payload.tipo_cobro        = 'MANUAL';
+      payload.monto_profesional = importe;
+      payload.monto_centro      = 0;
+      payload.monto_moplex      = 0;
     }
 
     // 💸 Descuento aplicado: el pago va MANUAL con el mismo reparto que la sesión
