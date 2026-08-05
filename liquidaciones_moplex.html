@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <title>Liquidaciones MOPLEX — PuntoBiO</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f7f9fc;color:#111;padding:24px}
@@ -73,12 +75,18 @@
     </div>
     <button class="btn" onclick="cargar()">Recalcular</button>
     <button class="btn" style="background:#25D366;" onclick="enviarWhatsAppLiq()" title="Arma el mensaje de la liquidación según la vista actual (profesional elegido, franquicia o todos) y lo abre en WhatsApp para mandarlo al chat que elijas.">📲 Enviar por WhatsApp</button>
+    <button class="btn" style="background:#6d28d9;" onclick="descargarPDFLiq()" title="Genera el PDF de la liquidación según la vista actual, para guardar o enviar por donde quieras.">📄 Descargar PDF</button>
   </div>
 
   <div id="resultado"><div class="loading">Elegí un mes y tocá Recalcular.</div></div>
 </div>
 
 <script>
+// VISTA PROPIA (?prof=Bruno / ?prof=Male): el profesional ve SOLO su liquidación.
+// El selector queda clavado y oculto, y la franquicia/resto no se muestran (ya lo
+// garantiza el filtro por profesional). Admin entra sin parámetro y ve todo.
+const PROF_CLAVADO = new URLSearchParams(location.search).get('prof') || '';
+
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
@@ -268,6 +276,20 @@ function prepararMoplex(monthPagos){
       out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:plantMoplex });
       out.totalMoplex += plantMoplex;
     }
+    // Línea por tratamiento para la liquidación del profesional: paciente,
+    // QUÉ se le paga (evaluación / plantilla / ambas) y cuánto le corresponde.
+    const comps = [];
+    if (evalCob > 0.5)  comps.push(`Evaluación (${(evalItem&&evalItem.nombre)||''}) ${fmt(evalProf)}`);
+    if (plantCob > 0.5) comps.push(`Plantilla (${(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||'')}) ${fmt(plantProf)}`);
+    if (comps.length){
+      (out.lineasProf = out.lineasProf || []).push({
+        prof, paciente, fecha: p0.fecha,
+        detalle: comps.join(' + '),
+        ambos: comps.length > 1,
+        montoProf: evalProf + plantProf,
+        esRectifSinHonorario: (comps.length === 1 && rectif && plantCob > 0.5 && (evalProf + plantProf) === 0)
+      });
+    }
   }
   return out;
 }
@@ -420,6 +442,9 @@ async function cargar(){
           consultaNombre: (byId[t.moplex_consulta_id]||{}).nombre || '—',
           plantillaNombre: plantRep ? ((rectif?'Rectif. ':'') + ((byId[t.moplex_plantilla_id]||{}).nombre||'')) : '',
           precio, prof_monto: (ev.prof||0)+(pl.prof||0), centro: (ev.centro||0)+(pl.centro||0), moplex: (ev.moplex||0)+(pl.moplex||0),
+          // Componentes discriminados (consulta vs plantilla) para mostrar qué se paga
+          ev: { precio: ev.precio||0, prof: ev.prof||0, centro: ev.centro||0, moplex: ev.moplex||0 },
+          pl: { precio: pl.precio||0, prof: pl.prof||0, centro: pl.centro||0, moplex: pl.moplex||0 },
           gratis: (precio <= 0.5), cobrado: false
         });
       }
@@ -445,7 +470,7 @@ async function cargar(){
 function render(pagos){
   window._ultimosPagos = pagos;
   const MPX = prepararMoplex(pagos);
-  const fProf = document.getElementById('filtroProf').value;
+  const fProf = PROF_CLAVADO || document.getElementById('filtroProf').value;
   // Modo MOPLEX (franquicia): la pantalla se enfoca en LO QUE HAY QUE PAGARLE a la
   // franquicia — tarjetas de pendiente/saldado y la tabla completa, sin los bloques
   // por profesional.
@@ -490,6 +515,11 @@ function render(pagos){
     }
     waF += `\n⏳ Falta arreglar: ${fmt(fPend)}\n✅ Ya arreglado: ${fmt(fSald)}\n🦶 Total a MOPLEX del mes: ${fmt(totalMoplex)}\n\nPuntoBiO`;
     window._waMensaje = waF;
+    window._pdfData = {
+      modo: 'franquicia', mesLabel,
+      filas: franqVista.filter(f => (f.montoMoplex||0) > 0.5).map(f => [f.fecha||'', f.paciente, f.prof||'', f.tipo, f.desc, fmt(f.montoMoplex), saldosPre[f.tratId] ? '✅ Arreglado' : '⏳ Falta']),
+      cierre: [`⏳ Falta arreglar: ${fmt(fPend)}`, `✅ Ya arreglado: ${fmt(fSald)}`, `Total a MOPLEX del mes: ${fmt(totalMoplex)}`]
+    };
     html += `<div class="cards" style="grid-template-columns:repeat(3,1fr);">
       <div class="card moplex"><div class="card-label">Total a MOPLEX este mes</div><div class="card-value">${fmt(totalMoplex)}</div></div>
       <div class="card prof"><div class="card-label">⏳ Falta arreglar</div><div class="card-value">${fmt(fPend)}</div></div>
@@ -523,11 +553,22 @@ function render(pagos){
     html += `</tbody></table>`;
     // Mensaje de WhatsApp según la vista: un profesional o el resumen general
     if (fProf){
-      let waP = `🦶 Liquidación MOPLEX — ${mesLabel}\nProfesional: ${fProf}\n\n`;
-      for (const d of items) waP += `• ${d.prac}: cobrado ${fmt(d.cobrado)} → te corresponde ${fmt(d.mProf)}\n`;
+      // Mensaje PARA el profesional: solo lo suyo — por paciente, aclarando qué
+      // se le paga (evaluación / plantilla / ambas). Sin totales del centro.
+      const lineas = (MPX.lineasProf || []).filter(l => deProf(l.prof))
+        .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || a.paciente.localeCompare(b.paciente));
+      let waP = `🦶 Liquidación MOPLEX — ${mesLabel}\n${fProf}\n\n`;
+      for (const l of lineas){
+        waP += `• ${l.fecha||''} · ${l.paciente} — ${l.detalle}${l.ambos ? ` = ${fmt(l.montoProf)}` : ''}${l.esRectifSinHonorario ? ' (rectificación, sin honorario)' : ''}\n`;
+      }
       const tp = porProf[fProf] || {cobrado:0, prof:0, centro:0};
-      waP += `\n💰 Total que te corresponde: ${fmt(tp.prof)}\n(Total cobrado ${fmt(tp.cobrado)} · queda en PuntoBiO ${fmt(tp.centro)})\n\nPuntoBiO`;
+      waP += `\n💰 Total a liquidarte: ${fmt(tp.prof)}\n\nPuntoBiO`;
       window._waMensaje = waP;
+      window._pdfData = {
+        modo: 'profesional', mesLabel, prof: fProf,
+        filas: lineas.map(l => [l.fecha||'', l.paciente, l.detalle + (l.esRectifSinHonorario ? ' (rectificación, sin honorario)' : ''), fmt(l.montoProf)]),
+        cierre: [`Total a liquidarte: ${fmt(tp.prof)}`]
+      };
     } else {
       let waT = `🦶 Liquidación MOPLEX — ${mesLabel}\n\n`;
       for (const [pr, x] of Object.entries(porProf).sort((a,b)=> a[0].localeCompare(b[0]))){
@@ -535,6 +576,11 @@ function render(pagos){
       }
       waT += `\nTotal cobrado: ${fmt(totalBruto)}\nA profesionales: ${fmt(totalProf)}\nA MOPLEX (franquicia): ${fmt(totalMoplex)}\nQueda en PuntoBiO: ${fmt(totalCentro)}\n\nPuntoBiO`;
       window._waMensaje = waT;
+      window._pdfData = {
+        modo: 'todos', mesLabel,
+        filas: Object.entries(porProf).sort((a,b)=> a[0].localeCompare(b[0])).map(([pr,x]) => [pr, fmt(x.cobrado), fmt(x.prof), fmt(x.centro)]),
+        cierre: [`Total cobrado: ${fmt(totalBruto)}`, `A profesionales: ${fmt(totalProf)}`, `A MOPLEX (franquicia): ${fmt(totalMoplex)}`, `Queda en PuntoBiO: ${fmt(totalCentro)}`]
+      };
     }
   } else {
     html += `<div class="empty">Sin cobros MOPLEX repartibles este mes.</div>`;
@@ -542,8 +588,9 @@ function render(pagos){
 
   } // fin bloques por profesional (no franquicia)
 
-  // ===== Quién recibió la plata (caja real, no liquidación) ===== (oculto en modo franquicia)
-  if (!esFranq){
+  // ===== Quién recibió la plata (caja real, no liquidación) =====
+  // (oculto en modo franquicia y en la vista propia de un profesional: es caja del centro)
+  if (!esFranq && !PROF_CLAVADO){
   const recibio = {};
   for (const p of pagosVista){
     const quien = normProf(p.quien_cobro) || normProf(p.profesional) || 'PuntoBiO';
@@ -608,18 +655,65 @@ function render(pagos){
       <p class="bloque-nota">Por <b>fecha de consulta</b>, estén cobradas o no. Las de $0 y las sin cobrar son <b>informativas</b>: no cambian los totales (esos salen de lo efectivamente cobrado, más arriba).</p>
       <table><thead><tr><th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Consulta</th><th>Plantilla</th>
         <th class="num">$ Paciente</th><th class="num">$ Prof</th><th class="num">$ Centro</th><th class="num">$ MOPLEX</th><th>Estado</th></tr></thead><tbody>`;
+    // Celda de plata con desglose Consulta/Plantilla cuando el tratamiento tiene los dos
+    const celDesg = (c, campo) => {
+      const total = (c.ev[campo]||0) + (c.pl[campo]||0);
+      const ambos = (c.ev.precio > 0.5) && (c.pl.precio > 0.5);
+      let out = fmt(total);
+      if (ambos) out += `<div style="font-size:10.5px;color:#64748b;font-weight:400;white-space:nowrap;">C ${fmt(c.ev[campo])} · P ${fmt(c.pl[campo])}</div>`;
+      return out;
+    };
     for (const c of cons){
       const estado = c.gratis ? '<span style="color:#9ca3af;">$0 (no factura)</span>'
         : (c.cobrado ? '<span style="color:#065f46;font-weight:600;">✅ Cobrada</span>' : '<span style="color:#92400e;font-weight:600;">⏳ Sin cobrar</span>');
       html += `<tr><td>${c.fecha||'—'}</td><td>${c.paciente}</td><td>${badge(c.prof)}</td>
         <td>${c.consultaNombre}</td><td>${c.plantillaNombre||'—'}</td>
-        <td class="num">${fmt(c.precio)}</td><td class="num">${fmt(c.prof_monto)}</td>
-        <td class="num">${fmt(c.centro)}</td><td class="num">${fmt(c.moplex)}</td><td>${estado}</td></tr>`;
+        <td class="num">${celDesg(c,'precio')}</td><td class="num">${celDesg(c,'prof')}</td>
+        <td class="num">${celDesg(c,'centro')}</td><td class="num">${celDesg(c,'moplex')}</td><td>${estado}</td></tr>`;
     }
     html += `</tbody></table>`;
   }
 
   document.getElementById('resultado').innerHTML = html;
+}
+
+// Genera el PDF de la liquidación según la vista actual (mismos datos que el WhatsApp).
+function descargarPDFLiq(){
+  const d = window._pdfData;
+  if (!d){ alert('Primero recalculá la liquidación.'); return; }
+  try{
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.setTextColor(15, 118, 110);
+    const titulo = d.modo === 'profesional' ? `Liquidación MOPLEX — ${d.mesLabel}`
+                 : d.modo === 'franquicia'  ? `Liquidación MOPLEX (franquicia) — ${d.mesLabel}`
+                 : `Liquidación MOPLEX — ${d.mesLabel}`;
+    doc.text(titulo, 14, 18);
+    doc.setFontSize(11);
+    doc.setTextColor(60, 60, 60);
+    doc.text(d.modo === 'profesional' ? `Profesional: ${d.prof}` : (d.modo === 'franquicia' ? 'Lo que el centro le paga a la franquicia' : 'Resumen general por profesional'), 14, 26);
+    const head = d.modo === 'profesional' ? [['Fecha', 'Paciente', 'Detalle (qué se paga)', 'Le corresponde']]
+               : d.modo === 'franquicia'  ? [['Fecha', 'Paciente', 'Prof', 'Tipo', 'Descripción', '$ a MOPLEX', 'Estado']]
+               : [['Profesional', 'Cobrado', 'Le corresponde', 'Queda en PuntoBiO']];
+    doc.autoTable({
+      startY: 32, head, body: d.filas,
+      styles: { fontSize: 9, cellPadding: 2.5 },
+      headStyles: { fillColor: [15, 118, 110], textColor: 255 },
+      alternateRowStyles: { fillColor: [240, 253, 250] }
+    });
+    let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 40) + 10;
+    doc.setFontSize(12);
+    doc.setTextColor(15, 118, 110);
+    for (const linea of d.cierre){ doc.text(linea, 14, y); y += 7; }
+    doc.setFontSize(9);
+    doc.setTextColor(120, 120, 120);
+    doc.text(`PuntoBiO · generado el ${new Date().toLocaleDateString('es-AR')}`, 14, y + 4);
+    const slug = (d.modo === 'profesional' ? d.prof : d.modo).toLowerCase();
+    doc.save(`liquidacion_moplex_${slug}_${d.mesLabel.replace(/\s+/g, '_').toLowerCase()}.pdf`);
+  }catch(e){
+    alert('No se pudo generar el PDF: ' + (e.message || e));
+  }
 }
 
 // Abre WhatsApp con el mensaje de la liquidación armado en el último render.
@@ -639,6 +733,20 @@ function enviarWhatsAppLiq(){
     selA.appendChild(o);
   }
   document.getElementById('selMes').value = String(d.getMonth()+1).padStart(2,'0');
+  if (PROF_CLAVADO){
+    const fp = document.getElementById('filtroProf');
+    // Asegurar que el valor exista en el select (por si viene un nombre fuera de la lista)
+    if (![...fp.options].some(o => o.value === PROF_CLAVADO)){
+      const o = document.createElement('option'); o.value = PROF_CLAVADO; o.textContent = PROF_CLAVADO;
+      fp.appendChild(o);
+    }
+    fp.value = PROF_CLAVADO;
+    fp.disabled = true;
+    // Esconder el control entero (queda el título diciendo de quién es la vista)
+    fp.closest('.control-group').style.display = 'none';
+    document.querySelector('h1').textContent = '🦶 Mi liquidación MOPLEX — ' + PROF_CLAVADO;
+    document.querySelector('.subtitle').textContent = 'Tus evaluaciones y plantillas MOPLEX: lo cobrado y lo que te corresponde, mes a mes.';
+  }
   cargar();
 })();
 </script>
