@@ -316,7 +316,7 @@
 <div class="modal-backdrop" id="modalCobrarSaldo">
   <div class="modal modal-sm">
     <div class="modal-header">
-      <span class="modal-title">💵 Cobrar saldo del puente</span>
+      <span class="modal-title">💵 Cobrar saldo pendiente</span>
       <button class="modal-close" onclick="cerrarModal('modalCobrarSaldo')">×</button>
     </div>
     <div class="modal-body">
@@ -653,7 +653,7 @@
       <div id="cobrarPuenteBox" style="display:none; margin:0 0 12px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px 12px;">
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; color:#78350f;">
           <input type="checkbox" id="cobrarSumarPuente" checked>
-          <span>➕ Sumar el <b>prorrateo de cambio de fecha</b> (<span id="cobrarPuenteMonto"></span>)</span>
+          <span>➕ Sumar el <b id="cobrarPuenteEtiqueta">saldo por cambio</b> (<span id="cobrarPuenteMonto"></span>)</span>
         </label>
         <div id="cobrarPuenteTotal" style="margin-top:6px; font-size:13px; font-weight:700; color:#166534;"></div>
       </div>
@@ -2420,13 +2420,63 @@ window.enviarBitacoraWhatsApp = () => {
   else toast('El alumno no tiene celular cargado.', true);
 };
 
-// Lee el saldo pendiente por cambio de fecha guardado en la inscripción.
-// Tag: [DEUDA_CAMBIO importe=NNN concepto=puente_fecha mes=YYYY-MM venc=X->Y]
+// Lee el saldo pendiente por cambio (fecha y/o plan) guardado en la inscripción.
+// Tag: [DEUDA_CAMBIO importe=NNN concepto=puente_fecha|proporcional_plan|mixto mes=YYYY-MM venc=X->Y det=PLAN->PLAN]
+// Parser clave=valor: retrocompatible (las etiquetas viejas solo con importe/mes/venc siguen andando)
+// y no se rompe si a futuro se agregan campos nuevos.
 function deudaCambioDe(inscripcion) {
   if (!inscripcion || !inscripcion.observaciones) return null;
-  const m = inscripcion.observaciones.match(/\[DEUDA_CAMBIO\s+importe=(\d+)[^\]]*?(?:mes=([\d-]+))?[^\]]*?(?:venc=([^\]\s]+))?\s*\]/);
+  const m = inscripcion.observaciones.match(/\[DEUDA_CAMBIO\s+([^\]]*)\]/);
   if (!m) return null;
-  return { importe: parseInt(m[1], 10), mes: m[2] || MES_ACTUAL, venc: m[3] || '' };
+  const d = { importe: 0, mes: MES_ACTUAL, venc: '', concepto: 'puente_fecha', det: '' };
+  m[1].split(/\s+/).forEach(tok => {
+    const eq = tok.indexOf('=');
+    if (eq < 1) return;
+    const k = tok.slice(0, eq), v = tok.slice(eq + 1);
+    if (k === 'importe') d.importe = parseInt(v, 10) || 0;
+    else if (k === 'mes' && v) d.mes = v;
+    else if (k === 'venc') d.venc = v;
+    else if (k === 'concepto' && v) d.concepto = v;
+    else if (k === 'det') d.det = v;
+  });
+  return d.importe > 0 ? d : null;
+}
+
+// Nombre humano del saldo según su origen (ficha, botones, mini-modal y modal Cobrar).
+function etiquetaSaldoCambio(d) {
+  if (!d) return 'saldo por cambio';
+  if (d.concepto === 'proporcional_plan') return 'proporcional por cambio de plan';
+  if (d.concepto === 'mixto') return 'proporcional por cambio de plan + fecha';
+  return 'prorrateo por cambio de fecha';
+}
+
+// Escribe/actualiza la etiqueta de saldo pendiente sobre unas observaciones.
+// SUMA sobre un saldo previo si lo había y deja UNA sola etiqueta: dos etiquetas
+// eran plata invisible (el lector toma la primera y el limpiador borra todas).
+// Si el importe final es 0, devuelve las observaciones sin etiqueta.
+function obsConSaldoPendiente(obsActual, nuevo) {
+  const previo = deudaCambioDe({ observaciones: obsActual || '' });
+  const limpia = (obsActual || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
+  let importe = nuevo.importe || 0;
+  let concepto = nuevo.concepto || 'puente_fecha';
+  let mes = nuevo.mes || MES_ACTUAL, venc = nuevo.venc || '', det = nuevo.det || '';
+  if (previo) {
+    importe += previo.importe;
+    if ((nuevo.importe || 0) > 0) {
+      if (previo.concepto !== concepto) concepto = 'mixto';
+      venc = venc || previo.venc;
+      det = det || previo.det;
+    } else {
+      // El cambio nuevo no suma plata: el saldo previo conserva su identidad.
+      concepto = previo.concepto; mes = previo.mes; venc = previo.venc; det = previo.det;
+    }
+  }
+  if (importe <= 0) return limpia;
+  let tag = `[DEUDA_CAMBIO importe=${importe} concepto=${concepto} mes=${mes}`;
+  if (venc) tag += ` venc=${venc}`;
+  if (det) tag += ` det=${det}`;
+  tag += ']';
+  return `${limpia} ${tag}`.trim();
 }
 
 // Cobra el saldo pendiente por cambio de fecha: abre un mini-modal con desplegable de medio.
@@ -2436,7 +2486,7 @@ window.cobrarSaldoCambioFecha = async () => {
   if (!i) { toast('No hay inscripción activa.', true); return; }
   const d = deudaCambioDe(i);
   if (!d) { toast('Este alumno no tiene saldo pendiente por cambio de fecha.', true); return; }
-  $('#csInfo').innerHTML = `<strong>${p ? p.nombre : 'Alumno'}</strong> · saldo del puente: <strong>${fmt$(d.importe)}</strong><br>Se imputa a <strong>${d.mes}</strong>.`;
+  $('#csInfo').innerHTML = `<strong>${p ? p.nombre : 'Alumno'}</strong> · ${etiquetaSaldoCambio(d)}: <strong>${fmt$(d.importe)}</strong><br>Se imputa a <strong>${d.mes}</strong>.`;
   $('#csMedio').value = 'EFECTIVO';
   $('#modalCobrarSaldo').classList.add('activo');
 };
@@ -2453,7 +2503,7 @@ window.confirmarCobrarSaldo = async () => {
     const { error: e1 } = await sb.from('pagos_tf').insert({
       inscripcion_id: i.id, mes_imputado: d.mes, fecha: HOY.toISOString().split('T')[0],
       importe: d.importe, medio: medioOk, tipo_cobro: 'NORMAL',
-      observaciones: `PUENTE cambio de fecha (saldo cobrado)${d.venc ? ' · venc ' + d.venc : ''}`,
+      observaciones: `SALDO cambio cobrado · ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`,
       cargado_por: usuarioId
     });
     if (e1) throw e1;
@@ -2610,9 +2660,9 @@ function renderPlanesYCobros(f) {
   if (i.plan_futuro && i.mes_aplica_plan && String(i.mes_aplica_plan) > MES_ACTUAL) {
     cambios.push(`📋 <b>Cambio de plan programado:</b> ${i.plan} → ${i.plan_futuro} · arranca <b>${nombreMes(i.mes_aplica_plan)}</b> <button onclick="abrirEditarCambio()" title="Corregir el plan o el mes" style="background:#fff;border:1px solid #f59e0b;color:#92400e;border-radius:6px;cursor:pointer;padding:2px 8px;font-size:12px;font-weight:600;margin-left:6px;">✏️ Editar</button>`);
   }
-  // Deuda de puente pendiente (sigue saliendo de la etiqueta porque es estado vivo)
-  const mD = (i.observaciones || '').match(/\[DEUDA_CAMBIO\s+importe=(\d+)[^\]]*\]/);
-  if (mD) cambios.push(`🟡 <b>Saldo del puente pendiente de cobro:</b> ${fmt$(parseInt(mD[1],10))}`);
+  // Saldo pendiente por cambio (sigue saliendo de la etiqueta porque es estado vivo)
+  const _dSaldo = deudaCambioDe(i);
+  if (_dSaldo) cambios.push(`🟡 <b>Saldo pendiente de cobro (${etiquetaSaldoCambio(_dSaldo)}):</b> ${fmt$(_dSaldo.importe)}`);
 
   if (cambios.length || histo.length) {
     let filasHist = '';
@@ -4241,11 +4291,14 @@ window.confirmarCambioPlan = async () => {
         if (e1) throw e1;
       }
       // 2) Día de vencimiento + (si no cobró) etiqueta de DEUDA
-      let obs = (i.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
-      obs = `${obs} [Cambio fecha: día ${i.dia_vencimiento||'—'}→${r.diaNuevo} el ${HOY.toISOString().split('T')[0]}]`.trim();
-      if (sinCobro && (r.importe || 0) > 0) {
-        obs += ` [DEUDA_CAMBIO importe=${r.importe} concepto=puente_fecha mes=${r.mes||MES_ACTUAL} venc=${i.dia_vencimiento||''}->${r.diaNuevo}]`;
-      }
+      // La etiqueta de saldo pasa por obsConSaldoPendiente: si ya había un saldo
+      // pendiente (de un cambio anterior), se SUMA en vez de pisarse o perderse.
+      let obs = `${(i.observaciones || '')} [Cambio fecha: día ${i.dia_vencimiento||'—'}→${r.diaNuevo} el ${HOY.toISOString().split('T')[0]}]`.trim();
+      obs = obsConSaldoPendiente(obs, {
+        importe: (sinCobro && (r.importe || 0) > 0) ? r.importe : 0,
+        concepto: 'puente_fecha', mes: r.mes || MES_ACTUAL,
+        venc: `${i.dia_vencimiento||''}->${r.diaNuevo}`
+      });
       const { data: updRows, error: e2 } = await sb.from('inscripciones_tf').update({
         dia_vencimiento: r.diaNuevo, observaciones: obs, actualizado_en: new Date().toISOString()
       }).eq('id', i.id).select('id, dia_vencimiento');
@@ -4365,14 +4418,32 @@ window.confirmarCambioPlan = async () => {
   const btn = $('#cpBtnConfirmar');
   btn.disabled = true; btn.textContent = 'Guardando...';
   try {
-    // 1) Programar el plan futuro SIN pisar el plan actual
-    const { error: errInsc } = await sb.from('inscripciones_tf').update({
+    // 1) Programar el plan futuro SIN pisar el plan actual.
+    // FIX 5/8 (caso Joaquín Almada Grezzi): con "No cobrar ahora (queda como saldo)"
+    // tildado, esta rama antes NO escribía nada — ni pago ni etiqueta — y el
+    // proporcional se evaporaba. Ahora queda como [DEUDA_CAMBIO] con concepto
+    // proporcional_plan (o mixto en modo Ambos), igual que el puente de fecha.
+    const saldoPendPlan = sinCobro ? ((importe > 0 ? importe : 0) || (datos.proporcional || 0)) : 0;
+    let obsPlan = `${(i.observaciones || '')} [Cambio programado: ${i.plan}→${planNuevo} desde ${mesQueViene}]`.trim();
+    obsPlan = obsConSaldoPendiente(obsPlan, {
+      importe: saldoPendPlan,
+      concepto: (cpModo === 'ambos' && (datos.puenteImporte || 0) > 0) ? 'mixto' : 'proporcional_plan',
+      mes: MES_ACTUAL,
+      venc: (cpModo === 'ambos' && cpFechaCache && cpFechaCache.diaNuevo) ? `${i.dia_vencimiento||''}->${cpFechaCache.diaNuevo}` : '',
+      det: `${i.plan}->${planNuevo}`
+    });
+    const { data: updPlanRows, error: errInsc } = await sb.from('inscripciones_tf').update({
       plan_futuro: planNuevo,
       mes_aplica_plan: mesQueViene,
-      observaciones: ((i.observaciones || '') + ` [Cambio programado: ${i.plan}→${planNuevo} desde ${mesQueViene}]`).trim(),
+      observaciones: obsPlan,
       actualizado_en: new Date().toISOString()
-    }).eq('id', i.id);
+    }).eq('id', i.id).select('id');
     if (errInsc) throw errInsc;
+    if (!updPlanRows || updPlanRows.length === 0) {
+      toast(`⚠️ La base NO actualizó ninguna fila (inscripción id ${i.id}). Puede ser un tema de permisos/RLS.`, true);
+      btn.disabled = false; btn.textContent = 'Confirmar cambio'; return;
+    }
+    i.observaciones = obsPlan; // reflejar en memoria: ficha y modal Cobrar leen la fila cacheada
     // Histórico: registrar el cambio de plan (no rompe si la tabla no existe)
     try {
       await sb.from('cambios_inscripcion').insert({
@@ -4380,7 +4451,8 @@ window.confirmarCambioPlan = async () => {
         descripcion: planNuevo === i.plan
           ? `Cambio de fecha (mismo plan ${i.plan})`
           : `Plan: ${i.plan} → ${planNuevo}`,
-        importe_puente: null, mes_imputado: mesQueViene,
+        importe_puente: (!sinCobro && importe > 0) ? importe : (saldoPendPlan > 0 ? saldoPendPlan : null),
+        mes_imputado: mesQueViene,
         vigente_desde: `${mesQueViene}-01`,
         hecho_por: (typeof usuarioId !== 'undefined' ? usuarioId : null)
       });
@@ -4485,6 +4557,7 @@ window.confirmarCambioPlan = async () => {
 
     let msg = `✓ Cambio programado: ${i.plan}→${planNuevo} desde ${nombreMes(mesQueViene)}`;
     if (!sinCobro && importe > 0) msg += ` · cobrado ${fmt$(importe)}`;
+    if (sinCobro && saldoPendPlan > 0) msg += ` · 🟡 saldo pendiente ${fmt$(saldoPendPlan)}`;
     if (cpTurnosSel.size > 0) msg += ` · ${cpTurnosSel.size} clase(s) agregada(s)`;
     if (borrarDeuda) msg += ` · 🧹 deuda anterior borrada`;
     toast(msg);
@@ -4563,7 +4636,7 @@ window.deshacerCambioPlan = async () => {
   const ok = confirm(
     `⚠️ DESHACER cambio de plan de ${p ? p.nombre : 'este alumno'}\n\n` +
     `• Se cancela el plan programado (${i.plan} → ${i.plan_futuro}).\n` +
-    `• Se borra el pago del proporcional, si se cobró.\n\n` +
+    `• Se borra el pago del proporcional, si se cobró (o el saldo pendiente, si quedó sin cobrar).\n\n` +
     `Esta acción NO se puede deshacer. ¿Confirmás?`
   );
   if (!ok) return;
@@ -4571,8 +4644,14 @@ window.deshacerCambioPlan = async () => {
   const btn = document.getElementById('btnDeshacerCambioPlan');
   if (btn) { btn.disabled = true; btn.textContent = 'Deshaciendo...'; }
   try {
-    // 1) Limpiar el plan programado y la nota que se había agregado
-    const obsLimpia = (i.observaciones || '').replace(/\s*\[Cambio programado:[^\]]*\]/g, '').trim();
+    // 1) Limpiar el plan programado y la nota que se había agregado.
+    // Si el saldo pendiente era del proporcional de ESTE cambio de plan, se limpia también
+    // (los saldos de puente_fecha o mixtos NO se tocan: pueden traer plata de un cambio de fecha).
+    let obsLimpia = (i.observaciones || '').replace(/\s*\[Cambio programado:[^\]]*\]/g, '').trim();
+    const _dUndo = deudaCambioDe({ observaciones: obsLimpia });
+    if (_dUndo && _dUndo.concepto === 'proporcional_plan') {
+      obsLimpia = obsLimpia.replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
+    }
     const { error: errInsc } = await sb.from('inscripciones_tf').update({
       plan_futuro: null,
       mes_aplica_plan: null,
@@ -4712,6 +4791,7 @@ function abrirModalCobrar() {
   const box = $('#cobrarPuenteBox');
   if (_puente && _puente.importe > 0) {
     $('#cobrarPuenteMonto').textContent = fmt$(_puente.importe);
+    $('#cobrarPuenteEtiqueta').textContent = etiquetaSaldoCambio(_puente);
     $('#cobrarSumarPuente').checked = true;
     box.style.display = 'block';
     $('#cobrarSumarPuente').onchange = actualizarTotalConPuente;
@@ -4737,8 +4817,8 @@ window.actualizarTotalConPuente = () => {
   const total = cuota + (sumar && d ? d.importe : 0);
   const el = document.getElementById('cobrarPuenteTotal');
   el.textContent = sumar && d
-    ? `Total a cobrar: ${fmt$(total)}  (cuota ${fmt$(cuota)} + puente ${fmt$(d.importe)})`
-    : `Total a cobrar: ${fmt$(cuota)}  (solo cuota — puente queda pendiente)`;
+    ? `Total a cobrar: ${fmt$(total)}  (cuota ${fmt$(cuota)} + saldo ${fmt$(d.importe)})`
+    : `Total a cobrar: ${fmt$(cuota)}  (solo cuota — el saldo queda pendiente)`;
 };
 
 // Al cambiar el mes a imputar, re-sugiero el importe con el precio de ESE mes.
@@ -4837,7 +4917,7 @@ window.confirmarCobro = async () => {
         const { error: ep } = await sb.from('pagos_tf').insert({
           inscripcion_id: insc.id, mes_imputado: d.mes, fecha: hoyISO,
           importe: d.importe, medio: $('#cobrarMedio').value, tipo_cobro: 'NORMAL',
-          observaciones: `PUENTE cambio de fecha (saldo cobrado)${d.venc ? ' · venc ' + d.venc : ''}`,
+          observaciones: `SALDO cambio cobrado junto a la cuota · ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`,
           cargado_por: usuarioId
         });
         if (ep) {
