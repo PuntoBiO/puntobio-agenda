@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="UTF-8">
+<title>Liquidaciones MOPLEX — PuntoBiO</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f7f9fc;color:#111;padding:24px}
+  .container{max-width:1200px;margin:0 auto}
+  h1{font-size:26px;margin-bottom:4px;color:#111}
+  .subtitle{color:#666;margin-bottom:20px;font-size:14px}
+  .controls{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:20px;display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap}
+  .control-group{display:flex;flex-direction:column;gap:4px}
+  .control-group label{font-size:11px;text-transform:uppercase;color:#666;font-weight:600;letter-spacing:.5px}
+  select,input{padding:8px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:14px;background:#fff;cursor:pointer;font-family:inherit}
+  .btn{padding:9px 16px;background:#0f766e;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600;font-family:inherit}
+  .btn:hover{background:#115e59}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px}
+  .card-label{font-size:11px;text-transform:uppercase;color:#666;font-weight:600;letter-spacing:.5px;margin-bottom:6px}
+  .card-value{font-size:22px;font-weight:700;color:#111}
+  .card.bruto{border-top:4px solid #0f766e}
+  .card.prof{border-top:4px solid #f59e0b}
+  .card.moplex{border-top:4px solid #14b8a6}
+  .card.centro{border-top:4px solid #10b981}
+  table{width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04);margin-bottom:24px}
+  thead{background:#f0fdfa;color:#0f766e}
+  th{padding:11px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;border-bottom:2px solid #ccfbf1}
+  th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}
+  td{padding:10px 12px;border-top:1px solid #f3f4f6;font-size:13.5px;color:#334155}
+  .bloque-tit{font-size:17px;font-weight:700;color:#0f766e;margin:26px 0 10px}
+  .bloque-nota{color:#666;font-size:13px;margin:-4px 0 12px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+  .badge-bruno{background:#dbeafe;color:#1e40af}
+  .badge-male{background:#fef3c7;color:#92400e}
+  .badge-vero{background:#fce7f3;color:#9d174d}
+  .badge-jime{background:#d1fae5;color:#065f46}
+  .badge-lu{background:#ede9fe;color:#5b21b6}
+  .aviso{background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;margin-bottom:18px;font-size:13px;color:#991b1b}
+  .btn-mini{padding:5px 10px;font-size:12px;border:none;border-radius:8px;color:#fff;cursor:pointer;font-weight:600}
+  .loading,.empty{padding:40px;text-align:center;color:#666}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🦶 Liquidaciones MOPLEX</h1>
+  <p class="subtitle">Liquidación mensual de MOPLEX, separada del resto (5/8/26): reparto por consulta/plantilla desde el catálogo · lo que va al profesional, a la franquicia y al centro.</p>
+
+  <div class="controls">
+    <div class="control-group">
+      <label>Mes</label>
+      <input type="month" id="mes">
+    </div>
+    <button class="btn" onclick="cargar()">Recalcular</button>
+  </div>
+
+  <div id="resultado"><div class="loading">Elegí un mes y tocá Recalcular.</div></div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
+
+// ============================================================
+// LEER UNA CONSULTA COMPLETA — paginado (regla de la casa 29/7/26):
+// el tope de 1000 filas de Supabase manda por encima del .limit().
+// Se le pasa una FUNCIÓN que arma la query de cero por página.
+// ============================================================
+async function sbLeerTodo(armarQuery) {
+  const PAGE = 1000;
+  let desde = 0;
+  let todo = [];
+  for (let i = 0; i < 50; i++) {
+    const { data, error } = await armarQuery().range(desde, desde + PAGE - 1);
+    if (error) return { data: null, error };
+    todo = todo.concat(data || []);
+    if (!data || data.length < PAGE) break;
+    desde += PAGE;
+  }
+  return { data: todo, error: null };
+}
+
+const fmt = n => '$' + (Number(n)||0).toLocaleString('es-AR',{maximumFractionDigits:0});
+const fmtNum = n => (Number(n)||0).toLocaleString('es-AR');
+const badge = (prof) => {
+  const cls = {'Bruno':'bruno','Male':'male','Vero':'vero','Jime':'jime','Lu':'lu'}[prof] || 'bruno';
+  return `<span class="badge badge-${cls}">${prof || '—'}</span>`;
+};
+function normProf(txt){
+  const t = String(txt||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'');
+  if (t === 'puntobio' || t === 'punto bio' || t === 'punto-bio') return 'PuntoBiO';
+  const map = {'bruno':'Bruno','male':'Male','vero':'Vero','jime':'Jime','lu':'Lu'};
+  return map[t] || (txt ? String(txt).trim() : '');
+}
+
+// ================= MOPLEX (lógica idéntica a la que vivía en liquidaciones.html) =================
+// MOPLEX empezó a facturar en junio 2026 (abril/mayo no cuentan: van en $0).
+const MOPLEX_FACTURA_DESDE = '2026-06';
+function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_FACTURA_DESDE; }
+
+// Mismas fórmulas que consultas_moplex.html (fuente de verdad del reparto)
+function calcConsultaMoplex(c){
+  if (!c) return null;
+  const precio = Number(c.precio_paciente)||0;
+  const moplex = Number(c.costo_moplex)||0;
+  const prof   = Math.round(precio*0.40);
+  const centro = precio - moplex - prof;
+  return { precio, moplex, prof, centro };
+}
+function calcPlantillaMoplex(p, rectif, montoCustom){
+  if (!p) return null;
+  if (rectif){
+    const precio = Number(montoCustom)||0;                          // rectificación: monto custom
+    const moplex = Math.round(precio*0.85);
+    const prof   = 0;
+    const centro = precio - moplex;                                 // 15%
+    return { precio, moplex, prof, centro, rectif:true };
+  }
+  const precio = Number(p.precio_paciente)||0;
+  const moplex = Number(p.costo_moplex)||0;
+  const prof   = Math.round(precio*0.10);
+  const centro = precio - moplex - prof;
+  return { precio, moplex, prof, centro, rectif:false };
+}
+function splitPortionMoplex(rep, portion, fact){
+  if (!rep || !rep.precio) return { prof:0, moplex:0, centro:portion };
+  if (!fact) return { prof:0, moplex:0, centro:portion };   // pre-junio: no factura
+  const fr = portion / rep.precio;
+  const prof   = Math.round(rep.prof * fr);
+  const moplex = Math.round(rep.moplex * fr);
+  const centro = portion - prof - moplex;
+  return { prof, moplex, centro };
+}
+
+// Recalcula el split de los cobros MOPLEX leyendo el tratamiento + catálogo.
+// AGRUPA por tratamiento y lleva un "presupuesto" de lo que falta cobrar de la
+// evaluación y de la plantilla, sin contar la evaluación dos veces cuando se
+// paga en varias cuotas. (Copiado fiel de liquidaciones.html.)
+function prepararMoplex(monthPagos){
+  const byId = (window._moplexCat && window._moplexCat.byId) || {};
+  const prevPagos = window._moplexPrevPagos || [];
+  const desde = window._moplexDesde || '';
+  const out = { detalle:{}, franquicia:[], sinTipo:[], totalMoplex:0 };
+  const cerca = (a,b)=> Math.abs(a-b) < 1;
+  const keyTid = (p)=> (p.tratamiento_id != null) ? ('t'+p.tratamiento_id) : ('p'+p.id);
+  const enMes = (p)=> !desde || String(p.fecha||'') >= desde;
+
+  const grupos = {};
+  for (const p of monthPagos){
+    const tid = keyTid(p);
+    (grupos[tid] = grupos[tid] || []).push(p);
+  }
+  const previos = {};
+  for (const p of prevPagos){
+    const tid = keyTid(p);
+    if (!grupos[tid]) continue;
+    (previos[tid] = previos[tid] || []).push(p);
+  }
+
+  for (const tid of Object.keys(grupos)){
+    const delMes = grupos[tid].slice();
+    const pagos = (previos[tid]||[]).concat(delMes)
+      .sort((a,b)=> (String(a.fecha||'')).localeCompare(String(b.fecha||'')) || ((a.id||0)-(b.id||0)));
+    const p0 = delMes[0];
+    const t  = p0.tratamientos || {};
+    const fact = moplexFacturable(p0.fecha);
+    const evalItem  = byId[t.moplex_consulta_id];
+    const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
+    const rectif    = !!t.moplex_plantilla_rectif;
+    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem)          : null;
+    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0) : null;
+    const paciente = (t.personas && t.personas.nombre) || '—';
+    const prof     = normProf(p0.profesional);
+
+    if (!evalRep && !plantRep){
+      const totalPaid = delMes.reduce((s,p)=> s + (Number(p.importe)||0), 0);
+      out.sinTipo.push({ fecha:p0.fecha, paciente, prof, importe:totalPaid, tratId:p0.tratamiento_id });
+      for (const p of delMes){ p._moplexInfo = { sinTipo:true }; p.monto_profesional = 0; p.monto_centro = Number(p.importe)||0; p._monto_moplex = 0; }
+      continue;
+    }
+
+    let evalRem  = evalRep  ? evalRep.precio  : 0;
+    let plantRem = plantRep ? plantRep.precio : 0;
+    let evalCob=0, evalProf=0, evalCentro=0;
+    let plantCob=0, plantProf=0, plantCentro=0, plantMoplex=0;
+
+    for (const p of pagos){
+      const importe = Number(p.importe)||0;
+      let evalPortion=0, plantPortion=0;
+      if      (evalRem>0.5 && cerca(importe, evalRem))                 { evalPortion=importe; }
+      else if (plantRem>0.5 && cerca(importe, plantRem))              { plantPortion=importe; }
+      else if (evalRem>0.5 && plantRem>0.5 && cerca(importe, evalRem+plantRem)) { evalPortion=evalRem; plantPortion=plantRem; }
+      else {
+        evalPortion  = Math.min(importe, Math.max(evalRem,0));
+        let resto    = importe - evalPortion;
+        plantPortion = Math.min(resto, Math.max(plantRem,0));
+      }
+      evalRem  -= evalPortion;
+      plantRem -= plantPortion;
+      const leftover = importe - evalPortion - plantPortion;
+
+      const se = splitPortionMoplex(evalRep,  evalPortion,  fact);
+      const sp = splitPortionMoplex(plantRep, plantPortion, fact);
+
+      if (!enMes(p)) continue;
+
+      p.monto_profesional = se.prof + sp.prof;
+      p.monto_centro      = se.centro + sp.centro + (leftover>0?leftover:0);
+      p._monto_moplex     = se.moplex + sp.moplex;
+      p._moplexInfo       = { evalPortion, plantPortion };
+
+      evalCob+=evalPortion;   evalProf+=se.prof;   evalCentro+=se.centro;
+      plantCob+=plantPortion; plantProf+=sp.prof;  plantCentro+=sp.centro;  plantMoplex+=sp.moplex;
+    }
+
+    if (evalCob > 0.5){
+      const lbl = 'Eval. — ' + ((evalItem&&evalItem.nombre)||'');
+      const k = prof + '||' + lbl;
+      if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
+      out.detalle[k].cobrado += evalCob; out.detalle[k].mProf += evalProf; out.detalle[k].centro += evalCentro;
+      out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Evaluación', desc:(evalItem&&evalItem.nombre)||'', montoMoplex:0 });
+    }
+    if (plantCob > 0.5){
+      const lbl = 'Plantilla — ' + ((rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''));
+      const k = prof + '||' + lbl;
+      if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
+      out.detalle[k].cobrado += plantCob; out.detalle[k].mProf += plantProf; out.detalle[k].centro += plantCentro;
+      out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:plantMoplex });
+      out.totalMoplex += plantMoplex;
+    }
+  }
+  return out;
+}
+
+// Marcar/desmarcar una plantilla como saldada con la franquicia MOPLEX
+async function toggleMoplexSaldado(tratId, val){
+  try{
+    const { error } = await sb.from('moplex_franquicia_saldos')
+      .upsert({ tratamiento_id: tratId, saldado: val, actualizado_en: new Date().toISOString() }, { onConflict: 'tratamiento_id' });
+    if (error) throw error;
+    window._moplexSaldos = window._moplexSaldos || {};
+    window._moplexSaldos[tratId] = val;
+    cargar();
+  }catch(e){
+    alert('No se pudo guardar el estado con MOPLEX.\n¿Ya creaste la tabla moplex_franquicia_saldos?\n\n' + (e.message||e));
+  }
+}
+
+// ================= CARGA =================
+async function cargar(){
+  const mes = document.getElementById('mes').value;
+  if (!mes) { alert('Elegí un mes'); return; }
+  document.getElementById('resultado').innerHTML = '<div class="loading">⏳ Cargando cobros MOPLEX...</div>';
+
+  const [year, month] = mes.split('-');
+  const desde = `${year}-${month}-01`;
+  const hasta = new Date(year, parseInt(month), 0).toISOString().split('T')[0];
+
+  // Cobros MOPLEX del mes (join inner: solo tratamientos de práctica MOPLEX)
+  const armarQPagos = () => sb.from('pagos_consultorio')
+    .select(`
+      id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro, tratamiento_id,
+      tratamientos!inner (
+        id, codigo_id, practica_codigo,
+        moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+        personas ( id, nombre )
+      )
+    `)
+    .eq('tratamientos.practica_codigo', 'MOPLEX')
+    .gte('fecha', desde)
+    .lte('fecha', hasta)
+    .order('fecha').order('id', { ascending: true });
+
+  const { data, error } = await sbLeerTodo(armarQPagos);
+  if (error) {
+    document.getElementById('resultado').innerHTML = `<div class="empty">❌ Error: ${error.message}</div>`;
+    return;
+  }
+  const pagosMes = data || [];
+
+  // Catálogo (montos fijos del reparto)
+  try {
+    const { data: cat } = await sb.from('moplex_catalogo').select('*');
+    const byId = {}; (cat||[]).forEach(c=>{ byId[c.id] = c; });
+    window._moplexCat = { byId };
+  } catch (e) {
+    window._moplexCat = { byId:{} };
+    console.warn('No se pudo cargar moplex_catalogo:', e.message);
+  }
+
+  // Estados de saldo con la franquicia
+  const mopTratIds = [...new Set(pagosMes.map(p => p.tratamiento_id).filter(x => x != null))];
+  window._moplexSaldos = {};
+  try {
+    if (mopTratIds.length){
+      const { data: sal } = await sb.from('moplex_franquicia_saldos')
+        .select('tratamiento_id, saldado').in('tratamiento_id', mopTratIds);
+      (sal||[]).forEach(r => { window._moplexSaldos[r.tratamiento_id] = !!r.saldado; });
+    }
+  } catch (e) {
+    console.warn('No se pudieron cargar saldos MOPLEX (falta tabla moplex_franquicia_saldos?):', e.message);
+  }
+
+  // Cuotas de MESES ANTERIORES de esos tratamientos (para no recontar la evaluación)
+  window._moplexDesde = desde;
+  window._moplexPrevPagos = [];
+  try {
+    if (mopTratIds.length){
+      const { data: prev } = await sbLeerTodo(() => sb.from('pagos_consultorio')
+        .select(`
+          id, fecha, importe, profesional, tratamiento_id,
+          tratamientos (
+            id, practica_codigo,
+            moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+            personas ( id, nombre )
+          )
+        `)
+        .in('tratamiento_id', mopTratIds)
+        .lt('fecha', desde)
+        .order('fecha').order('id', { ascending: true }));
+      window._moplexPrevPagos = prev || [];
+    }
+  } catch (e) {
+    console.warn('No se pudieron cargar cuotas MOPLEX de meses anteriores:', e.message);
+  }
+
+  // TODAS las consultas del mes (informativo, por fecha de consulta — igual que Consultas MOPLEX)
+  window._moplexConsultasMes = [];
+  try {
+    const { data: mopTtos } = await sb.from('tratamientos')
+      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto')
+      .eq('practica_codigo','MOPLEX');
+    const ttos = mopTtos || [];
+    if (ttos.length){
+      const ttoIds  = ttos.map(t=>t.id);
+      const codigos = [...new Set(ttos.map(t=>t.codigo_id).filter(Boolean))];
+      const persIds = [...new Set(ttos.map(t=>t.persona_id).filter(Boolean))];
+
+      const fechaSesion = {}, profSesion = {}, bestSes = {};
+      if (ttoIds.length){
+        const { data: ses } = await sb.from('sesiones').select('tratamiento_id, profesional, fecha').in('tratamiento_id', ttoIds);
+        (ses||[]).forEach(r=>{
+          const k=r.tratamiento_id, f=r.fecha||'';
+          if (f && (!fechaSesion[k] || f>fechaSesion[k])) fechaSesion[k]=f;
+          if (r.profesional && (!bestSes[k] || f>bestSes[k].key)) bestSes[k]={key:f, prof:r.profesional};
+        });
+        Object.keys(bestSes).forEach(k=> profSesion[k]=normProf(bestSes[k].prof));
+      }
+      const fechaTurno = {}, profTurno = {}, bestT = {};
+      if (codigos.length){
+        const { data: tb } = await sb.from('turnos_biolab').select('tratamiento_id, profesional, fecha, hora_inicio').in('tratamiento_id', codigos).neq('estado','CANCELADO');
+        (tb||[]).forEach(r=>{
+          const k=r.tratamiento_id, key=(r.fecha||'')+(r.hora_inicio||'');
+          if (!bestT[k] || key>bestT[k].key) bestT[k]={key, prof:r.profesional, fecha:r.fecha||''};
+        });
+        Object.keys(bestT).forEach(k=>{ profTurno[k]=normProf(bestT[k].prof); if(bestT[k].fecha) fechaTurno[k]=bestT[k].fecha; });
+      }
+      const nombres = {};
+      if (persIds.length){
+        const { data: per } = await sb.from('personas').select('id, nombre').in('id', persIds);
+        (per||[]).forEach(p=> nombres[p.id]=p.nombre);
+      }
+
+      const byId = (window._moplexCat && window._moplexCat.byId) || {};
+      const scale = (m, fact) => (m && fact) ? m : { precio:0, moplex:0, prof:0, centro:0 };
+      const lista = [];
+      for (const t of ttos){
+        const fc = fechaSesion[t.id] || fechaTurno[t.codigo_id] || t.fecha_alta || '';
+        if (String(fc).slice(0,7) !== mes) continue;
+        const fact = moplexFacturable(fc);
+        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id]) : null;
+        const rectif   = !!t.moplex_plantilla_rectif;
+        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0) : null;
+        const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
+        const precio = (ev.precio||0) + (pl.precio||0);
+        lista.push({
+          tratId: t.id, fecha: fc, paciente: nombres[t.persona_id] || '—',
+          prof: normProf(t.profesional) || profSesion[t.id] || profTurno[t.codigo_id] || '',
+          consultaNombre: (byId[t.moplex_consulta_id]||{}).nombre || '—',
+          plantillaNombre: plantRep ? ((rectif?'Rectif. ':'') + ((byId[t.moplex_plantilla_id]||{}).nombre||'')) : '',
+          precio, prof_monto: (ev.prof||0)+(pl.prof||0), centro: (ev.centro||0)+(pl.centro||0), moplex: (ev.moplex||0)+(pl.moplex||0),
+          gratis: (precio <= 0.5), cobrado: false
+        });
+      }
+      const listIds = lista.map(x=>x.tratId);
+      if (listIds.length){
+        const { data: pagQ } = await sbLeerTodo(() => sb.from('pagos_consultorio')
+          .select('id, tratamiento_id, importe').in('tratamiento_id', listIds)
+          .order('id', { ascending: true }));
+        const cobradoSet = new Set((pagQ||[]).filter(p=> Number(p.importe)>0).map(p=>p.tratamiento_id));
+        lista.forEach(x=> x.cobrado = cobradoSet.has(x.tratId));
+      }
+      lista.sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||''));
+      window._moplexConsultasMes = lista;
+    }
+  } catch (e) {
+    console.warn('No se pudieron cargar las consultas MOPLEX del mes:', e.message);
+  }
+
+  render(pagosMes);
+}
+
+// ================= RENDER =================
+function render(pagos){
+  const MPX = prepararMoplex(pagos);
+  let html = '';
+
+  // Totales del mes (sobre lo efectivamente cobrado)
+  let totalBruto=0, totalProf=0, totalCentro=0, totalMoplex=MPX.totalMoplex||0;
+  for (const p of pagos){
+    totalBruto  += Number(p.importe)||0;
+    totalProf   += Number(p.monto_profesional)||0;
+    totalCentro += Number(p.monto_centro)||0;
+  }
+
+  // Aviso: cobros sin tipo asignado
+  if (MPX.sinTipo.length > 0){
+    html += `<div class="aviso"><b>⚠️ ${MPX.sinTipo.length} cobro${MPX.sinTipo.length>1?'s':''} MOPLEX sin tipo asignado</b> — no se pueden repartir bien:`;
+    for (const s of MPX.sinTipo){
+      html += `<div style="margin-top:4px;"><b>${s.paciente}</b> (${s.fecha}) — ${fmt(s.importe)}. Asigná la consulta/plantilla en <b>Consultas MOPLEX</b> y recalculá.</div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `<div class="cards">
+    <div class="card bruto"><div class="card-label">Total cobrado MOPLEX</div><div class="card-value">${fmt(totalBruto)}</div></div>
+    <div class="card prof"><div class="card-label">A profesionales</div><div class="card-value">${fmt(totalProf)}</div></div>
+    <div class="card moplex"><div class="card-label">A MOPLEX (franquicia)</div><div class="card-value">${fmt(totalMoplex)}</div></div>
+    <div class="card centro"><div class="card-label">Queda en PuntoBiO</div><div class="card-value">${fmt(totalCentro)}</div></div>
+  </div>`;
+
+  // ===== Por profesional (lo que le corresponde por eval/plantilla) =====
+  const items = Object.values(MPX.detalle).sort((a,b)=> a.prof.localeCompare(b.prof) || a.prac.localeCompare(b.prac));
+  html += `<h2 class="bloque-tit">👤 Por profesional — lo que le corresponde de MOPLEX</h2>
+    <p class="bloque-nota">Reparto del catálogo sobre lo efectivamente cobrado (evaluación 40% al profesional · plantilla 10% · rectificación 0%). Este monto <b>no está más adentro de Liquidaciones general</b>: se salda por acá.</p>`;
+  if (items.length){
+    html += `<table><thead><tr><th>Profesional</th><th>Concepto</th><th class="num">Cobrado</th><th class="num">Al profesional</th><th class="num">Al centro</th></tr></thead><tbody>`;
+    const porProf = {};
+    for (const d of items){
+      html += `<tr><td>${badge(d.prof)}</td><td>${d.prac}</td><td class="num">${fmt(d.cobrado)}</td><td class="num">${fmt(d.mProf)}</td><td class="num">${fmt(d.centro)}</td></tr>`;
+      if (!porProf[d.prof]) porProf[d.prof] = {cobrado:0, prof:0, centro:0};
+      porProf[d.prof].cobrado += d.cobrado; porProf[d.prof].prof += d.mProf; porProf[d.prof].centro += d.centro;
+    }
+    for (const [pr, x] of Object.entries(porProf).sort((a,b)=> a[0].localeCompare(b[0]))){
+      html += `<tr style="font-weight:700;background:#f0fdfa;color:#0f766e;"><td colspan="2">TOTAL ${pr}</td><td class="num">${fmt(x.cobrado)}</td><td class="num">${fmt(x.prof)}</td><td class="num">${fmt(x.centro)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  } else {
+    html += `<div class="empty">Sin cobros MOPLEX repartibles este mes.</div>`;
+  }
+
+  // ===== Quién recibió la plata (caja real, no liquidación) =====
+  const recibio = {};
+  for (const p of pagos){
+    const quien = normProf(p.quien_cobro) || normProf(p.profesional) || 'PuntoBiO';
+    const medio = String(p.medio_pago||'—').toUpperCase();
+    if (!recibio[quien]) recibio[quien] = {total:0, medios:{}};
+    recibio[quien].total += Number(p.importe)||0;
+    recibio[quien].medios[medio] = (recibio[quien].medios[medio]||0) + (Number(p.importe)||0);
+  }
+  const rKeys = Object.keys(recibio).sort();
+  if (rKeys.length){
+    html += `<h2 class="bloque-tit">💵 Quién recibió la plata MOPLEX (caja real — no es la liquidación)</h2>
+      <table><thead><tr><th>Recibió</th><th>Por medio</th><th class="num">Total</th></tr></thead><tbody>`;
+    for (const q of rKeys){
+      const med = Object.entries(recibio[q].medios).map(([m,v])=> `${m} ${fmt(v)}`).join(' · ');
+      html += `<tr><td>${badge(q)}</td><td>${med}</td><td class="num">${fmt(recibio[q].total)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // ===== Franquicia: lo que el centro le paga a MOPLEX =====
+  const saldos = window._moplexSaldos || {};
+  let moplexPend=0, moplexSald=0;
+  html += `<h2 class="bloque-tit">🦶 MOPLEX (franquicia) — lo que el centro le paga</h2>
+    <p class="bloque-nota">Solo las <b>plantillas</b> pagan a MOPLEX (las evaluaciones no). Marcá <b>pagada</b> cada plantilla a medida que vas arreglando con ellos. Solo cuenta desde junio 2026.</p>`;
+  if (MPX.franquicia.length){
+    html += `<table><thead><tr><th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Tipo</th><th>Descripción</th><th class="num">$ a MOPLEX</th><th>Pago a MOPLEX</th></tr></thead><tbody>`;
+    for (const f of MPX.franquicia){
+      const esPlant = (f.tipo === 'Plantilla' && f.montoMoplex > 0.5);
+      const saldado = !!saldos[f.tratId];
+      if (esPlant){ if (saldado) moplexSald += f.montoMoplex; else moplexPend += f.montoMoplex; }
+      const estadoCell = !esPlant ? '<span style="color:#9ca3af;">—</span>'
+        : (saldado
+          ? `<button class="btn-mini" style="background:#10b981" onclick="toggleMoplexSaldado(${f.tratId}, false)" title="Ya le pagaste esta plantilla a MOPLEX. Clic para deshacer.">✅ Pagado</button>`
+          : `<button class="btn-mini" style="background:#f59e0b" onclick="toggleMoplexSaldado(${f.tratId}, true)" title="Todavía no le pagaste esta plantilla a MOPLEX. Clic cuando la pagues.">⏳ Falta pagar</button>`);
+      html += `<tr><td>${f.fecha||'—'}</td><td>${f.paciente}</td><td>${badge(f.prof)}</td><td>${f.tipo}</td><td>${f.desc}</td>
+        <td class="num">${fmt(f.montoMoplex)}</td><td>${estadoCell}</td></tr>`;
+    }
+    html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td colspan="5">Pendiente de pagar a MOPLEX</td><td class="num">${fmt(moplexPend)}</td><td></td></tr>`;
+    if (moplexSald > 0.5) html += `<tr style="font-weight:700;background:#d1fae5;color:#065f46;"><td colspan="5">Ya saldado con MOPLEX</td><td class="num">${fmt(moplexSald)}</td><td></td></tr>`;
+    html += `</tbody></table>`;
+  } else {
+    html += `<div class="empty">Sin movimientos con la franquicia este mes.</div>`;
+  }
+
+  // ===== Todas las consultas del mes (informativo) =====
+  const cons = window._moplexConsultasMes || [];
+  if (cons.length){
+    html += `<h2 class="bloque-tit">📋 Todas las consultas del mes</h2>
+      <p class="bloque-nota">Por <b>fecha de consulta</b>, estén cobradas o no. Las de $0 y las sin cobrar son <b>informativas</b>: no cambian los totales (esos salen de lo efectivamente cobrado, más arriba).</p>
+      <table><thead><tr><th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Consulta</th><th>Plantilla</th>
+        <th class="num">$ Paciente</th><th class="num">$ Prof</th><th class="num">$ Centro</th><th class="num">$ MOPLEX</th><th>Estado</th></tr></thead><tbody>`;
+    for (const c of cons){
+      const estado = c.gratis ? '<span style="color:#9ca3af;">$0 (no factura)</span>'
+        : (c.cobrado ? '<span style="color:#065f46;font-weight:600;">✅ Cobrada</span>' : '<span style="color:#92400e;font-weight:600;">⏳ Sin cobrar</span>');
+      html += `<tr><td>${c.fecha||'—'}</td><td>${c.paciente}</td><td>${badge(c.prof)}</td>
+        <td>${c.consultaNombre}</td><td>${c.plantillaNombre||'—'}</td>
+        <td class="num">${fmt(c.precio)}</td><td class="num">${fmt(c.prof_monto)}</td>
+        <td class="num">${fmt(c.centro)}</td><td class="num">${fmt(c.moplex)}</td><td>${estado}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  document.getElementById('resultado').innerHTML = html;
+}
+
+// Mes actual por defecto
+(function(){
+  const d = new Date();
+  document.getElementById('mes').value = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  cargar();
+})();
+</script>
+</body>
+</html>
