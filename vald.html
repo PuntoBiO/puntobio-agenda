@@ -1936,6 +1936,31 @@ async function generar() {
       }
       if (documentos.length) toast('📎 Se envían ' + documentos.length + ' documento(s) del paciente a la IA.');
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
+    // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
+    let contexto = null;
+    try {
+      const { data: hcs } = await sb.from('historias_clinicas')
+        .select('*').eq('persona_id', pacienteSel.id).is('fusionada_en', null)
+        .order('completado_en', { ascending: false }).limit(1);
+      const hc = hcs && hcs[0];
+      if (hc) {
+        const ANTEC = [['hipertension','Hipertensión'],['hipotension','Hipotensión'],['anemia','Anemia'],['asma','Asma'],['colesterol_elevado','Colesterol elevado'],['hipotiroidismo','Hipotiroidismo'],['hipertiroidismo','Hipertiroidismo'],['diabetes','Diabetes'],['varices','Várices'],['contracturas','Contracturas'],['taquicardia','Taquicardia'],['problemas_digestivos','Problemas digestivos'],['mujer_partos','Partos'],['incontinencia_urinaria','Incontinencia urinaria'],['mareos','Mareos'],['vertigo','Vértigo'],['depresion','Depresión'],['ansiedad','Ansiedad'],['sueno_irregular','Sueño irregular'],['insomnio','Insomnio'],['usa_vendaje_protesis','Usa vendaje/prótesis'],['usa_plantillas','Usa plantillas'],['cirugias','Cirugías previas']];
+        const conSi = ANTEC.filter(([k]) => hc[k] === true).map(([, l]) => l);
+        const dolor = hc.dolor_motivo_consulta ? ('sí' + (hc.dolor_zona ? ' — zona: ' + hc.dolor_zona : '') + (hc.dolor_desde_cuando ? ' (desde ' + hc.dolor_desde_cuando + ')' : '')) : null;
+        contexto = {
+          motivo: (hc.motivo_consulta || '').trim() || null,
+          objetivo: (hc.objetivo_funcional || '').trim() || null,
+          dolor,
+          contracturas: (hc.contracturas_donde || '').trim() || null,
+          cirugias: (hc.cirugias_descripcion || '').trim() || null,
+          antecedentes: conSi.length ? conSi.join(', ') : null,
+          lado_habil: hc.lado_habil || null,
+          otros: (hc.otros_antecedentes || '').trim() || null,
+        };
+        const algo = Object.values(contexto).some(v => v);
+        if (!algo) contexto = null;
+      }
+    } catch (_) { /* sin HC o sin acceso: sigue sin contexto */ }
     const body = {
       paciente: {
         nombre: pacienteSel.nombre,
@@ -1943,6 +1968,7 @@ async function generar() {
         sexo: sexoPac,
         poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
+        contexto: contexto,
       },
       hallazgos: sinExcluidos,
       calculadoras: calculadoras,
