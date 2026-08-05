@@ -121,15 +121,20 @@ const MOPLEX_FACTURA_DESDE = '2026-06';
 function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_FACTURA_DESDE; }
 
 // Mismas fórmulas que consultas_moplex.html (fuente de verdad del reparto)
-function calcConsultaMoplex(c){
+function calcConsultaMoplex(c, montoCustom){
   if (!c) return null;
-  const precio = Number(c.precio_paciente)||0;
-  const moplex = Number(c.costo_moplex)||0;
+  // Precio corregido/convenio (✏️ de Consultas MOPLEX): manda sobre el catálogo,
+  // con MOPLEX escalado proporcional — misma fórmula que consultas_moplex.html.
+  const precioDef = Number(c.precio_paciente)||0;
+  const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : precioDef;
+  const custom = (Number(montoCustom) > 0) && Number(montoCustom) !== precioDef;
+  const moplexBase = Number(c.costo_moplex)||0;
+  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
   const prof   = Math.round(precio*0.40);
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro };
 }
-function calcPlantillaMoplex(p, rectif, montoCustom){
+function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
   if (!p) return null;
   if (rectif){
     const precio = Number(montoCustom)||0;                          // rectificación: monto custom
@@ -138,8 +143,11 @@ function calcPlantillaMoplex(p, rectif, montoCustom){
     const centro = precio - moplex;                                 // 15%
     return { precio, moplex, prof, centro, rectif:true };
   }
-  const precio = Number(p.precio_paciente)||0;
-  const moplex = Number(p.costo_moplex)||0;
+  const precioDef = Number(p.precio_paciente)||0;
+  const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
+  const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
+  const moplexBase = Number(p.costo_moplex)||0;
+  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
   const prof   = Math.round(precio*0.10);
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro, rectif:false };
@@ -189,8 +197,8 @@ function prepararMoplex(monthPagos){
     const evalItem  = byId[t.moplex_consulta_id];
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
-    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem)          : null;
-    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0) : null;
+    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, Number(t.moplex_consulta_monto)||0) : null;
+    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
     const paciente = (t.personas && t.personas.nombre) || '—';
     const prof     = normProf(p0.profesional);
 
@@ -283,7 +291,8 @@ async function cargar(){
       id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro, tratamiento_id,
       tratamientos!inner (
         id, codigo_id, practica_codigo,
-        moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+        moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
+        moplex_consulta_monto, moplex_plantilla_monto, solicita_plantillas,
         personas ( id, nombre )
       )
     `)
@@ -332,7 +341,8 @@ async function cargar(){
           id, fecha, importe, profesional, tratamiento_id,
           tratamientos (
             id, practica_codigo,
-            moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
+            moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
+            moplex_consulta_monto, moplex_plantilla_monto, solicita_plantillas,
             personas ( id, nombre )
           )
         `)
@@ -349,7 +359,7 @@ async function cargar(){
   window._moplexConsultasMes = [];
   try {
     const { data: mopTtos } = await sb.from('tratamientos')
-      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto')
+      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto')
       .eq('practica_codigo','MOPLEX');
     const ttos = mopTtos || [];
     if (ttos.length){
@@ -389,9 +399,9 @@ async function cargar(){
         const fc = fechaSesion[t.id] || fechaTurno[t.codigo_id] || t.fecha_alta || '';
         if (String(fc).slice(0,7) !== mes) continue;
         const fact = moplexFacturable(fc);
-        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id]) : null;
+        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], Number(t.moplex_consulta_monto)||0) : null;
         const rectif   = !!t.moplex_plantilla_rectif;
-        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0) : null;
+        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
         const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
         const precio = (ev.precio||0) + (pl.precio||0);
         lista.push({

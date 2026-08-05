@@ -93,13 +93,19 @@ function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r
 const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {}, profPorSesion: {}, realizado: {}, mesAbierto: null, fechaSesion: {}, fechaTurno: {} }
 
 // ---- cálculo de reparto ----
-function calcConsulta(c){
+function calcConsulta(c, montoCustom){
   if(!c) return null
-  const precio = Number(c.precio_paciente)||0
-  const moplex = Number(c.costo_moplex)||0
+  // Precio editable (✂️ correcciones / convenios). Por defecto el del catálogo; si Lu lo cambió, ese.
+  const precioDef = Number(c.precio_paciente)||0
+  const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : precioDef
+  const custom = (Number(montoCustom) > 0) && Number(montoCustom) !== precioDef
+  // Con precio corregido el reparto se ajusta proporcional: MOPLEX baja en la misma
+  // proporción que el precio; prof ya es % del precio; centro = resto.
+  const moplexBase = Number(c.costo_moplex)||0
+  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
   const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
-  return { precio, moplex, prof, centro }
+  return { precio, moplex, prof, centro, custom }
 }
 function calcPlantilla(p, rectif, montoCustom, montoPlantilla){
   if(!p) return null
@@ -245,7 +251,15 @@ function filaTto(t){
   const consOpts = state.cat.consultas.map(c =>
     `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}</option>`).join('')
   const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
-  const cMon = montosLine(aplicarFactura(calcConsulta(state.cat.byId[t.moplex_consulta_id]), factura))
+  const consCat = state.cat.byId[t.moplex_consulta_id]
+  const consPrecioDef = consCat ? (Number(consCat.precio_paciente)||0) : 0
+  const consPrecioActual = (Number(t.moplex_consulta_monto) > 0) ? Number(t.moplex_consulta_monto) : consPrecioDef
+  const consEditado = (Number(t.moplex_consulta_monto) > 0) && Number(t.moplex_consulta_monto) !== consPrecioDef
+  const consInput = consCat
+    ? `<div style="margin-top:4px;"><span title="Precio del paciente. Trae el del catálogo; editalo para corregirlo." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${consPrecioActual}" onchange="setConsultaMonto(${t.id}, this.value)" style="width:110px;${consEditado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span></div>`
+    : ''
+  const cRep = aplicarFactura(calcConsulta(consCat, Number(t.moplex_consulta_monto)||0), factura)
+  const cMon = montosLine(cRep) + ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : '')
 
   // --- Plantilla ---
   let plCell
@@ -282,7 +296,7 @@ function filaTto(t){
     <td>${fmtFechaCorta(fechaConsulta(t))}</td>
     <td>${profSel}</td>
     <td><span class="est2 ${estCls}">${estTxt}</span></td>
-    <td>${consSel}${cMon}</td>
+    <td>${consSel}${consInput}${cMon}</td>
     <td class="c">
       <label class="sw">
         <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
@@ -377,9 +391,9 @@ async function setProf(id, val){
 async function setConsulta(id, val){
   const v = val ? Number(val) : null
   try{
-    const { error } = await sb.from('tratamientos').update({ moplex_consulta_id: v }).eq('id', id)
+    const { error } = await sb.from('tratamientos').update({ moplex_consulta_id: v, moplex_consulta_monto: null }).eq('id', id)
     if (error) throw error
-    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_consulta_id = v
+    const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_consulta_id = v; t.moplex_consulta_monto = null }
     render()
   } catch(e){ msg('No se pudo guardar la consulta: ' + (e.message || e), 'err') }
 }
@@ -393,6 +407,16 @@ async function setPlantilla(id, val){
     const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_plantilla_id = v; t.moplex_plantilla_monto = null }
     render()
   } catch(e){ msg('No se pudo guardar la plantilla: ' + (e.message || e), 'err') }
+}
+
+async function setConsultaMonto(id, val){
+  const v = (val === '' || val == null) ? null : Number(val)
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_consulta_monto: v }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_consulta_monto = v
+    render()
+  } catch(e){ msg('No se pudo guardar el precio de la consulta: ' + (e.message || e), 'err') }
 }
 
 async function setPlantillaMonto(id, val){
