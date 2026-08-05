@@ -104,11 +104,15 @@ function calcConsulta(c){
 function calcPlantilla(p, rectif, montoCustom, montoPlantilla){
   if(!p) return null
   if(rectif){
-    const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2)  // editable; por defecto la mitad
+    // El monto es editable; por defecto la mitad del catálogo. UN 0 EXPLÍCITO VALE:
+    // es "rectificación sin cargo" (MOPLEX no cobra nada) — caso Susana Ruggeri 5/8/26.
+    // Solo el campo VACÍO cae al valor por defecto.
+    const tieneMonto = (montoCustom !== null && montoCustom !== undefined && montoCustom !== '' && !isNaN(Number(montoCustom)))
+    const precio = tieneMonto ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2)
     const moplex = Math.round(precio*0.85)
     const prof   = 0
     const centro = precio - moplex                                // 15%
-    return { precio, moplex, prof, centro, rectif:true }
+    return { precio, moplex, prof, centro, rectif:true, sinCargo: tieneMonto && precio === 0 }
   }
   // Nueva: precio editable (convenios MOPLEX). Por defecto el del catálogo; si Lu lo cambió, ese.
   const precioDef = Number(p.precio_paciente)||0
@@ -257,12 +261,13 @@ function filaTto(t){
     const editado = (Number(t.moplex_plantilla_monto) > 0) && Number(t.moplex_plantilla_monto) !== precioDef
     let extraInput = ''
     if (rectif){
-      extraInput = `<input class="sel sel-sm" type="number" step="100" min="0" placeholder="monto MOPLEX" value="${t.moplex_rectif_monto || ''}" onchange="setRectifMonto(${t.id}, this.value)" title="Monto que indica MOPLEX para la rectificación" style="width:130px;">`
+      extraInput = `<input class="sel sel-sm" type="number" step="100" min="0" placeholder="monto MOPLEX" value="${(t.moplex_rectif_monto === null || t.moplex_rectif_monto === undefined) ? '' : t.moplex_rectif_monto}" onchange="setRectifMonto(${t.id}, this.value)" title="Monto que indica MOPLEX para la rectificación" style="width:130px;">`
     } else if (plCat){
       // Precio del paciente editable (convenios MOPLEX). Trae por defecto el del catálogo.
       extraInput = `<span title="Precio del paciente. Trae el del catálogo; editalo si hay convenio MOPLEX." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${precioActual}" onchange="setPlantillaMonto(${t.id}, this.value)" style="width:110px;${editado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span>`
     }
-    const pMon = montosLine(aplicarFactura(calcPlantilla(plCat, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0), factura))
+    const pRep = aplicarFactura(calcPlantilla(plCat, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0), factura)
+    const pMon = montosLine(pRep) + ((pRep && pRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 rectificación sin cargo (MOPLEX no cobra)</div>` : '')
     const convChip = (!rectif && editado) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio de convenio (catálogo ${fmt(precioDef)})</div>` : ''
     plCell = `<div class="plrow">${plSel} ${rectSel} ${extraInput}</div>${pMon}${convChip}<div class="muted">cobra ${prof || '—'}</div>`
   } else {
