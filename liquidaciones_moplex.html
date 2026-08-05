@@ -50,7 +50,27 @@
   <div class="controls">
     <div class="control-group">
       <label>Mes</label>
-      <input type="month" id="mes">
+      <select id="selMes">
+        <option value="01">Enero</option><option value="02">Febrero</option><option value="03">Marzo</option>
+        <option value="04">Abril</option><option value="05">Mayo</option><option value="06">Junio</option>
+        <option value="07">Julio</option><option value="08">Agosto</option><option value="09">Septiembre</option>
+        <option value="10">Octubre</option><option value="11">Noviembre</option><option value="12">Diciembre</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label>Año</label>
+      <select id="selAnio"></select>
+    </div>
+    <div class="control-group">
+      <label>Profesional</label>
+      <select id="filtroProf" onchange="if(window._ultimosPagos) render(window._ultimosPagos)">
+        <option value="">Todos</option>
+        <option value="Bruno">Bruno</option>
+        <option value="Male">Male</option>
+        <option value="Lu">Lu</option>
+        <option value="Jime">Jime</option>
+        <option value="Vero">Vero</option>
+      </select>
     </div>
     <button class="btn" onclick="cargar()">Recalcular</button>
   </div>
@@ -250,8 +270,7 @@ async function toggleMoplexSaldado(tratId, val){
 
 // ================= CARGA =================
 async function cargar(){
-  const mes = document.getElementById('mes').value;
-  if (!mes) { alert('Elegí un mes'); return; }
+  const mes = document.getElementById('selAnio').value + '-' + document.getElementById('selMes').value;
   document.getElementById('resultado').innerHTML = '<div class="loading">⏳ Cargando cobros MOPLEX...</div>';
 
   const [year, month] = mes.split('-');
@@ -404,21 +423,31 @@ async function cargar(){
 
 // ================= RENDER =================
 function render(pagos){
+  window._ultimosPagos = pagos;
   const MPX = prepararMoplex(pagos);
+  const fProf = document.getElementById('filtroProf').value;
+  const deProf = (nombre) => !fProf || normProf(nombre) === fProf;
+  // Vista filtrada por profesional (el que ATENDIÓ). El reparto se calcula
+  // siempre sobre todos los pagos para que los presupuestos por tratamiento
+  // no se rompan; el filtro solo recorta lo que se muestra y se suma.
+  const pagosVista = pagos.filter(p => deProf(p.profesional));
+  const franqVista = MPX.franquicia.filter(f => deProf(f.prof));
   let html = '';
 
-  // Totales del mes (sobre lo efectivamente cobrado)
-  let totalBruto=0, totalProf=0, totalCentro=0, totalMoplex=MPX.totalMoplex||0;
-  for (const p of pagos){
+  // Totales del mes (sobre lo efectivamente cobrado, de la vista)
+  let totalBruto=0, totalProf=0, totalCentro=0;
+  for (const p of pagosVista){
     totalBruto  += Number(p.importe)||0;
     totalProf   += Number(p.monto_profesional)||0;
     totalCentro += Number(p.monto_centro)||0;
   }
+  const totalMoplex = franqVista.reduce((s,f)=> s + (f.tipo==='Plantilla' ? (Number(f.montoMoplex)||0) : 0), 0);
 
   // Aviso: cobros sin tipo asignado
-  if (MPX.sinTipo.length > 0){
-    html += `<div class="aviso"><b>⚠️ ${MPX.sinTipo.length} cobro${MPX.sinTipo.length>1?'s':''} MOPLEX sin tipo asignado</b> — no se pueden repartir bien:`;
-    for (const s of MPX.sinTipo){
+  const sinTipoVista = MPX.sinTipo.filter(s => deProf(s.prof));
+  if (sinTipoVista.length > 0){
+    html += `<div class="aviso"><b>⚠️ ${sinTipoVista.length} cobro${sinTipoVista.length>1?'s':''} MOPLEX sin tipo asignado</b> — no se pueden repartir bien:`;
+    for (const s of sinTipoVista){
       html += `<div style="margin-top:4px;"><b>${s.paciente}</b> (${s.fecha}) — ${fmt(s.importe)}. Asigná la consulta/plantilla en <b>Consultas MOPLEX</b> y recalculá.</div>`;
     }
     html += `</div>`;
@@ -432,7 +461,7 @@ function render(pagos){
   </div>`;
 
   // ===== Por profesional (lo que le corresponde por eval/plantilla) =====
-  const items = Object.values(MPX.detalle).sort((a,b)=> a.prof.localeCompare(b.prof) || a.prac.localeCompare(b.prac));
+  const items = Object.values(MPX.detalle).filter(d => deProf(d.prof)).sort((a,b)=> a.prof.localeCompare(b.prof) || a.prac.localeCompare(b.prac));
   html += `<h2 class="bloque-tit">👤 Por profesional — lo que le corresponde de MOPLEX</h2>
     <p class="bloque-nota">Reparto del catálogo sobre lo efectivamente cobrado (evaluación 40% al profesional · plantilla 10% · rectificación 0%). Este monto <b>no está más adentro de Liquidaciones general</b>: se salda por acá.</p>`;
   if (items.length){
@@ -453,7 +482,7 @@ function render(pagos){
 
   // ===== Quién recibió la plata (caja real, no liquidación) =====
   const recibio = {};
-  for (const p of pagos){
+  for (const p of pagosVista){
     const quien = normProf(p.quien_cobro) || normProf(p.profesional) || 'PuntoBiO';
     const medio = String(p.medio_pago||'—').toUpperCase();
     if (!recibio[quien]) recibio[quien] = {total:0, medios:{}};
@@ -476,9 +505,9 @@ function render(pagos){
   let moplexPend=0, moplexSald=0;
   html += `<h2 class="bloque-tit">🦶 MOPLEX (franquicia) — lo que el centro le paga</h2>
     <p class="bloque-nota">Solo las <b>plantillas</b> pagan a MOPLEX (las evaluaciones no). Marcá <b>pagada</b> cada plantilla a medida que vas arreglando con ellos. Solo cuenta desde junio 2026.</p>`;
-  if (MPX.franquicia.length){
+  if (franqVista.length){
     html += `<table><thead><tr><th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Tipo</th><th>Descripción</th><th class="num">$ a MOPLEX</th><th>Pago a MOPLEX</th></tr></thead><tbody>`;
-    for (const f of MPX.franquicia){
+    for (const f of franqVista){
       const esPlant = (f.tipo === 'Plantilla' && f.montoMoplex > 0.5);
       const saldado = !!saldos[f.tratId];
       if (esPlant){ if (saldado) moplexSald += f.montoMoplex; else moplexPend += f.montoMoplex; }
@@ -497,7 +526,7 @@ function render(pagos){
   }
 
   // ===== Todas las consultas del mes (informativo) =====
-  const cons = window._moplexConsultasMes || [];
+  const cons = (window._moplexConsultasMes || []).filter(c => deProf(c.prof));
   if (cons.length){
     html += `<h2 class="bloque-tit">📋 Todas las consultas del mes</h2>
       <p class="bloque-nota">Por <b>fecha de consulta</b>, estén cobradas o no. Las de $0 y las sin cobrar son <b>informativas</b>: no cambian los totales (esos salen de lo efectivamente cobrado, más arriba).</p>
@@ -517,10 +546,16 @@ function render(pagos){
   document.getElementById('resultado').innerHTML = html;
 }
 
-// Mes actual por defecto
+// Mes/año actual por defecto
 (function(){
   const d = new Date();
-  document.getElementById('mes').value = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  const selA = document.getElementById('selAnio');
+  for (let y = 2025; y <= d.getFullYear() + 1; y++){
+    const o = document.createElement('option'); o.value = String(y); o.textContent = String(y);
+    if (y === d.getFullYear()) o.selected = true;
+    selA.appendChild(o);
+  }
+  document.getElementById('selMes').value = String(d.getMonth()+1).padStart(2,'0');
   cargar();
 })();
 </script>
