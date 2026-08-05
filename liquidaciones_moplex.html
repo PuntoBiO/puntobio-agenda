@@ -68,11 +68,11 @@
         <option value="Bruno">Bruno</option>
         <option value="Male">Male</option>
         <option value="Lu">Lu</option>
-        <option value="Jime">Jime</option>
-        <option value="Vero">Vero</option>
+        <option value="MOPLEX">🦶 MOPLEX (franquicia)</option>
       </select>
     </div>
     <button class="btn" onclick="cargar()">Recalcular</button>
+    <button class="btn" style="background:#25D366;" onclick="enviarWhatsAppLiq()" title="Arma el mensaje de la liquidación según la vista actual (profesional elegido, franquicia o todos) y lo abre en WhatsApp para mandarlo al chat que elijas.">📲 Enviar por WhatsApp</button>
   </div>
 
   <div id="resultado"><div class="loading">Elegí un mes y tocá Recalcular.</div></div>
@@ -446,7 +446,11 @@ function render(pagos){
   window._ultimosPagos = pagos;
   const MPX = prepararMoplex(pagos);
   const fProf = document.getElementById('filtroProf').value;
-  const deProf = (nombre) => !fProf || normProf(nombre) === fProf;
+  // Modo MOPLEX (franquicia): la pantalla se enfoca en LO QUE HAY QUE PAGARLE a la
+  // franquicia — tarjetas de pendiente/saldado y la tabla completa, sin los bloques
+  // por profesional.
+  const esFranq = (fProf === 'MOPLEX');
+  const deProf = (nombre) => esFranq || !fProf || normProf(nombre) === fProf;
   // Vista filtrada por profesional (el que ATENDIÓ). El reparto se calcula
   // siempre sobre todos los pagos para que los presupuestos por tratamiento
   // no se rompan; el filtro solo recorta lo que se muestra y se suma.
@@ -473,14 +477,35 @@ function render(pagos){
     html += `</div>`;
   }
 
-  html += `<div class="cards">
+  const mesLabel = (document.getElementById('selMes').selectedOptions[0] || {}).textContent + ' ' + document.getElementById('selAnio').value;
+  if (esFranq){
+    const saldosPre = window._moplexSaldos || {};
+    let fPend = 0, fSald = 0;
+    let waF = `🦶 Liquidación MOPLEX (franquicia) — ${mesLabel}\n\n`;
+    for (const f of franqVista){
+      if ((f.montoMoplex||0) <= 0.5) continue;
+      const arr = !!saldosPre[f.tratId];
+      if (arr) fSald += f.montoMoplex; else fPend += f.montoMoplex;
+      waF += `• ${f.fecha||''} ${f.paciente} · ${f.tipo} ${f.desc} — ${fmt(f.montoMoplex)}${arr ? ' ✅ arreglado' : ' ⏳ falta'}\n`;
+    }
+    waF += `\n⏳ Falta arreglar: ${fmt(fPend)}\n✅ Ya arreglado: ${fmt(fSald)}\n🦶 Total a MOPLEX del mes: ${fmt(totalMoplex)}\n\nPuntoBiO`;
+    window._waMensaje = waF;
+    html += `<div class="cards" style="grid-template-columns:repeat(3,1fr);">
+      <div class="card moplex"><div class="card-label">Total a MOPLEX este mes</div><div class="card-value">${fmt(totalMoplex)}</div></div>
+      <div class="card prof"><div class="card-label">⏳ Falta arreglar</div><div class="card-value">${fmt(fPend)}</div></div>
+      <div class="card centro"><div class="card-label">✅ Ya arreglado</div><div class="card-value">${fmt(fSald)}</div></div>
+    </div>`;
+  } else {
+    html += `<div class="cards">
     <div class="card bruto"><div class="card-label">Total cobrado MOPLEX</div><div class="card-value">${fmt(totalBruto)}</div></div>
     <div class="card prof"><div class="card-label">A profesionales</div><div class="card-value">${fmt(totalProf)}</div></div>
     <div class="card moplex"><div class="card-label">A MOPLEX (franquicia)</div><div class="card-value">${fmt(totalMoplex)}</div></div>
     <div class="card centro"><div class="card-label">Queda en PuntoBiO</div><div class="card-value">${fmt(totalCentro)}</div></div>
   </div>`;
+  }
 
-  // ===== Por profesional (lo que le corresponde por eval/plantilla) =====
+  // ===== Por profesional (lo que le corresponde por eval/plantilla) ===== (oculto en modo franquicia)
+  if (!esFranq){
   const items = Object.values(MPX.detalle).filter(d => deProf(d.prof)).sort((a,b)=> a.prof.localeCompare(b.prof) || a.prac.localeCompare(b.prac));
   html += `<h2 class="bloque-tit">👤 Por profesional — lo que le corresponde de MOPLEX</h2>
     <p class="bloque-nota">Reparto del catálogo sobre lo efectivamente cobrado (evaluación 40% al profesional · plantilla 10% · rectificación 0%). Este monto <b>no está más adentro de Liquidaciones general</b>: se salda por acá.</p>`;
@@ -496,11 +521,29 @@ function render(pagos){
       html += `<tr style="font-weight:700;background:#f0fdfa;color:#0f766e;"><td colspan="2">TOTAL ${pr}</td><td class="num">${fmt(x.cobrado)}</td><td class="num">${fmt(x.prof)}</td><td class="num">${fmt(x.centro)}</td></tr>`;
     }
     html += `</tbody></table>`;
+    // Mensaje de WhatsApp según la vista: un profesional o el resumen general
+    if (fProf){
+      let waP = `🦶 Liquidación MOPLEX — ${mesLabel}\nProfesional: ${fProf}\n\n`;
+      for (const d of items) waP += `• ${d.prac}: cobrado ${fmt(d.cobrado)} → te corresponde ${fmt(d.mProf)}\n`;
+      const tp = porProf[fProf] || {cobrado:0, prof:0, centro:0};
+      waP += `\n💰 Total que te corresponde: ${fmt(tp.prof)}\n(Total cobrado ${fmt(tp.cobrado)} · queda en PuntoBiO ${fmt(tp.centro)})\n\nPuntoBiO`;
+      window._waMensaje = waP;
+    } else {
+      let waT = `🦶 Liquidación MOPLEX — ${mesLabel}\n\n`;
+      for (const [pr, x] of Object.entries(porProf).sort((a,b)=> a[0].localeCompare(b[0]))){
+        waT += `• ${pr}: cobrado ${fmt(x.cobrado)} → le corresponde ${fmt(x.prof)}\n`;
+      }
+      waT += `\nTotal cobrado: ${fmt(totalBruto)}\nA profesionales: ${fmt(totalProf)}\nA MOPLEX (franquicia): ${fmt(totalMoplex)}\nQueda en PuntoBiO: ${fmt(totalCentro)}\n\nPuntoBiO`;
+      window._waMensaje = waT;
+    }
   } else {
     html += `<div class="empty">Sin cobros MOPLEX repartibles este mes.</div>`;
   }
 
-  // ===== Quién recibió la plata (caja real, no liquidación) =====
+  } // fin bloques por profesional (no franquicia)
+
+  // ===== Quién recibió la plata (caja real, no liquidación) ===== (oculto en modo franquicia)
+  if (!esFranq){
   const recibio = {};
   for (const p of pagosVista){
     const quien = normProf(p.quien_cobro) || normProf(p.profesional) || 'PuntoBiO';
@@ -520,33 +563,46 @@ function render(pagos){
     html += `</tbody></table>`;
   }
 
+  } // fin quién recibió (no franquicia)
+
   // ===== Franquicia: lo que el centro le paga a MOPLEX =====
+  // Con un profesional elegido NO se muestra (es plata del centro con la franquicia,
+  // no de la liquidación del profesional). Se ve en "Todos" y en el modo MOPLEX.
+  if (!fProf || esFranq){
   const saldos = window._moplexSaldos || {};
   let moplexPend=0, moplexSald=0;
   html += `<h2 class="bloque-tit">🦶 MOPLEX (franquicia) — lo que el centro le paga</h2>
-    <p class="bloque-nota">Las <b>plantillas</b> pagan siempre a MOPLEX; las <b>evaluaciones</b> pagan el <b>20%</b> desde agosto 2026 (antes $0). Marcá <b>pagada</b> cada línea a medida que vas arreglando con ellos. Solo cuenta desde junio 2026.</p>`;
+    <p class="bloque-nota">Las <b>plantillas</b> pagan siempre a MOPLEX; las <b>evaluaciones</b> pagan el <b>20%</b> desde agosto 2026 (antes $0). Marcá <b>Arreglado</b> cada línea a medida que vas arreglando con ellos. Solo cuenta desde junio 2026.</p>
+    <label style="display:inline-flex;align-items:center;gap:8px;margin:0 0 10px;padding:8px 14px;background:${window._soloFalta ? '#fef3c7' : '#fff'};border:1px solid ${window._soloFalta ? '#f59e0b' : '#e5e7eb'};border-radius:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:#92400e;">
+      <input type="checkbox" ${window._soloFalta ? 'checked' : ''} onchange="window._soloFalta=this.checked; render(window._ultimosPagos)" style="width:16px;height:16px;cursor:pointer;">
+      ⏳ Ver solo lo que falta arreglar con MOPLEX
+    </label>`;
   if (franqVista.length){
     html += `<table><thead><tr><th>Fecha</th><th>Paciente</th><th>Profesional</th><th>Tipo</th><th>Descripción</th><th class="num">$ a MOPLEX</th><th>Pago a MOPLEX</th></tr></thead><tbody>`;
     for (const f of franqVista){
       const esPagable = (f.montoMoplex > 0.5);
       const saldado = !!saldos[f.tratId];
       if (esPagable){ if (saldado) moplexSald += f.montoMoplex; else moplexPend += f.montoMoplex; }
+      // Filtro "solo lo que falta arreglar": oculta lo ya arreglado y las líneas sin monto.
+      if (window._soloFalta && (!esPagable || saldado)) continue;
       const estadoCell = !esPagable ? '<span style="color:#9ca3af;">—</span>'
         : (saldado
-          ? `<button class="btn-mini" style="background:#10b981" onclick="toggleMoplexSaldado(${f.tratId}, false)" title="Ya le pagaste esta línea a MOPLEX. Clic para deshacer.">✅ Pagado</button>`
-          : `<button class="btn-mini" style="background:#f59e0b" onclick="toggleMoplexSaldado(${f.tratId}, true)" title="Todavía no le pagaste esta línea a MOPLEX. Clic cuando la pagues.">⏳ Falta pagar</button>`);
+          ? `<button class="btn-mini" style="background:#10b981" onclick="toggleMoplexSaldado(${f.tratId}, false)" title="Ya arreglaste esta línea con MOPLEX. Clic para deshacer.">✅ Arreglado</button>`
+          : `<button class="btn-mini" style="background:#f59e0b" onclick="toggleMoplexSaldado(${f.tratId}, true)" title="Todavía no arreglaste esta línea con MOPLEX. Clic cuando la arregles.">⏳ Falta arreglar</button>`);
       html += `<tr><td>${f.fecha||'—'}</td><td>${f.paciente}</td><td>${badge(f.prof)}</td><td>${f.tipo}</td><td>${f.desc}</td>
         <td class="num">${fmt(f.montoMoplex)}</td><td>${estadoCell}</td></tr>`;
     }
-    html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td colspan="5">Pendiente de pagar a MOPLEX</td><td class="num">${fmt(moplexPend)}</td><td></td></tr>`;
-    if (moplexSald > 0.5) html += `<tr style="font-weight:700;background:#d1fae5;color:#065f46;"><td colspan="5">Ya saldado con MOPLEX</td><td class="num">${fmt(moplexSald)}</td><td></td></tr>`;
+    html += `<tr style="font-weight:700;background:#fef3c7;color:#92400e;"><td colspan="5">⏳ Falta arreglar con MOPLEX</td><td class="num">${fmt(moplexPend)}</td><td></td></tr>`;
+    if (moplexSald > 0.5) html += `<tr style="font-weight:700;background:#d1fae5;color:#065f46;"><td colspan="5">✅ Ya arreglado con MOPLEX</td><td class="num">${fmt(moplexSald)}</td><td></td></tr>`;
     html += `</tbody></table>`;
   } else {
     html += `<div class="empty">Sin movimientos con la franquicia este mes.</div>`;
   }
 
-  // ===== Todas las consultas del mes (informativo) =====
-  const cons = (window._moplexConsultasMes || []).filter(c => deProf(c.prof));
+  } // fin franquicia (solo Todos o modo MOPLEX)
+
+  // ===== Todas las consultas del mes (informativo) ===== (oculto en modo franquicia)
+  const cons = esFranq ? [] : (window._moplexConsultasMes || []).filter(c => deProf(c.prof));
   if (cons.length){
     html += `<h2 class="bloque-tit">📋 Todas las consultas del mes</h2>
       <p class="bloque-nota">Por <b>fecha de consulta</b>, estén cobradas o no. Las de $0 y las sin cobrar son <b>informativas</b>: no cambian los totales (esos salen de lo efectivamente cobrado, más arriba).</p>
@@ -564,6 +620,13 @@ function render(pagos){
   }
 
   document.getElementById('resultado').innerHTML = html;
+}
+
+// Abre WhatsApp con el mensaje de la liquidación armado en el último render.
+// Sin número fijo: WhatsApp te deja elegir el chat (Bruno, Male, el grupo, MOPLEX...).
+function enviarWhatsAppLiq(){
+  if (!window._waMensaje){ alert('Primero recalculá la liquidación.'); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(window._waMensaje), '_blank');
 }
 
 // Mes/año actual por defecto
