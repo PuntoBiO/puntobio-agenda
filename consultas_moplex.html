@@ -93,16 +93,28 @@ function msg(t, tipo){ const r=$('msg'); r.className='res show '+(tipo||'ok'); r
 const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], byId: {} }, profPorTto: {}, profPorSesion: {}, realizado: {}, mesAbierto: null, fechaSesion: {}, fechaTurno: {} }
 
 // ---- cálculo de reparto ----
-function calcConsulta(c, montoCustom){
+// Desde el 1/8/2026 MOPLEX cobra el 20% de la CONSULTA (antes las consultas iban $0
+// a la franquicia; solo pagaban las plantillas). Corte por FECHA DE LA CONSULTA:
+// julio 2026 para atrás no se toca. Excepciones que siguen en $0: garantía (precio 0)
+// y rectificación sin cargo.
+const MOPLEX_PCT_CONSULTA = 0.20
+const MOPLEX_PCT_CONSULTA_DESDE = '2026-08'
+function calcConsulta(c, montoCustom, fechaC){
   if(!c) return null
   // Precio editable (✂️ correcciones / convenios). Por defecto el del catálogo; si Lu lo cambió, ese.
   const precioDef = Number(c.precio_paciente)||0
   const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : precioDef
   const custom = (Number(montoCustom) > 0) && Number(montoCustom) !== precioDef
-  // Con precio corregido el reparto se ajusta proporcional: MOPLEX baja en la misma
-  // proporción que el precio; prof ya es % del precio; centro = resto.
-  const moplexBase = Number(c.costo_moplex)||0
-  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+  const cobraMoplex = ((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE
+  let moplex
+  if (cobraMoplex){
+    // 20% del precio (proporcional: si el precio está corregido, el 20% se corrige con él)
+    moplex = Math.round(precio * MOPLEX_PCT_CONSULTA)
+  } else {
+    // Regla vieja: costo fijo del catálogo (hoy $0 para consultas), escalado si hay convenio
+    const moplexBase = Number(c.costo_moplex)||0
+    moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+  }
   const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
   return { precio, moplex, prof, centro, custom }
@@ -258,7 +270,7 @@ function filaTto(t){
   const consInput = consCat
     ? `<div style="margin-top:4px;"><span title="Precio del paciente. Trae el del catálogo; editalo para corregirlo." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${consPrecioActual}" onchange="setConsultaMonto(${t.id}, this.value)" style="width:110px;${consEditado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span></div>`
     : ''
-  const cRep = aplicarFactura(calcConsulta(consCat, Number(t.moplex_consulta_monto)||0), factura)
+  const cRep = aplicarFactura(calcConsulta(consCat, Number(t.moplex_consulta_monto)||0, fechaConsulta(t)), factura)
   const cMon = montosLine(cRep) + ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : '')
 
   // --- Plantilla ---
