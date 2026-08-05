@@ -139,7 +139,14 @@ function calcConsultaMoplex(c, montoCustom, fechaC){
   const precioDef = Number(c.precio_paciente)||0;
   const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : precioDef;
   const custom = (Number(montoCustom) > 0) && Number(montoCustom) !== precioDef;
-  const cobraMoplex = ((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE;
+  // DOBLE CONDICIÓN (fix 5/8 noche, careo contra julio): el 20% aplica solo si
+  // la CONSULTA es de agosto en adelante Y el MES QUE SE LIQUIDA es agosto en
+  // adelante. Sin la segunda pata, consultas de agosto PAGADAS en julio (Arias,
+  // Costa) le metían el 20% a la liquidación de julio ($84.862 → $95.062) — y
+  // julio es intocable.
+  const mesVista = String(window._moplexDesde || '').slice(0,7);
+  const cobraMoplex = (((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE)
+                   && (!mesVista || mesVista >= MOPLEX_PCT_CONSULTA_DESDE);
   let moplex;
   if (cobraMoplex){
     moplex = Math.round(precio * MOPLEX_PCT_CONSULTA);
@@ -265,8 +272,10 @@ function prepararMoplex(monthPagos){
       const k = prof + '||' + lbl;
       if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0};
       out.detalle[k].cobrado += evalCob; out.detalle[k].mProf += evalProf; out.detalle[k].centro += evalCentro;
-      out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Evaluación', desc:(evalItem&&evalItem.nombre)||'', montoMoplex:evalMoplex });
-      out.totalMoplex += evalMoplex;
+      // Las evaluaciones NO empujan línea de franquicia acá: la deuda con MOPLEX
+      // por evaluaciones nace de la CONSULTA REALIZADA (regla del 5/8, caso Manuel
+      // Arias: hizo el control el 3/8 con la plata entrada en julio → MOPLEX cobra
+      // igual). Se arma en render() desde las consultas del mes.
     }
     if (plantCob > 0.5){
       const lbl = 'Plantilla — ' + ((rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''));
@@ -480,7 +489,17 @@ function render(pagos){
   // siempre sobre todos los pagos para que los presupuestos por tratamiento
   // no se rompan; el filtro solo recorta lo que se muestra y se suma.
   const pagosVista = pagos.filter(p => deProf(p.profesional));
-  const franqVista = MPX.franquicia.filter(f => deProf(f.prof));
+  // Franquicia = plantillas (por cobro, como siempre) + evaluaciones POR CONSULTA
+  // REALIZADA del mes (>= agosto 2026), estén cobradas o no y sin importar en qué
+  // mes entró la plata. Las futuras (turno aún no realizado) no deben todavía.
+  const hoyStr = new Date().toISOString().slice(0, 10);
+  const evalFranq = (window._moplexConsultasMes || [])
+    .filter(c => c.ev && c.ev.moplex > 0.5 && String(c.fecha || '') <= hoyStr)
+    .map(c => ({ tratId: c.tratId, fecha: c.fecha, paciente: c.paciente, prof: c.prof,
+                 tipo: 'Evaluación', desc: c.consultaNombre, montoMoplex: c.ev.moplex }));
+  const franquiciaAll = MPX.franquicia.concat(evalFranq)
+    .sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || a.paciente.localeCompare(b.paciente));
+  const franqVista = franquiciaAll.filter(f => deProf(f.prof));
   let html = '';
 
   // Totales del mes (sobre lo efectivamente cobrado, de la vista)
