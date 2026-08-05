@@ -4458,6 +4458,29 @@ window.confirmarCambioPlan = async () => {
       });
     } catch (eh) { console.warn('No se pudo guardar el histórico de cambio de plan', eh); }
 
+    // CIERRE de mes bonificado (caso Guillermo Swoboda 5/8): si el plan VIEJO era
+    // bonificado (~BON), el mes anterior al arranque del plan nuevo corrió sin cuota.
+    // Sin este cierre, cuando el efectivizador pisa el plan, fn_estado_cuenta evalúa
+    // ese mes con el plan PAGO actual y fabrica una deuda fantasma retroactiva.
+    // Idempotente: no repite el cierre si ese mes ya lo tiene.
+    if (/BON/i.test(i.plan || '') && planNuevo !== i.plan) {
+      const [_by, _bm] = String(mesQueViene).split('-').map(Number);
+      const _dPrev = new Date(_by, _bm - 2, 1); // mes anterior al arranque
+      const mesCierreBON = `${_dPrev.getFullYear()}-${String(_dPrev.getMonth() + 1).padStart(2, '0')}`;
+      const yaCerradoBON = (pagosPorInsc[i.id] || []).some(pg =>
+        pg.mes_imputado === mesCierreBON && pg.tipo_cobro === 'CORTESIA' &&
+        /CIERRE mes bonificado/i.test(pg.observaciones || ''));
+      if (!yaCerradoBON) {
+        const { error: eBON } = await sb.from('pagos_tf').insert({
+          inscripcion_id: i.id, mes_imputado: mesCierreBON, fecha: HOY.toISOString().split('T')[0],
+          importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+          observaciones: `CIERRE mes bonificado por cambio de plan (${i.plan}→${planNuevo}) · sin cuota ese mes`,
+          cargado_por: usuarioId
+        });
+        if (eBON) console.warn('No se pudo cerrar el mes bonificado:', eBON.message);
+      }
+    }
+
     // dejamos al alumno "al día" del mes actual con un ajuste en $0 (CORTESIA).
     // El sistema considera moroso a quien NO tiene pago del mes actual; este registro
     // lo saca de morosos sin cobrar plata. Es idempotente: si ya existe uno igual, no duplica.

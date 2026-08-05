@@ -138,6 +138,13 @@
       <div class="form-group"><label>Importe a cobrar</label><input type="number" id="cobrarImporte" step="500" min="0"><div class="form-hint" id="cobrarHint"></div></div>
       <div class="form-group"><label>Mes a imputar</label><select id="cobrarMesImputado"></select></div>
       <div class="form-group"><label>Medio de pago</label><select id="cobrarMedio"><option value="EFECTIVO">Efectivo</option><option value="TRANSFERENCIA" selected>Transferencia</option><option value="DEBITO">Débito</option></select></div>
+      <div id="cobrarSaldoCambioBox" style="display:none;margin:0 0 12px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#78350f;">
+          <input type="checkbox" id="cobrarSumarSaldoCambio" checked style="width:16px;height:16px;cursor:pointer;">
+          <span>➕ Sumar el <b id="cobrarSaldoCambioEtiqueta">saldo por cambio</b> (<span id="cobrarSaldoCambioMonto"></span>)</span>
+        </label>
+        <div id="cobrarSaldoCambioTotal" style="margin-top:6px;font-size:13px;font-weight:700;color:#166534;"></div>
+      </div>
       <div class="form-group" style="background:#fef3c7;border:1px solid #d97706;border-radius:8px;padding:10px 12px;">
         <label style="display:flex;align-items:center;gap:8px;color:#92400e;cursor:pointer;font-weight:600;">
           <input type="checkbox" id="cobrarParcial" style="width:16px;height:16px;cursor:pointer;" onchange="togglePagoParcial()">
@@ -638,6 +645,43 @@
     navigator.clipboard.writeText(msg).then(() => mostrarToast('✓ Mensaje copiado al portapapeles')).catch(() => prompt('Copiá este mensaje:', msg));
   };
 
+  // ===== SALDO POR CAMBIO (espejo de administracion_terapia_fisica.html) =====
+  // Lee el saldo pendiente por cambio (fecha y/o plan) guardado en la inscripción.
+  // Tag: [DEUDA_CAMBIO importe=NNN concepto=puente_fecha|proporcional_plan|mixto mes=YYYY-MM venc=X->Y det=PLAN->PLAN]
+  function deudaCambioDe(inscripcion) {
+    if (!inscripcion || !inscripcion.observaciones) return null;
+    const m = inscripcion.observaciones.match(/\[DEUDA_CAMBIO\s+([^\]]*)\]/);
+    if (!m) return null;
+    const d = { importe: 0, mes: mesActual, venc: '', concepto: 'puente_fecha', det: '' };
+    m[1].split(/\s+/).forEach(tok => {
+      const eq = tok.indexOf('=');
+      if (eq < 1) return;
+      const k = tok.slice(0, eq), v = tok.slice(eq + 1);
+      if (k === 'importe') d.importe = parseInt(v, 10) || 0;
+      else if (k === 'mes' && v) d.mes = v;
+      else if (k === 'venc') d.venc = v;
+      else if (k === 'concepto' && v) d.concepto = v;
+      else if (k === 'det') d.det = v;
+    });
+    return d.importe > 0 ? d : null;
+  }
+  function etiquetaSaldoCambio(d) {
+    if (!d) return 'saldo por cambio';
+    if (d.concepto === 'proporcional_plan') return 'proporcional por cambio de plan';
+    if (d.concepto === 'mixto') return 'proporcional por cambio de plan + fecha';
+    return 'prorrateo por cambio de fecha';
+  }
+  function actualizarTotalSaldoCambio() {
+    const box = $('cobrarSaldoCambioBox');
+    if (!box || box.style.display === 'none' || !inscripcionEnAccion) return;
+    const d = deudaCambioDe(inscripcionEnAccion);
+    const sumar = $('cobrarSumarSaldoCambio').checked;
+    const cuota = Number($('cobrarImporte').value || 0);
+    $('cobrarSaldoCambioTotal').textContent = (sumar && d)
+      ? `Total a cobrar: ${fmt(cuota + d.importe)}  (cuota ${fmt(cuota)} + saldo ${fmt(d.importe)})`
+      : `Total a cobrar: ${fmt(cuota)}  (solo cuota — el saldo queda pendiente)`;
+  }
+
   window.abrirCobro = function(inscripcionId) {
     const c = window._morososCache[inscripcionId];
     if (!c) return;
@@ -673,6 +717,20 @@
     $('cobrarSaldoPendiente').value = '';
     $('cobrarParcialBox').style.display = 'none';
     $('cobrarParcialHint').textContent = '';
+    // Saldo pendiente por cambio de plan/fecha: si lo hay, ofrecer cobrarlo JUNTO.
+    const _dCambio = deudaCambioDe(c);
+    if (_dCambio) {
+      $('cobrarSaldoCambioEtiqueta').textContent = etiquetaSaldoCambio(_dCambio);
+      $('cobrarSaldoCambioMonto').textContent = fmt(_dCambio.importe);
+      $('cobrarSumarSaldoCambio').checked = true;
+      $('cobrarSaldoCambioBox').style.display = 'block';
+      $('cobrarSumarSaldoCambio').onchange = actualizarTotalSaldoCambio;
+      $('cobrarImporte').oninput = actualizarTotalSaldoCambio;
+      actualizarTotalSaldoCambio();
+    } else {
+      $('cobrarSaldoCambioBox').style.display = 'none';
+      $('cobrarImporte').oninput = null;
+    }
     $('modalCobrar').classList.add('activo');
     setTimeout(() => $('cobrarImporte').focus(), 50);
   };
@@ -718,8 +776,30 @@
     });
     btn.disabled = false; btn.textContent = 'Confirmar cobro';
     if (error) { mostrarToast('❌ Error: ' + error.message, 'error'); return; }
+    // ➕ Saldo por cambio de plan/fecha: si está tildado, se cobra JUNTO
+    // (pago propio imputado a SU mes) y se limpia la etiqueta DEUDA_CAMBIO.
+    let msgSaldo = '';
+    const _boxVis = $('cobrarSaldoCambioBox') && $('cobrarSaldoCambioBox').style.display !== 'none';
+    if (_boxVis && $('cobrarSumarSaldoCambio').checked) {
+      const d = deudaCambioDe(c);
+      if (d && d.importe > 0) {
+        const { error: eS } = await supa.from('pagos_tf').insert({
+          inscripcion_id: c.id, mes_imputado: d.mes,
+          fecha: new Date().toISOString().slice(0, 10),
+          importe: d.importe, medio: $('cobrarMedio').value, tipo_cobro: 'NORMAL',
+          observaciones: `SALDO cambio cobrado junto a la cuota · ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`
+        });
+        if (eS) {
+          mostrarToast('La cuota se cobró, pero el saldo por cambio falló: ' + eS.message + ' — cobralo desde la ficha en Administración.', 'error');
+        } else {
+          const obsLimpia = (c.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
+          await supa.from('inscripciones_tf').update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() }).eq('id', c.id);
+          msgSaldo = ` + saldo ${fmt(d.importe)}`;
+        }
+      }
+    }
     cerrarModal('modalCobrar');
-    mostrarToast(`✅ Cobro de ${fmt(importe)} registrado a ${c.nombre}`);
+    mostrarToast(`✅ Cobro de ${fmt(importe)}${msgSaldo} registrado a ${c.nombre}`);
     inscripcionEnAccion = null;
     await cargarTodo();
   };
