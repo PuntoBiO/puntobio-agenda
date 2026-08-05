@@ -131,6 +131,45 @@
   .gan-mini .m.win .val{color:#065f46}
   .gan-body table{margin-bottom:0}
   @media(max-width:768px){ .gan-mini{grid-template-columns:repeat(2,1fr)} }
+  /* ==== Vista nueva (rediseño 05/08/2026) ==== */
+  .nv{margin-bottom:28px}
+  .badge.nv-pb{background:#e0f2fe;color:#075985}
+  .nv-nota{font-size:12px;color:#64748b;margin:8px 0 4px;line-height:1.5}
+  .nv-card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;margin-bottom:16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .nv-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap}
+  .nv-nom{font-size:17px;font-weight:800}
+  .nv-pct{font-size:11.5px;font-weight:700;color:#475569;background:#f1f5f9;padding:3px 9px;border-radius:999px}
+  .nv-estado{margin-left:auto;font-size:14px;font-weight:800;padding:7px 14px;border-radius:999px}
+  .nv-cobra{background:#d1fae5;color:#065f46}
+  .nv-debe{background:#fee2e2;color:#991b1b}
+  .nv-cero{background:#f1f5f9;color:#475569}
+  .nv-grid{display:grid;grid-template-columns:repeat(3,1fr)}
+  .nv-box{padding:14px 18px;border-right:1px solid #f1f5f9;border-bottom:1px solid #f1f5f9}
+  .nv-box:last-child{border-right:none}
+  .nv-lab{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#64748b;font-weight:700;margin-bottom:5px}
+  .nv-val{font-size:19px;font-weight:800}
+  .nv-sub{font-size:12px;color:#666;margin-top:3px}
+  .nv-barra{display:flex;height:26px;border-radius:8px;overflow:hidden;margin:12px 18px;font-size:11.5px;font-weight:700;color:#fff}
+  .nv-barra div{display:flex;align-items:center;justify-content:center;white-space:nowrap}
+  .nv-b1{background:#f59e0b}
+  .nv-b2{background:#10b981}
+  .nv-sec{padding:14px 18px;border-top:1px solid #f1f5f9}
+  .nv-cierre{background:#f8fafc}
+  .nv-tit{font-size:12.5px;font-weight:800;color:#334155;margin-bottom:9px}
+  .nv-reg{font-size:11.5px;color:#64748b;font-weight:400}
+  table.nv-tb{width:100%;border-collapse:collapse;font-size:13px;background:transparent;border:none;box-shadow:none;border-radius:0}
+  table.nv-tb th{background:transparent;color:#64748b;font-size:10.5px;padding:6px 8px;border-bottom:1px solid #e5e7eb}
+  table.nv-tb td{padding:8px;border-top:none;border-bottom:1px solid #f6f7f9;font-size:13px}
+  table.nv-tb tr.nv-total td{border-top:2px solid #cbd5e1;border-bottom:none;font-size:15px;padding-top:10px}
+  .nv-cruce{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:13.5px;border-bottom:1px dashed #eef2f7}
+  .nv-cruce b{margin-left:auto;font-variant-numeric:tabular-nums}
+  .nv-in{color:#065f46}
+  .nv-out{color:#991b1b}
+  .nv-cust{background:#faf5ff;border:1px solid #e9d5ff;border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5}
+  .nv-vieja{margin-top:30px}
+  .nv-vieja>summary{cursor:pointer;font-weight:700;color:#1e9fe0;padding:12px 16px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;list-style:none}
+  .nv-vieja>summary::-webkit-details-marker{display:none}
+  @media(max-width:900px){ .nv-grid{grid-template-columns:1fr} .nv-box{border-right:none} }
 </style>
 </head>
 <body>
@@ -585,7 +624,7 @@ async function cargar(){
       .in('tratamiento_id', lote).order('fecha').order('id'));
     if (sesData) sesAll.push(...sesData);
     const { data: pagData } = await sbLeerTodo(() => sb.from('pagos_consultorio')
-      .select('id, tratamiento_id, fecha, importe, quien_cobro')
+      .select('id, tratamiento_id, fecha, importe, quien_cobro, medio_pago')
       .in('tratamiento_id', lote).order('fecha').order('id'));
     if (pagData) pagosAll.push(...pagData);
   }
@@ -754,6 +793,279 @@ async function cargar(){
   render(data || [], sesionesData, filtroProf);
 }
 
+// ============================================================
+// VISTA NUEVA (rediseño 05/08/2026) — por profesional, con custodia y cruces
+// IMPORTANTE: no cambia ningún cálculo. Se arma con lo mismo que ya calcula
+// el motor (liquidables/pendientes/pagos) y solo lo MUESTRA de otra forma.
+// La vista anterior queda debajo, plegada, para poder comparar.
+// ============================================================
+const MEDIO_NOM = m => {
+  const s = String(m||'').toUpperCase();
+  if (s.includes('DEBITO') || s.includes('DÉBITO')) return 'Débito';
+  if (s.includes('TRANSFER')) return 'Transferencia';
+  if (s.includes('EFECTIVO')) return 'Efectivo';
+  return 'Otro';
+};
+// REGLA DE TENENCIA (planilla de Jime): el efectivo se rinde a la caja de
+// PuntoBiO y el débito nunca sale de ahí. Lo único que queda en manos del
+// profesional es la transferencia que el paciente le hace directo.
+function tenedorDe(medio, quien){
+  return String(medio||'').toUpperCase().includes('TRANSFER') ? (quien || 'PuntoBiO') : 'PuntoBiO';
+}
+
+function vistaNueva(ctx){
+  const { liquidables, pendientes, pagos, MT, hasta, filtroProf } = ctx;
+  const ORDEN_P = ['Bruno','Male','Vero','Jime','Lu'];
+  const chipT = p => (p === 'PuntoBiO')
+    ? '<span class="badge nv-pb">PuntoBiO</span>' : badge(p);
+  const ord = arr => arr.sort((a,b) => {
+    const ia = ORDEN_P.indexOf(a), ib = ORDEN_P.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  // ---------- matriz: quién TIENE la plata → de quién ES ----------
+  const tiene = {};
+  const meter = (t, d, m) => { if (!(m > 0.5)) return; (tiene[t] = tiene[t] || {})[d] = (tiene[t][d] || 0) + m; };
+  const P = {};
+  const needP = p => P[p] = P[p] || { ses:0, abonado:0, prof:0, centro:0, pendSes:0, pend:0, medios:{}, filas:[] };
+
+  for (const s of liquidables){
+    if (!s.prof) continue;
+    const r = needP(s.prof);
+    r.ses++; r.abonado += s.valor; r.prof += s.mProf; r.centro += s.mCentro; r.filas.push(s);
+    const tot = s.valor || 1;
+    for (const tr of (s.tenedores || [])){
+      const share = tr.monto / tot;
+      const ten = tenedorDe(tr.medio, tr.quien);
+      meter(ten, s.prof, s.mProf * share);
+      meter(ten, 'PuntoBiO', s.mCentro * share);
+      const k = MEDIO_NOM(tr.medio);
+      const mm = r.medios[k] = r.medios[k] || { monto:0, porTen:{} };
+      mm.monto += s.mProf * share;
+      mm.porTen[ten] = (mm.porTen[ten] || 0) + s.mProf * share;
+    }
+  }
+  // MASOTERAPIA: liquida por PAGO (no entra en la cascada de sesiones)
+  for (const p of pagos){
+    const pc = String((p.tratamientos || {}).practica_codigo || '');
+    if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
+    const imp = Number(p.importe) || 0; if (imp <= 0.5) continue;
+    const prof = normProf(p.profesional) || 'Vero';
+    const mProf = ['Bruno','Male','Vero'].includes(prof) ? Math.round(imp * 0.65) : 0;
+    const mCentro = imp - mProf;
+    const r = needP(prof);
+    r.ses++; r.abonado += imp; r.prof += mProf; r.centro += mCentro;
+    const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
+    const ten = tenedorDe(p.medio_pago, quien);
+    meter(ten, prof, mProf); meter(ten, 'PuntoBiO', mCentro);
+    const k = MEDIO_NOM(p.medio_pago);
+    const mm = r.medios[k] = r.medios[k] || { monto:0, porTen:{} };
+    mm.monto += mProf; mm.porTen[ten] = (mm.porTen[ten] || 0) + mProf;
+    r.filas.push({ fecha:p.fecha, paciente:((p.tratamientos||{}).personas||{}).nombre || '—',
+                   practica:pc, valor:imp, mProf, mCentro, tenedores:[{quien, monto:imp, medio:p.medio_pago}] });
+  }
+  for (const x of (pendientes || [])){ if (!x.prof) continue; const r = needP(x.prof); r.pendSes++; r.pend += x.valor; }
+
+  // ---------- CUSTODIA: plata cobrada de sesiones que todavía no se hicieron ----------
+  const info = {};
+  for (const s of (MT.sesAll || [])){
+    const t = s.tratamientos || {}; if (s.tratamiento_id == null) continue;
+    info[s.tratamiento_id] = info[s.tratamiento_id] || { cod:t.codigo_id || '—', prac:t.practica_codigo || '', pac:((t.personas||{}).nombre) || '—' };
+  }
+  for (const p of pagos){
+    const t = p.tratamientos || {}; if (p.tratamiento_id == null) continue;
+    info[p.tratamiento_id] = info[p.tratamiento_id] || { cod:t.codigo_id || '—', prac:t.practica_codigo || '', pac:((t.personas||{}).nombre) || '—' };
+  }
+  const sesT = {}, pagT = {};
+  for (const s of (MT.sesAll || [])){ if (!s.fecha || s.fecha > hasta || s.tratamiento_id == null) continue; (sesT[s.tratamiento_id] = sesT[s.tratamiento_id] || []).push(s); }
+  for (const p of (MT.pagosAll || [])){ if (!p.fecha || p.fecha > hasta || p.tratamiento_id == null) continue; (pagT[p.tratamiento_id] = pagT[p.tratamiento_id] || []).push(p); }
+  const custodia = [];
+  for (const tid of Object.keys(pagT)){
+    const nfo = info[tid] || { cod:'—', prac:'', pac:'—' };
+    if (nfo.prac === 'MOPLEX' || String(nfo.prac).startsWith('MASAJES')) continue;
+    const pgs = pagT[tid].slice().sort((a,b)=> ((a.fecha||'').localeCompare(b.fecha||'')) || (a.id-b.id));
+    const ses = (sesT[tid] || []);
+    const pagado = pgs.reduce((x,p)=> x + (Number(p.importe)||0), 0);
+    const trabajado = ses.reduce((x,s)=> x + (Number(s.monto_profesional)||0) + (Number(s.monto_centro)||0), 0);
+    const sobra = pagado - trabajado;
+    if (sobra <= 0.5) continue;
+    // los ÚLTIMOS pesos que entraron son los que están en custodia
+    let resto = sobra; const porTen = {}; let ultFecha = '';
+    for (let i = pgs.length - 1; i >= 0 && resto > 0.5; i--){
+      const p = pgs[i], imp = Number(p.importe) || 0, toma = Math.min(imp, resto);
+      const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
+      const ten = tenedorDe(p.medio_pago, quien);
+      porTen[ten] = (porTen[ten] || 0) + toma;
+      if (!ultFecha) ultFecha = p.fecha;
+      resto -= toma;
+    }
+    const ult = ses[ses.length - 1];
+    const pctProf = ult ? ((Number(ult.monto_profesional)||0) / (((Number(ult.monto_profesional)||0) + (Number(ult.monto_centro)||0)) || 1)) : null;
+    custodia.push({ tid, cod:nfo.cod, pac:nfo.pac, prac:nfo.prac, monto:sobra, porTen, fecha:ultFecha,
+                    profPrev: ult ? normProf(ult.profesional) : '', pctProf });
+  }
+  custodia.sort((a,b)=> b.monto - a.monto);
+  const custTot = custodia.reduce((x,c)=> x + c.monto, 0);
+  const custPorTen = {};
+  for (const c of custodia) for (const t of Object.keys(c.porTen)) custPorTen[t] = (custPorTen[t] || 0) + c.porTen[t];
+
+  // ---------- CRUCES neteados por par ----------
+  const brutos = [];
+  for (const t of Object.keys(tiene)) for (const d of Object.keys(tiene[t]))
+    if (t !== d && tiene[t][d] > 0.5) brutos.push({ de:t, a:d, monto:tiene[t][d] });
+  const netos = [], visto = new Set();
+  for (const c of brutos){
+    const key = [c.de, c.a].sort().join('|'); if (visto.has(key)) continue; visto.add(key);
+    const ida = brutos.filter(x=> x.de===c.de && x.a===c.a).reduce((s,x)=>s+x.monto,0);
+    const vta = brutos.filter(x=> x.de===c.a && x.a===c.de).reduce((s,x)=>s+x.monto,0);
+    const n = ida - vta; if (Math.abs(n) < 0.5) continue;
+    netos.push(n > 0 ? {de:c.de, a:c.a, monto:n} : {de:c.a, a:c.de, monto:-n});
+  }
+
+  // ---------- CAJA del mes: quién cobró qué, por medio (plata física) ----------
+  const caja = {};
+  for (const p of pagos){
+    const quien = String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO';
+    const c = caja[quien] = caja[quien] || { Efectivo:0, Transferencia:0, 'Débito':0, Otro:0, total:0 };
+    const imp = Number(p.importe) || 0;
+    c[MEDIO_NOM(p.medio_pago)] += imp; c.total += imp;
+  }
+
+  // ============================ HTML ============================
+  const profsVista = ord(Object.keys(P)).filter(p => !filtroProf || p === filtroProf);
+  let h = '<div class="nv">';
+
+  // --- pantallazo de caja
+  const quienes = ord(Object.keys(caja));
+  const sumC = k => quienes.reduce((s,q)=> s + caja[q][k], 0);
+  h += `<h2 class="bloque-tit">💵 Plata que entró este mes — quién la cobró y por qué medio</h2>
+    <table><thead><tr><th>Quién lo cobró</th><th class="num">Efectivo</th><th class="num">Transferencia</th>
+      <th class="num">Débito</th><th class="num">Otro</th><th class="num">Total</th></tr></thead><tbody>
+      ${quienes.map(q=>`<tr><td>${chipT(q)}</td><td class="num">${fmt(caja[q].Efectivo)}</td>
+        <td class="num">${fmt(caja[q].Transferencia)}</td><td class="num">${fmt(caja[q]['Débito'])}</td>
+        <td class="num">${caja[q].Otro ? '<b style="color:#b45309">'+fmt(caja[q].Otro)+'</b>' : '—'}</td>
+        <td class="num"><b>${fmt(caja[q].total)}</b></td></tr>`).join('')}
+    </tbody><tfoot><tr><td>TOTAL</td><td class="num">${fmt(sumC('Efectivo'))}</td>
+      <td class="num">${fmt(sumC('Transferencia'))}</td><td class="num">${fmt(sumC('Débito'))}</td>
+      <td class="num">${fmt(sumC('Otro'))}</td><td class="num">${fmt(sumC('total'))}</td></tr></tfoot></table>
+    <div class="nv-nota">Es <b>plata física</b>: lo que pasó por las manos de cada uno, no lo que le corresponde.
+      Sirve para cruzar con lo que cada profesional informa a fin de mes. <b>No incluye MOPLEX</b>, que se liquida en su propia pantalla.
+      Si aparece algo en “Otro”, es un cobro con el medio de pago mal escrito.</div>`;
+
+  // --- tarjeta por profesional
+  h += `<h2 class="bloque-tit">👤 Liquidación por profesional</h2>`;
+  if (!profsVista.length) h += `<div class="vacio">Sin movimientos para mostrar.</div>`;
+  for (const p of profsVista){
+    const r = P[p];
+    const pct = r.abonado ? Math.round(r.prof / r.abonado * 100) : 0;
+    const mios = netos.filter(n => n.de === p || n.a === p);
+    const cobra = mios.filter(n=> n.a===p).reduce((s,n)=>s+n.monto,0);
+    const paga  = mios.filter(n=> n.de===p).reduce((s,n)=>s+n.monto,0);
+    const saldo = cobra - paga;
+    const estado = Math.abs(saldo) < 0.5 ? ['nv-cero','Saldado']
+      : (saldo > 0 ? ['nv-cobra', 'Le tienen que pagar ' + fmt(saldo)] : ['nv-debe', 'Tiene que rendir ' + fmt(-saldo)]);
+    const suyoEnSuPoder = (tiene[p] || {})[p] || 0;
+    const ajeno = Object.keys(tiene[p] || {}).filter(d => d !== p).reduce((s,d)=> s + tiene[p][d], 0);
+    const custSuya = custPorTen[p] || 0;
+
+    h += `<div class="nv-card">
+      <div class="nv-head"><span class="nv-nom">${badge(p)}</span>
+        <span class="nv-pct">${pct}% profesional / ${100-pct}% centro</span>
+        <span class="nv-estado ${estado[0]}">${estado[1]}</span></div>
+
+      <div class="nv-grid">
+        <div class="nv-box"><div class="nv-lab">Sesiones realizadas</div><div class="nv-val">${r.ses + r.pendSes}</div>
+          <div class="nv-sub">${fmt(r.abonado + r.pend)} de producción</div></div>
+        <div class="nv-box"><div class="nv-lab">Sesiones abonadas</div><div class="nv-val">${r.ses}</div>
+          <div class="nv-sub">${fmt(r.abonado)} cobrados</div></div>
+        <div class="nv-box"><div class="nv-lab">⏳ Falta cobrar</div><div class="nv-val">${r.pendSes}</div>
+          <div class="nv-sub">${fmt(r.pend)} que el paciente debe</div></div>
+      </div>
+
+      <div class="nv-barra"><div class="nv-b1" style="width:${pct}%">${p} · ${fmt(r.prof)}</div>
+        <div class="nv-b2" style="width:${100-pct}%">PuntoBiO · ${fmt(r.centro)}</div></div>
+
+      <div class="nv-sec"><div class="nv-tit">💵 Dónde está la plata que le corresponde</div>
+        <table class="nv-tb"><thead><tr><th>Medio de pago</th><th class="num">De ${p}</th><th>Quién la tiene hoy</th></tr></thead><tbody>
+        ${Object.keys(r.medios).map(k=>{
+          const m = r.medios[k];
+          const regla = k === 'Transferencia' ? 'el paciente le transfiere al profesional que atendió'
+                      : (k === 'Efectivo' ? 'queda en caja PuntoBiO hasta que se rinda'
+                      : (k === 'Débito' ? 'siempre en custodia de PuntoBiO' : 'medio de pago sin identificar'));
+          return `<tr><td><b>${k}</b><div class="nv-reg">${regla}</div></td>
+            <td class="num"><b>${fmt(m.monto)}</b></td>
+            <td>${Object.keys(m.porTen).map(t=>`${chipT(t)} <b>${fmt(m.porTen[t])}</b>`).join(' · ')}</td></tr>`;
+        }).join('') || '<tr><td colspan="3" class="nv-reg">Sin sesiones abonadas este mes.</td></tr>'}
+        </tbody></table></div>
+
+      <div class="nv-sec"><div class="nv-tit">🔒 Custodia en su poder</div>
+        ${custSuya > 0.5
+          ? `<div class="nv-cust"><b>${fmt(custSuya)}</b> cobrados por sesiones que todavía no se hicieron.
+               No es de nadie hasta que se realicen: se reparte a medida que se hacen, y le toca a quien las haga.</div>`
+          : `<div class="nv-reg">No tiene plata en custodia.</div>`}</div>
+
+      <div class="nv-sec"><div class="nv-tit">🔁 Cruces</div>
+        ${mios.length ? mios.map(n=>{
+            const entra = n.a === p;
+            return `<div class="nv-cruce"><span class="${entra?'nv-in':'nv-out'}">${entra?'⬅':'➡'}</span>
+              <span>${entra ? `${chipT(n.de)} le debe a ${chipT(p)}` : `${chipT(p)} le debe a ${chipT(n.a)}`}</span>
+              <b class="${entra?'nv-in':'nv-out'}">${fmt(n.monto)}</b></div>`;
+          }).join('') : '<div class="nv-reg">Sin cruces: la plata que le corresponde ya está en su poder.</div>'}
+      </div>
+
+      <div class="nv-sec nv-cierre"><div class="nv-tit">📄 Liquidación final de ${p}</div>
+        <table class="nv-tb"><tbody>
+          <tr><td>Le corresponde por sus sesiones abonadas</td><td class="num"><b>${fmt(r.prof)}</b></td></tr>
+          <tr><td>Ya lo tiene: transferencias que recibió directo <span class="nv-reg">se descuenta</span></td>
+              <td class="num nv-out">− ${fmt(suyoEnSuPoder)}</td></tr>
+          ${ajeno > 0.5 ? `<tr><td>Tiene plata de otros que debe entregar <span class="nv-reg">${Object.keys(tiene[p]||{}).filter(d=>d!==p).map(d=>`${d} ${fmt(tiene[p][d])}`).join(' · ')}</span></td>
+              <td class="num nv-out">− ${fmt(ajeno)}</td></tr>` : ''}
+          ${Object.keys(tiene).filter(t=> t!==p && (tiene[t]||{})[p]).map(t=>
+            `<tr><td>${t} tiene plata suya</td><td class="num nv-in">+ ${fmt(tiene[t][p])}</td></tr>`).join('')}
+          <tr class="nv-total"><td><b>TOTAL A PAGARLE</b></td><td class="num"><b>${fmt(saldo)}</b></td></tr>
+        </tbody></table>
+        <div class="nv-nota">El efectivo que cobró no se descuenta: quedó en la caja de PuntoBiO. Lo de MOPLEX se paga aparte,
+          desde la pantalla Liquidaciones MOPLEX. Las obras sociales todavía no entran acá.</div>
+      </div>
+    </div>`;
+  }
+
+  // --- mapa de cruces
+  const grupo = (tit, arr, vacio) => `<div class="nv-tit" style="margin-top:14px">${tit}</div>
+    ${arr.length ? arr.map(n=>`<div class="nv-cruce"><span>${chipT(n.de)} le debe a ${chipT(n.a)}</span><b>${fmt(n.monto)}</b></div>`).join('')
+                 : `<div class="nv-reg">${vacio}</div>`}`;
+  h += `<h2 class="bloque-tit">🔁 Cruces del mes — quién le debe a quién</h2>
+    <div class="nv-card" style="padding:6px 18px 18px">
+      ${grupo('PuntoBiO le debe a…', netos.filter(n=>n.de==='PuntoBiO'), 'Nada.')}
+      ${grupo('…le deben a PuntoBiO', netos.filter(n=>n.a==='PuntoBiO'), 'Nadie.')}
+      ${grupo('Entre profesionales', netos.filter(n=>n.de!=='PuntoBiO' && n.a!=='PuntoBiO'), 'Ningún cruce entre profesionales este mes.')}
+      <details style="margin-top:10px"><summary style="cursor:pointer;color:#1e9fe0;font-weight:700;font-size:13px">Ver de dónde sale cada cruce (antes de netear)</summary>
+        <table class="nv-tb" style="margin-top:8px"><thead><tr><th>Tiene la plata</th><th>Es de</th><th class="num">Monto</th></tr></thead>
+        <tbody>${brutos.slice().sort((a,b)=>b.monto-a.monto).map(b=>`<tr><td>${chipT(b.de)}</td><td>${chipT(b.a)}</td><td class="num">${fmt(b.monto)}</td></tr>`).join('')}</tbody></table>
+      </details>
+    </div>`;
+
+  // --- custodia
+  h += `<h2 class="bloque-tit">🔒 Custodia — plata cobrada de sesiones que todavía no se hicieron</h2>`;
+  if (!custodia.length) h += `<div class="vacio">No hay plata en custodia al cierre del mes.</div>`;
+  else h += `<div class="nv-card" style="padding:14px 18px;margin-bottom:12px">
+      ${ord(Object.keys(custPorTen)).map(t=>`<div class="nv-cruce"><span>🔒 ${chipT(t)} tiene guardado</span><b>${fmt(custPorTen[t])}</b></div>`).join('')}
+    </div>
+    <table><thead><tr><th>Paciente</th><th>Tratamiento</th><th>La tiene</th><th class="num">En custodia</th><th>Cuando se realicen</th></tr></thead><tbody>
+      ${custodia.map(c=>`<tr><td><b>${c.pac}</b></td><td style="font-family:monospace;font-size:12px">${c.cod}</td>
+        <td>${Object.keys(c.porTen).map(t=>`${chipT(t)} ${fmt(c.porTen[t])}`).join(' · ')}</td>
+        <td class="num"><b>${fmt(c.monto)}</b></td>
+        <td class="nv-reg">${c.profPrev && c.pctProf != null
+          ? `si las hace ${c.profPrev}: ${fmt(c.monto*c.pctProf)} para ${c.profPrev} · ${fmt(c.monto*(1-c.pctProf))} para PuntoBiO`
+          : 'se reparte a quien las haga'}</td></tr>`).join('')}
+    </tbody><tfoot><tr><td colspan="3">TOTAL en custodia</td><td class="num">${fmt(custTot)}</td><td></td></tr></tfoot></table>
+    <div class="nv-nota">Esta plata <b>no se liquida</b> y no es de nadie todavía: se convierte en liquidación sesión por sesión.
+      Si el tratamiento se corta, se devuelve.</div>`;
+
+  h += '</div>';
+  return h;
+}
+
 function render(pagos, sesiones, filtroProf){
   filtroProf = filtroProf || '';
   sesiones = sesiones || [];
@@ -822,7 +1134,7 @@ function render(pagos, sesiones, filtroProf){
       run += Number(p.importe) || 0;
       // `quien` y `desdeCum` son datos NUEVOS: no cambian el calculo de fechaAbono,
       // solo permiten saber que tramo de plata cubrio cada sesion y quien lo cobro.
-      acum.push({ fecha: p.fecha, cum: run, desdeCum, quien: String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO' });
+      acum.push({ fecha: p.fecha, cum: run, desdeCum, quien: String(p.quien_cobro || 'PuntoBiO').split('(')[0].trim() || 'PuntoBiO', medio: String(p.medio_pago || '').toUpperCase() });
     }
     let cumVal = 0;
     for (const s of ses){
@@ -838,7 +1150,7 @@ function render(pagos, sesiones, filtroProf){
       for (const a of acum){
         const ini = Math.max(iniSes, a.desdeCum);
         const fin = Math.min(cumVal, a.cum);
-        if (fin - ini > 0.5) tramos.push({ fecha: a.fecha, monto: fin - ini, quien: a.quien });
+        if (fin - ini > 0.5) tramos.push({ fecha: a.fecha, monto: fin - ini, quien: a.quien, medio: a.medio });
       }
       const cubiertoTotal = tramos.reduce((x, tr) => x + tr.monto, 0);
       const deuda = Math.max(0, valor - cubiertoTotal);
@@ -872,7 +1184,7 @@ function render(pagos, sesiones, filtroProf){
           mProf: mProf * parteMes,
           mCentro: mCentro * parteMes,
           fechaAbono: delMes[delMes.length - 1].fecha,
-          tenedores: delMes.map(tr => ({ quien: tr.quien, monto: tr.monto })),
+          tenedores: delMes.map(tr => ({ quien: tr.quien, monto: tr.monto, medio: tr.medio })),
           parcial: deuda > 0.5,        // el paciente todavia debe parte de esta sesion
           vieneDeDeuda: huboAntes      // ya se le liquido una parte en un mes anterior
         }));
@@ -1622,7 +1934,12 @@ function render(pagos, sesiones, filtroProf){
     html += `</tbody></table>`;
   }
 
-  document.getElementById('resultado').innerHTML = html;
+  // ===== SALIDA: primero la VISTA NUEVA, y la de siempre plegada abajo =====
+  let _htmlNuevo = '';
+  try { _htmlNuevo = vistaNueva({ liquidables, pendientes, pagos, MT, hasta, filtroProf }); }
+  catch(e){ console.error('vistaNueva:', e); _htmlNuevo = '<div class="vacio">⚠️ No se pudo dibujar la vista nueva (' + e.message + '). Abrí la vista anterior acá abajo.</div>'; }
+  document.getElementById('resultado').innerHTML = _htmlNuevo +
+    '<details class="nv-vieja"><summary>▸ Ver la vista anterior (la de siempre, para comparar)</summary><div style="margin-top:14px">' + html + '</div></details>';
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
   window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, totalMoplex: totalMoplexV, profs, ordenarProfs, cant: cantVista, moplex: MPX, moplexFranq: franqVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
