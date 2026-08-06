@@ -722,13 +722,16 @@
 /* SELF-SERVICE · modal compartido para confirmaciones */
 .pb-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 20px; }
 .pb-modal-overlay.open { display: flex; }
-.pb-modal { background: #fff; border-radius: 16px; padding: 22px; max-width: 480px; width: 100%; box-shadow: 0 24px 50px rgba(0,0,0,.3); color: #1e293b; }
+.pb-modal { background: #fff; border-radius: 16px; padding: 22px; max-width: 480px; width: 100%; box-shadow: 0 24px 50px rgba(0,0,0,.3); color: #1e293b; max-height: 88vh; display: flex; flex-direction: column; overflow-y: auto; }
 .pb-modal h3 { font-size: 18px; font-weight: 800; margin-bottom: 8px; color: #0f172a; }
 .pb-modal-sub { font-size: 13.5px; color: #64748b; margin-bottom: 16px; line-height: 1.5; }
-.pb-modal-opciones { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; max-height: 240px; overflow-y: auto; }
+/* Alto en vh (no 240px fijo): en el celular entraban solo 4 tarjetas y el resto
+   quedaba inalcanzable. flex:0 1 auto + min-height:0 para que pueda encogerse
+   dentro del modal y el scroll táctil funcione. */
+.pb-modal-opciones { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; max-height: 52vh; overflow-y: auto; flex: 0 1 auto; min-height: 0; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
 .pb-modal-opcion { background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-size: 13.5px; transition: all .15s; text-align: left; }
 .pb-modal-opcion:hover { border-color: #1e9fe0; background: #eff6ff; }
-.pb-modal-acciones { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+.pb-modal-acciones { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #e2e8f0; flex-shrink: 0; }
 .pb-modal-btn { padding: 10px 16px; border-radius: 10px; font-family: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer; border: 1.5px solid; }
 .pb-modal-btn.cancel { background: transparent; border-color: #cbd5e1; color: #64748b; }
 .pb-modal-btn.confirm { background: #1e9fe0; border-color: #1e9fe0; color: #fff; }
@@ -1771,7 +1774,9 @@ async function cargarEspacio(per){
       const f = r.fecha_ausencia;
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
       return new Date(f) >= hace60;
-    }),
+    // La MÁS VIEJA PRIMERO: es la que está por vencer, tiene que ser la que
+    // el alumno ve arriba de todo cuando elige qué recuperar.
+    }).sort((a,b) => String(a.fecha_ausencia||'') < String(b.fecha_ausencia||'') ? -1 : 1),
     // Feriados del ciclo que cayeron en tu día fijo (virtuales: la fila se crea al reservar)
     feriadosPendientes,
     // Cierres del centro YA reservados (fila tipo 'cierre'): para no ofrecerlos de nuevo
@@ -2260,7 +2265,8 @@ window.refrescarDatosAgenda = async function(){
       if (r.fecha_recupero) return false;
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
       return new Date(r.fecha_ausencia) >= hace60;
-    });
+    // Espejo de la carga inicial: la más vieja primero.
+    }).sort((a,b) => String(a.fecha_ausencia||'') < String(b.fecha_ausencia||'') ? -1 : 1);
     // Cierres del centro ya reservados (refresh del set, espejo de la carga inicial)
     data.cierresRecuperadosSet = new Set((recus.data || [])
       .filter(r => (r.estado||'').toLowerCase() !== 'cancelado' && (r.tipo||'').toLowerCase().includes('cierre'))
@@ -5947,10 +5953,26 @@ window.pbConfirmarCambioArea = async function(turnoOrigenId, turnoDestinoId, fec
 };
 
 // Abrir modal Recuperar Acá
+// Comparador: falta más VIEJA primero (la que primero se vence).
+function _pbPorFechaAsc(a, b) {
+  return String(a.fecha_ausencia||'') < String(b.fecha_ausencia||'') ? -1 : 1;
+}
+
+// Chip "· vence en X días" para cada opción del modal. Mismo cálculo que la
+// tarjeta de recuperatorios (la regla de los 60 días vive en la base).
+window.pbChipVence = function(fechaAusencia) {
+  if (!fechaAusencia) return '';
+  const d = DIAS_PARA_RECUPERAR - diasEntre(String(fechaAusencia), hoyISO());
+  let color = '#16a34a';
+  if (d <= 7) color = '#dc2626'; else if (d <= 15) color = '#d97706';
+  const txt = d <= 0 ? 'vencida' : ('vence en ' + d + (d === 1 ? ' día' : ' días'));
+  return ` · <b style="color:${color}">${txt}</b>`;
+};
+
 window.pbAbrirRecuperar = function(turnoDestinoId, fechaISO) {
   const data = window._agendaData;
   const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
-  const recupes = data.recuperatoriosPendientes || [];
+  const recupes = (data.recuperatoriosPendientes || []).slice().sort(_pbPorFechaAsc);
   const feriados = data.feriadosPendientes || [];
   const cierres = (typeof pbCierresPendientes === 'function') ? pbCierresPendientes() : [];
   if (!destino) { alert('Turno no encontrado.'); return; }
@@ -6026,12 +6048,15 @@ window.pbAbrirRecuperar = function(turnoDestinoId, fechaISO) {
     const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
     opciones += `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
       Falta del <b>${esc(fAus)}</b>
-      <div style="font-size:11.5px;color:#64748b;margin-top:2px">Tipo: ${esc(r.tipo||'')}</div>
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">Tipo: ${esc(r.tipo||'')}${pbChipVence(r.fecha_ausencia)}</div>
     </button>`;
   });
+  const _hint = total > 4
+    ? '<br><span style="color:#94a3b8">Arriba está la que primero se te vence · deslizá la lista para ver todas.</span>'
+    : (recupes.length > 1 ? '<br><span style="color:#94a3b8">Arriba está la que primero se te vence.</span>' : '');
   pbAbrirModal({
     titulo: '🎯 Recuperar acá',
-    subtitulo: `Elegí qué clase querés recuperar en <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>:`,
+    subtitulo: `Elegí qué clase querés recuperar en <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b>:${_hint}`,
     infoBox: '',
     cuerpoHTML: opciones,
   });
@@ -6142,7 +6167,7 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
   const data = window._agendaData;
   const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
   if (!destino) { alert('Turno no encontrado.'); return; }
-  const recupes = data.recuperatoriosPendientes || [];
+  const recupes = (data.recuperatoriosPendientes || []).slice().sort(_pbPorFechaAsc);
   const cupoS = data.cupoSueltas;
   const fechaTxt = fechaISO.split('-').reverse().join('/');
 
@@ -6187,7 +6212,7 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
     const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
     opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
       🎯 <b>Usar recuperatorio</b> de la falta del ${esc(fAus)}
-      <div style="font-size:11.5px;color:#64748b;margin-top:2px">No suma al cupo de sueltas</div>
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">No suma al cupo de sueltas${pbChipVence(r.fecha_ausencia)}</div>
     </button>`;
   });
   opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarClaseSuelta(${destino.id}, '${fechaISO}')">
