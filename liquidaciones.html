@@ -167,6 +167,38 @@
   .nv-out{color:#991b1b}
   .nv-cust{background:#faf5ff;border:1px solid #e9d5ff;border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5}
   .nv-aviso{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:13px;line-height:1.5}
+  /* ---- Lista de liquidación (nivel 1/2/3) ---- */
+  .nv-lista{background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden}
+  .nv-fila{border-bottom:1px solid #f1f5f9}
+  .nv-fila:last-of-type{border-bottom:none}
+  .nv-fila>summary{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;list-style:none}
+  .nv-fila>summary::-webkit-details-marker{display:none}
+  .nv-fila>summary:hover{background:#f8fafc}
+  .nv-check{width:24px;height:24px;border-radius:50%;border:2px solid #cbd5e1;color:transparent;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;flex:0 0 auto}
+  .nv-pagado .nv-check{background:#10b981;border-color:#10b981;color:#fff}
+  .nv-pagado>summary .nv-quien,.nv-pagado>summary .nv-monto,.nv-pagado>summary .nv-que{opacity:.4}
+  .nv-quien{font-size:16px;font-weight:800}
+  .nv-que{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-left:auto}
+  .nv-monto{font-size:19px;font-weight:800;font-variant-numeric:tabular-nums;min-width:115px;text-align:right}
+  .nv-que.nv-cobra,.nv-monto.nv-cobra{color:#065f46}
+  .nv-que.nv-debe,.nv-monto.nv-debe{color:#991b1b}
+  .nv-que.nv-cero,.nv-monto.nv-cero{color:#94a3b8}
+  .nv-suma{display:flex;align-items:center;gap:12px;padding:14px 16px;background:#f8fafc;border-top:2px solid #e2e8f0}
+  .nv-suma .nv-quien{font-size:12px;letter-spacing:.5px;color:#475569}
+  .nv-suma .nv-monto{margin-left:auto}
+  .nv-cuenta{padding:4px 16px 18px 52px;background:#fcfdfe}
+  .nv-r{display:flex;align-items:baseline;gap:10px;padding:7px 0;font-size:14px;border-bottom:1px dashed #eef2f7}
+  .nv-r span{flex:1}
+  .nv-r small{display:block;font-size:11.5px;color:#94a3b8;font-weight:400}
+  .nv-r b{font-variant-numeric:tabular-nums;font-size:15px}
+  .nv-total-fila{border-bottom:none;border-top:2px solid #cbd5e1;margin-top:6px;padding-top:11px;font-weight:800}
+  .nv-total-fila b{font-size:19px}
+  .nv-sub2{font-size:11.5px;color:#94a3b8;padding:2px 0 6px;line-height:1.45}
+  .nv-det{margin-top:10px}
+  .nv-det>summary{cursor:pointer;font-size:12.5px;color:#1e9fe0;font-weight:700;list-style:none}
+  .nv-det>summary::-webkit-details-marker{display:none}
+  .nv-det>summary:before{content:'▸ '}
+  .nv-det[open]>summary:before{content:'▾ '}
   .nv-vieja{margin-top:30px}
   .nv-vieja>summary{cursor:pointer;font-weight:700;color:#1e9fe0;padding:12px 16px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;list-style:none}
   .nv-vieja>summary::-webkit-details-marker{display:none}
@@ -982,84 +1014,86 @@ function vistaNueva(ctx){
       Si aparece algo en “Otro”, es un cobro con el medio de pago mal escrito.</div>`;
 
   // --- tarjeta por profesional
+  // --- 👤 NIVEL 1: una fila por persona, un solo número. Se despliega la cuenta
+  //     en pocos renglones (nivel 2) y cada renglón esconde su detalle (nivel 3).
+  {
+  const mesKey = String(hasta || '').slice(0, 7);
+  let PAGADOS = {};
+  try { PAGADOS = JSON.parse(localStorage.getItem('liq_pagado_' + mesKey) || '{}'); } catch(e){ PAGADOS = {}; }
+  window._liqTogglePagado = function(p){
+    PAGADOS[p] = !PAGADOS[p];
+    try { localStorage.setItem('liq_pagado_' + mesKey, JSON.stringify(PAGADOS)); } catch(e){}
+    const fila = document.getElementById('fila-' + p);
+    if (fila) fila.classList.toggle('nv-pagado', !!PAGADOS[p]);
+  };
+
   h += `<h2 class="bloque-tit">👤 Liquidación por profesional</h2>`;
   if (!profsVista.length) h += `<div class="vacio">Sin movimientos para mostrar.</div>`;
+  h += `<div class="nv-lista">`;
+  let totalAPagar = 0;
+
   for (const p of profsVista){
     const r = P[p];
-    const pct = r.abonado ? Math.round(r.prof / r.abonado * 100) : 0;
     const mios = netos.filter(n => n.de === p || n.a === p);
-    const cobra = mios.filter(n=> n.a===p).reduce((s,n)=>s+n.monto,0);
-    const paga  = mios.filter(n=> n.de===p).reduce((s,n)=>s+n.monto,0);
-    const saldo = cobra - paga;
-    const estado = Math.abs(saldo) < 0.5 ? ['nv-cero','Saldado']
-      : (saldo > 0 ? ['nv-cobra', 'Le tienen que pagar ' + fmt(saldo)] : ['nv-debe', 'Tiene que rendir ' + fmt(-saldo)]);
+    const leDeben = Object.keys(tiene).filter(t => t !== p && (tiene[t] || {})[p]);
+    const cobra = leDeben.reduce((s,t)=> s + tiene[t][p], 0);
     const suyoEnSuPoder = (tiene[p] || {})[p] || 0;
-    const ajeno = Object.keys(tiene[p] || {}).filter(d => d !== p).reduce((s,d)=> s + tiene[p][d], 0);
+    const ajenoKeys = Object.keys(tiene[p] || {}).filter(d => d !== p);
+    const ajeno = ajenoKeys.reduce((s,d)=> s + tiene[p][d], 0);
+    const aPagar = r.prof - suyoEnSuPoder - ajeno;
+    totalAPagar += aPagar;
     const custSuya = custPorTen[p] || 0;
+    const pagado = !!PAGADOS[p];
+    const txt = Math.abs(aPagar) < 0.5 ? 'están a mano' : (aPagar > 0 ? 'le pagás' : 'te entrega');
+    const cls = Math.abs(aPagar) < 0.5 ? 'nv-cero' : (aPagar > 0 ? 'nv-cobra' : 'nv-debe');
 
-    h += `<div class="nv-card">
-      <div class="nv-head"><span class="nv-nom">${badge(p)}</span>
-        <span class="nv-pct">${pct}% profesional / ${100-pct}% centro</span>
-        <span class="nv-estado ${estado[0]}">${estado[1]}</span></div>
+    h += `<details class="nv-fila ${pagado ? 'nv-pagado' : ''}" id="fila-${p}">
+      <summary>
+        <span class="nv-check" onclick="event.preventDefault();event.stopPropagation();window._liqTogglePagado('${p}')" title="Marcar como arreglado">✓</span>
+        <span class="nv-quien">${badge(p)}</span>
+        <span class="nv-que ${cls}">${txt}</span>
+        <span class="nv-monto ${cls}">${fmt(Math.abs(aPagar))}</span>
+      </summary>
+      <div class="nv-cuenta">
+        <div class="nv-r"><span>Le corresponde</span><b>${fmt(r.prof)}</b></div>
+        <div class="nv-sub2">${r.ses} sesiones abonadas sobre ${fmt(r.abonado)} cobrados${r.pendSes ? ` · ${r.pendSes} sin abonar (${fmt(r.pend)})` : ''}</div>
 
-      <div class="nv-grid">
-        <div class="nv-box"><div class="nv-lab">Sesiones realizadas</div><div class="nv-val">${r.ses + r.pendSes}</div>
-          <div class="nv-sub">${fmt(r.abonado + r.pend)} de producción</div></div>
-        <div class="nv-box"><div class="nv-lab">Sesiones abonadas</div><div class="nv-val">${r.ses}</div>
-          <div class="nv-sub">${fmt(r.abonado)} cobrados</div></div>
-        <div class="nv-box"><div class="nv-lab">⏳ Falta cobrar</div><div class="nv-val">${r.pendSes}</div>
-          <div class="nv-sub">${fmt(r.pend)} que el paciente debe</div></div>
+        <div class="nv-r"><span>De eso, ya lo tiene él <small>transferencias que recibió directo</small></span><b class="nv-out">− ${fmt(suyoEnSuPoder)}</b></div>
+        <div class="nv-sub2">El efectivo y el débito no se descuentan: quedaron en la caja de PuntoBiO.</div>
+
+        ${ajeno > 0.5 ? `<div class="nv-r"><span>Tiene plata de otros <small>${ajenoKeys.map(d=>`${d} ${fmt(tiene[p][d])}`).join(' · ')}</small></span><b class="nv-out">− ${fmt(ajeno)}</b></div>
+        <div class="nv-sub2">Es la parte que viaja adentro de las transferencias que recibió. Se compensa en el número final, no se devuelve a mano.</div>` : ''}
+        ${cobra > 0.5 ? `<div class="nv-sub2">De lo que le corresponde, ${fmt(cobra)} lo tiene ${leDeben.join(' y ')}.</div>` : ''}
+
+        <div class="nv-r nv-total-fila"><span>${aPagar >= 0 ? 'LE PAGÁS' : 'TE ENTREGA'}</span><b>${fmt(Math.abs(aPagar))}</b></div>
+        <div class="nv-sub2">Más lo suyo de MOPLEX, que se paga desde su propia pantalla. Las obras sociales todavía no entran acá.</div>
+        ${custSuya > 0.5 ? `<div class="nv-sub2">🔒 Además tiene ${fmt(custSuya)} en custodia, de sesiones que todavía no se hicieron. No se liquida hasta que se realicen.</div>` : ''}
+
+        <details class="nv-det"><summary>Ver de dónde sale · medios de pago y cruces</summary>
+          <table class="nv-tb"><thead><tr><th>Medio de pago</th><th class="num">De ${p}</th><th>Quién la tiene hoy</th></tr></thead><tbody>
+          ${Object.keys(r.medios).map(k=>{
+            const m = r.medios[k];
+            const regla = k === 'Transferencia' ? 'queda en quien la recibió'
+                        : (k === 'Efectivo' ? 'queda en la caja de PuntoBiO'
+                        : (k === 'Débito' ? 'siempre en PuntoBiO' : '⚠️ medio de pago sin identificar'));
+            return `<tr><td><b>${k}</b><div class="nv-reg">${regla}</div></td>
+              <td class="num"><b>${fmt(m.monto)}</b></td>
+              <td>${Object.keys(m.porTen).map(t=>`${chipT(t)} <b>${fmt(m.porTen[t])}</b>`).join(' · ')}</td></tr>`;
+          }).join('') || '<tr><td colspan="3" class="nv-reg">Sin sesiones abonadas este mes.</td></tr>'}
+          </tbody></table>
+          ${mios.length ? `<div class="nv-tit" style="margin-top:12px">Cruces de ${p}</div>` + mios.map(n=>{
+              const entra = n.a === p;
+              return `<div class="nv-cruce"><span class="${entra?'nv-in':'nv-out'}">${entra?'⬅':'➡'}</span>
+                <span>${entra ? `${chipT(n.de)} le debe a ${chipT(p)}` : `${chipT(p)} le debe a ${chipT(n.a)}`}</span>
+                <b class="${entra?'nv-in':'nv-out'}">${fmt(n.monto)}</b></div>`;
+            }).join('') : '<div class="nv-reg" style="margin-top:10px">Sin cruces: lo que le corresponde ya está donde tiene que estar.</div>'}
+        </details>
       </div>
-
-      <div class="nv-barra"><div class="nv-b1" style="width:${pct}%">${p} · ${fmt(r.prof)}</div>
-        <div class="nv-b2" style="width:${100-pct}%">PuntoBiO · ${fmt(r.centro)}</div></div>
-
-      <div class="nv-sec"><div class="nv-tit">💵 Dónde está la plata que le corresponde</div>
-        <table class="nv-tb"><thead><tr><th>Medio de pago</th><th class="num">De ${p}</th><th>Quién la tiene hoy</th></tr></thead><tbody>
-        ${Object.keys(r.medios).map(k=>{
-          const m = r.medios[k];
-          const regla = k === 'Transferencia' ? 'el paciente le transfiere al profesional que atendió'
-                      : (k === 'Efectivo' ? 'queda en caja PuntoBiO hasta que se rinda'
-                      : (k === 'Débito' ? 'siempre en custodia de PuntoBiO' : 'medio de pago sin identificar'));
-          return `<tr><td><b>${k}</b><div class="nv-reg">${regla}</div></td>
-            <td class="num"><b>${fmt(m.monto)}</b></td>
-            <td>${Object.keys(m.porTen).map(t=>`${chipT(t)} <b>${fmt(m.porTen[t])}</b>`).join(' · ')}</td></tr>`;
-        }).join('') || '<tr><td colspan="3" class="nv-reg">Sin sesiones abonadas este mes.</td></tr>'}
-        </tbody></table></div>
-
-      <div class="nv-sec"><div class="nv-tit">🔒 Custodia en su poder</div>
-        ${custSuya > 0.5
-          ? `<div class="nv-cust"><b>${fmt(custSuya)}</b> cobrados por sesiones que todavía no se hicieron.
-               No es de nadie hasta que se realicen: se reparte a medida que se hacen, y le toca a quien las haga.</div>`
-          : `<div class="nv-reg">No tiene plata en custodia.</div>`}</div>
-
-      <div class="nv-sec"><div class="nv-tit">🔁 Cruces</div>
-        ${mios.length ? mios.map(n=>{
-            const entra = n.a === p;
-            return `<div class="nv-cruce"><span class="${entra?'nv-in':'nv-out'}">${entra?'⬅':'➡'}</span>
-              <span>${entra ? `${chipT(n.de)} le debe a ${chipT(p)}` : `${chipT(p)} le debe a ${chipT(n.a)}`}</span>
-              <b class="${entra?'nv-in':'nv-out'}">${fmt(n.monto)}</b></div>`;
-          }).join('') : '<div class="nv-reg">Sin cruces: la plata que le corresponde ya está en su poder.</div>'}
-      </div>
-
-      <div class="nv-sec nv-cierre"><div class="nv-tit">📄 Liquidación final de ${p}</div>
-        <table class="nv-tb"><tbody>
-          <tr><td>Le corresponde por sus sesiones abonadas</td><td class="num"><b>${fmt(r.prof)}</b></td></tr>
-          <tr><td>Ya lo tiene: transferencias que recibió directo <span class="nv-reg">se descuenta</span></td>
-              <td class="num nv-out">− ${fmt(suyoEnSuPoder)}</td></tr>
-          ${ajeno > 0.5 ? `<tr><td>Tiene plata de otros que debe entregar <span class="nv-reg">${Object.keys(tiene[p]||{}).filter(d=>d!==p).map(d=>`${d} ${fmt(tiene[p][d])}`).join(' · ')}</span></td>
-              <td class="num nv-out">− ${fmt(ajeno)}</td></tr>` : ''}
-          ${Object.keys(tiene).filter(t=> t!==p && (tiene[t]||{})[p]).map(t=>
-            `<tr><td>${t} tiene plata suya</td><td class="num nv-in">+ ${fmt(tiene[t][p])}</td></tr>`).join('')}
-          <tr class="nv-total"><td><b>TOTAL A PAGARLE</b></td><td class="num"><b>${fmt(saldo)}</b></td></tr>
-        </tbody></table>
-        <div style="margin-top:10px;padding:10px 14px;border-radius:10px;font-size:14.5px;font-weight:700;${saldo > 0.5 ? 'background:#ecfdf5;color:#065f46;' : (saldo < -0.5 ? 'background:#fef2f2;color:#991b1b;' : 'background:#f1f5f9;color:#475569;')}">
-          ${saldo > 0.5 ? `🤝 Para arreglar: PuntoBiO le paga <u>${fmt(saldo)}</u> a ${p}` : (saldo < -0.5 ? `🤝 Para arreglar: ${p} le entrega <u>${fmt(-saldo)}</u> a PuntoBiO` : `🤝 Están a mano: nadie le debe nada a nadie`)}
-          <span style="font-weight:400;font-size:12px;"> · + lo suyo de MOPLEX (su pantalla)</span></div>
-        <div class="nv-nota">El efectivo que cobró no se descuenta: quedó en la caja de PuntoBiO. Lo de MOPLEX se paga aparte,
-          desde la pantalla Liquidaciones MOPLEX. Las obras sociales todavía no entran acá.</div>
-      </div>
-    </div>`;
+    </details>`;
+  }
+  h += `<div class="nv-fila nv-suma"><span class="nv-quien">TOTAL A REPARTIR</span><span class="nv-monto">${fmt(totalAPagar)}</span></div>`;
+  h += `</div>`;
+  h += `<div class="nv-nota">El tilde de la izquierda es para ir marcando con quién ya arreglaste. Queda guardado en esta compu, no lo ven los demás.</div>`;
   }
 
   // --- mapa de cruces
