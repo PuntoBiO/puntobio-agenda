@@ -225,7 +225,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 const SUPABASE_URL = 'https://bqpjtoiictnzcasxfucf.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxcGp0b2lpY3RuemNhc3hmdWNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MDQwOTMsImV4cCI6MjA5NDI4MDA5M30.N1pG65Bm0EmPqxe8hzEFQqE0v1_N5pwrv8HO8We8Xdw';
+// 11/8/26 — alineada con el resto del Ecosistema (app.html, agenda_tf.html).
+// Antes usaba la anon key LEGACY (JWT eyJ...role:anon); era el único archivo,
+// junto con historias_clinicas.html, que seguía con la vieja.
+const SUPABASE_KEY = 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi';
 const FORM_URL = 'https://www.puntobio.com.ar/registrate.html';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (name, acquireTimeout, fn) => fn() } });
 
@@ -313,7 +316,18 @@ async function cargar() {
 
     const { data: personas, error: pErr } = await pQuery.limit(1);
     if (pErr) throw pErr;
-    if (!personas || !personas.length) throw new Error('Persona no encontrada');
+    if (!personas || !personas.length) {
+      // 11/8/26 — la tabla personas tiene RLS (es_equipo() / puedo_ver_persona() /
+      // auth_user_id = auth.uid()). Sin sesión válida, PostgREST devuelve CERO filas
+      // SIN error, y el cartel viejo "Persona no encontrada" hacía creer que faltaba
+      // la persona cuando en realidad faltaba el permiso. Distinguimos los dos casos.
+      let _ses = null;
+      try { _ses = (await sb.auth.getSession()).data.session; } catch (e) { _ses = null; }
+      if (!_ses) {
+        throw new Error('Sesión no detectada en esta ventana: sin login no se puede leer la ficha (RLS). Volvé a entrar al sistema y reintentá.');
+      }
+      throw new Error('La cuenta ' + ((_ses.user && _ses.user.email) || '?') + ' no tiene permiso para ver esta ficha (id ' + (personaIdParam || dniParam) + '), o la persona no existe.');
+    }
     persona = personas[0];
 
     // Buscar HCs y MOPLEX en paralelo
