@@ -1099,10 +1099,46 @@ function vistaNueva(ctx){
   // uno sesión por sesión. Incluye a Jime y Lu (100% centro), que en los bloques de
   // plata quedan en $0 y su trabajo no se veía en ningún lado. Desplegable por profesional.
   if (filtroProf !== 'MOPLEX'){
-    const deudaSes = {};
-    for (const x of (pendientes || [])){
-      const k = (x.tratId || '') + '|' + (x.fecha || '') + '|' + x.prof;
-      deudaSes[k] = (deudaSes[k] || 0) + x.valor;
+    // ESTADO por sesión con imputación "primero el pago del MISMO DÍA, después la
+    // más vieja" (10/8, caso Néstor Camacho): la cascada del motor tapa siempre la
+    // sesión más vieja y la deuda quedaba colgada en la ÚLTIMA (el 6/8, que SÍ tiene
+    // su pago) en vez de en la que de verdad no tiene pago (el 4/8). Esto es SOLO
+    // para el cartelito de estado: los montos de la liquidación no cambian.
+    const _pagosT = {};
+    for (const p of (MT.pagosAll || [])){
+      if (p.tratamiento_id == null) continue;
+      (_pagosT[p.tratamiento_id] = _pagosT[p.tratamiento_id] || []).push({ fecha: p.fecha || '', resto: Number(p.importe) || 0 });
+    }
+    const _sesT = {};
+    for (const s of (MT.sesAll || [])){
+      if (s.tratamiento_id == null || !s.id) continue;
+      const tS0 = s.tratamientos || {};
+      if ((tS0.practica_codigo || '') === 'MOPLEX' || String(tS0.practica_codigo || '').startsWith('MASAJES')) continue;
+      const v = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
+      if (v <= 0.5) continue;
+      (_sesT[s.tratamiento_id] = _sesT[s.tratamiento_id] || []).push({ id: s.id, fecha: s.fecha || '', need: v });
+    }
+    const deudaShow = {};   // s.id → lo que le falta cubrir a ESA sesión (para el estado)
+    for (const tid of Object.keys(_sesT)){
+      const ss = _sesT[tid].slice().sort((a,b)=> a.fecha.localeCompare(b.fecha) || (a.id - b.id));
+      const pp = (_pagosT[tid] || []).slice().sort((a,b)=> a.fecha.localeCompare(b.fecha));
+      // PASO 1: cada sesión toma primero la plata de SU MISMO DÍA
+      for (const s of ss){
+        for (const p of pp){
+          if (s.need <= 0.5) break;
+          if (p.fecha !== s.fecha || p.resto <= 0.5) continue;
+          const toma = Math.min(s.need, p.resto); s.need -= toma; p.resto -= toma;
+        }
+      }
+      // PASO 2: lo que sobró tapa lo que falta, de la sesión más vieja a la más nueva
+      for (const s of ss){
+        for (const p of pp){
+          if (s.need <= 0.5) break;
+          if (p.resto <= 0.5) continue;
+          const toma = Math.min(s.need, p.resto); s.need -= toma; p.resto -= toma;
+        }
+        if (s.need > 0.5) deudaShow[s.id] = s.need;
+      }
     }
     const realizadas = {};
     for (const s of (MT.sesAll || [])){
@@ -1117,7 +1153,7 @@ function vistaNueva(ctx){
         fecha: s.fecha, paciente: ((tS.personas || {}).nombre) || '—',
         practica: tS.practica_codigo || '', val,
         mp: Number(s.monto_profesional) || 0, mc: Number(s.monto_centro) || 0,
-        deuda: deudaSes[(s.tratamiento_id || '') + '|' + (s.fecha || '') + '|' + pr] || 0
+        deuda: deudaShow[s.id] || 0
       });
     }
     h += `<h2 class="bloque-tit">🗓️ Sesiones realizadas en el mes — por profesional</h2>
