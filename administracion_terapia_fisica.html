@@ -1781,7 +1781,9 @@ window.enviarReciboUno = async (fila, btnEl) => {
   const mesAct = new Date().toISOString().slice(0, 7);
   let body = null;
   if (fila && fila.reciboModo === 'bonif') body = { inscripcion_id: fila.inscReciboId, mes_imputado: mesAct };
-  else if (fila && fila.pagoMesId) body = { pago_id: fila.pagoMesId };
+  // Si el recibo YA se había enviado, el botón dice "tocá para reenviar": va con
+  // force para que la función no lo saltee por idempotencia.
+  else if (fila && fila.pagoMesId) body = { pago_id: fila.pagoMesId, force: !fila.reciboPendiente };
   if (!body) { alert('Este alumno no tiene un recibo para enviar este mes.'); return; }
 
   const txtOrig = btnEl ? btnEl.textContent : '';
@@ -1789,7 +1791,11 @@ window.enviarReciboUno = async (fila, btnEl) => {
   try {
     const { data, error } = await sb.functions.invoke('enviar_recibo', { body });
     if (error) { alert('No se pudo enviar el recibo: ' + (error.message || error)); }
-    else if (data && data.skipped) { alert('El alumno no tiene email cargado, así que no se le pudo enviar.'); }
+    else if (data && data.skipped) {
+      alert(/mail/i.test(String(data.skipped))
+        ? 'El alumno no tiene email cargado, así que no se le pudo enviar.'
+        : 'No se envió: ' + data.skipped);
+    }
     else { toast('✓ Recibo enviado por mail'); }
   } catch (e) {
     alert('Error al enviar: ' + (e.message || e));
@@ -2503,7 +2509,9 @@ window.confirmarCobrarSaldo = async () => {
     const { error: e1 } = await sb.from('pagos_tf').insert({
       inscripcion_id: i.id, mes_imputado: d.mes, fecha: HOY.toISOString().split('T')[0],
       importe: d.importe, medio: medioOk, tipo_cobro: 'NORMAL',
-      observaciones: `SALDO cambio cobrado · ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`,
+      // Marcador canónico: las observaciones EMPIEZAN con SALDO_CAMBIO| para que
+      // fn_deuda_mes_tf y el recibo sepan que esto NO es pago de la cuota del mes.
+      observaciones: `SALDO_CAMBIO| ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`,
       cargado_por: usuarioId
     });
     if (e1) throw e1;
@@ -4940,7 +4948,8 @@ window.confirmarCobro = async () => {
         const { error: ep } = await sb.from('pagos_tf').insert({
           inscripcion_id: insc.id, mes_imputado: d.mes, fecha: hoyISO,
           importe: d.importe, medio: $('#cobrarMedio').value, tipo_cobro: 'NORMAL',
-          observaciones: `SALDO cambio cobrado junto a la cuota · ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''}`,
+          // Marcador canónico (ver nota en confirmarCobrarSaldo): SALDO_CAMBIO| al inicio.
+          observaciones: `SALDO_CAMBIO| ${etiquetaSaldoCambio(d)}${d.det ? ' (' + d.det + ')' : ''}${d.venc ? ' · venc ' + d.venc : ''} · cobrado junto a la cuota`,
           cargado_por: usuarioId
         });
         if (ep) {
