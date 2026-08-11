@@ -1066,6 +1066,63 @@ function vistaNueva(ctx){
     <div class="nv-nota">Esta plata <b>no se liquida</b> y no es de nadie todavía: se convierte en liquidación sesión por sesión.
       Si el tratamiento se corta, se devuelve.</div>`;
 
+  // ---------- SESIONES REALIZADAS DEL MES, POR PROFESIONAL (pedido de Lu 10/8) ----------
+  // TODO lo trabajado en el mes, esté cobrado o no — para controlar el trabajo de cada
+  // uno sesión por sesión. Incluye a Jime y Lu (100% centro), que en los bloques de
+  // plata quedan en $0 y su trabajo no se veía en ningún lado. Desplegable por profesional.
+  if (filtroProf !== 'MOPLEX'){
+    const deudaSes = {};
+    for (const x of (pendientes || [])){
+      const k = (x.tratId || '') + '|' + (x.fecha || '') + '|' + x.prof;
+      deudaSes[k] = (deudaSes[k] || 0) + x.valor;
+    }
+    const realizadas = {};
+    for (const s of (MT.sesAll || [])){
+      if (!s.fecha || s.fecha < MT.desde || s.fecha > hasta) continue;
+      const pr = normProf(s.profesional); if (!pr) continue;
+      if (filtroProf && pr !== filtroProf) continue;
+      const tS = s.tratamientos || {};
+      if ((tS.practica_codigo || '') === 'MOPLEX') continue;
+      const val = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
+      if (val <= 0.5) continue;
+      (realizadas[pr] = realizadas[pr] || []).push({
+        fecha: s.fecha, paciente: ((tS.personas || {}).nombre) || '—',
+        practica: tS.practica_codigo || '', val,
+        mp: Number(s.monto_profesional) || 0, mc: Number(s.monto_centro) || 0,
+        deuda: deudaSes[(s.tratamiento_id || '') + '|' + (s.fecha || '') + '|' + pr] || 0
+      });
+    }
+    h += `<h2 class="bloque-tit">🗓️ Sesiones realizadas en el mes — por profesional</h2>
+      <div class="nv-nota" style="margin:-6px 0 10px">Todo lo <b>trabajado</b> del mes, esté cobrado o no — para controlar el trabajo de cada uno. Incluye a quienes son 100% centro (Jime y Lu), que en los bloques de plata figuran en $0.</div>`;
+    const profsSes = ord(Object.keys(realizadas));
+    if (!profsSes.length) h += `<div class="vacio">Sin sesiones realizadas este mes.</div>`;
+    for (const p of profsSes){
+      const filas = realizadas[p].slice().sort((a,b)=> (a.fecha||'').localeCompare(b.fecha||'') || a.paciente.localeCompare(b.paciente));
+      const tot = filas.reduce((x,f)=> x + f.val, 0);
+      const conDeuda = filas.filter(f => f.deuda > 0.5).length;
+      h += `<details class="nv-card" style="padding:10px 18px;margin-bottom:10px;">
+        <summary style="cursor:pointer;display:flex;align-items:center;gap:10px;font-size:14.5px;">
+          ${badge(p)} <b>${filas.length} sesión${filas.length !== 1 ? 'es' : ''}</b>
+          <span style="color:#475569;">${fmt(tot)} de producción</span>
+          ${conDeuda ? `<span style="color:#92400e;font-weight:700;">⏳ ${conDeuda} sin abonar del todo</span>` : `<span style="color:#065f46;font-weight:700;">✓ todas abonadas</span>`}
+        </summary>
+        <table class="nv-tb" style="margin-top:10px;"><thead><tr>
+          <th>Fecha</th><th>Paciente</th><th>Práctica</th><th class="num">$ Sesión</th>
+          <th class="num">Del profe</th><th class="num">Del centro</th><th>Estado</th></tr></thead><tbody>
+        ${filas.map(f => {
+          const est = !(f.deuda > 0.5)
+            ? '<span style="color:#065f46;font-weight:600;">✓ abonada</span>'
+            : (f.deuda >= f.val - 0.5
+              ? '<span style="color:#92400e;font-weight:600;">⏳ sin abonar</span>'
+              : `<span style="color:#b45309;font-weight:600;">parcial · debe ${fmt(f.deuda)}</span>`);
+          return `<tr><td>${f.fecha}</td><td>${f.paciente}</td><td>${practicaLabel(f.practica)}</td>
+            <td class="num">${fmt(f.val)}</td><td class="num">${fmt(f.mp)}</td><td class="num">${fmt(f.mc)}</td><td>${est}</td></tr>`;
+        }).join('')}
+        </tbody></table>
+      </details>`;
+    }
+  }
+
   h += '</div>';
   return h;
 }
