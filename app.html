@@ -1232,7 +1232,7 @@ const EMAILS_SOLO_SARKMED = EMAILS_SARKMED_CLINICO
 // permisos reales siguen siendo los de quien está logueada.
 window.__verComoSarkmed = null
 window.mailSarkmedEfectivo = function() {
-  return (window.__verComoSarkmed || (usuario && usuario.email) || '').toLowerCase().trim()
+  return (window.__verComoSarkmed || (usuario && usuario.email) || window.__mailLogin || '').toLowerCase().trim()
 }
 window.esSoloSarkmed = function() {
   return EMAILS_SOLO_SARKMED.includes(window.mailSarkmedEfectivo())
@@ -1282,6 +1282,8 @@ async function init() {
   }
 
   usuario = persona
+  // El mail del login manda para los candados por mail (en el padrón puede faltar).
+  window.__mailLogin = (session.user.email || '').toLowerCase().trim()
 
   // CAPACIDAD VERSIONADA DE TURNOS TF (04/08/26)
   // Aplica los cambios de cupo programados cuya fecha ya llego, copiando el
@@ -1304,6 +1306,11 @@ async function init() {
       .eq('persona_id', persona.id)
       .maybeSingle()
     permisos = perm || {}
+  } else if (EMAILS_SOLO_SARKMED.includes((persona.email || session.user.email || '').toLowerCase().trim())) {
+    // SARKMED: la Dra. Rendón y Romina entran al panel SIN ser equipo del centro.
+    // Así no aparecen en la mensajería de alumnos ni heredan nada del Ecosistema:
+    // su acceso sale de las listas de SarkMED y de es_sarkmed_externo() en la base.
+    permisos = {}
   } else {
     // 🔒 Este panel es EXCLUSIVO del equipo. Si no es equipo, no puede estar acá.
     // Lo mandamos a su espacio personal y frenamos antes de renderizar nada.
@@ -1775,6 +1782,10 @@ function buildNav() {
         <span class="nav-icon">👤</span>
         <span class="nav-label">Mi perfil</span>
       </div>
+      ${(usuario && usuario.es_equipo === false && !window.__verComoSarkmed) ? `<div class="nav-item" onclick="window.location.href='mi_espacio.html'">
+        <span class="nav-icon">🏠</span>
+        <span class="nav-label">Mi espacio</span>
+      </div>` : ''}
     </div>`
   }
 
@@ -3636,17 +3647,29 @@ function renderAgendaSarkmed() {
 // ======================
 window.abrirVerComoSarkmed = function() {
   const quienes = [
-    { mail: 'matilderendon@hotmail.com', nombre: 'Dra. Matilde Rendón' },
-    { mail: 'abad.romin@gmail.com',      nombre: 'Romina Abad' },
-    { mail: 'paukappes@gmail.com',       nombre: 'Pau' },
-    { mail: 'alejandraperna@gmail.com',  nombre: 'Ale' }
+    { mail: 'matilderendon@hotmail.com', nombre: 'Dra. Matilde Rendón', rol: 'Clínico · ve todo SarkMED, carga historias e informes' },
+    { mail: 'abad.romin@gmail.com',      nombre: 'Romina Abad',         rol: 'Clínico · sin Caja ni Liquidación' },
+    { mail: 'paukappes@gmail.com',       nombre: 'Pau',                 rol: 'Administración · apartado completo' },
+    { mail: 'alejandraperna@gmail.com',  nombre: 'Ale',                 rol: 'Administración · apartado completo' }
   ]
-  const lista = quienes.map((q, i) => `${i + 1}. ${q.nombre}`).join('\n')
-  const elegido = prompt(`¿Con los ojos de quién querés ver SarkMED?\n\n${lista}\n\nEscribí el número:`)
-  if (!elegido) return
-  const idx = parseInt(elegido, 10) - 1
-  if (!(idx >= 0 && idx < quienes.length)) { alert('Número no válido.'); return }
-  window.__verComoSarkmed = quienes[idx].mail
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  contentEl.innerHTML = `
+    <div style="max-width:640px;margin:40px auto;padding:0 20px;">
+      <h2 style="margin:0 0 6px;">Ver SarkMED como otra persona</h2>
+      <p style="color:var(--text-muted,#64748b);margin:0 0 22px;font-size:14px;">
+        Cambia lo que se muestra en pantalla, no lo que podés hacer: por debajo seguís siendo vos.
+      </p>
+      ${quienes.map(q => `
+        <div onclick="window.activarVerComoSarkmed('${q.mail}')"
+             style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:14px 16px;margin-bottom:10px;cursor:pointer;background:#fff;">
+          <div style="font-weight:700;font-size:15px;">${q.nombre}</div>
+          <div style="color:var(--text-muted,#64748b);font-size:12.5px;margin-top:3px;">${q.rol}</div>
+        </div>`).join('')}
+    </div>`
+}
+window.activarVerComoSarkmed = function(mail) {
+  window.__verComoSarkmed = mail
   document.getElementById('nav-items').innerHTML = buildNav()
   if (window.esSoloSarkmed()) renderPlaceholder('hc-sarkmed')
   else renderAgendaSarkmed()
