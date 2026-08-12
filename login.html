@@ -538,13 +538,20 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 // Equipo -> app.html (panel completo). Alumno/paciente -> mi_espacio.html.
 // Averigua el rol de la persona logueada.
 // Devuelve: 'alumno' | 'equipo' | 'ambos'
+// SARKMED: la Dra. Rendón y Romina trabajan en el circuito pero NO son equipo
+// del centro (Mati además es alumna). Sin esta lista, login las mandaría siempre
+// a Mi Espacio y nunca llegarían al panel donde vive SarkMED.
+const EMAILS_SARKMED_CLINICO = [
+  'matilderendon@hotmail.com',   // Dra. Matilde Rendón
+  'abad.romin@gmail.com'         // Romina Abad
+]
+
 async function detectarRol(uidArg) {
   try {
-    let uid = uidArg
-    if (!uid) {
-      const { data: { session } } = await supabase.auth.getSession()
-      uid = session && session.user ? session.user.id : null
-    }
+    const { data: { session } } = await supabase.auth.getSession()
+    let uid = uidArg || (session && session.user ? session.user.id : null)
+    const miMail = (session && session.user && session.user.email ? session.user.email : '').toLowerCase().trim()
+    const esSarkmed = EMAILS_SARKMED_CLINICO.includes(miMail)
     if (!uid) return 'alumno'
     const { data: per } = await supabase
       .from('personas')
@@ -552,8 +559,8 @@ async function detectarRol(uidArg) {
       .eq('auth_user_id', uid)
       .maybeSingle()
 
-    if (!per) return 'alumno' // sin ficha de equipo -> tratamos como alumno
-    if (!per.es_equipo) return 'alumno'
+    if (!per) return esSarkmed ? 'equipo' : 'alumno' // sin ficha de equipo -> tratamos como alumno
+    if (!per.es_equipo && !esSarkmed) return 'alumno'
 
     // Es equipo. ¿También tiene plan TF activo? -> doble rol
     let tienePlan = false
