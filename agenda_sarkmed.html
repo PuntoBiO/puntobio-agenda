@@ -156,6 +156,7 @@
     font-size:13px; font-family:inherit; color:var(--text); background:#fff;
   }
   .campo input:focus, .campo select:focus, .campo textarea:focus{outline:2px solid var(--primary-border); border-color:var(--primary);}
+  .mayus{text-transform:uppercase;}
   .fila-2{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
   .err-box{background:var(--rojo-soft); border:1px solid #fecaca; color:#991b1b; padding:9px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;}
   .ok-box{background:var(--verde-soft); border:1px solid #bbf7d0; color:#166534; padding:9px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;}
@@ -230,7 +231,7 @@
         <div class="fila-2">
           <div class="campo">
             <label>Apellido y nombre</label>
-            <input type="text" id="np-nombre" autocomplete="off">
+            <input type="text" id="np-nombre" class="mayus" autocomplete="off">
           </div>
           <div class="campo">
             <label>DNI</label>
@@ -274,7 +275,7 @@
         <div class="fila-2">
           <div class="campo">
             <label>Emergencia · nombre</label>
-            <input type="text" id="np-emergencia-nombre" autocomplete="off">
+            <input type="text" id="np-emergencia-nombre" class="mayus" autocomplete="off">
           </div>
         </div>
       </div>
@@ -367,6 +368,7 @@ let turnoSel = null;
 let jornadaSel = null;
 let pacienteElegido = null;        // { id, apellido_nombre, dni }
 let buscarTimer = null;
+let resultadosBusqueda = [];   // lo último que devolvió el buscador de pacientes
 
 /* ════════════════════════════════════════════════════════════════
    HELPERS
@@ -385,6 +387,11 @@ function fechaLarga(iso){
   const dias = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
   return `${dias[d.getDay()]} ${d.getDate()} de ${MESES[d.getMonth()].toLowerCase()} de ${d.getFullYear()}`;
 }
+// Normalizadores · la base guarda siempre igual: nombres en MAYÚSCULA,
+// DNI y teléfonos solo números, mail en minúscula.
+function aMayus(v){ return (v || '').trim().replace(/\s+/g, ' ').toUpperCase(); }
+function soloNumeros(v){ return (v || '').replace(/\D/g, ''); }
+function aMinus(v){ return (v || '').trim().toLowerCase(); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function edadDe(nac){
   if(!nac) return null;
@@ -788,10 +795,11 @@ function buscarPacientes(q){
       cont.innerHTML = '<div class="res-item" style="cursor:default;color:var(--muted)">Sin coincidencias · cargalo abajo por primera vez</div>';
       return;
     }
+    resultadosBusqueda = data;
     cont.style.display = 'block';
-    cont.innerHTML = data.map(p => {
+    cont.innerHTML = data.map((p, i) => {
       const edad = edadDe(p.fecha_nacimiento);
-      return `<div class="res-item" onclick="elegirPaciente(${p.id}, ${JSON.stringify(esc(p.apellido_nombre))}, ${JSON.stringify(esc(p.dni))})">
+      return `<div class="res-item" onclick="elegirPacienteIdx(${i})">
         <b>${esc(p.apellido_nombre)}</b>
         <span>DNI ${esc(p.dni)}${edad != null ? ' · ' + edad + ' años' : ''}${p.telefono ? ' · ' + esc(p.telefono) : ''}</span>
       </div>`;
@@ -799,6 +807,11 @@ function buscarPacientes(q){
   }, 250);
 }
 
+function elegirPacienteIdx(i){
+  const p = resultadosBusqueda[i];
+  if(!p) return;
+  elegirPaciente(p.id, p.apellido_nombre, p.dni);
+}
 function elegirPaciente(id, nombre, dni){
   pacienteElegido = { id, apellido_nombre: nombre, dni };
   document.getElementById('resultados').style.display = 'none';
@@ -824,8 +837,8 @@ async function guardarTurnoNuevo(){
 
   // Alta rápida si no eligió a nadie del listado
   if(!paciente){
-    const nombre = document.getElementById('np-nombre').value.trim();
-    const dni    = document.getElementById('np-dni').value.trim();
+    const nombre = aMayus(document.getElementById('np-nombre').value);
+    const dni    = soloNumeros(document.getElementById('np-dni').value);
     if(!nombre || !dni){
       alerta.innerHTML = '<div class="err-box">Buscá al paciente arriba, o cargá al menos apellido, nombre y DNI para darlo de alta.</div>';
       return;
@@ -833,13 +846,13 @@ async function guardarTurnoNuevo(){
     const fila = {
       apellido_nombre: nombre,
       dni,
-      telefono: document.getElementById('np-tel').value.trim() || null,
-      email: document.getElementById('np-email').value.trim() || null,
+      telefono: soloNumeros(document.getElementById('np-tel').value) || null,
+      email: aMinus(document.getElementById('np-email').value) || null,
       fecha_nacimiento: document.getElementById('np-nac').value || null,
       sexo: document.getElementById('np-sexo').value || null,
-      ocupacion: document.getElementById('np-ocupacion').value.trim() || null,
-      contacto_emergencia: document.getElementById('np-emergencia').value.trim() || null,
-      contacto_emergencia_nombre: document.getElementById('np-emergencia-nombre').value.trim() || null,
+      ocupacion: aMayus(document.getElementById('np-ocupacion').value) || null,
+      contacto_emergencia: soloNumeros(document.getElementById('np-emergencia').value) || null,
+      contacto_emergencia_nombre: aMayus(document.getElementById('np-emergencia-nombre').value) || null,
       creado_por_email: miEmail
     };
     const { data, error } = await sb.from('pacientes_sarkmed').insert(fila).select('id, apellido_nombre, dni').single();
