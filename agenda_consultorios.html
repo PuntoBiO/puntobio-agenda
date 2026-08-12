@@ -823,7 +823,7 @@ function reglaDe(cod) { return REGLAS_PRACTICA[normPractica(cod)]; }
 // Recorre cada profesional disponible y cada práctica que ofrece, usando la
 // misma lógica de bloqueo ya corregida. Si nadie puede tomar nada → slot lleno.
 function slotTieneLugar(diaNumero, hora, fecha) {
-  const disp = disponiblesEn(diaNumero, hora);
+  const disp = disponiblesEn(diaNumero, hora, fecha);
   for (const d of disp) {
     for (const prac of d.practicas) {
       if (profesionalesParaPracticaEn(diaNumero, hora, prac, fecha).includes(d.profesional)) return true;
@@ -871,11 +871,32 @@ function esBloqueoFijo(diaNumero, hora) {
   return null;
 }
 
-function disponiblesEn(diaNumero, hora) {
+// ¿Este profesional tiene cerrada ESTA práctica en ESTA fecha/hora?
+// 12/8/26 — PUNTO ÚNICO de los bloqueos por profesional. Antes la disponibilidad
+// salía solo de la tabla estática DISPONIBILIDAD, que no sabe de fechas: un profe
+// de vacaciones seguía contando como presente y sus horarios se le ofrecían al
+// paciente (caso vacaciones de Jime, sep/26). Ahora todo lo que pregunta "¿quién
+// atiende acá?" pasa por este filtro y lo hereda solo.
+// Una APERTURA puntual cargada a mano para ese profe/día/hora manda por encima
+// del cierre (es una excepción deliberada de la admin).
+function profeBloqueadoEn(prof, practica, fecha, hora) {
+  if (!fecha || !window.Bloqueos) return false;
+  if (aperturaConsProfEn(fecha, hora, prof)) return false;
+  const email = NOMBRE_A_EMAIL[prof] || prof;
+  const hi = pad(hora) + ':00', hf = pad(hora + 1) + ':00';
+  return !!Bloqueos.queAplica(CONS_AREA, fecha, hi, hf, email, normPractica(practica));
+}
+
+// Sin `fecha` se comporta como siempre (solo la grilla semanal teórica).
+// Con `fecha`, descuenta a los profesionales bloqueados ese día: si a alguien le
+// quedan cero prácticas, deja de figurar como disponible.
+function disponiblesEn(diaNumero, hora, fecha) {
   const out = [];
   for (const prof of PROFESIONALES) {
-    const practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora];
-    if (practicas && practicas.length > 0) out.push({ profesional: prof, practicas });
+    let practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora];
+    if (!practicas || practicas.length === 0) continue;
+    if (fecha) practicas = practicas.filter(p => !profeBloqueadoEn(prof, p, fecha, hora));
+    if (practicas.length > 0) out.push({ profesional: prof, practicas });
   }
   return out;
 }
@@ -883,7 +904,7 @@ function disponiblesEn(diaNumero, hora) {
 // Si hay un filtro de práctica activo, devuelve los profesionales que pueden darla en ese slot
 // considerando también si ya están ocupados (regla INDIVIDUAL bloquea cualquier otro turno)
 function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
-  if (!practica) return disponiblesEn(diaNumero, hora).map(d => d.profesional);
+  if (!practica) return disponiblesEn(diaNumero, hora, fecha).map(d => d.profesional);
   const real = practica === '__SOBRE_FISIO__' ? 'FISIO' : practica;
   const regla = REGLAS_PRACTICA[real];
   if (!regla) return [];
@@ -915,6 +936,8 @@ function profesionalesParaPracticaEn(diaNumero, hora, practica, fecha) {
     const practicas = DISPONIBILIDAD[prof]?.[diaNumero]?.[hora] || [];
     const habilitadoApertura = fecha && aperturaConsProfEn(fecha, hora, prof) && practicasHabitualesDe(prof).includes(real);
     if (!practicas.includes(real) && !habilitadoApertura) continue;
+    // Bloqueo de agenda (vacaciones, ausencia, cierre de una práctica): el profe no cuenta.
+    if (fecha && profeBloqueadoEn(prof, real, fecha, hora)) continue;
 
     if (fecha) {
       // Chequear si el profesional ya tiene un turno en esta franja
@@ -2048,7 +2071,7 @@ function abrirModalConSlots(slots) {
     if (practicaFiltro) {
       dispProfs = profesionalesParaPracticaEn(s.diaNumero, s.hora, practicaFiltro, s.fecha);
     } else {
-      dispProfs = disponiblesEn(s.diaNumero, s.hora).map(d => d.profesional);
+      dispProfs = disponiblesEn(s.diaNumero, s.hora, s.fecha).map(d => d.profesional);
       // Sumar profes habilitados por apertura (Modo gestión) en esa fecha
       profesAbiertosEn(s.fecha, s.hora).forEach(p => { if (!dispProfs.includes(p)) dispProfs.push(p); });
     }
@@ -2990,7 +3013,10 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
   // OSTEOPATÍA / MASAJE (especialidad)
   if (esp.tipo === 'especialidad') {
     const esMarJue19 = (diaNumero === 2 || diaNumero === 4) && hora === 19;
-    if (esMarJue19 && esp.cod === 'OSTEOPATIA') return !hayEspecialidad; // Jime osteo convive con la fisio de Bruno
+    if (esMarJue19 && esp.cod === 'OSTEOPATIA') {
+      // Jime osteo convive con la fisio de Bruno — pero si ese día no está, no va.
+      return !hayEspecialidad && disponiblesEn(diaNumero, hora, fecha).some(d => d.practicas.includes('OSTEOPATIA'));
+    }
     if (!vacioCompleto) return false;                                    // osteo es exclusivo (bloquea consultorio y viceversa)
     return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0; // donde atiende Jime
   }
@@ -3001,12 +3027,12 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
   // PUNCIÓN SECA / DLM (individuales): casillero LIBRE COMPLETO + que atienda el profe
   if (esp.tipo === 'individual') {
     if (!vacioCompleto) return false;
-    return disponiblesEn(diaNumero, hora).some(d => d.profesional === esp.profe && d.practicas.includes(esp.cod));
+    return disponiblesEn(diaNumero, hora, fecha).some(d => d.profesional === esp.profe && d.practicas.includes(esp.cod));
   }
 
   // REHABILITACIÓN FÍSICA / SUELO PÉLVICO: lugar de rehab (sobreturno) libre + hay kine de fisio
   if (esp.tipo === 'rehab') {
-    const hayProfFisio = disponiblesEn(diaNumero, hora).some(d => d.practicas.includes('FISIO'));
+    const hayProfFisio = disponiblesEn(diaNumero, hora, fecha).some(d => d.practicas.includes('FISIO'));
     const sobreUsados = slotTurnos.filter(esSobreTurnoCons).length;
     return hayProfFisio && sobreUsados === 0;
   }
