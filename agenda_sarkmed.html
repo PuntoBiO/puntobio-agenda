@@ -429,18 +429,30 @@ async function cargarRolUsuario(){
   }
 }
 function esAdminGeneral(){ return usuarioRol === 'admin_general'; }
-// Quiénes abren y cierran los sábados del circuito: Lu y Jime (admin) + Pau y Ale.
-const EMAILS_SARKMED_JORNADAS = ['paukappes@gmail.com','alejandraperna@gmail.com'];
+// Quiénes abren y cierran los sábados: sale de sarkmed_accesos.gestiona_jornadas.
 function puedeAbrirJornadas(){
-  const base = esAdminGeneral() || EMAILS_SARKMED_JORNADAS.includes(miEmail);
+  const yo = accesoDe(miEmail);
+  const base = yo ? yo.gestiona_jornadas : esAdminGeneral();
   const vc = new URLSearchParams(location.search).get('vercomo');
-  // En vista previa: solo Pau y Ale manejan jornadas además de las admin.
-  if (vc) return EMAILS_SARKMED_JORNADAS.includes(vc.toLowerCase().trim()) && base;
+  if (vc) { const visto = accesoDe(vc); return base && !!(visto && visto.gestiona_jornadas); }
   return base;
 }
-// Rol clínico de SARKMED (Dra. Rendón, Romina): ven toda la agenda pero no dan
-// ni modifican turnos. Su trabajo es la historia clínica y el informe.
-const EMAILS_SARKMED_CLINICO = ['matilderendon@hotmail.com','abad.romin@gmail.com'];
+// PERMISOS DE SARKMED · viven en la tabla `sarkmed_accesos`, no acá.
+let accesosSark = [];
+async function cargarAccesosSark(){
+  try{
+    const { data, error } = await sb
+      .from('sarkmed_accesos')
+      .select('email, nombre, gestiona_turnos, gestiona_jornadas')
+      .eq('activo', true);
+    if(error) throw error;
+    accesosSark = (data || []).map(a => ({ ...a, email: (a.email||'').toLowerCase().trim() }));
+  }catch(e){ console.warn('No se pudieron leer los accesos de SarkMED:', e); accesosSark = []; }
+}
+function accesoDe(mail){
+  const m = (mail || '').toLowerCase().trim();
+  return accesosSark.find(a => a.email === m) || null;
+}
 // VISTA PREVIA: app.html puede pasar ?vercomo=mail para mirar la agenda con los
 // ojos de otra persona. Solo sirve para RESTRINGIR lo que se muestra: el mail
 // real sigue mandando para todo lo que agregue permisos.
@@ -449,7 +461,12 @@ function mailEfectivo(){
   return (vc || miEmail || '').toLowerCase().trim();
 }
 function puedeGestionarTurnos(){
-  return !EMAILS_SARKMED_CLINICO.includes(miEmail) && !EMAILS_SARKMED_CLINICO.includes(mailEfectivo());
+  const yo = accesoDe(miEmail);
+  const visto = accesoDe(mailEfectivo());
+  // Si no hay fila (equipo del centro sin acceso cargado), manda el rol de siempre.
+  const real = yo ? yo.gestiona_turnos : true;
+  const previa = visto ? visto.gestiona_turnos : real;
+  return real && previa;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -951,6 +968,7 @@ async function iniciarRealtime(){
 /* INIT */
 (async () => {
   await cargarRolUsuario();
+  await cargarAccesosSark();
   await cargarDatos();
   render();
   iniciarRealtime();

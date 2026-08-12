@@ -1191,52 +1191,38 @@ const EMAILS_VALD = [
   'brunitovelez99@gmail.com',    // Bruno
   'loz.magdalena@gmail.com'      // Male
 ]
-// Quiénes ven el apartado SARKMED (circuito de valoración muscular de los sábados).
-// Tres roles, cada uno con su lista. Para sumar o sacar a alguien, editá la lista
-// que corresponda; EMAILS_SARKMED se arma sola con las tres.
-//  · ADMIN          → Lu y Jime: todo.
-//  · ADMINISTRACIÓN → Pau y Ale: ven el apartado completo, igual que Lu y Jime.
-//  · CLÍNICO        → Dra. Rendón y Romina: ven TODO SarkMED y cargan lo suyo en
-//                     historias e informes. No gestionan turnos ni cargan padrón,
-//                     y no ven ninguna otra parte del Ecosistema PuntoBiO.
-const EMAILS_SARKMED_ADMIN = [
-  'liclucianavelaz@gmail.com',   // Lu
-  'jimenahllorente@gmail.com'    // Jime
-]
-const EMAILS_SARKMED_ADMINISTRACION = [
-  'paukappes@gmail.com',         // Pau
-  'alejandraperna@gmail.com'     // Ale
-]
-const EMAILS_SARKMED_CLINICO = [
-  'matilderendon@hotmail.com',   // Dra. Matilde Rendón
-  'abad.romin@gmail.com'         // Romina Abad
-]
-const EMAILS_SARKMED = [...EMAILS_SARKMED_ADMIN, ...EMAILS_SARKMED_ADMINISTRACION, ...EMAILS_SARKMED_CLINICO]
-// PLATA EN SARKMED, tres pantallas: "Mi facturación" la ve cada uno con lo suyo;
-// CAJA (lo cobrado en la jornada) y LIQUIDACIÓN (movimiento completo y reparto
-// entre profesionales) las ven solo estos mails.
-const EMAILS_SARKMED_LIQUIDACION = [
-  'liclucianavelaz@gmail.com',   // Lu
-  'jimenahllorente@gmail.com',   // Jime
-  'paukappes@gmail.com',         // Pau
-  'alejandraperna@gmail.com',    // Ale
-  'matilderendon@hotmail.com'    // Dra. Matilde Rendón
-]
-window.sarkmedVeLiquidacion = function() {
-  return EMAILS_SARKMED_LIQUIDACION.includes(window.mailSarkmedEfectivo())
+// ACCESOS DE SARKMED · viven en la tabla `sarkmed_accesos`, NO acá.
+// Para sumar, sacar o cambiarle permisos a alguien se edita esa tabla; este
+// archivo solo lee. Cada fila trae: rol, solo_sarkmed, gestiona_turnos,
+// gestiona_jornadas, carga_hc, ve_caja, ve_liquidacion.
+window.__accesosSarkmed = []   // lo que el RLS deja ver: el equipo ve todas las filas, cada externa la suya
+async function cargarAccesosSarkmed() {
+  try {
+    const { data, error } = await supabase
+      .from('sarkmed_accesos')
+      .select('email, nombre, rol, solo_sarkmed, gestiona_turnos, gestiona_jornadas, carga_hc, ve_caja, ve_liquidacion')
+      .eq('activo', true)
+    if (error) throw error
+    window.__accesosSarkmed = (data || []).map(a => ({ ...a, email: (a.email || '').toLowerCase().trim() }))
+  } catch (e) {
+    console.warn('No se pudieron leer los accesos de SarkMED:', e)
+    window.__accesosSarkmed = []
+  }
 }
-// Los del rol clínico entran SOLO a SarkMED: no ven nada más del Ecosistema.
-const EMAILS_SOLO_SARKMED = EMAILS_SARKMED_CLINICO
-// VISTA PREVIA (solo Lu y Jime): permite mirar el sistema con los ojos de otra
-// usuaria de SarkMED. Cambia lo que se MUESTRA, no lo que se puede hacer: los
-// permisos reales siguen siendo los de quien está logueada.
+window.accesoSarkmedDe = function(mail) {
+  const m = (mail || '').toLowerCase().trim()
+  return window.__accesosSarkmed.find(a => a.email === m) || null
+}
+// VISTA PREVIA (solo Lu y Jime): mirar el sistema con los ojos de otra usuaria.
+// Cambia lo que se MUESTRA, no lo que se puede hacer.
 window.__verComoSarkmed = null
 window.mailSarkmedEfectivo = function() {
   return (window.__verComoSarkmed || (usuario && usuario.email) || window.__mailLogin || '').toLowerCase().trim()
 }
-window.esSoloSarkmed = function() {
-  return EMAILS_SOLO_SARKMED.includes(window.mailSarkmedEfectivo())
-}
+window.miAccesoSarkmed = function() { return window.accesoSarkmedDe(window.mailSarkmedEfectivo()) }
+window.esSoloSarkmed = function() { return !!window.miAccesoSarkmed()?.solo_sarkmed }
+window.sarkmedVeLiquidacion = function() { return !!window.miAccesoSarkmed()?.ve_liquidacion }
+window.sarkmedVeCaja = function() { return !!window.miAccesoSarkmed()?.ve_caja }
 
 // ¿El usuario logueado es un profesional con vista acotada? (Bruno/Male/Vero o profes TF)
 // Lo usamos en el menú y para abrir la HC en modo solo-lectura.
@@ -1284,6 +1270,8 @@ async function init() {
   usuario = persona
   // El mail del login manda para los candados por mail (en el padrón puede faltar).
   window.__mailLogin = (session.user.email || '').toLowerCase().trim()
+  // Los accesos de SarkMED se leen de la base ANTES de decidir menú y destino.
+  await cargarAccesosSarkmed()
 
   // CAPACIDAD VERSIONADA DE TURNOS TF (04/08/26)
   // Aplica los cambios de cupo programados cuya fecha ya llego, copiando el
@@ -1306,7 +1294,7 @@ async function init() {
       .eq('persona_id', persona.id)
       .maybeSingle()
     permisos = perm || {}
-  } else if (EMAILS_SOLO_SARKMED.includes((persona.email || session.user.email || '').toLowerCase().trim())) {
+  } else if (window.__accesosSarkmed.some(a => a.solo_sarkmed && a.email === (session.user.email || '').toLowerCase().trim())) {
     // SARKMED: la Dra. Rendón y Romina entran al panel SIN ser equipo del centro.
     // Así no aparecen en la mensajería de alumnos ni heredan nada del Ecosistema:
     // su acceso sale de las listas de SarkMED y de es_sarkmed_externo() en la base.
@@ -1762,7 +1750,7 @@ function buildNav() {
         <span class="nav-icon">👥</span>
         <span class="nav-label">Padrón SARKMED</span>
       </div>
-      ${window.sarkmedVeLiquidacion()
+      ${window.sarkmedVeCaja()
         ? `<div class="nav-item" onclick="irA('caja-sarkmed')">
         <span class="nav-icon">💵</span>
         <span class="nav-label">Caja</span>
@@ -1994,13 +1982,13 @@ function buildNav() {
   // sábados: padrón, jornadas y turnos separados del resto del centro.
   // Lu, Jime, Pau y Ale ven el apartado completo.
   // (El rol clínico no llega hasta acá: sale antes, con su menú propio.)
-  if (EMAILS_SARKMED.includes(miEmailNav)) {
+  if (window.accesoSarkmedDe(miEmailNav)) {
     areas.push({ icon: '⚕️', label: 'SARKMED', id: 'sarkmed', nuevoHtml: window.badgeNuevo('2026-08-12') })
     areas.push({ icon: '📅', label: 'Agenda SARKMED', id: 'agenda-sarkmed', sub: true })
     areas.push({ icon: '🩺', label: 'Historias Clínicas', id: 'hc-sarkmed', sub: true })
     areas.push({ icon: '📄', label: 'Informes', id: 'informes-sarkmed', sub: true })
     areas.push({ icon: '👥', label: 'Padrón SARKMED', id: 'padron-sarkmed', sub: true })
-    if (window.sarkmedVeLiquidacion()) areas.push({ icon: '💵', label: 'Caja', id: 'caja-sarkmed', sub: true })
+    if (window.sarkmedVeCaja()) areas.push({ icon: '💵', label: 'Caja', id: 'caja-sarkmed', sub: true })
     areas.push({ icon: '🧾', label: 'Mi facturación', id: 'mi-facturacion-sarkmed', sub: true })
     if (window.sarkmedVeLiquidacion()) areas.push({ icon: '💰', label: 'Liquidación', id: 'liquidacion-sarkmed', sub: true })
     if (permisos.admin_total) areas.push({ icon: '👁', label: 'Ver como…', id: 'sarkmed-vercomo', sub: true })
@@ -3646,12 +3634,18 @@ function renderAgendaSarkmed() {
 // SARKMED · VER COMO (solo Lu y Jime)
 // ======================
 window.abrirVerComoSarkmed = function() {
-  const quienes = [
-    { mail: 'matilderendon@hotmail.com', nombre: 'Dra. Matilde Rendón', rol: 'Clínico · ve todo SarkMED, carga historias e informes' },
-    { mail: 'abad.romin@gmail.com',      nombre: 'Romina Abad',         rol: 'Clínico · sin Caja ni Liquidación' },
-    { mail: 'paukappes@gmail.com',       nombre: 'Pau',                 rol: 'Administración · apartado completo' },
-    { mail: 'alejandraperna@gmail.com',  nombre: 'Ale',                 rol: 'Administración · apartado completo' }
-  ]
+  const yo = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  const quienes = window.__accesosSarkmed
+    .filter(a => a.email !== yo)
+    .map(a => ({
+      mail: a.email,
+      nombre: a.nombre,
+      rol: [
+        a.rol === 'CLINICO' ? 'Clínico' : (a.rol === 'ADMIN' ? 'Admin' : 'Administración'),
+        a.gestiona_jornadas ? 'abre jornadas' : (a.gestiona_turnos ? 'da turnos' : 'agenda en consulta'),
+        a.ve_liquidacion ? 've liquidación' : 'sin liquidación'
+      ].join(' · ')
+    }))
   const contentEl = document.getElementById('content')
   contentEl.classList.remove('module-embed')
   contentEl.innerHTML = `

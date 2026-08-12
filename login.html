@@ -538,20 +538,26 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 // Equipo -> app.html (panel completo). Alumno/paciente -> mi_espacio.html.
 // Averigua el rol de la persona logueada.
 // Devuelve: 'alumno' | 'equipo' | 'ambos'
-// SARKMED: la Dra. Rendón y Romina trabajan en el circuito pero NO son equipo
-// del centro (Mati además es alumna). Sin esta lista, login las mandaría siempre
-// a Mi Espacio y nunca llegarían al panel donde vive SarkMED.
-const EMAILS_SARKMED_CLINICO = [
-  'matilderendon@hotmail.com',   // Dra. Matilde Rendón
-  'abad.romin@gmail.com'         // Romina Abad
-]
+// SARKMED: quiénes trabajan en el circuito vive en la tabla `sarkmed_accesos`,
+// no acá. Sin esta consulta, a las que NO son equipo del centro (la Dra. Rendón,
+// que además es alumna, y Romina) login las mandaría siempre a Mi Espacio.
+async function tieneAccesoSarkmed() {
+  try {
+    const { data, error } = await supabase
+      .from('sarkmed_accesos')
+      .select('email')
+      .eq('activo', true)
+      .limit(1)
+    if (error) return false
+    return !!(data && data.length > 0)   // el RLS ya devuelve solo lo que le corresponde
+  } catch (e) { return false }
+}
 
 async function detectarRol(uidArg) {
   try {
     const { data: { session } } = await supabase.auth.getSession()
     let uid = uidArg || (session && session.user ? session.user.id : null)
-    const miMail = (session && session.user && session.user.email ? session.user.email : '').toLowerCase().trim()
-    const esSarkmed = EMAILS_SARKMED_CLINICO.includes(miMail)
+    const esSarkmed = await tieneAccesoSarkmed()
     if (!uid) return 'alumno'
     const { data: per } = await supabase
       .from('personas')
