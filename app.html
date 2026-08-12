@@ -1250,6 +1250,17 @@ window.badgeNuevo = function(fechaLanzamiento) {
 // ======================
 // INICIALIZACION
 // ======================
+// Red de seguridad: si el arranque no termina, a los 8 segundos sacamos el cartel
+// de "Cargando sistema..." para no dejar la pantalla muerta.
+setTimeout(() => {
+  const l = document.getElementById('loader')
+  if (l && l.style.display !== 'none') {
+    console.warn('El arranque tardó demasiado: se muestra el sistema igual.')
+    l.style.display = 'none'
+    const a = document.getElementById('app'); if (a) a.classList.add('ready')
+  }
+}, 8000)
+
 async function init() {
   const { data: { session } } = await supabase.auth.getSession()
 
@@ -1310,11 +1321,17 @@ async function init() {
     return
   }
 
-  renderShell()
-  // Los usuarios que solo ven SARKMED entran directo a su agenda, no al Inicio del centro.
-  // El rol clínico de SarkMED entra directo a las historias, que es su trabajo.
-  if (window.esSoloSarkmed()) renderPlaceholder('hc-sarkmed')
-  else renderHome()
+  try {
+    renderShell()
+    // El rol clínico de SarkMED entra directo a las historias, que es su trabajo.
+    if (window.esSoloSarkmed()) renderPlaceholder('hc-sarkmed')
+    else renderHome()
+  } catch (e) {
+    // Si algo falla armando la pantalla, mostramos el sistema igual y dejamos el
+    // motivo en la consola. Nunca se queda en "Cargando sistema...".
+    console.error('Error al armar la pantalla inicial:', e)
+    try { renderHome() } catch (e2) { console.error('Tampoco pudo el inicio:', e2) }
+  }
 
   document.getElementById('loader').style.display = 'none'
   document.getElementById('app').classList.add('ready')
@@ -1730,7 +1747,9 @@ function buildNav() {
 
   // SOLO SARKMED: rol clínico (Dra. Rendón, Romina). Ven TODO el apartado
   // SarkMED y nada más: ni Inicio, ni áreas del centro, ni administración.
-  if (window.esSoloSarkmed()) {
+  let _soloSark = false
+  try { _soloSark = window.esSoloSarkmed() } catch (e) { _soloSark = false }
+  if (_soloSark) {
     const enVistaPrevia = !!window.__verComoSarkmed
     return `<div class="nav-section">
       <div class="nav-section-title">SARKMED${enVistaPrevia ? ' · VISTA PREVIA' : ''}</div>
@@ -1986,6 +2005,7 @@ function buildNav() {
   // sábados: padrón, jornadas y turnos separados del resto del centro.
   // Lu, Jime, Pau y Ale ven el apartado completo.
   // (El rol clínico no llega hasta acá: sale antes, con su menú propio.)
+  try {
   if (window.accesoSarkmedDe(miEmailNav)) {
     areas.push({ icon: '⚕️', label: 'SARKMED', id: 'sarkmed', nuevoHtml: window.badgeNuevo('2026-08-12') })
     areas.push({ icon: '📅', label: 'Agenda SARKMED', id: 'agenda-sarkmed', sub: true })
@@ -1997,6 +2017,7 @@ function buildNav() {
     if (window.sarkmedVeLiquidacion()) areas.push({ icon: '💰', label: 'Liquidación', id: 'liquidacion-sarkmed', sub: true })
     if (permisos.admin_total) areas.push({ icon: '👁', label: 'Ver como…', id: 'sarkmed-vercomo', sub: true })
   }
+  } catch (e) { console.warn('SarkMED: no se pudo armar el bloque del menú', e) }
 
   // VALD para quienes están en EMAILS_VALD pero NO tienen habilitado todo BioLab
   // (ej. Bruno/Male): les mostramos SOLO el acceso a VALD, como ítem suelto, sin
