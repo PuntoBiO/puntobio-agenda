@@ -192,6 +192,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lock: (na
    ESTADO
    ════════════════════════════════════════════════════════════════ */
 let pacientes = [];
+let cargando = true;      // true mientras se lee el padrón: la pantalla avisa en vez de mostrar filas a medio dibujar
 let filtro = '';
 let editando = null;      // paciente en edición, o null si es alta
 let miEmail = '';
@@ -251,6 +252,7 @@ function puedeEditar(){
    CARGA · paginada, para que nunca se corte en 1000
    ════════════════════════════════════════════════════════════════ */
 async function cargarPacientes(){
+  cargando = true;
   const todos = [];
   let desde = 0;
   const paso = 1000;
@@ -268,6 +270,15 @@ async function cargarPacientes(){
     desde += paso;
   }
   pacientes = todos;
+  cargando = false;
+}
+
+/* Botón ↻ Actualizar · vuelve a leer el padrón sin recargar la página */
+async function refrescar(){
+  if(cargando) return;
+  await cargarPacientes();
+  render();
+  toast('Padrón actualizado', 'ok');
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -283,9 +294,20 @@ function listaFiltrada(){
 }
 
 function render(){
-  document.getElementById('zona-acciones').innerHTML = puedeEditar()
-    ? '<button class="btn btn-primary" onclick="abrirNuevo()">+ Nuevo paciente</button>'
-    : '<span style="font-size:11.5px;color:var(--muted)">Solo consulta</span>';
+  document.getElementById('zona-acciones').innerHTML =
+    `<button class="btn" onclick="refrescar()" ${cargando ? 'disabled' : ''} title="Volver a leer el padrón">↻ Actualizar</button>` +
+    (puedeEditar()
+      ? '<button class="btn btn-primary" style="margin-left:8px" onclick="abrirNuevo()">+ Nuevo paciente</button>'
+      : '<span style="font-size:11.5px;color:var(--muted);margin-left:10px">Solo consulta</span>');
+
+  // Mientras se lee, la pantalla lo dice. Antes quedaba un hueco en blanco
+  // y el contador mostraba un número de una lista que todavía no estaba dibujada.
+  if(cargando){
+    document.getElementById('contador').textContent = 'Cargando…';
+    document.getElementById('wrap').innerHTML =
+      '<div class="vacio"><b>Cargando pacientes…</b>Un segundo.</div>';
+    return;
+  }
 
   const lista = listaFiltrada();
   document.getElementById('contador').textContent =
@@ -322,8 +344,12 @@ function render(){
           const edad = edadDe(p.fecha_nacimiento);
           return `<tr>
             <td>
-              <div class="pac-nombre">${esc(p.apellido_nombre)}</div>
-              <div class="pac-dni">DNI ${esc(p.dni)}</div>
+              <div class="pac-nombre">${
+                (p.apellido_nombre || '').trim()
+                  ? esc(p.apellido_nombre)
+                  : '<span style="color:var(--rojo-x)">FICHA SIN NOMBRE</span>'
+              }</div>
+              <div class="pac-dni">DNI ${esc(p.dni || '—')}</div>
             </td>
             <td class="ocultar-chico celda-dim">${edad != null ? edad + ' años' : '—'}</td>
             <td class="ocultar-chico celda-dim">${esc(p.telefono || '—')}</td>
@@ -473,6 +499,7 @@ async function darDeBaja(id){
 
 /* INIT */
 (async () => {
+  render();                       // primero el cartel de "Cargando pacientes…"
   await cargarSesionYAccesos();
   await cargarPacientes();
   render();
