@@ -973,6 +973,7 @@
       <span class="semana-label" id="semana-label" onclick="abrirCalendarioSemana()" title="Clic para saltar a una fecha" style="cursor:pointer">Cargando...</span>
       <button onclick="cambiarSemana(1)">&#8594;</button>
       <button onclick="volverAHoy()" title="Volver a la semana actual" style="margin-left:6px;font-size:12px;font-weight:600;padding:4px 10px">Hoy</button>
+      <button id="btn-refrescar" onclick="refrescarAgenda()" title="Traer los últimos cambios" style="margin-left:4px;font-size:13px;font-weight:600;padding:4px 9px">&#128260;</button>
       <input type="date" id="semana-datepicker" onchange="irASemanaDeFecha(this.value)" style="position:absolute;opacity:0;width:1px;height:1px;pointer-events:none">
     </div>
     <div class="user-box" id="user-box" style="display:none">
@@ -1263,7 +1264,11 @@ async function fetchConTimeout(url, opciones = {}, ms = 12000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   try {
-    return await fetch(url, { ...opciones, signal: ctrl.signal });
+    // cache:'no-store' — SIN esto Safari puede servir la respuesta VIEJA de su
+    // propia cache (las URLs son idénticas entre recargas) y la agenda muestra
+    // cupos desactualizados hasta que se refresca varias veces. Mismo fix que
+    // ya tiene agenda_consultorios.html.
+    return await fetch(url, { ...opciones, cache: 'no-store', signal: ctrl.signal });
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('La conexión tardó demasiado. Revisá internet y reintentá.');
     throw e;
@@ -1293,6 +1298,10 @@ async function refrescarToken() {
       if (res.ok && data.access_token) {
         guardarToken(data.access_token);
         if (data.refresh_token) guardarRefreshToken(data.refresh_token);
+        // El canal de tiempo real quedó autenticado con el token VIEJO. Con RLS
+        // prendido, a partir del vencimiento deja de traer cambios en silencio.
+        // Hay que volver a autenticarlo con el token nuevo.
+        realtimeReautenticar(data.access_token);
         return true;
       }
       // Refresh inválido: forzar nuevo login
@@ -1657,10 +1666,17 @@ let ALUMNOS_POR_TURNO = {};
 // key: `${turno_id}-${fecha}` -> [{id, nombre, tipo, agregadoId}]
 let AGREGADOS_POR_TURNO = {};
 let cargando = false;
-async function cargarDatos() {
-  if (cargando) return;
+// Si llega un pedido de recarga mientras ya estamos cargando, NO se descarta:
+// queda encolado y se corre al terminar. (Antes se perdía en silencio, y como
+// cargarDatos hace ~10 lecturas seguidas la ventana para perderlo era larga.)
+let _recargaPendiente = false;
+// silencioso=true: no borra la grilla con el cartel "Cargando datos...".
+// Lo usan las recargas automáticas (tiempo real, volver a la pestaña), para que
+// la pantalla no parpadee mientras alguien está mirando.
+async function cargarDatos(silencioso) {
+  if (cargando) { _recargaPendiente = true; return; }
   cargando = true;
-  mostrarCargando(true);
+  if (!silencioso) mostrarCargando(true);
   try {
     // Cargar turnos
     const turnos = await supabaseQuery('turnos', '?select=*&order=dia,hora,servicio');
@@ -1749,6 +1765,10 @@ async function cargarDatos() {
   } finally {
     cargando = false;
     mostrarCargando(false);
+    if (_recargaPendiente) {
+      _recargaPendiente = false;
+      setTimeout(() => cargarDatos(true), 80);   // la encolada va silenciosa
+    }
   }
 }
 function mostrarCargando(activo) {
@@ -1837,6 +1857,25 @@ window.irASemanaDeFecha = async (fechaIso) => {
   await cargarDatos();
   if (vistaActual === 'semana') renderVistaSemana();
   else { renderDiasTabs(); renderTurnos(); }
+};
+
+// Botón 🔄 — trae los últimos cambios sin recargar la página entera.
+// De paso reautentica el canal de tiempo real, por si se había caído.
+window.refrescarAgenda = async () => {
+  const btn = document.getElementById('btn-refrescar');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳'; }
+  try {
+    _cambiosDiferidos = false;
+    realtimeReautenticar();
+    await cargarDatos(true);
+    if (vistaActual === 'semana') renderVistaSemana();
+    else { renderDiasTabs(); renderTurnos(); }
+    toast('Agenda actualizada', 'ok');
+  } catch (e) {
+    toast('No se pudo actualizar: ' + (e.message || e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#128260;'; }
+  }
 };
 
 // Vuelve a la semana actual
@@ -4518,6 +4557,9 @@ window.abrirAgregarAlumno = (dia, hora, servicio) => {
 };
 window.cerrarAgregar = () => {
   document.getElementById('agregar-overlay').classList.remove('activo');
+  // Si el modal del turno quedó abierto detrás, esperamos a que se cierre él.
+  const modalAbierto = document.getElementById('modal-overlay')?.classList.contains('activo');
+  if (!modalAbierto) aplicarCambiosDiferidos();
 };
 
 window.buscarPersonaAgregar = (texto) => {
@@ -6245,7 +6287,10 @@ async function abrirModal(dia, hora, servicio) {
   renderModalBody(dia, hora, servicio);
 }
 function cerrarModal(e) { if (e.target===document.getElementById('modal-overlay')) cerrarModalBtn(); }
-function cerrarModalBtn() { document.getElementById('modal-overlay').classList.remove('activo'); }
+function cerrarModalBtn() {
+  document.getElementById('modal-overlay').classList.remove('activo');
+  aplicarCambiosDiferidos();   // trae lo que cambiaron otros mientras estaba abierto
+}
 function filtrar(tipo, btn) {
   filtroActivo = tipo;
   // Solo desmarcar los 3 filtros de servicio (no el toggle Día/Semana)
@@ -6465,6 +6510,26 @@ async function confirmarJustif() {
 // =============================================
 let realtimeCanal = null;
 let realtimeTimer = null;
+let realtimeOk = false;          // ¿el canal está realmente conectado?
+// Cambios que llegaron mientras había un modal abierto y NO se pudieron aplicar.
+// Se aplican al cerrar el modal (antes se perdían para siempre: el comentario
+// decía "al cerrar el modal verá los datos frescos" pero nadie releía nada).
+let _cambiosDiferidos = false;
+// Vuelve a autenticar el canal de tiempo real con el token vigente.
+function realtimeReautenticar(token) {
+  try {
+    const t = token || obtenerToken();
+    if (t && sbCliente && sbCliente.realtime && sbCliente.realtime.setAuth) {
+      Promise.resolve(sbCliente.realtime.setAuth(t)).catch(() => {});
+    }
+  } catch (e) { console.warn('[REALTIME] no se pudo reautenticar', e); }
+}
+// Aplica los cambios que quedaron pendientes al cerrar un modal.
+function aplicarCambiosDiferidos() {
+  if (!_cambiosDiferidos) return;
+  _cambiosDiferidos = false;
+  cargarDatos(true);
+}
 function recargarPorRealtime() {
   // Debounce: si llegan varios cambios juntos, esperamos un toque y recargamos 1 vez.
   clearTimeout(realtimeTimer);
@@ -6475,8 +6540,8 @@ function recargarPorRealtime() {
     // la grilla para mostrar en vivo lo que hicieron otras personas.
     const modalAbierto = document.getElementById('modal-overlay')?.classList.contains('activo');
     const agregarAbierto = document.getElementById('agregar-overlay')?.classList.contains('activo');
-    if (modalAbierto || agregarAbierto) return;
-    cargarDatos();
+    if (modalAbierto || agregarAbierto) { _cambiosDiferidos = true; return; }
+    cargarDatos(true);
   }, 1200);
 }
 async function iniciarRealtime() {
@@ -6495,9 +6560,14 @@ async function iniciarRealtime() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_agregados' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_alumnos' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clases_cerradas' }, recargarPorRealtime)
+      // CAPACIDAD: sin estas dos, un cambio de cupo hecho desde Gestión de Cupos
+      // no llegaba nunca a una agenda ya abierta.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turnos' }, recargarPorRealtime)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'turnos_capacidad' }, recargarPorRealtime)
       .subscribe((status, err) => {
         // Log de estado para diagnosticar en la consola del navegador
         console.log('[REALTIME] estado del canal:', status, err || '');
+        realtimeOk = (status === 'SUBSCRIBED');
         if (status === 'SUBSCRIBED') {
           console.log('[REALTIME] ✅ conectado: la agenda escucha cambios en vivo');
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
@@ -6508,6 +6578,30 @@ async function iniciarRealtime() {
     console.warn('[REALTIME] No se pudo iniciar el tiempo real', e);
   }
 }
+
+// ===== RED DE SEGURIDAD DEL REFRESCO =====
+// El tiempo real puede caerse sin avisar (canal cerrado, wifi que se corta, la
+// notebook que se durmió). Estas dos redes garantizan que la agenda no quede
+// congelada mostrando cupos viejos.
+// 1) Al volver a la pestaña: reautenticar el canal y traer los cambios.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !sesionActiva) return;
+  realtimeReautenticar();
+  const modalAbierto = document.getElementById('modal-overlay')?.classList.contains('activo');
+  const agregarAbierto = document.getElementById('agregar-overlay')?.classList.contains('activo');
+  if (modalAbierto || agregarAbierto) { _cambiosDiferidos = true; return; }
+  cargarDatos(true);
+});
+// 2) Latido cada 3 minutos, SOLO si el canal no está conectado y la pestaña está
+//    a la vista. Si el tiempo real anda, esto no consulta nada.
+setInterval(() => {
+  if (!sesionActiva || realtimeOk) return;
+  if (document.visibilityState !== 'visible') return;
+  const modalAbierto = document.getElementById('modal-overlay')?.classList.contains('activo');
+  const agregarAbierto = document.getElementById('agregar-overlay')?.classList.contains('activo');
+  if (modalAbierto || agregarAbierto) return;
+  cargarDatos(true);
+}, 180000);
 
 let sesionActiva = false;
 async function verificarSesion() {
