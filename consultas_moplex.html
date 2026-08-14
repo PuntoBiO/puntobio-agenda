@@ -59,6 +59,7 @@ tbody tr:hover{background:var(--bg-soft)}
 .mes-body{margin-bottom:6px}
 .est2{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;display:inline-block}
 .est2.ok{background:var(--green-bg);color:#166534}
+.est2.sincons{background:#f1f5f9;color:#475569}
 .est2.pend{background:var(--amber-bg);color:#92400e}
 .mes-reg{font-size:11px;font-weight:700;color:var(--amber);background:var(--amber-bg);border:1px solid #fde68a;border-radius:99px;padding:3px 10px;margin-left:8px}
 </style>
@@ -99,7 +100,7 @@ const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], by
 // y rectificación sin cargo.
 const MOPLEX_PCT_CONSULTA = 0.20
 const MOPLEX_PCT_CONSULTA_DESDE = '2026-08'
-function calcConsulta(c, montoCustom, fechaC){
+function calcConsulta(c, montoCustom, fechaC, cortesiaPB){
   if(!c) return null
   // Precio editable (✂️ correcciones / convenios). Por defecto el del catálogo; si Lu lo cambió, ese.
   // UN 0 EXPLÍCITO VALE (12/8, caso Manuel Arias segundo par / bonificación de MOPLEX):
@@ -119,9 +120,15 @@ function calcConsulta(c, montoCustom, fechaC){
     const moplexBase = Number(c.costo_moplex)||0
     moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
   }
+  // CORTESÍA PUNTOBIO (12/8, "ej para una amiga mía"): el paciente paga SOLO lo de
+  // MOPLEX (esa plata es de la franquicia, no se puede regalar) y PB regala el resto:
+  // profesional $0 y centro $0. El monto a cobrar es exactamente el que va a MOPLEX.
+  if (cortesiaPB && moplex > 0){
+    return { precio: moplex, moplex, prof: 0, centro: 0, custom: false, sinCargo: false, cortesiaPB: true }
+  }
   const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
-  return { precio, moplex, prof, centro, custom, sinCargo: tieneMonto && precio === 0 }
+  return { precio, moplex, prof, centro, custom, sinCargo: tieneMonto && precio === 0, cortesiaPB: false }
 }
 function calcPlantilla(p, rectif, montoCustom, montoPlantilla){
   if(!p) return null
@@ -258,8 +265,8 @@ function filaTto(t){
   const pac  = state.personas[t.persona_id] || '(sin nombre)'
   const prof = t.profesional || state.profPorSesion[t.id] || state.profPorTto[t.codigo_id] || ''
   const realiz = !!state.realizado[t.id]
-  const estTxt = realiz ? 'Realizado' : 'Pendiente'
-  const estCls = realiz ? 'ok' : 'pend'
+  let estTxt = realiz ? 'Realizado' : 'Pendiente'
+  let estCls = realiz ? 'ok' : 'pend'
   const pide = !!t.solicita_plantillas
   const factura = facturable(t)
 
@@ -275,10 +282,30 @@ function filaTto(t){
   const consInput = consCat
     ? `<div style="margin-top:4px;"><span title="Precio del paciente. Trae el del catálogo; editalo para corregirlo." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${consPrecioActual}" onchange="setConsultaMonto(${t.id}, this.value)" style="width:110px;${consEditado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span></div>`
     : ''
-  const cRep = aplicarFactura(calcConsulta(consCat, t.moplex_consulta_monto, fechaConsulta(t)), factura)
-  const cMon = montosLine(cRep)
-    + ((cRep && cRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 consulta sin cargo (nadie cobra — cortesía/bonificado MOPLEX)</div>`
-      : ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : ''))
+  const cortPB = !!t.moplex_consulta_cortesia_pb
+  const cortChk = consCat
+    ? `<div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11.5px;color:#9a3412;" title="El paciente paga SOLO lo que cobra MOPLEX; PuntoBiO regala su parte y la del profesional.">
+        <input type="checkbox" ${cortPB ? 'checked' : ''} onchange="setConsultaCortesiaPB(${t.id}, this.checked)" style="width:13px;height:13px;cursor:pointer;">
+        🎁 Cortesía PuntoBiO</label></div>`
+    : ''
+  const cRep = aplicarFactura(calcConsulta(consCat, t.moplex_consulta_monto, fechaConsulta(t), cortPB), factura)
+  // "PEDIDO DE PLANTILLAS" (12/8, caso Arias: el 13/8 no hizo otra baropodometría,
+  // solo dejó el par viejo a rectificar / pide otro par más — la consulta que vale es
+  // la que YA se hizo): ítem del catálogo con precio $0 que no es garantía. La consulta
+  // va toda en $0 y la columna PLANTILLA decide sola: Rectificación → prof $0;
+  // plantilla nueva → reparto normal con su 10% al profesional.
+  const esPedido = !!(consCat && (Number(consCat.precio_paciente)||0) === 0 && !consCat.es_garantia)
+  // "SIN CONSULTA": pedido de plantillas, o consulta sin cargo (0 en el ✂️), sin sesión
+  // — no se espera ningún turno, el "Pendiente" eterno mentía. La plata no depende de
+  // esto: la rectificación / plantilla liquida por el COBRO igual. Si algún día se
+  // marca presente, gana Realizado.
+  if (!realiz && (esPedido || (cRep && cRep.sinCargo))){ estTxt = 'Sin consulta'; estCls = 'sincons' }
+  const cMon = (esPedido
+    ? `<div class="muted" style="color:#475569;font-weight:700;">📦 pedido de plantillas — sin consulta ($0): la baropodometría que vale es la que ya se hizo. La plantilla/rectificación de al lado sigue su curso normal.</div>`
+    : montosLine(cRep)
+      + ((cRep && cRep.cortesiaPB) ? `<div class="muted" style="color:#9a3412;font-weight:700;">🎁 cortesía PuntoBiO — el paciente paga solo lo de MOPLEX (${fmt(cRep.moplex)}); PB regala el resto</div>`
+        : ((cRep && cRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 consulta sin cargo (nadie cobra — cortesía/bonificado MOPLEX)</div>`
+        : ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : ''))))
 
   // --- Plantilla ---
   let plCell
@@ -315,7 +342,7 @@ function filaTto(t){
     <td>${fmtFechaCorta(fechaConsulta(t))}</td>
     <td>${profSel}</td>
     <td><span class="est2 ${estCls}">${estTxt}</span></td>
-    <td>${consSel}${consInput}${cMon}</td>
+    <td>${consSel}${esPedido ? '' : consInput}${esPedido ? '' : cortChk}${cMon}</td>
     <td class="c">
       <label class="sw">
         <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
@@ -410,9 +437,9 @@ async function setProf(id, val){
 async function setConsulta(id, val){
   const v = val ? Number(val) : null
   try{
-    const { error } = await sb.from('tratamientos').update({ moplex_consulta_id: v, moplex_consulta_monto: null }).eq('id', id)
+    const { error } = await sb.from('tratamientos').update({ moplex_consulta_id: v, moplex_consulta_monto: null, moplex_consulta_cortesia_pb: false }).eq('id', id)
     if (error) throw error
-    const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_consulta_id = v; t.moplex_consulta_monto = null }
+    const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_consulta_id = v; t.moplex_consulta_monto = null; t.moplex_consulta_cortesia_pb = false }
     render()
   } catch(e){ msg('No se pudo guardar la consulta: ' + (e.message || e), 'err') }
 }
@@ -426,6 +453,15 @@ async function setPlantilla(id, val){
     const t = state.ttos.find(x => x.id === id); if (t){ t.moplex_plantilla_id = v; t.moplex_plantilla_monto = null }
     render()
   } catch(e){ msg('No se pudo guardar la plantilla: ' + (e.message || e), 'err') }
+}
+
+async function setConsultaCortesiaPB(id, val){
+  try{
+    const { error } = await sb.from('tratamientos').update({ moplex_consulta_cortesia_pb: !!val }).eq('id', id)
+    if (error) throw error
+    const t = state.ttos.find(x => x.id === id); if (t) t.moplex_consulta_cortesia_pb = !!val
+    render()
+  } catch(e){ msg('No se pudo guardar la cortesía (¿falta la columna moplex_consulta_cortesia_pb?): ' + (e.message || e), 'err') }
 }
 
 async function setConsultaMonto(id, val){

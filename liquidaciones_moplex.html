@@ -133,7 +133,7 @@ function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_
 // misma regla que consultas_moplex.html). Julio 2026 para atrás: $0 como siempre.
 const MOPLEX_PCT_CONSULTA = 0.20;
 const MOPLEX_PCT_CONSULTA_DESDE = '2026-08';
-function calcConsultaMoplex(c, montoCustom, fechaC){
+function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
   if (!c) return null;
   // Precio corregido/convenio (✏️ de Consultas MOPLEX): manda sobre el catálogo.
   // UN 0 EXPLÍCITO VALE = consulta sin cargo (12/8, mismo criterio que consultas_moplex.html).
@@ -155,6 +155,10 @@ function calcConsultaMoplex(c, montoCustom, fechaC){
   } else {
     const moplexBase = Number(c.costo_moplex)||0;
     moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+  }
+  // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
+  if (cortesiaPB && moplex > 0){
+    return { precio: moplex, moplex, prof: 0, centro: 0 };
   }
   const prof   = Math.round(precio*0.40);
   const centro = precio - moplex - prof;
@@ -223,7 +227,7 @@ function prepararMoplex(monthPagos){
     const evalItem  = byId[t.moplex_consulta_id];
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
-    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha) : null;
+    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha, t.moplex_consulta_cortesia_pb) : null;
     const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
     const paciente = (t.personas && t.personas.nombre) || '—';
     const prof     = normProf(p0.profesional);
@@ -335,7 +339,7 @@ async function cargar(){
       tratamientos!inner (
         id, codigo_id, practica_codigo, fecha_alta,
         moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-        moplex_consulta_monto, moplex_plantilla_monto, solicita_plantillas,
+        moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, solicita_plantillas,
         personas ( id, nombre )
       )
     `)
@@ -385,7 +389,7 @@ async function cargar(){
           tratamientos (
             id, practica_codigo, fecha_alta,
             moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-            moplex_consulta_monto, moplex_plantilla_monto, solicita_plantillas,
+            moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, solicita_plantillas,
             personas ( id, nombre )
           )
         `)
@@ -402,7 +406,7 @@ async function cargar(){
   window._moplexConsultasMes = [];
   try {
     const { data: mopTtos } = await sb.from('tratamientos')
-      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto')
+      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb')
       .eq('practica_codigo','MOPLEX');
     const ttos = mopTtos || [];
     if (ttos.length){
@@ -442,7 +446,7 @@ async function cargar(){
         const fc = fechaSesion[t.id] || fechaTurno[t.codigo_id] || t.fecha_alta || '';
         if (String(fc).slice(0,7) !== mes) continue;
         const fact = moplexFacturable(fc);
-        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc) : null;
+        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc, t.moplex_consulta_cortesia_pb) : null;
         const rectif   = !!t.moplex_plantilla_rectif;
         const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
         const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
