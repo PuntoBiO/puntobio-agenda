@@ -164,11 +164,13 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro };
 }
-function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
+function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
   if (!p) return null;
   if (rectif){
     const precio = Number(montoCustom)||0;                          // rectificación: monto custom
     const moplex = Math.round(precio*0.85);
+    // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX (el 85%)
+    if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:true };
     const prof   = 0;
     const centro = precio - moplex;                                 // 15%
     return { precio, moplex, prof, centro, rectif:true };
@@ -178,6 +180,8 @@ function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
   const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
   const moplexBase = Number(p.costo_moplex)||0;
   const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+  // Cortesía PuntoBiO en la plantilla nueva: el paciente paga SOLO el costo MOPLEX
+  if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:false };
   const prof   = Math.round(precio*0.10);
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro, rectif:false };
@@ -228,7 +232,7 @@ function prepararMoplex(monthPagos){
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
     const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha, t.moplex_consulta_cortesia_pb) : null;
-    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
+    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb) : null;
     const paciente = (t.personas && t.personas.nombre) || '—';
     const prof     = normProf(p0.profesional);
 
@@ -339,7 +343,7 @@ async function cargar(){
       tratamientos!inner (
         id, codigo_id, practica_codigo, fecha_alta,
         moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-        moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, solicita_plantillas,
+        moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, solicita_plantillas,
         personas ( id, nombre )
       )
     `)
@@ -389,7 +393,7 @@ async function cargar(){
           tratamientos (
             id, practica_codigo, fecha_alta,
             moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-            moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, solicita_plantillas,
+            moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, solicita_plantillas,
             personas ( id, nombre )
           )
         `)
@@ -406,7 +410,7 @@ async function cargar(){
   window._moplexConsultasMes = [];
   try {
     const { data: mopTtos } = await sb.from('tratamientos')
-      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb')
+      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb')
       .eq('practica_codigo','MOPLEX');
     const ttos = mopTtos || [];
     if (ttos.length){
@@ -448,7 +452,7 @@ async function cargar(){
         const fact = moplexFacturable(fc);
         const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc, t.moplex_consulta_cortesia_pb) : null;
         const rectif   = !!t.moplex_plantilla_rectif;
-        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
+        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb) : null;
         const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
         const precio = (ev.precio||0) + (pl.precio||0);
         lista.push({
