@@ -102,9 +102,13 @@ const MOPLEX_PCT_CONSULTA_DESDE = '2026-08'
 function calcConsulta(c, montoCustom, fechaC){
   if(!c) return null
   // Precio editable (✂️ correcciones / convenios). Por defecto el del catálogo; si Lu lo cambió, ese.
+  // UN 0 EXPLÍCITO VALE (12/8, caso Manuel Arias segundo par / bonificación de MOPLEX):
+  // es "consulta sin cargo" — nadie cobra: ni centro, ni profesional, ni MOPLEX (20% de $0).
+  // Solo el campo VACÍO cae al precio del catálogo. Mismo criterio que la rectificación sin cargo.
   const precioDef = Number(c.precio_paciente)||0
-  const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : precioDef
-  const custom = (Number(montoCustom) > 0) && Number(montoCustom) !== precioDef
+  const tieneMonto = (montoCustom !== null && montoCustom !== undefined && montoCustom !== '' && !isNaN(Number(montoCustom)))
+  const precio = tieneMonto ? Number(montoCustom) : precioDef
+  const custom = tieneMonto && Number(montoCustom) !== precioDef
   const cobraMoplex = ((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE
   let moplex
   if (cobraMoplex){
@@ -117,7 +121,7 @@ function calcConsulta(c, montoCustom, fechaC){
   }
   const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
-  return { precio, moplex, prof, centro, custom }
+  return { precio, moplex, prof, centro, custom, sinCargo: tieneMonto && precio === 0 }
 }
 function calcPlantilla(p, rectif, montoCustom, montoPlantilla){
   if(!p) return null
@@ -265,13 +269,16 @@ function filaTto(t){
   const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
   const consCat = state.cat.byId[t.moplex_consulta_id]
   const consPrecioDef = consCat ? (Number(consCat.precio_paciente)||0) : 0
-  const consPrecioActual = (Number(t.moplex_consulta_monto) > 0) ? Number(t.moplex_consulta_monto) : consPrecioDef
-  const consEditado = (Number(t.moplex_consulta_monto) > 0) && Number(t.moplex_consulta_monto) !== consPrecioDef
+  const _tieneCM = (t.moplex_consulta_monto !== null && t.moplex_consulta_monto !== undefined && t.moplex_consulta_monto !== '')
+  const consPrecioActual = _tieneCM ? Number(t.moplex_consulta_monto) : consPrecioDef
+  const consEditado = _tieneCM && Number(t.moplex_consulta_monto) !== consPrecioDef
   const consInput = consCat
     ? `<div style="margin-top:4px;"><span title="Precio del paciente. Trae el del catálogo; editalo para corregirlo." style="display:inline-flex;align-items:center;gap:4px;">✏️<input class="sel sel-sm" type="number" step="100" min="0" value="${consPrecioActual}" onchange="setConsultaMonto(${t.id}, this.value)" style="width:110px;${consEditado?'border-color:var(--turquoise);color:var(--turquoise-dim);font-weight:700;':''}"></span></div>`
     : ''
-  const cRep = aplicarFactura(calcConsulta(consCat, Number(t.moplex_consulta_monto)||0, fechaConsulta(t)), factura)
-  const cMon = montosLine(cRep) + ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : '')
+  const cRep = aplicarFactura(calcConsulta(consCat, t.moplex_consulta_monto, fechaConsulta(t)), factura)
+  const cMon = montosLine(cRep)
+    + ((cRep && cRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 consulta sin cargo (nadie cobra — cortesía/bonificado MOPLEX)</div>`
+      : ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : ''))
 
   // --- Plantilla ---
   let plCell
