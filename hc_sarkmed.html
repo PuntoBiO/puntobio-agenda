@@ -208,6 +208,7 @@ let solapa     = 'medica';
 let miEmail    = '';
 let accesos    = [];
 let resultadosPac = [];
+let nutri      = {};        // solapa de Nutrición de la ficha abierta
 
 /* Categoría libre del final: no tiene casilleros, solo texto. */
 const CAT_OTROS = 'Otros';
@@ -444,11 +445,12 @@ async function crearEvaluacion(idx){
 /* ════════════════════════════════════════════════════════════════
    RENDER · FICHA
    ════════════════════════════════════════════════════════════════ */
-function abrirFicha(id){
+async function abrirFicha(id){
   fichaActual = evaluaciones.find(e => e.id === id);
   if(!fichaActual){ toast('No encuentro esa ficha', 'err'); return; }
   vista = 'ficha';
   solapa = 'medica';
+  await cargarNutricion(id);
   render();
   window.scrollTo({ top:0, behavior:'smooth' });
 }
@@ -457,7 +459,12 @@ function volverALista(){
   render();
   window.scrollTo({ top:0, behavior:'smooth' });
 }
-function irSolapa(s){ solapa = s; renderFicha(); }
+function irSolapa(s){
+  if(solapa === 'nutricion') levantarNutricion();
+  if(solapa === 'medica' && fichaActual) guardarAntecedentesEnMemoria();
+  solapa = s;
+  renderFicha();
+}
 
 function renderFicha(){
   const f = fichaActual, p = f.paciente || {};
@@ -489,13 +496,14 @@ function renderFicha(){
 
     <div class="solapas">
       <button class="solapa ${solapa === 'medica' ? 'activa' : ''}" onclick="irSolapa('medica')">Médica</button>
-      <button class="solapa" disabled title="Se construye después">Nutrición</button>
+      <button class="solapa ${solapa === 'nutricion' ? 'activa' : ''}" onclick="irSolapa('nutricion')">Nutrición</button>
       <button class="solapa" disabled title="Se construye después">Suelo pélvico</button>
       <button class="solapa" disabled title="Se construye después">BiOLAB</button>
     </div>
 
-    ${solapa === 'medica' ? solapaMedica(f, ro) : ''}
+    ${solapa === 'medica' ? solapaMedica(f, ro) : solapaNutricion(nutri, ro)}
   `;
+  if(solapa === 'nutricion') calcularIMC();
 }
 
 function solapaMedica(f, ro){
@@ -685,10 +693,203 @@ function guardarAntecedentesEnMemoria(){
 }
 
 /* ════════════════════════════════════════════════════════════════
+   SOLAPA · NUTRICIÓN
+   ════════════════════════════════════════════════════════════════ */
+const PATRONES = [
+  ['COMPLETO','Completo'], ['SIN_TACC','Sin TACC'],
+  ['VEGETARIANO','Vegetariano'], ['SIN_LACTOSA','Sin lactosa']
+];
+
+async function cargarNutricion(hcId){
+  const { data, error } = await sb.from('hc_sarkmed_nutricion').select('*').eq('hc_id', hcId).maybeSingle();
+  if(error){ toast('No pude leer Nutrición: ' + error.message, 'err'); }
+  nutri = data || { hc_id: hcId, patron_alimentario: [] };
+  nutri.patron_alimentario = nutri.patron_alimentario || [];
+}
+
+function solapaNutricion(n, ro){
+  const patron = n.patron_alimentario || [];
+  return `
+  <div class="bloque">
+    <div class="bloque-head">Anamnesis nutricional</div>
+    <div class="bloque-body">
+      <div class="campo"><label>Apetito</label>
+        <div class="chips">
+          <button class="chip ${n.apetito === 'HIPOREXIA'  ? 'on' : ''}" onclick="setNut('apetito','HIPOREXIA')"  ${ro}>Hiporexia</button>
+          <button class="chip ${n.apetito === 'CONSERVADO' ? 'on' : ''}" onclick="setNut('apetito','CONSERVADO')" ${ro}>Conservado</button>
+        </div>
+      </div>
+      <div class="campo"><label>Patrón alimentario</label>
+        <div class="chips">
+          ${PATRONES.map(([k, t], i) =>
+            `<button class="chip ${patron.includes(k) ? 'on' : ''}" onclick="togPatron(${i})" ${ro}>${t}</button>`).join('')}
+        </div>
+      </div>
+      <div class="fila-3">
+        <div class="campo"><label>N° de comidas diarias</label><input type="text" id="comidas_diarias" value="${esc(n.comidas_diarias || '')}" ${ro}></div>
+        <div class="campo"><label>Agua por día</label><input type="text" id="agua_diaria" value="${esc(n.agua_diaria || '')}" ${ro}></div>
+        <div class="campo"><label>Autonomía en la cocina</label><input type="text" id="autonomia_cocina" value="${esc(n.autonomia_cocina || '')}" ${ro}></div>
+      </div>
+      <div class="campo"><label>Masticación</label><input type="text" id="masticacion" value="${esc(n.masticacion || '')}" ${ro}></div>
+      <div class="campo"><label>Autopercepción del estado nutricional</label><textarea id="autopercepcion" ${ro}>${esc(n.autopercepcion || '')}</textarea></div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Aporte proteico diario</div>
+    <div class="bloque-body">
+      <div class="fila-2">
+        <div class="campo"><label>Sugerido según peso corporal (g/día)</label><input type="number" step="0.1" id="proteina_sugerida" value="${n.proteina_sugerida ?? ''}" ${ro}></div>
+        <div class="campo"><label>Estimado según anamnesis</label>
+          <div class="chips">
+            <button class="chip ${n.proteina_estimada === 'INSUFICIENTE' ? 'on' : ''}" onclick="setNut('proteina_estimada','INSUFICIENTE')" ${ro}>Insuficiente</button>
+            <button class="chip ${n.proteina_estimada === 'SUFICIENTE'   ? 'on' : ''}" onclick="setNut('proteina_estimada','SUFICIENTE')"   ${ro}>Suficiente</button>
+            <button class="chip ${n.proteina_estimada === 'EXCESIVO'     ? 'on' : ''}" onclick="setNut('proteina_estimada','EXCESIVO')"     ${ro}>Excesivo</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Antropometría básica</div>
+    <div class="bloque-body">
+      <div class="fila-3">
+        <div class="campo"><label>Peso (kg)</label><input type="number" step="0.01" id="peso_kg" value="${n.peso_kg ?? ''}" oninput="calcularIMC()" ${ro}></div>
+        <div class="campo"><label>Talla (m)</label><input type="number" step="0.01" id="talla_m" value="${n.talla_m ?? ''}" oninput="calcularIMC()" ${ro}></div>
+        <div class="campo"><label>IMC (kg/m²) · se calcula solo</label><input type="text" id="imc_visible" value="" disabled></div>
+      </div>
+      <div class="campo"><label>Clasificación OMS</label>
+        <div class="chips" id="chips-oms">
+          <button class="chip ${n.clasificacion_oms === 'BAJO_PESO' ? 'on' : ''}" onclick="setNut('clasificacion_oms','BAJO_PESO')" ${ro}>Bajo peso</button>
+          <button class="chip ${n.clasificacion_oms === 'NORMOPESO' ? 'on' : ''}" onclick="setNut('clasificacion_oms','NORMOPESO')" ${ro}>Normopeso</button>
+          <button class="chip ${n.clasificacion_oms === 'SOBREPESO' ? 'on' : ''}" onclick="setNut('clasificacion_oms','SOBREPESO')" ${ro}>Sobrepeso</button>
+          <button class="chip ${n.clasificacion_oms === 'OBESIDAD'  ? 'on' : ''}" onclick="setNut('clasificacion_oms','OBESIDAD')"  ${ro}>Obesidad</button>
+        </div>
+        <div style="font-size:11.5px;color:var(--muted)" id="sugerencia-oms"></div>
+      </div>
+
+      <div class="fila-3">
+        <div class="campo"><label>Músculo esquelético (kg)</label><input type="number" step="0.01" id="musculo_kg" value="${n.musculo_kg ?? ''}" ${ro}></div>
+        <div class="campo"><label>Músculo esquelético (%)</label><input type="number" step="0.1" id="musculo_pct" value="${n.musculo_pct ?? ''}" ${ro}></div>
+        <div class="campo"><label>SMI (kg/m²)</label><input type="number" step="0.01" id="smi" value="${n.smi ?? ''}" ${ro}></div>
+      </div>
+      <div class="campo"><label>Nivel por bioimpedancia</label>
+        <div class="chips">
+          <button class="chip ${n.musculo_nivel === 'BAJO'     ? 'on' : ''}" onclick="setNut('musculo_nivel','BAJO')"     ${ro}>Bajo</button>
+          <button class="chip ${n.musculo_nivel === 'ESTANDAR' ? 'on' : ''}" onclick="setNut('musculo_nivel','ESTANDAR')" ${ro}>Estándar</button>
+          <button class="chip ${n.musculo_nivel === 'ALTO'     ? 'on' : ''}" onclick="setNut('musculo_nivel','ALTO')"     ${ro}>Alto</button>
+        </div>
+      </div>
+
+      <div class="fila-2">
+        <div class="campo"><label>Bíceps derecho (cm)</label><input type="number" step="0.1" id="per_biceps_der" value="${n.per_biceps_der ?? ''}" ${ro}></div>
+        <div class="campo"><label>Bíceps izquierdo (cm)</label><input type="number" step="0.1" id="per_biceps_izq" value="${n.per_biceps_izq ?? ''}" ${ro}></div>
+      </div>
+      <div class="fila-2">
+        <div class="campo"><label>Pantorrilla derecha (cm)</label><input type="number" step="0.1" id="per_pantorrilla_der" value="${n.per_pantorrilla_der ?? ''}" ${ro}></div>
+        <div class="campo"><label>Pantorrilla izquierda (cm)</label><input type="number" step="0.1" id="per_pantorrilla_izq" value="${n.per_pantorrilla_izq ?? ''}" ${ro}></div>
+      </div>
+
+      <div class="campo"><label>Observaciones</label><textarea id="observaciones" ${ro}>${esc(n.observaciones || '')}</textarea></div>
+    </div>
+  </div>`;
+}
+
+/* El IMC se calcula, no se escribe. La clasificación OMS queda SUGERIDA:
+   la marca definitiva siempre la pone quien evalúa. */
+function calcularIMC(){
+  const p = Number(v('peso_kg')), t = Number(v('talla_m'));
+  const cajaImc = document.getElementById('imc_visible');
+  const sug     = document.getElementById('sugerencia-oms');
+  if(!cajaImc) return;
+  if(!p || !t){ cajaImc.value = ''; if(sug) sug.textContent = ''; return; }
+  const imc = p / (t * t);
+  if(!isFinite(imc) || imc <= 0 || imc > 100){ cajaImc.value = ''; if(sug) sug.textContent = ''; return; }
+  cajaImc.value = imc.toFixed(1);
+  const cual = imc < 18.5 ? 'Bajo peso' : imc < 25 ? 'Normopeso' : imc < 30 ? 'Sobrepeso' : 'Obesidad';
+  if(sug) sug.textContent = `Con un IMC de ${imc.toFixed(1)} la OMS lo ubica en “${cual}”. Marcalo vos.`;
+}
+
+function setNut(campo, valor){
+  if(!puedeCargar()) return;
+  levantarNutricion();
+  nutri[campo] = (nutri[campo] === valor) ? null : valor;   // volver a tocar, destilda
+  renderFicha();
+}
+function togPatron(i){
+  if(!puedeCargar()) return;
+  levantarNutricion();
+  const k = PATRONES[i][0];
+  const lista = nutri.patron_alimentario || (nutri.patron_alimentario = []);
+  const p = lista.indexOf(k);
+  if(p >= 0) lista.splice(p, 1); else lista.push(k);
+  renderFicha();
+}
+/* Levanta lo escrito en pantalla antes de redibujar, para no perderlo */
+function levantarNutricion(){
+  if(solapa !== 'nutricion') return;
+  ['comidas_diarias','agua_diaria','autonomia_cocina','masticacion','autopercepcion','observaciones']
+    .forEach(c => { if(document.getElementById(c)) nutri[c] = txt(c); });
+  ['proteina_sugerida','peso_kg','talla_m','musculo_kg','musculo_pct','smi',
+   'per_biceps_der','per_biceps_izq','per_pantorrilla_der','per_pantorrilla_izq']
+    .forEach(c => { if(document.getElementById(c)) nutri[c] = num(c); });
+}
+
+async function guardarNutricion(){
+  levantarNutricion();
+  const p = Number(nutri.peso_kg), t = Number(nutri.talla_m);
+  const imc = (p && t) ? Number((p / (t * t)).toFixed(1)) : null;
+
+  const fila = {
+    hc_id:              fichaActual.id,
+    apetito:            nutri.apetito || null,
+    comidas_diarias:    nutri.comidas_diarias || null,
+    patron_alimentario: nutri.patron_alimentario || [],
+    agua_diaria:        nutri.agua_diaria || null,
+    autonomia_cocina:   nutri.autonomia_cocina || null,
+    masticacion:        nutri.masticacion || null,
+    autopercepcion:     nutri.autopercepcion || null,
+    proteina_sugerida:  nutri.proteina_sugerida ?? null,
+    proteina_estimada:  nutri.proteina_estimada || null,
+    peso_kg:            nutri.peso_kg ?? null,
+    talla_m:            nutri.talla_m ?? null,
+    imc:                (imc && isFinite(imc) && imc < 100) ? imc : null,
+    clasificacion_oms:  nutri.clasificacion_oms || null,
+    musculo_kg:         nutri.musculo_kg ?? null,
+    musculo_pct:        nutri.musculo_pct ?? null,
+    smi:                nutri.smi ?? null,
+    musculo_nivel:      nutri.musculo_nivel || null,
+    per_biceps_der:     nutri.per_biceps_der ?? null,
+    per_biceps_izq:     nutri.per_biceps_izq ?? null,
+    per_pantorrilla_der: nutri.per_pantorrilla_der ?? null,
+    per_pantorrilla_izq: nutri.per_pantorrilla_izq ?? null,
+    observaciones:      nutri.observaciones || null,
+    editado_en:         new Date().toISOString(),
+    editado_por_email:  miEmail
+  };
+
+  const btn = document.getElementById('btn-guardar');
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  const { error } = await sb.from('hc_sarkmed_nutricion').upsert(fila, { onConflict: 'hc_id' });
+  btn.disabled = false; btn.textContent = 'Guardar ficha';
+
+  if(error){ toast('No se pudo guardar Nutrición: ' + error.message, 'err'); return; }
+  toast('Nutrición guardada', 'ok');
+  await cargarNutricion(fichaActual.id);
+  renderFicha();
+}
+
+/* ════════════════════════════════════════════════════════════════
    GUARDAR
    ════════════════════════════════════════════════════════════════ */
 async function guardarFicha(){
   if(!puedeCargar()){ toast('No tenés permiso para cargar historias', 'err'); return; }
+  if(solapa === 'nutricion') return guardarNutricion();
+  return guardarMedica();
+}
+
+async function guardarMedica(){
   guardarAntecedentesEnMemoria();
 
   // Limpieza: categorías sin nada cargado no se guardan.
