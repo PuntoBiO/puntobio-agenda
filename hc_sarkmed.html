@@ -339,7 +339,15 @@ function render(){
     return;
   }
   if(!lista.length){
-    wrap.innerHTML = `<div class="vacio"><b>Sin resultados</b>Nadie coincide con “${esc(filtro)}”.</div>`;
+    // Ojo: acá se buscan EVALUACIONES, no personas. Si el paciente existe en el
+    // padrón pero todavía no tiene ficha, la pantalla lo ofrece en vez de decir
+    // "no hay nadie" — que es mentira y hace perder tiempo.
+    wrap.innerHTML = `<div class="vacio">
+      <b>Todavía no hay ninguna evaluación de “${esc(filtro)}”</b>
+      <div style="font-size:12.5px;margin-bottom:14px">Esta pantalla lista evaluaciones, no el padrón.</div>
+      <div id="sug-pacientes" style="max-width:420px;margin:0 auto;text-align:left"></div>
+    </div>`;
+    sugerirPacientes(filtro);
     return;
   }
 
@@ -371,6 +379,34 @@ function render(){
           </tr>`).join('')}
       </tbody>
     </table>`;
+}
+
+/* Busca en el PADRÓN a quien no tiene evaluación todavía y ofrece crearla. */
+async function sugerirPacientes(q){
+  const cont = document.getElementById('sug-pacientes');
+  if(!cont) return;
+  const limpio = (q || '').replace(/[,()*%]/g, ' ').replace(/\s+/g, ' ').trim();
+  if(limpio.length < 2) return;
+  const soloNum = limpio.replace(/\D/g, '');
+  const filtros = [`apellido_nombre.ilike.%${limpio}%`];
+  if(soloNum.length >= 3) filtros.push(`dni.ilike.%${soloNum}%`);
+
+  const { data, error } = await sb.from('pacientes_sarkmed')
+    .select('id, apellido_nombre, dni, fecha_nacimiento, activo')
+    .or(filtros.join(','))
+    .order('apellido_nombre')
+    .limit(5);
+  if(error || !data || !data.length){
+    cont.innerHTML = '<div style="font-size:12.5px;color:var(--muted);text-align:center">Tampoco aparece en el padrón. Cargalo primero en Padrón SARKMED.</div>';
+    return;
+  }
+  resultadosPac = data;
+  cont.innerHTML = '<div style="font-size:12.5px;font-weight:700;margin-bottom:8px">Está en el padrón. ¿Le abrimos la evaluación?</div>' +
+    data.map((p, i) => `
+      <div class="res-pac" onclick="crearEvaluacion(${i})">
+        <div class="pac-nombre">${esc(p.apellido_nombre || '(sin nombre)')}</div>
+        <div class="pac-dni">DNI ${esc(p.dni || '—')} · tocá para crear su evaluación</div>
+      </div>`).join('');
 }
 
 function filtrar(val){ filtro = val || ''; if(vista === 'lista') render(); }
@@ -1088,6 +1124,8 @@ function solapaBiolab(b, ro){
             ${(fichaActual.paciente && fichaActual.paciente.vald_profile_id)
               ? 'Vinculado ✓' : 'Sin vincular · se vincula solo al traer'}
           </div>
+          <input type="text" id="vald_profile_manual" placeholder="Profile ID del Hub (si no lo encuentra por nombre)"
+                 value="${esc((fichaActual.paciente && fichaActual.paciente.vald_profile_id) || '')}" style="margin-top:6px;font-size:11.5px">
         </div>
       </div>
       <div id="vald-estado" style="font-size:12.5px"></div>
@@ -1376,7 +1414,8 @@ async function traerDeVald(forzarProfileId){
   btn.disabled = true; btn.textContent = 'Buscando…';
   est.innerHTML = '<span style="color:var(--muted)">Buscando el perfil en VALD y trayendo la toma…</span>';
   try{
-    const pid = forzarProfileId || p.vald_profile_id || '';
+    const manual = (v('vald_profile_manual') || '').trim();
+    const pid = forzarProfileId || manual || p.vald_profile_id || '';
     const fecha = (document.getElementById('vald_fecha') || {}).value || '';
     const qs = [];
     if(pid) qs.push('profileId=' + encodeURIComponent(pid));
@@ -1408,9 +1447,24 @@ async function traerDeVald(forzarProfileId){
     const n = aplicarDatosVald(datos);
 
     if(!n.total){
-      est.innerHTML = '<span style="color:var(--rojo-x)">No encontré tomas de VALD' +
-        (fecha ? ' en esa fecha.' : ' en los últimos 120 días.') +
-        ' Si la toma es más vieja, poné la fecha arriba y volvé a intentar.</span>';
+      const perfil = datos.perfil || null;
+      if(perfil){
+        // El perfil existe: se vincula igual, así la próxima vez no hay que buscarlo
+        const pidOk = datos.profileId || perfil.profileId;
+        if(pidOk){
+          await sb.from('pacientes_sarkmed').update({ vald_profile_id: pidOk }).eq('id', p.id);
+          p.vald_profile_id = pidOk;
+          const cajaP = document.getElementById('vald-perfil');
+          if(cajaP) cajaP.textContent = 'Vinculado ✓';
+        }
+        est.innerHTML = '<span style="color:var(--rojo-x)"><b>Encontré el perfil</b> (' + esc(perfil.nombre || '') + ')' +
+          ' pero no tiene tomas' + (fecha ? ' en esa fecha.' : ' en los últimos 120 días.') +
+          ' Si la toma es más vieja, poné la fecha del día de la evaluación y volvé a intentar.</span>';
+      }else{
+        est.innerHTML = '<span style="color:var(--rojo-x)"><b>VALD no encontró el perfil</b> buscando por ' +
+          esc(p.apellido_nombre || '') + (p.dni ? ' / DNI ' + esc(p.dni) : '') + '.' +
+          ' En el Hub el nombre puede estar escrito distinto: copiá el Profile ID desde VALD, pegalo en el campo de la derecha y volvé a tocar Traer.</span>';
+      }
       return;
     }
 
