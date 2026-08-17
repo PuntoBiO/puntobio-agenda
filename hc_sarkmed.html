@@ -392,24 +392,37 @@ function buscarPaciente(q){
     return;
   }
   timerBusca = setTimeout(async () => {
-    const soloNum = txtq.replace(/\D/g, '');
-    let query = sb.from('pacientes_sarkmed')
-      .select('id, apellido_nombre, dni, fecha_nacimiento')
-      .eq('activo', true).limit(8);
-    query = soloNum.length >= 4
-      ? query.ilike('dni', '%' + soloNum + '%')
-      : query.ilike('apellido_nombre', '%' + txtq + '%');
-    const { data, error } = await query;
-    if(error){ cont.innerHTML = '<div style="font-size:12px;color:var(--rojo-x)">Error al buscar.</div>'; return; }
+    // Los caracteres que rompen el filtro or() de PostgREST se sacan antes.
+    const limpio  = txtq.replace(/[,()*%]/g, ' ').replace(/\s+/g, ' ').trim();
+    const soloNum = limpio.replace(/\D/g, '');
+    if(!limpio){ cont.innerHTML = ''; return; }
+
+    // Busca por nombre Y por DNI a la vez. SIN filtro por activo: las fichas
+    // viejas pueden tener ese campo en null y quedaban invisibles.
+    const filtros = [`apellido_nombre.ilike.%${limpio}%`];
+    if(soloNum.length >= 3) filtros.push(`dni.ilike.%${soloNum}%`);
+
+    const { data, error } = await sb.from('pacientes_sarkmed')
+      .select('id, apellido_nombre, dni, fecha_nacimiento, activo')
+      .or(filtros.join(','))
+      .order('apellido_nombre')
+      .limit(8);
+
+    if(error){
+      cont.innerHTML = `<div style="font-size:12px;color:var(--rojo-x)">Error al buscar: ${esc(error.message)}</div>`;
+      return;
+    }
     resultadosPac = data || [];
     if(!resultadosPac.length){
-      cont.innerHTML = '<div style="font-size:12px;color:var(--muted)">No aparece nadie. Cargalo primero en el Padrón.</div>';
+      cont.innerHTML = '<div style="font-size:12px;color:var(--muted)">No aparece nadie con ese nombre ni ese DNI. Fijate en el Padrón cómo está escrito.</div>';
       return;
     }
     // El nombre NUNCA va dentro del atributo onclick: se elige por índice.
     cont.innerHTML = resultadosPac.map((p, i) => `
       <div class="res-pac" onclick="crearEvaluacion(${i})">
-        <div class="pac-nombre">${esc(p.apellido_nombre || '(sin nombre)')}</div>
+        <div class="pac-nombre">${esc(p.apellido_nombre || '(sin nombre)')}${
+          p.activo === false ? ' <span class="tag tag-abierta" style="background:var(--rojo-soft);color:#991b1b;border-color:#fecaca">de baja</span>' : ''
+        }</div>
         <div class="pac-dni">DNI ${esc(p.dni || '—')}</div>
       </div>`).join('');
   }, 250);
