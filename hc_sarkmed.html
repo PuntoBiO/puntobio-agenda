@@ -211,6 +211,7 @@ let resultadosPac = [];
 let nutri      = {};        // solapa de Nutrición de la ficha abierta
 let adjuntos   = [];        // estudios cargados en la ficha abierta
 let suelo      = {};        // solapa de Suelo Pélvico de la ficha abierta
+let biolab     = {};        // solapa BiOLAB de la ficha abierta
 
 /* Categoría libre del final: no tiene casilleros, solo texto. */
 const CAT_OTROS = 'Otros';
@@ -454,6 +455,7 @@ async function abrirFicha(id){
   solapa = 'medica';
   await cargarNutricion(id);
   await cargarSuelo(id);
+  await cargarBiolab(id);
   await cargarAdjuntos(id);
   render();
   window.scrollTo({ top:0, behavior:'smooth' });
@@ -466,6 +468,7 @@ function volverALista(){
 function irSolapa(s){
   if(solapa === 'nutricion') levantarNutricion();
   if(solapa === 'suelo_pelvico') levantarSuelo();
+  if(solapa === 'biolab') levantarBiolab();
   if(solapa === 'medica' && fichaActual) guardarAntecedentesEnMemoria();
   solapa = s;
   renderFicha();
@@ -503,14 +506,16 @@ function renderFicha(){
       <button class="solapa ${solapa === 'medica' ? 'activa' : ''}" onclick="irSolapa('medica')">Médica</button>
       <button class="solapa ${solapa === 'nutricion' ? 'activa' : ''}" onclick="irSolapa('nutricion')">Nutrición</button>
       <button class="solapa ${solapa === 'suelo_pelvico' ? 'activa' : ''}" onclick="irSolapa('suelo_pelvico')">Suelo pélvico</button>
-      <button class="solapa" disabled title="Se construye después">BiOLAB</button>
+      <button class="solapa ${solapa === 'biolab' ? 'activa' : ''}" onclick="irSolapa('biolab')">BiOLAB</button>
     </div>
 
-    ${solapa === 'medica'    ? solapaMedica(f, ro)
-    : solapa === 'nutricion' ? solapaNutricion(nutri, ro)
-    :                          solapaSuelo(suelo, ro)}
+    ${solapa === 'medica'        ? solapaMedica(f, ro)
+    : solapa === 'nutricion'     ? solapaNutricion(nutri, ro)
+    : solapa === 'suelo_pelvico' ? solapaSuelo(suelo, ro)
+    :                              solapaBiolab(biolab, ro)}
   `;
   if(solapa === 'nutricion') calcularIMC();
+  if(solapa === 'biolab')    calcularBiolab();
 }
 
 function solapaMedica(f, ro){
@@ -973,6 +978,279 @@ async function guardarSuelo(){
   renderFicha();
 }
 
+/* ════════════════════════════════════════════════════════════════
+   SOLAPA · BiOLAB
+   Los cálculos van acá, en código. La IA solo interpreta. Firma Lu.
+   ════════════════════════════════════════════════════════════════ */
+const G = 9.80665;   // N → kg
+
+async function cargarBiolab(hcId){
+  const { data, error } = await sb.from('hc_sarkmed_biolab').select('*').eq('hc_id', hcId).maybeSingle();
+  if(error) toast('No pude leer BiOLAB: ' + error.message, 'err');
+  biolab = data || { hc_id: hcId };
+}
+
+const CAMPOS_BIOLAB_NUM = ['sarc_f','ishii_fuerza_kg','ishii_pantorrilla_cm','prension_izq_n','prension_der_n',
+  'imtp_pico_izq_n','imtp_pico_der_n','imtp_rfd_izq','imtp_rfd_der','marcha_4m_seg','tug_seg',
+  'sppb_balance','sppb_marcha','sppb_chair','step_2min','sls_area_izq','sls_area_der'];
+const CAMPOS_BIOLAB_TXT = ['resumen_neuromuscular','resumen_potencia','resumen_equilibrio',
+  'resumen_movilidad','resumen_flexibilidad','informe'];
+
+function solapaBiolab(b, ro){
+  return `
+  <div class="bloque">
+    <div class="bloque-head">Screening de sarcopenia</div>
+    <div class="bloque-body">
+      <div class="fila-3">
+        <div class="campo"><label>SARC-F</label><input type="number" id="sarc_f" value="${b.sarc_f ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>Prensión para Ishii (kg)</label><input type="number" step="0.1" id="ishii_fuerza_kg" value="${b.ishii_fuerza_kg ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>Pantorrilla (cm)</label><input type="number" step="0.1" id="ishii_pantorrilla_cm" value="${b.ishii_pantorrilla_cm ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="campo"><label>Resumen del Hub · screening</label>
+        <textarea id="resumen_neuromuscular" placeholder="Pegá acá el resumen de fuerza y capacidad neuromuscular tal cual sale del Hub…" ${ro}>${esc(b.resumen_neuromuscular || '')}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Fuerza · DynaMo y ForceDecks</div>
+    <div class="bloque-body">
+      <div class="fila-2">
+        <div class="campo"><label>Prensión izquierda (N)</label><input type="number" step="0.1" id="prension_izq_n" value="${b.prension_izq_n ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>Prensión derecha (N)</label><input type="number" step="0.1" id="prension_der_n" value="${b.prension_der_n ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="fila-2">
+        <div class="campo"><label>IMTP · pico izquierdo (N)</label><input type="number" step="0.1" id="imtp_pico_izq_n" value="${b.imtp_pico_izq_n ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>IMTP · pico derecho (N)</label><input type="number" step="0.1" id="imtp_pico_der_n" value="${b.imtp_pico_der_n ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="fila-2">
+        <div class="campo"><label>RFD 100 ms izquierdo (N/s)</label><input type="number" step="0.1" id="imtp_rfd_izq" value="${b.imtp_rfd_izq ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>RFD 100 ms derecho (N/s)</label><input type="number" step="0.1" id="imtp_rfd_der" value="${b.imtp_rfd_der ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="campo"><label>Resumen del Hub · potencia</label>
+        <textarea id="resumen_potencia" placeholder="Sit to stand, sentadilla, RFD de desaceleración…" ${ro}>${esc(b.resumen_potencia || '')}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Movilidad funcional y marcha</div>
+    <div class="bloque-body">
+      <div class="fila-3">
+        <div class="campo"><label>Marcha 4 m (seg)</label><input type="number" step="0.01" id="marcha_4m_seg" value="${b.marcha_4m_seg ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>Timed Up and Go (seg)</label><input type="number" step="0.01" id="tug_seg" value="${b.tug_seg ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>2 Minute Step Test</label><input type="number" id="step_2min" value="${b.step_2min ?? ''}" ${ro}></div>
+      </div>
+      <div class="fila-3">
+        <div class="campo"><label>SPPB · balance (0-4)</label><input type="number" id="sppb_balance" value="${b.sppb_balance ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>SPPB · marcha (0-4)</label><input type="number" id="sppb_marcha" value="${b.sppb_marcha ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>SPPB · chair stand (0-4)</label><input type="number" id="sppb_chair" value="${b.sppb_chair ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="campo"><label>Resumen del Hub · movilidad HumanTrak</label>
+        <textarea id="resumen_movilidad" placeholder="Postura estática, rangos articulares, sentadilla, overhead squat, estocada…" ${ro}>${esc(b.resumen_movilidad || '')}</textarea>
+      </div>
+      <div class="campo"><label>Resumen · flexibilidad</label>
+        <textarea id="resumen_flexibilidad" placeholder="Chair sit and reach, back scratch, toe touch…" ${ro}>${esc(b.resumen_flexibilidad || '')}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Equilibrio y control postural</div>
+    <div class="bloque-body">
+      <div class="fila-2">
+        <div class="campo"><label>Single leg stand · área izquierda (mm²)</label><input type="number" step="0.1" id="sls_area_izq" value="${b.sls_area_izq ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+        <div class="campo"><label>Single leg stand · área derecha (mm²)</label><input type="number" step="0.1" id="sls_area_der" value="${b.sls_area_der ?? ''}" oninput="calcularBiolab()" ${ro}></div>
+      </div>
+      <div class="campo"><label>Resumen del Hub · equilibrio</label>
+        <textarea id="resumen_equilibrio" placeholder="Quiet stand, tándem ojos abiertos y cerrados, apoyo monopodal…" ${ro}>${esc(b.resumen_equilibrio || '')}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque" style="border-color:var(--azul-border)">
+    <div class="bloque-head" style="background:var(--azul)">Lo que calcula el sistema</div>
+    <div class="bloque-body" style="background:var(--azul-soft)">
+      <div id="calculos-biolab" style="font-size:12.5px;line-height:1.9"></div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Diagnóstico</div>
+    <div class="bloque-body">
+      <div class="campo"><label>Escala KWGS · lo marca quien evalúa</label>
+        <div class="chips">
+          <button class="chip ${b.diagnostico_sarcopenia === 'NEGATIVO'   ? 'on' : ''}" onclick="setBiolab('diagnostico_sarcopenia','NEGATIVO')"   ${ro}>Negativo para sarcopenia</button>
+          <button class="chip ${b.diagnostico_sarcopenia === 'SARCOPENIA' ? 'on' : ''}" onclick="setBiolab('diagnostico_sarcopenia','SARCOPENIA')" ${ro}>Sarcopenia · masa y fuerza</button>
+          <button class="chip ${b.diagnostico_sarcopenia === 'FUNCIONAL'  ? 'on' : ''}" onclick="setBiolab('diagnostico_sarcopenia','FUNCIONAL')"  ${ro}>Funcional · fuerza y rendimiento</button>
+          <button class="chip ${b.diagnostico_sarcopenia === 'SEVERA'     ? 'on' : ''}" onclick="setBiolab('diagnostico_sarcopenia','SEVERA')"     ${ro}>Severa · masa, fuerza y rendimiento</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Informe BiOLAB</div>
+    <div class="bloque-body">
+      <div class="campo">
+        <textarea id="informe" style="min-height:260px" placeholder="Acá va el informe interpretado. Se puede escribir a mano o pegar el borrador y corregirlo." ${ro}>${esc(b.informe || '')}</textarea>
+      </div>
+      ${b.informe_firmado
+        ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
+                       border-radius:6px;font-size:12px;font-weight:600">
+             ✓ Firmado por ${esc(b.firmado_por || '')} el ${fechaLinda((b.firmado_en || '').slice(0,10))}
+           </div>`
+        : (ro ? '' : `<button class="btn btn-azul" onclick="firmarInforme()">✍ Firmar informe</button>
+                      <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Guardá antes de firmar.</span>`)}
+    </div>
+  </div>
+
+  ${bloqueAdjuntos('biolab', ro,
+    'Estudios adjuntos · PDF de VALD y del Hub',
+    'ForceDecks, DynaMo, HumanTrak: subí los PDF que bajás del Hub. Podés elegir varios de una.')}`;
+}
+
+/* Todos los cálculos, en un solo lugar. Nada de esto se escribe a mano. */
+function calcularBiolab(){
+  const caja = document.getElementById('calculos-biolab');
+  if(!caja) return;
+  const n = id => { const el = document.getElementById(id); const s = el ? el.value : ''; return s === '' ? null : Number(s); };
+  const p = fichaActual.paciente || {};
+  const edad = edadDe(p.fecha_nacimiento);
+  const peso = Number(nutri.peso_kg) || null;      // viene de la solapa Nutrición
+  const sexo = (p.sexo || '').toUpperCase();
+  const L = [];
+
+  // Prensión: de N a kg, y el corte de EWGSOP2
+  const pi = n('prension_izq_n'), pd = n('prension_der_n');
+  if(pi || pd){
+    const kgI = pi ? (pi / G) : null, kgD = pd ? (pd / G) : null;
+    const mejor = Math.max(kgI || 0, kgD || 0);
+    const corte = sexo.startsWith('M') && !sexo.startsWith('MU') ? 27 : 16;   // varón 27 kg, mujer 16 kg
+    L.push(`<b>Prensión:</b> ${kgI ? kgI.toFixed(1) + ' kg izq' : '—'} · ${kgD ? kgD.toFixed(1) + ' kg der' : '—'}` +
+           (kgI && kgD ? ` · asimetría ${asim(kgI, kgD)} %` : '') +
+           ` → corte EWGSOP2 ${corte} kg: <b>${mejor >= corte ? 'por encima' : 'POR DEBAJO'}</b>`);
+  }
+
+  // Ishii
+  const fz = n('ishii_fuerza_kg'), pan = n('ishii_pantorrilla_cm');
+  if(edad != null && fz && pan){
+    const ishii = (0.80 * edad) - (5.09 * fz) - (3.28 * pan) + 206;
+    const franja = ishii >= 140 ? 'sarcopenia severa (≥140)' : ishii >= 105 ? 'alto riesgo (≥105)' : 'sin riesgo por Ishii';
+    L.push(`<b>Ishii:</b> ${ishii.toFixed(1)} puntos → ${franja}`);
+  }
+
+  // IMTP
+  const ii = n('imtp_pico_izq_n'), idd = n('imtp_pico_der_n');
+  if(ii && idd){
+    const total = ii + idd;
+    L.push(`<b>IMTP:</b> ${total.toFixed(0)} N sumando ambos lados · asimetría ${asim(ii, idd)} %` +
+           (peso ? ` · fuerza relativa <b>${(total / peso).toFixed(2)} N/kg</b>` : ' · (falta el peso en Nutrición para la fuerza relativa)'));
+  }
+  const ri = n('imtp_rfd_izq'), rd = n('imtp_rfd_der');
+  if(ri && rd) L.push(`<b>RFD 100 ms:</b> asimetría ${asim(ri, rd)} %${Math.abs(asim(ri, rd)) >= 20 ? ' · <b>por encima del 20 % habitual</b>' : ''}`);
+
+  // Marcha
+  const m4 = n('marcha_4m_seg');
+  if(m4 > 0){
+    const vel = 4 / m4;
+    L.push(`<b>Velocidad de marcha:</b> ${vel.toFixed(2)} m/s → ${vel <= 0.8 ? '<b>bajo el umbral de fragilidad (0,8)</b>' : vel < 1 ? 'movilidad moderada' : 'adecuada para independencia'}`);
+  }
+  const tug = n('tug_seg');
+  if(tug) L.push(`<b>TUG:</b> ${tug} s → ${tug < 10 ? 'independiente, bajo riesgo' : tug < 20 ? 'adecuada, algo de lentitud' : tug < 30 ? 'limitaciones, riesgo de caída' : 'dependencia, alto riesgo'}`);
+
+  // SPPB
+  const sb = n('sppb_balance'), sm = n('sppb_marcha'), sc = n('sppb_chair');
+  if(sb != null || sm != null || sc != null){
+    const t = (sb || 0) + (sm || 0) + (sc || 0);
+    const f = t <= 3 ? 'limitación severa' : t <= 6 ? 'limitación moderada' : t <= 9 ? 'limitación leve' : 'función física normal';
+    L.push(`<b>SPPB:</b> ${t}/12 → ${f}`);
+  }
+
+  // Equilibrio monopodal
+  const ai = n('sls_area_izq'), ad = n('sls_area_der');
+  if(ai && ad){
+    const veces = (Math.max(ai, ad) / Math.min(ai, ad));
+    L.push(`<b>Apoyo monopodal:</b> asimetría ${asim(ai, ad)} % · el lado peor oscila <b>${veces.toFixed(1)} veces</b> más que el otro`);
+  }
+
+  // SMI, que viene de Nutrición
+  if(nutri.smi){
+    const corteSmi = sexo.startsWith('M') && !sexo.startsWith('MU') ? 7.0 : 5.5;
+    L.push(`<b>SMI (de Nutrición):</b> ${nutri.smi} kg/m² → corte EWGSOP2 ${corteSmi}: ${Number(nutri.smi) < corteSmi ? '<b>POR DEBAJO</b>' : 'por encima'}`);
+  }
+
+  caja.innerHTML = L.length
+    ? L.join('<br>') + '<div style="margin-top:9px;font-size:11.5px;color:var(--azul-2)">Estos números orientan. El diagnóstico lo marca quien evalúa.</div>'
+    : '<span style="color:var(--muted)">Cargá los valores de arriba y acá aparecen los cálculos.</span>';
+}
+function asim(a, b){
+  const may = Math.max(a, b), men = Math.min(a, b);
+  return may ? Math.round(((may - men) / may) * 100) : 0;
+}
+
+function setBiolab(campo, valor){
+  if(!puedeCargar()) return;
+  levantarBiolab();
+  biolab[campo] = (biolab[campo] === valor) ? null : valor;
+  renderFicha();
+}
+function levantarBiolab(){
+  if(solapa !== 'biolab') return;
+  CAMPOS_BIOLAB_NUM.forEach(c => { if(document.getElementById(c)) biolab[c] = num(c); });
+  CAMPOS_BIOLAB_TXT.forEach(c => { if(document.getElementById(c)) biolab[c] = txt(c); });
+}
+
+async function guardarBiolab(){
+  levantarBiolab();
+  const p = fichaActual.paciente || {};
+  const edad = edadDe(p.fecha_nacimiento);
+  const peso = Number(nutri.peso_kg) || null;
+
+  // Los calculados se guardan resueltos, para poder comparar entre evaluaciones
+  const ishii = (edad != null && biolab.ishii_fuerza_kg && biolab.ishii_pantorrilla_cm)
+    ? Number(((0.80 * edad) - (5.09 * biolab.ishii_fuerza_kg) - (3.28 * biolab.ishii_pantorrilla_cm) + 206).toFixed(1)) : null;
+  const picoTotal = (biolab.imtp_pico_izq_n && biolab.imtp_pico_der_n)
+    ? biolab.imtp_pico_izq_n + biolab.imtp_pico_der_n : null;
+
+  const fila = { hc_id: fichaActual.id, editado_en: new Date().toISOString(), editado_por_email: miEmail };
+  CAMPOS_BIOLAB_NUM.forEach(c => { fila[c] = biolab[c] ?? null; });
+  CAMPOS_BIOLAB_TXT.forEach(c => { fila[c] = biolab[c] || null; });
+  fila.ishii_score      = ishii;
+  fila.fuerza_relativa  = (picoTotal && peso) ? Number((picoTotal / peso).toFixed(2)) : null;
+  fila.velocidad_marcha = biolab.marcha_4m_seg ? Number((4 / biolab.marcha_4m_seg).toFixed(2)) : null;
+  fila.sppb_total       = (biolab.sppb_balance != null || biolab.sppb_marcha != null || biolab.sppb_chair != null)
+    ? (biolab.sppb_balance || 0) + (biolab.sppb_marcha || 0) + (biolab.sppb_chair || 0) : null;
+  fila.diagnostico_sarcopenia = biolab.diagnostico_sarcopenia || null;
+
+  const btn = document.getElementById('btn-guardar');
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  const { error } = await sb.from('hc_sarkmed_biolab').upsert(fila, { onConflict: 'hc_id' });
+  btn.disabled = false; btn.textContent = 'Guardar ficha';
+
+  if(error){ toast('No se pudo guardar BiOLAB: ' + error.message, 'err'); return; }
+  toast('BiOLAB guardado', 'ok');
+  await cargarBiolab(fichaActual.id);
+  renderFicha();
+}
+
+async function firmarInforme(){
+  if(!(biolab.informe || txt('informe'))){ toast('No hay informe para firmar', 'err'); return; }
+  if(!confirm('Al firmar, el informe queda cerrado con tu nombre y la fecha. ¿Firmar?')) return;
+  levantarBiolab();
+  const { error } = await sb.from('hc_sarkmed_biolab').upsert({
+    hc_id: fichaActual.id,
+    informe: biolab.informe || null,
+    informe_firmado: true,
+    firmado_por: miEmail,
+    firmado_en: new Date().toISOString()
+  }, { onConflict: 'hc_id' });
+  if(error){ toast('No se pudo firmar: ' + error.message, 'err'); return; }
+  toast('Informe firmado', 'ok');
+  await cargarBiolab(fichaActual.id);
+  renderFicha();
+}
+
 /* ── Adjuntos ───────────────────────────────────────────────────── */
 function bloqueAdjuntos(sol, ro, titulo, ayuda){
   return `
@@ -1150,6 +1428,7 @@ async function guardarFicha(){
   if(!puedeCargar()){ toast('No tenés permiso para cargar historias', 'err'); return; }
   if(solapa === 'nutricion')     return guardarNutricion();
   if(solapa === 'suelo_pelvico') return guardarSuelo();
+  if(solapa === 'biolab')        return guardarBiolab();
   return guardarMedica();
 }
 
