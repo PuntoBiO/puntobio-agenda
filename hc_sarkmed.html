@@ -648,9 +648,78 @@ function solapaMedica(f, ro){
     </div>
   </div>
 
+  <div class="bloque" style="border-color:var(--azul-border)">
+    <div class="bloque-head" style="background:var(--azul)">Informe final del paciente</div>
+    <div class="bloque-body">
+      ${bloqueLoQueDejoBiolab()}
+
+      <div class="campo"><label>Informe final</label>
+        <textarea id="informe_final" style="min-height:200px" placeholder="Lo que va a leer el paciente: resumen clínico, hallazgos, integración de lo que dejó cada profesional." ${ro}>${esc(f.informe_final || '')}</textarea>
+      </div>
+      <div class="campo"><label>Sugerencias</label>
+        <textarea id="sugerencias" style="min-height:140px" placeholder="Pautas, interconsultas, revaloración." ${ro}>${esc(f.sugerencias || '')}</textarea>
+      </div>
+      ${f.informe_final_firmado_en
+        ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
+                       border-radius:6px;font-size:12px;font-weight:600">
+             ✓ Informe final firmado por ${esc(f.informe_final_firmado_por || '')} el ${fechaLinda((f.informe_final_firmado_en || '').slice(0,10))}
+           </div>`
+        : (ro ? '' : `<button class="btn btn-azul" onclick="firmarInformeFinal()">✍ Firmar informe final</button>
+                      <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Guardá antes de firmar.</span>`)}
+    </div>
+  </div>
+
   ${bloqueAdjuntos('medica', ro,
     'Estudios adjuntos · consentimientos, estudios que trae el paciente',
     'Consentimientos firmados, resonancias, densitometrías, laboratorios: podés elegir varios archivos de una.')}`;
+}
+
+/* Lo que BiOLAB le deja a la médica: su informe finalizado, en solo lectura.
+   Mientras no esté finalizado, la médica ve que todavía se está cargando. */
+function bloqueLoQueDejoBiolab(){
+  const b = biolab || {};
+  if(!b.finalizado && !b.informe_firmado){
+    return `<div style="background:var(--panel-2);border:1px dashed var(--border);border-radius:8px;
+                        padding:12px 14px;margin-bottom:14px;font-size:12.5px;color:var(--muted)">
+      <b style="color:var(--text)">BiOLAB todavía no finalizó su informe.</b><br>
+      Cuando lo firme, aparece acá para armar el informe final.
+    </div>`;
+  }
+  const partes = [];
+  if(b.diagnostico_sarcopenia) partes.push('Diagnóstico KWGS: <b>' + esc(b.diagnostico_sarcopenia) + '</b>');
+  if(b.ishii_score != null)    partes.push('Ishii ' + b.ishii_score);
+  if(b.sppb_total != null)     partes.push('SPPB ' + b.sppb_total + '/12');
+  if(b.velocidad_marcha)       partes.push('marcha ' + b.velocidad_marcha + ' m/s');
+  if(b.fuerza_relativa)        partes.push('fuerza relativa ' + b.fuerza_relativa + ' N/kg');
+
+  return `<div style="background:var(--azul-soft);border:1px solid var(--azul-border);border-radius:8px;
+                      padding:12px 14px;margin-bottom:14px">
+    <div style="font-size:12px;font-weight:700;color:var(--azul-2);margin-bottom:6px">
+      ✓ BiOLAB finalizó · ${esc(b.firmado_por || '')} ${b.firmado_en ? 'el ' + fechaLinda((b.firmado_en || '').slice(0,10)) : ''}
+    </div>
+    ${partes.length ? `<div style="font-size:12.5px;margin-bottom:8px">${partes.join(' · ')}</div>` : ''}
+    ${b.informe ? `<details><summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--azul)">Ver el informe de BiOLAB</summary>
+      <div style="white-space:pre-wrap;font-size:12.5px;margin-top:8px;max-height:280px;overflow:auto;
+                  background:#fff;border:1px solid var(--border);border-radius:6px;padding:10px">${esc(b.informe)}</div>
+    </details>` : ''}
+  </div>`;
+}
+
+async function firmarInformeFinal(){
+  const texto = txt('informe_final');
+  if(!texto){ toast('No hay informe final para firmar', 'err'); return; }
+  if(!confirm('Al firmar, el informe final queda cerrado con tu nombre y la fecha. ¿Firmar?')) return;
+  const { error } = await sb.from('hc_sarkmed').update({
+    informe_final: texto,
+    sugerencias: txt('sugerencias'),
+    informe_final_firmado_por: miEmail,
+    informe_final_firmado_en: new Date().toISOString()
+  }).eq('id', fichaActual.id);
+  if(error){ toast('No se pudo firmar: ' + error.message, 'err'); return; }
+  toast('Informe final firmado', 'ok');
+  await cargarEvaluaciones();
+  fichaActual = evaluaciones.find(e => e.id === fichaActual.id) || fichaActual;
+  renderFicha();
 }
 
 /* Los casilleros salen del catálogo de la base, no de una lista escrita acá. */
@@ -1139,7 +1208,7 @@ function solapaBiolab(b, ro){
       ${b.informe_firmado
         ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
                        border-radius:6px;font-size:12px;font-weight:600">
-             ✓ Firmado por ${esc(b.firmado_por || '')} el ${fechaLinda((b.firmado_en || '').slice(0,10))}
+             ✓ Finalizado por ${esc(b.firmado_por || '')} el ${fechaLinda((b.firmado_en || '').slice(0,10))} · ya está disponible en la solapa Médica
            </div>`
         : (ro ? '' : `<button class="btn btn-azul" onclick="firmarInforme()">✍ Firmar informe</button>
                       <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Guardá antes de firmar.</span>`)}
@@ -1486,17 +1555,19 @@ async function guardarBiolab(){
 
 async function firmarInforme(){
   if(!(biolab.informe || txt('informe'))){ toast('No hay informe para firmar', 'err'); return; }
-  if(!confirm('Al firmar, el informe queda cerrado con tu nombre y la fecha. ¿Firmar?')) return;
+  if(!confirm('Al firmar, el informe queda cerrado con tu nombre y la fecha, y pasa a la solapa Médica para el informe final del paciente. ¿Firmar?')) return;
   levantarBiolab();
   const { error } = await sb.from('hc_sarkmed_biolab').upsert({
     hc_id: fichaActual.id,
     informe: biolab.informe || null,
     informe_firmado: true,
     firmado_por: miEmail,
-    firmado_en: new Date().toISOString()
+    firmado_en: new Date().toISOString(),
+    finalizado: true,
+    finalizado_en: new Date().toISOString()
   }, { onConflict: 'hc_id' });
   if(error){ toast('No se pudo firmar: ' + error.message, 'err'); return; }
-  toast('Informe firmado', 'ok');
+  toast('Informe finalizado · ya lo ve la médica', 'ok');
   await cargarBiolab(fichaActual.id);
   renderFicha();
 }
@@ -1729,6 +1800,8 @@ async function guardarMedica(){
     consent_datos:        !!fichaActual.consent_datos,
     consent_circuito:     !!fichaActual.consent_circuito,
     estado:               txt('estado') || 'ABIERTA',
+    informe_final:        txt('informe_final'),
+    sugerencias:          txt('sugerencias'),
 
     editado_en:           new Date().toISOString(),
     editado_por_email:    miEmail
