@@ -210,6 +210,7 @@ let accesos    = [];
 let resultadosPac = [];
 let nutri      = {};        // solapa de Nutrición de la ficha abierta
 let adjuntos   = [];        // estudios cargados en la ficha abierta
+let suelo      = {};        // solapa de Suelo Pélvico de la ficha abierta
 
 /* Categoría libre del final: no tiene casilleros, solo texto. */
 const CAT_OTROS = 'Otros';
@@ -452,6 +453,7 @@ async function abrirFicha(id){
   vista = 'ficha';
   solapa = 'medica';
   await cargarNutricion(id);
+  await cargarSuelo(id);
   await cargarAdjuntos(id);
   render();
   window.scrollTo({ top:0, behavior:'smooth' });
@@ -463,6 +465,7 @@ function volverALista(){
 }
 function irSolapa(s){
   if(solapa === 'nutricion') levantarNutricion();
+  if(solapa === 'suelo_pelvico') levantarSuelo();
   if(solapa === 'medica' && fichaActual) guardarAntecedentesEnMemoria();
   solapa = s;
   renderFicha();
@@ -499,11 +502,13 @@ function renderFicha(){
     <div class="solapas">
       <button class="solapa ${solapa === 'medica' ? 'activa' : ''}" onclick="irSolapa('medica')">Médica</button>
       <button class="solapa ${solapa === 'nutricion' ? 'activa' : ''}" onclick="irSolapa('nutricion')">Nutrición</button>
-      <button class="solapa" disabled title="Se construye después">Suelo pélvico</button>
+      <button class="solapa ${solapa === 'suelo_pelvico' ? 'activa' : ''}" onclick="irSolapa('suelo_pelvico')">Suelo pélvico</button>
       <button class="solapa" disabled title="Se construye después">BiOLAB</button>
     </div>
 
-    ${solapa === 'medica' ? solapaMedica(f, ro) : solapaNutricion(nutri, ro)}
+    ${solapa === 'medica'    ? solapaMedica(f, ro)
+    : solapa === 'nutricion' ? solapaNutricion(nutri, ro)
+    :                          solapaSuelo(suelo, ro)}
   `;
   if(solapa === 'nutricion') calcularIMC();
 }
@@ -797,23 +802,189 @@ function solapaNutricion(n, ro){
     </div>
   </div>
 
+  ${bloqueAdjuntos('nutricion', ro,
+    'Estudios adjuntos · bioimpedancia y composición corporal',
+    'Subí acá la imagen o el PDF que tira la balanza: el músculo apendicular, los porcentajes de grasa, lo que venga.')}`;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SOLAPA · SUELO PÉLVICO
+   ════════════════════════════════════════════════════════════════ */
+const UBIC_PROLAPSO = [['ANT','Anterior'], ['MED','Medio'], ['POST','Posterior']];
+const POPQ = ['0','I','II','III','IV'];
+
+async function cargarSuelo(hcId){
+  const { data, error } = await sb.from('hc_sarkmed_suelo_pelvico').select('*').eq('hc_id', hcId).maybeSingle();
+  if(error) toast('No pude leer Suelo Pélvico: ' + error.message, 'err');
+  suelo = data || { hc_id: hcId, prolapso_ubicacion: [] };
+  suelo.prolapso_ubicacion = suelo.prolapso_ubicacion || [];
+}
+
+/* Sí / No / sin preguntar. El tercer estado es a propósito: en una HC
+   "no lo sé" no es lo mismo que "no". Se vuelve a tocar y se destilda. */
+function siNo(campo, valor, ro){
+  const v = valor;
+  return `<div class="chips">
+    <button class="chip ${v === true  ? 'on' : ''}" onclick="setSuelo('${campo}', true)"  ${ro}>Sí</button>
+    <button class="chip ${v === false ? 'on' : ''}" onclick="setSuelo('${campo}', false)" ${ro}>No</button>
+  </div>`;
+}
+
+function solapaSuelo(s, ro){
+  const ubic = s.prolapso_ubicacion || [];
+  return `
   <div class="bloque">
-    <div class="bloque-head">Estudios adjuntos · bioimpedancia y composición corporal</div>
+    <div class="bloque-head">Antecedentes ginecológicos / urológicos</div>
     <div class="bloque-body">
-      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-        Subí acá la imagen o el PDF que tira la balanza: el músculo apendicular, los porcentajes de grasa, lo que venga.
-        Queda guardado dentro de esta evaluación.
+      <div class="campo"><label>Embarazos y partos</label><input type="text" id="embarazos_partos" value="${esc(s.embarazos_partos || '')}" ${ro}></div>
+      <div class="campo"><label>Cirugías previas</label><input type="text" id="cirugias_previas" value="${esc(s.cirugias_previas || '')}" ${ro}></div>
+      <div class="campo"><label>Infecciones urinarias recurrentes</label>${siNo('itu_recurrentes', s.itu_recurrentes, ro)}</div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Digestivos</div>
+    <div class="bloque-body">
+      <div class="campo"><label>Patologías digestivas</label>${siNo('patologias_digestivas', s.patologias_digestivas, ro)}</div>
+      <div class="campo"><label>Cirugías abdominales</label><textarea id="cirugias_abdominales" ${ro}>${esc(s.cirugias_abdominales || '')}</textarea></div>
+      <div class="campo"><label>Otros antecedentes relevantes</label><textarea id="otros_antecedentes" ${ro}>${esc(s.otros_antecedentes || '')}</textarea></div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Síntomas actuales</div>
+    <div class="bloque-body">
+      <div class="fila-2">
+        <div class="campo"><label>Incontinencia urinaria</label>${siNo('incontinencia_urinaria', s.incontinencia_urinaria, ro)}</div>
+        <div class="campo"><label>Incontinencia fecal</label>${siNo('incontinencia_fecal', s.incontinencia_fecal, ro)}</div>
       </div>
+      <div class="fila-2">
+        <div class="campo"><label>Dolor pélvico</label>${siNo('dolor_pelvico', s.dolor_pelvico, ro)}</div>
+        <div class="campo"><label>Sensación de peso o prolapso</label>${siNo('sensacion_peso_prolapso', s.sensacion_peso_prolapso, ro)}</div>
+      </div>
+      <div class="fila-2">
+        <div class="campo"><label>Urgencia miccional</label>${siNo('urgencia_miccional', s.urgencia_miccional, ro)}</div>
+        <div class="campo"><label>Frecuencia urinaria</label><input type="text" id="frecuencia_urinaria" value="${esc(s.frecuencia_urinaria || '')}" ${ro}></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Exploración física</div>
+    <div class="bloque-body">
+      <div class="campo"><label>Inspección</label><textarea id="inspeccion" ${ro}>${esc(s.inspeccion || '')}</textarea></div>
+      <div class="campo"><label>Palpación</label><textarea id="palpacion" ${ro}>${esc(s.palpacion || '')}</textarea></div>
+
+      <div class="campo"><label>Tono muscular del piso pélvico · escala Oxford</label>
+        <div class="chips">
+          ${[1,2,3,4,5].map(n =>
+            `<button class="chip ${s.escala_oxford === n ? 'on' : ''}" onclick="setSuelo('escala_oxford', ${n})" ${ro}>${n}</button>`).join('')}
+        </div>
+      </div>
+
+      <div class="campo"><label>Presencia de prolapsos</label>${siNo('prolapsos', s.prolapsos, ro)}</div>
+      <div class="campo"><label>Ubicación</label>
+        <div class="chips">
+          ${UBIC_PROLAPSO.map(([k, t], i) =>
+            `<button class="chip ${ubic.includes(k) ? 'on' : ''}" onclick="togUbicacion(${i})" ${ro}>${t}</button>`).join('')}
+        </div>
+      </div>
+      <div class="campo"><label>Escala POP-Q</label>
+        <div class="chips">
+          ${POPQ.map(g =>
+            `<button class="chip ${s.escala_popq === g ? 'on' : ''}" onclick="setSuelo('escala_popq', '${g}')" ${ro}>${g}</button>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Pruebas complementarias</div>
+    <div class="bloque-body">
+      <div class="campo"><label>Ecografía</label><input type="text" id="ecografia" value="${esc(s.ecografia || '')}" ${ro}></div>
+      <div class="campo"><label>Urodinamia</label><input type="text" id="urodinamia" value="${esc(s.urodinamia || '')}" ${ro}></div>
+      <div class="campo"><label>Otras</label><input type="text" id="otras_pruebas" value="${esc(s.otras_pruebas || '')}" ${ro}></div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Diagnóstico</div>
+    <div class="bloque-body">
+      <div class="campo">
+        <textarea id="diagnostico" style="min-height:150px" ${ro}>${esc(s.diagnostico || '')}</textarea>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:5px">
+          Queda firmado con la matrícula de quien lo carga cuando se arme el PDF del paciente.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  ${bloqueAdjuntos('suelo_pelvico', ro,
+    'Estudios adjuntos · ecografía, urodinamia',
+    'Subí acá los estudios que trae la paciente: ecografía, urodinamia, lo que haya.')}`;
+}
+
+function setSuelo(campo, valor){
+  if(!puedeCargar()) return;
+  levantarSuelo();
+  suelo[campo] = (suelo[campo] === valor) ? null : valor;   // volver a tocar, destilda
+  renderFicha();
+}
+function togUbicacion(i){
+  if(!puedeCargar()) return;
+  levantarSuelo();
+  const k = UBIC_PROLAPSO[i][0];
+  const lista = suelo.prolapso_ubicacion || (suelo.prolapso_ubicacion = []);
+  const p = lista.indexOf(k);
+  if(p >= 0) lista.splice(p, 1); else lista.push(k);
+  renderFicha();
+}
+const CAMPOS_SUELO_TEXTO = ['embarazos_partos','cirugias_previas','cirugias_abdominales','otros_antecedentes',
+  'frecuencia_urinaria','inspeccion','palpacion','ecografia','urodinamia','otras_pruebas','diagnostico'];
+
+function levantarSuelo(){
+  if(solapa !== 'suelo_pelvico') return;
+  CAMPOS_SUELO_TEXTO.forEach(c => { if(document.getElementById(c)) suelo[c] = txt(c); });
+}
+
+async function guardarSuelo(){
+  levantarSuelo();
+  const fila = { hc_id: fichaActual.id, editado_en: new Date().toISOString(), editado_por_email: miEmail };
+  CAMPOS_SUELO_TEXTO.forEach(c => { fila[c] = suelo[c] || null; });
+  ['itu_recurrentes','patologias_digestivas','incontinencia_urinaria','incontinencia_fecal',
+   'dolor_pelvico','sensacion_peso_prolapso','urgencia_miccional','prolapsos']
+    .forEach(c => { fila[c] = (suelo[c] === true || suelo[c] === false) ? suelo[c] : null; });
+  fila.escala_oxford      = suelo.escala_oxford ?? null;
+  fila.escala_popq        = suelo.escala_popq || null;
+  fila.prolapso_ubicacion = suelo.prolapso_ubicacion || [];
+
+  const btn = document.getElementById('btn-guardar');
+  btn.disabled = true; btn.textContent = 'Guardando…';
+  const { error } = await sb.from('hc_sarkmed_suelo_pelvico').upsert(fila, { onConflict: 'hc_id' });
+  btn.disabled = false; btn.textContent = 'Guardar ficha';
+
+  if(error){ toast('No se pudo guardar Suelo Pélvico: ' + error.message, 'err'); return; }
+  toast('Suelo pélvico guardado', 'ok');
+  await cargarSuelo(fichaActual.id);
+  renderFicha();
+}
+
+/* ── Adjuntos ───────────────────────────────────────────────────── */
+function bloqueAdjuntos(sol, ro, titulo, ayuda){
+  return `
+  <div class="bloque">
+    <div class="bloque-head">${esc(titulo)}</div>
+    <div class="bloque-body">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(ayuda)}</div>
       ${ro ? '' : `
       <div class="campo">
-        <input type="file" id="archivo-nutri" accept="image/*,application/pdf" multiple onchange="subirAdjuntos('nutricion', this)">
+        <input type="file" id="archivo-${sol}" accept="image/*,application/pdf" multiple onchange="subirAdjuntos('${sol}', this)">
       </div>`}
-      <div id="lista-adjuntos">${listaAdjuntos('nutricion', ro)}</div>
+      <div id="lista-adjuntos">${listaAdjuntos(sol, ro)}</div>
     </div>
   </div>`;
 }
 
-/* ── Adjuntos ───────────────────────────────────────────────────── */
 function listaAdjuntos(sol, ro){
   const arch = adjuntos.filter(a => a.solapa === sol);
   if(!arch.length) return '<div style="font-size:12px;color:var(--muted)">Todavía no hay estudios cargados.</div>';
@@ -972,7 +1143,8 @@ async function guardarNutricion(){
    ════════════════════════════════════════════════════════════════ */
 async function guardarFicha(){
   if(!puedeCargar()){ toast('No tenés permiso para cargar historias', 'err'); return; }
-  if(solapa === 'nutricion') return guardarNutricion();
+  if(solapa === 'nutricion')     return guardarNutricion();
+  if(solapa === 'suelo_pelvico') return guardarSuelo();
   return guardarMedica();
 }
 
