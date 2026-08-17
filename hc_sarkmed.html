@@ -209,6 +209,7 @@ let miEmail    = '';
 let accesos    = [];
 let resultadosPac = [];
 let nutri      = {};        // solapa de Nutrición de la ficha abierta
+let adjuntos   = [];        // estudios cargados en la ficha abierta
 
 /* Categoría libre del final: no tiene casilleros, solo texto. */
 const CAT_OTROS = 'Otros';
@@ -451,6 +452,7 @@ async function abrirFicha(id){
   vista = 'ficha';
   solapa = 'medica';
   await cargarNutricion(id);
+  await cargarAdjuntos(id);
   render();
   window.scrollTo({ top:0, behavior:'smooth' });
 }
@@ -793,7 +795,92 @@ function solapaNutricion(n, ro){
 
       <div class="campo"><label>Observaciones</label><textarea id="observaciones" ${ro}>${esc(n.observaciones || '')}</textarea></div>
     </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Estudios adjuntos · bioimpedancia y composición corporal</div>
+    <div class="bloque-body">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Subí acá la imagen o el PDF que tira la balanza: el músculo apendicular, los porcentajes de grasa, lo que venga.
+        Queda guardado dentro de esta evaluación.
+      </div>
+      ${ro ? '' : `
+      <div class="campo">
+        <input type="file" id="archivo-nutri" accept="image/*,application/pdf" multiple onchange="subirAdjuntos('nutricion', this)">
+      </div>`}
+      <div id="lista-adjuntos">${listaAdjuntos('nutricion', ro)}</div>
+    </div>
   </div>`;
+}
+
+/* ── Adjuntos ───────────────────────────────────────────────────── */
+function listaAdjuntos(sol, ro){
+  const arch = adjuntos.filter(a => a.solapa === sol);
+  if(!arch.length) return '<div style="font-size:12px;color:var(--muted)">Todavía no hay estudios cargados.</div>';
+  return arch.map((a, i) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:9px 12px;border:1px solid var(--border);
+                border-radius:8px;margin-bottom:6px;background:var(--panel-2)">
+      <span style="font-size:18px">${(a.tipo || '').startsWith('image/') ? '🖼️' : '📄'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.nombre)}</div>
+        <div style="font-size:11px;color:var(--muted)">${fechaLinda((a.subido_en || '').slice(0,10))}${a.tamano ? ' · ' + Math.round(a.tamano/1024) + ' KB' : ''}</div>
+      </div>
+      <button class="btn" onclick="verAdjunto(${i})">Ver</button>
+      ${ro ? '' : `<button class="btn" style="color:var(--rojo-x)" onclick="borrarAdjunto(${i})">Borrar</button>`}
+    </div>`).join('');
+}
+
+async function cargarAdjuntos(hcId){
+  const { data, error } = await sb.from('hc_sarkmed_adjuntos')
+    .select('*').eq('hc_id', hcId).order('subido_en', { ascending:false });
+  if(error){ console.warn('adjuntos:', error.message); adjuntos = []; return; }
+  adjuntos = data || [];
+}
+
+async function subirAdjuntos(sol, input){
+  const files = Array.from(input.files || []);
+  if(!files.length) return;
+  const cont = document.getElementById('lista-adjuntos');
+  cont.innerHTML = '<div style="font-size:12px;color:var(--muted)">Subiendo…</div>';
+
+  for(const file of files){
+    // El nombre se limpia: los acentos y espacios rompen las rutas del bucket.
+    const limpio = file.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                            .replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${fichaActual.id}/${sol}/${Date.now()}_${limpio}`;
+    const { error: eUp } = await sb.storage.from('sarkmed-hc').upload(path, file, { upsert:false });
+    if(eUp){ toast('No se pudo subir ' + file.name + ': ' + eUp.message, 'err'); continue; }
+    const { error: eIns } = await sb.from('hc_sarkmed_adjuntos').insert({
+      hc_id: fichaActual.id, solapa: sol, path, nombre: file.name,
+      tipo: file.type || null, tamano: file.size || null, subido_por: miEmail
+    });
+    if(eIns) toast('Se subió el archivo pero no se pudo anotar: ' + eIns.message, 'err');
+  }
+  input.value = '';
+  await cargarAdjuntos(fichaActual.id);
+  renderFicha();
+  toast('Estudio cargado', 'ok');
+}
+
+async function verAdjunto(i){
+  const a = adjuntos.filter(x => x.solapa === solapa)[i];
+  if(!a) return;
+  // Link firmado: vence en 5 minutos, no queda nada público.
+  const { data, error } = await sb.storage.from('sarkmed-hc').createSignedUrl(a.path, 300);
+  if(error){ toast('No se pudo abrir: ' + error.message, 'err'); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
+async function borrarAdjunto(i){
+  const a = adjuntos.filter(x => x.solapa === solapa)[i];
+  if(!a) return;
+  if(!confirm('¿Borrar "' + a.nombre + '"? No se puede deshacer.')) return;
+  await sb.storage.from('sarkmed-hc').remove([a.path]);
+  const { error } = await sb.from('hc_sarkmed_adjuntos').delete().eq('id', a.id);
+  if(error){ toast('No se pudo borrar: ' + error.message, 'err'); return; }
+  await cargarAdjuntos(fichaActual.id);
+  renderFicha();
+  toast('Estudio borrado', 'ok');
 }
 
 /* El IMC se calcula, no se escribe. La clasificación OMS queda SUGERIDA:
