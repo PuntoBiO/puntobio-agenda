@@ -1113,8 +1113,14 @@ function solapaBiolab(b, ro){
         La marcha, el TUG y el SPPB se cargan a mano, porque no salen del equipo.
       </div>
       <div class="fila-3">
-        <div class="campo"><label>Fecha de la toma (opcional)</label>
-          <input type="date" id="vald_fecha" title="Si la toma es vieja, poné la fecha; si no, busca en los últimos 120 días">
+        <div class="campo"><label>Buscar desde</label>
+          <select id="vald_rango">
+            <option value="120">Los últimos 120 días</option>
+            <option value="365">El último año</option>
+            <option value="1095" selected>Los últimos 3 años</option>
+            <option value="0">Una fecha exacta ↓</option>
+          </select>
+          <input type="date" id="vald_fecha" style="margin-top:6px" title="Solo si elegís fecha exacta">
         </div>
         <div class="campo"><label>&nbsp;</label>
           <button class="btn btn-azul" id="btn-vald" onclick="traerDeVald()" style="width:100%">⬇ Traer de VALD</button>
@@ -1421,8 +1427,24 @@ async function traerDeVald(forzarProfileId){
       manual = '';
     }
     const pid = forzarProfileId || manual || p.vald_profile_id || '';
+    // OJO: un input date a medio completar devuelve cadena vacía, y así se
+    // buscaba en los últimos 120 días sin que nadie se enterara. Ahora el rango
+    // es explícito y la fecha exacta solo manda si está completa.
     const fecha = (document.getElementById('vald_fecha') || {}).value || '';
-    const desde = fecha ? '&from=' + encodeURIComponent(fecha + 'T00:00:00.0000000Z') : '';
+    const rango = Number((document.getElementById('vald_rango') || {}).value || 1095);
+    let desdeISO = '';
+    if(rango === 0){
+      if(!fecha){
+        est.innerHTML = '<span style="color:var(--rojo-x)">Elegiste “fecha exacta” pero la fecha está incompleta. Completala (día, mes y año) o elegí un rango.</span>';
+        return;
+      }
+      desdeISO = fecha;
+    }else{
+      const d = new Date(); d.setDate(d.getDate() - rango);
+      desdeISO = d.toISOString().slice(0, 10);
+    }
+    const desde = '&from=' + encodeURIComponent(desdeISO + 'T00:00:00.0000000Z');
+    const desdeLindo = desdeISO.split('-').reverse().join('/');
 
     // En el Hub el nombre puede estar escrito de otra forma y el DNI puede no
     // figurar. En vez de rendirse al primer intento, se prueban variantes.
@@ -1482,8 +1504,8 @@ async function traerDeVald(forzarProfileId){
           if(cajaP) cajaP.textContent = 'Vinculado ✓';
         }
         est.innerHTML = '<span style="color:var(--rojo-x)"><b>Encontré el perfil</b> (' + esc(perfil.nombre || '') + ')' +
-          ' pero no tiene tomas' + (fecha ? ' en esa fecha.' : ' en los últimos 120 días.') +
-          ' Si la toma es más vieja, poné la fecha del día de la evaluación y volvé a intentar.</span>';
+          ' pero no encontré tomas desde el ' + esc(desdeLindo) + '.' +
+          ' Si la evaluación es anterior, ampliá el rango o poné la fecha exacta del día de la toma.</span>';
       }else{
         est.innerHTML = '<span style="color:var(--rojo-x)"><b>VALD no encontró el perfil.</b> Probé por nombre y DNI, ' +
           'solo por nombre, con mayúscula inicial y con el apellido al revés, y ninguna dio.<br>' +
@@ -1504,7 +1526,7 @@ async function traerDeVald(forzarProfileId){
     }
     biolab.vald_traido_en = new Date().toISOString();
 
-    est.innerHTML = `<span style="color:var(--verde)"><b>Listo:</b> ${n.detalle.join(' · ')}.</span>` +
+    est.innerHTML = `<span style="color:var(--verde)"><b>Listo</b> (tomas desde el ${esc(desdeLindo)}): ${n.detalle.join(' · ')}.</span>` +
       (n.pisados ? ` <span style="color:var(--muted)">Lo que ya estaba cargado no se tocó (${n.pisados}).</span>` : '') +
       ' <span style="color:var(--muted)">Revisá y tocá Guardar ficha.</span>';
     calcularBiolab();
