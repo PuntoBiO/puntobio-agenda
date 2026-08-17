@@ -1124,7 +1124,7 @@ function solapaBiolab(b, ro){
             ${(fichaActual.paciente && fichaActual.paciente.vald_profile_id)
               ? 'Vinculado ✓' : 'Sin vincular · se vincula solo al traer'}
           </div>
-          <input type="text" id="vald_profile_manual" placeholder="Profile ID del Hub (si no lo encuentra por nombre)"
+          <input type="text" id="vald_profile_manual" placeholder="Profile ID del Hub (el código largo de la URL, no el nombre)"
                  value="${esc((fichaActual.paciente && fichaActual.paciente.vald_profile_id) || '')}" style="margin-top:6px;font-size:11.5px">
         </div>
       </div>
@@ -1414,23 +1414,47 @@ async function traerDeVald(forzarProfileId){
   btn.disabled = true; btn.textContent = 'Buscando…';
   est.innerHTML = '<span style="color:var(--muted)">Buscando el perfil en VALD y trayendo la toma…</span>';
   try{
-    const manual = (v('vald_profile_manual') || '').trim();
+    let manual = (v('vald_profile_manual') || '').trim();
+    // Un Profile ID es un código largo, no un nombre: si pegaron el nombre, se ignora
+    if(manual && !/^[0-9a-f-]{20,}$/i.test(manual)){
+      est.innerHTML = '<span style="color:var(--rojo-x)">Eso no parece un Profile ID: es el código largo con guiones que sale en la URL del Hub, después de /profiles/. Lo ignoro y busco por nombre.</span>';
+      manual = '';
+    }
     const pid = forzarProfileId || manual || p.vald_profile_id || '';
     const fecha = (document.getElementById('vald_fecha') || {}).value || '';
-    const qs = [];
-    if(pid) qs.push('profileId=' + encodeURIComponent(pid));
-    else {
-      qs.push('nombre=' + encodeURIComponent(p.apellido_nombre || ''));
-      if(p.dni) qs.push('dni=' + encodeURIComponent(p.dni));
-    }
-    if(fecha) qs.push('from=' + encodeURIComponent(fecha + 'T00:00:00.0000000Z'));
+    const desde = fecha ? '&from=' + encodeURIComponent(fecha + 'T00:00:00.0000000Z') : '';
 
-    const resp = await fetch(SUPABASE_URL + '/functions/v1/vald-datos-ts?' + qs.join('&'),
-      { headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY } });
-    const txtResp = await resp.text();
-    let datos;
-    try { datos = JSON.parse(txtResp); } catch { throw new Error(txtResp || ('HTTP ' + resp.status)); }
-    if(!resp.ok) throw new Error('VALD HTTP ' + resp.status);
+    // En el Hub el nombre puede estar escrito de otra forma y el DNI puede no
+    // figurar. En vez de rendirse al primer intento, se prueban variantes.
+    const intentos = [];
+    if(pid){
+      intentos.push({ q: 'profileId=' + encodeURIComponent(pid), como: 'por perfil' });
+    }else{
+      const nom = (p.apellido_nombre || '').trim();
+      const titulo = nom.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());   // GRACIELA BRUNO → Graciela Bruno
+      const partes = titulo.split(/\s+/);
+      const invertido = partes.length > 1 ? partes.slice(1).join(' ') + ' ' + partes[0] : titulo;
+      if(p.dni) intentos.push({ q: 'nombre=' + encodeURIComponent(nom) + '&dni=' + encodeURIComponent(p.dni), como: 'nombre y DNI' });
+      intentos.push({ q: 'nombre=' + encodeURIComponent(nom),        como: 'solo el nombre' });
+      intentos.push({ q: 'nombre=' + encodeURIComponent(titulo),     como: 'el nombre con mayúscula inicial' });
+      if(invertido !== titulo)
+        intentos.push({ q: 'nombre=' + encodeURIComponent(invertido), como: 'nombre y apellido al revés' });
+    }
+
+    let datos = null, comoSalio = '';
+    for(const intento of intentos){
+      const resp = await fetch(SUPABASE_URL + '/functions/v1/vald-datos-ts?' + intento.q + desde,
+        { headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY } });
+      const txtResp = await resp.text();
+      let d;
+      try { d = JSON.parse(txtResp); } catch { throw new Error(txtResp || ('HTTP ' + resp.status)); }
+      if(!resp.ok) throw new Error('VALD HTTP ' + resp.status);
+      datos = d; comoSalio = intento.como;
+      // Sirve si identificó un perfil, si hay que elegir, o si ya trajo datos
+      if(d.needsPicker || d.perfil || d.profileId ||
+         (d.fuerza || []).length || (d.forceDecks || []).length || (d.movilidad || []).length) break;
+    }
+    if(!datos) throw new Error('VALD no respondió');
 
     // Varios perfiles posibles: que elija quien evalúa, no el sistema
     if(datos.needsPicker){
@@ -1461,9 +1485,10 @@ async function traerDeVald(forzarProfileId){
           ' pero no tiene tomas' + (fecha ? ' en esa fecha.' : ' en los últimos 120 días.') +
           ' Si la toma es más vieja, poné la fecha del día de la evaluación y volvé a intentar.</span>';
       }else{
-        est.innerHTML = '<span style="color:var(--rojo-x)"><b>VALD no encontró el perfil</b> buscando por ' +
-          esc(p.apellido_nombre || '') + (p.dni ? ' / DNI ' + esc(p.dni) : '') + '.' +
-          ' En el Hub el nombre puede estar escrito distinto: copiá el Profile ID desde VALD, pegalo en el campo de la derecha y volvé a tocar Traer.</span>';
+        est.innerHTML = '<span style="color:var(--rojo-x)"><b>VALD no encontró el perfil.</b> Probé por nombre y DNI, ' +
+          'solo por nombre, con mayúscula inicial y con el apellido al revés, y ninguna dio.<br>' +
+          'Andá al Hub, abrí a ' + esc(p.apellido_nombre || '') + ', y copiá de la barra de direcciones el código largo ' +
+          'que aparece después de /profiles/ — ese es el Profile ID. Pegalo en el campo de la derecha y volvé a tocar Traer.</span>';
       }
       return;
     }
