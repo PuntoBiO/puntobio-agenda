@@ -212,6 +212,7 @@ let nutri      = {};        // solapa de Nutrición de la ficha abierta
 let adjuntos   = [];        // estudios cargados en la ficha abierta
 let suelo      = {};        // solapa de Suelo Pélvico de la ficha abierta
 let biolab     = {};        // solapa BiOLAB de la ficha abierta
+let candidatosVald = [];    // perfiles posibles cuando VALD no identifica uno solo
 
 /* Categoría libre del final: no tiene casilleros, solo texto. */
 const CAT_OTROS = 'Otros';
@@ -998,6 +999,32 @@ const CAMPOS_BIOLAB_TXT = ['resumen_neuromuscular','resumen_potencia','resumen_e
 
 function solapaBiolab(b, ro){
   return `
+  ${ro ? '' : `
+  <div class="bloque" style="border-color:var(--azul-border)">
+    <div class="bloque-head" style="background:var(--azul)">Traer las mediciones de VALD</div>
+    <div class="bloque-body">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Trae SOLO lo que se mide con VALD: prensión, IMTP con su RFD y las áreas del apoyo monopodal.
+        La marcha, el TUG y el SPPB se cargan a mano, porque no salen del equipo.
+      </div>
+      <div class="fila-3">
+        <div class="campo"><label>Fecha de la toma (opcional)</label>
+          <input type="date" id="vald_fecha" title="Si la toma es vieja, poné la fecha; si no, busca en los últimos 120 días">
+        </div>
+        <div class="campo"><label>&nbsp;</label>
+          <button class="btn btn-azul" id="btn-vald" onclick="traerDeVald()" style="width:100%">⬇ Traer de VALD</button>
+        </div>
+        <div class="campo"><label>Perfil de VALD</label>
+          <div style="padding:8px 10px;border:1px dashed var(--border);border-radius:6px;background:var(--panel-2);font-size:12px" id="vald-perfil">
+            ${(fichaActual.paciente && fichaActual.paciente.vald_profile_id)
+              ? 'Vinculado ✓' : 'Sin vincular · se vincula solo al traer'}
+          </div>
+        </div>
+      </div>
+      <div id="vald-estado" style="font-size:12.5px"></div>
+    </div>
+  </div>`}
+
   <div class="bloque">
     <div class="bloque-head">Screening de sarcopenia</div>
     <div class="bloque-body">
@@ -1258,6 +1285,161 @@ function setBiolab(campo, valor){
   biolab[campo] = (biolab[campo] === valor) ? null : valor;
   renderFicha();
 }
+/* ════════════════════════════════════════════════════════════════
+   TRAER DE VALD
+   Misma cañería que usa el apartado VALD: la edge function vald-datos-ts.
+   Busca por perfil guardado, o por nombre + DNI la primera vez.
+   Solo rellena lo que MIDE el equipo; nunca pisa un dato ya cargado a mano
+   salvo que el campo esté vacío.
+   ════════════════════════════════════════════════════════════════ */
+function ponerSiVacio(id, valor){
+  const el = document.getElementById(id);
+  if(!el || valor == null || isNaN(valor)) return false;
+  if((el.value || '').trim() !== '') return false;      // ya había algo cargado: no se pisa
+  el.value = Math.round(Number(valor) * 10) / 10;
+  return true;
+}
+
+async function traerDeVald(forzarProfileId){
+  const p = fichaActual.paciente || {};
+  const btn = document.getElementById('btn-vald');
+  const est = document.getElementById('vald-estado');
+  btn.disabled = true; btn.textContent = 'Buscando…';
+  est.innerHTML = '<span style="color:var(--muted)">Buscando el perfil en VALD y trayendo la toma…</span>';
+  try{
+    const pid = forzarProfileId || p.vald_profile_id || '';
+    const fecha = (document.getElementById('vald_fecha') || {}).value || '';
+    const qs = [];
+    if(pid) qs.push('profileId=' + encodeURIComponent(pid));
+    else {
+      qs.push('nombre=' + encodeURIComponent(p.apellido_nombre || ''));
+      if(p.dni) qs.push('dni=' + encodeURIComponent(p.dni));
+    }
+    if(fecha) qs.push('from=' + encodeURIComponent(fecha + 'T00:00:00.0000000Z'));
+
+    const resp = await fetch(SUPABASE_URL + '/functions/v1/vald-datos-ts?' + qs.join('&'),
+      { headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY } });
+    const txtResp = await resp.text();
+    let datos;
+    try { datos = JSON.parse(txtResp); } catch { throw new Error(txtResp || ('HTTP ' + resp.status)); }
+    if(!resp.ok) throw new Error('VALD HTTP ' + resp.status);
+
+    // Varios perfiles posibles: que elija quien evalúa, no el sistema
+    if(datos.needsPicker){
+      candidatosVald = datos.candidatos || [];
+      est.innerHTML = '<div style="margin-bottom:6px">Hay más de un perfil posible. ¿Cuál es?</div>' +
+        candidatosVald.map((c, i) =>
+          `<div class="res-pac" onclick="traerDeVald(candidatosVald[${i}].profileId)">
+             <div class="pac-nombre">${esc(c.nombre || '(sin nombre)')}</div>
+             <div class="pac-dni">${esc(c.profileId || '')}</div>
+           </div>`).join('');
+      return;
+    }
+
+    const n = aplicarDatosVald(datos);
+
+    if(!n.total){
+      est.innerHTML = '<span style="color:var(--rojo-x)">No encontré tomas de VALD' +
+        (fecha ? ' en esa fecha.' : ' en los últimos 120 días.') +
+        ' Si la toma es más vieja, poné la fecha arriba y volvé a intentar.</span>';
+      return;
+    }
+
+    // Vínculo guardado para la próxima vez
+    const profileId = datos.profileId || (datos.perfil && datos.perfil.profileId);
+    if(profileId && p.vald_profile_id !== profileId){
+      await sb.from('pacientes_sarkmed').update({ vald_profile_id: profileId }).eq('id', p.id);
+      p.vald_profile_id = profileId;
+      biolab.vald_profile_id = profileId;
+      const cajaP = document.getElementById('vald-perfil');
+      if(cajaP) cajaP.textContent = 'Vinculado ✓';
+    }
+    biolab.vald_traido_en = new Date().toISOString();
+
+    est.innerHTML = `<span style="color:var(--verde)"><b>Listo:</b> ${n.detalle.join(' · ')}.</span>` +
+      (n.pisados ? ` <span style="color:var(--muted)">Lo que ya estaba cargado no se tocó (${n.pisados}).</span>` : '') +
+      ' <span style="color:var(--muted)">Revisá y tocá Guardar ficha.</span>';
+    calcularBiolab();
+  }catch(e){
+    est.innerHTML = '<span style="color:var(--rojo-x)">⚠️ ' + esc(String(e && e.message ? e.message : e)) + '</span>';
+  }finally{
+    btn.disabled = false; btn.textContent = '⬇ Traer de VALD';
+  }
+}
+
+/* Mapeo VALD → campos de la ficha. Los nombres salen de lo que devuelve
+   vald-datos-ts: fuerza[] (DynaMo), forceDecks[] (pruebas con resultados). */
+function aplicarDatosVald(datos){
+  const detalle = [];
+  let total = 0, pisados = 0;
+  const contar = (ok, etiqueta) => { if(ok){ total++; detalle.push(etiqueta); } else pisados++; };
+
+  // Prensión (DynaMo)
+  const grip = (datos.fuerza || []).find(f => /prensi|grip/i.test(f.grupo || ''));
+  if(grip){
+    const a = ponerSiVacio('prension_izq_n', grip.izquierda_N);
+    const b = ponerSiVacio('prension_der_n', grip.derecha_N);
+    contar(a || b, 'prensión');
+  }
+
+  // IMTP (ForceDecks): pico por lado y RFD
+  const imtp = (datos.forceDecks || []).find(t => /isometric mid|imtp/i.test(t.prueba || ''));
+  if(imtp && imtp.resultados){
+    const res = imtp.resultados;
+    const pico = res['Peak Force'] || res['Peak Vertical Force'];
+    if(pico && pico.lados){
+      const a = ponerSiVacio('imtp_pico_izq_n', pico.lados.Left);
+      const b = ponerSiVacio('imtp_pico_der_n', pico.lados.Right);
+      contar(a || b, 'IMTP');
+    }
+    // El RFD viene con nombres distintos según el equipo: se busca el que hable de 100 ms
+    const claveRfd = Object.keys(res).find(k => /rfd/i.test(k) && /100/.test(k))
+                  || Object.keys(res).find(k => /rfd/i.test(k));
+    if(claveRfd && res[claveRfd].lados){
+      const a = ponerSiVacio('imtp_rfd_izq', res[claveRfd].lados.Left);
+      const b = ponerSiVacio('imtp_rfd_der', res[claveRfd].lados.Right);
+      contar(a || b, 'RFD');
+    }
+  }
+
+  // Apoyo monopodal: área de la elipse del centro de masa
+  const sls = (datos.forceDecks || []).find(t => /single leg|monopodal|unilateral stance/i.test(t.prueba || ''));
+  if(sls && sls.resultados){
+    const area = Object.keys(sls.resultados).find(k => /area of cop ellipse/i.test(k));
+    if(area && sls.resultados[area].lados){
+      const a = ponerSiVacio('sls_area_izq', sls.resultados[area].lados.Left);
+      const b = ponerSiVacio('sls_area_der', sls.resultados[area].lados.Right);
+      contar(a || b, 'apoyo monopodal');
+    }
+  }
+
+  // Los resúmenes se llenan con lo que llegó, SOLO si están vacíos
+  const listar = (arr, fn) => (arr || []).map(fn).filter(Boolean).join('\n');
+  const resFuerza = listar(datos.fuerza, f =>
+    `${f.grupo}: izq ${f.izquierda_N ?? '—'} N / der ${f.derecha_N ?? '—'} N` +
+    (f.asimetria_pct != null ? ` · asimetría ${f.asimetria_pct} %` : ''));
+  const resFD = listar(datos.forceDecks, t => {
+    const m = Object.keys(t.resultados || {}).slice(0, 8)
+      .map(k => `  ${k}: ${(t.resultados[k].lados && (t.resultados[k].lados.Trial ?? t.resultados[k].lados.Both ??
+        ((t.resultados[k].lados.Left ?? '—') + ' / ' + (t.resultados[k].lados.Right ?? '—')))) ?? '—'} ${t.resultados[k].unidad || ''}`)
+      .join('\n');
+    return `${t.prueba}\n${m}`;
+  });
+  const resMov = listar(datos.movilidad, m => m.prueba);
+
+  const pegar = (id, texto) => {
+    const el = document.getElementById(id);
+    if(el && texto && !(el.value || '').trim()){ el.value = texto; return true; }
+    return false;
+  };
+  if(pegar('resumen_neuromuscular', resFuerza)) detalle.push('resumen de fuerza');
+  if(pegar('resumen_potencia', resFD))          detalle.push('resumen de ForceDecks');
+  if(pegar('resumen_movilidad', resMov))        detalle.push('movilidad HumanTrak');
+  if(resFuerza || resFD || resMov) total++;
+
+  return { total, detalle, pisados };
+}
+
 function levantarBiolab(){
   if(solapa !== 'biolab') return;
   CAMPOS_BIOLAB_NUM.forEach(c => { if(document.getElementById(c)) biolab[c] = num(c); });
@@ -1282,6 +1464,8 @@ async function guardarBiolab(){
   const fila = { hc_id: fichaActual.id, editado_en: new Date().toISOString(), editado_por_email: miEmail };
   CAMPOS_BIOLAB_NUM.forEach(c => { fila[c] = biolab[c] ?? null; });
   CAMPOS_BIOLAB_TXT.forEach(c => { fila[c] = biolab[c] || null; });
+  fila.vald_profile_id = biolab.vald_profile_id || null;
+  fila.vald_traido_en  = biolab.vald_traido_en  || null;
   fila.ishii_score      = ishii;
   fila.fuerza_relativa  = (picoTotal && peso) ? Number((picoTotal / peso).toFixed(2)) : null;
   fila.velocidad_marcha = biolab.marcha_4m_seg ? Number((4 / biolab.marcha_4m_seg).toFixed(2)) : null;
