@@ -1099,7 +1099,7 @@ async function cargarBiolab(hcId){
 const CAMPOS_BIOLAB_NUM = ['ishii_fuerza_kg','ishii_pantorrilla_cm','prension_izq_n','prension_der_n',
   'imtp_pico_izq_n','imtp_pico_der_n','imtp_rfd_izq','imtp_rfd_der','marcha_4m_seg','tug_seg',
   'sppb_balance','sppb_marcha','sppb_chair','step_2min','sls_area_izq','sls_area_der'];
-const CAMPOS_BIOLAB_TXT = ['resumen_neuromuscular','resumen_potencia','resumen_equilibrio',
+const CAMPOS_BIOLAB_TXT = ['hallazgos','resumen_neuromuscular','resumen_potencia','resumen_equilibrio',
   'resumen_movilidad','resumen_flexibilidad','informe'];
 
 function solapaBiolab(b, ro){
@@ -1226,6 +1226,19 @@ function solapaBiolab(b, ro){
     <div class="bloque-head" style="background:var(--azul)">Lo que calcula el sistema</div>
     <div class="bloque-body" style="background:var(--azul-soft)">
       <div id="calculos-biolab" style="font-size:12.5px;line-height:1.9"></div>
+    </div>
+  </div>
+
+  <div class="bloque">
+    <div class="bloque-head">Hallazgos · lo que se sale de norma</div>
+    <div class="bloque-body">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+        Se calcula al traer de VALD con los mismos cortes de asimetría que usa el apartado VALD.
+        🟡 al límite · 🔴 fuera de norma · ⚠️ toma dudosa. <span id="panel-hallazgos"></span>
+      </div>
+      <div class="campo">
+        <textarea id="hallazgos" style="min-height:130px" placeholder="Se completa solo al traer de VALD. Se puede editar." ${ro}>${esc(b.hallazgos || '')}</textarea>
+      </div>
     </div>
   </div>
 
@@ -1490,7 +1503,8 @@ async function traerDeVald(forzarProfileId){
       return;
     }
 
-    const n = aplicarDatosVald(datos);
+    const cortes = await cortesAsimetria();
+    const n = aplicarDatosVald(datos, cortes);
 
     if(!n.total){
       const perfil = datos.perfil || null;
@@ -1537,22 +1551,158 @@ async function traerDeVald(forzarProfileId){
   }
 }
 
-/* Mapeo VALD → campos de la ficha. Los nombres salen de lo que devuelve
-   vald-datos-ts: fuerza[] (DynaMo), forceDecks[] (pruebas con resultados). */
-function aplicarDatosVald(datos){
+/* Mapeo VALD → ficha. Dos cosas distintas:
+   1. Los pocos valores que alimentan cálculos van a sus campos.
+   2. TODO lo demás se vuelca en los resúmenes, con la misma marca que usa el
+      apartado VALD: 🟢 dentro de norma, 🟡 al límite, 🔴 fuera, ⚠️ toma dudosa.
+   Los cortes salen de biolab_normas, no de números escritos acá. */
+
+/* Métricas de ForceDecks donde la asimetría izq/der es confiable (mismo set que VALD) */
+const FD_ASIM_OK = new Set([
+  'Peak Force','Eccentric Peak Force','Concentric Peak Force',
+  'Eccentric Mean Force','Concentric Mean Force','Eccentric Impulse','Concentric Impulse',
+  'Eccentric Deceleration RFD','Eccentric Deceleration Peak Force','Eccentric Deceleration Mean Force',
+  'Mean Force','Takeoff Peak Force','Eccentric:Concentric Mean Force Ratio'
+]);
+const FD_TASA = new Set(['Eccentric Deceleration RFD','Eccentric:Concentric Mean Force Ratio']);
+const esPruebaEquilibrio = (n) => /quiet stand|single leg|tandem|balance|monopodal|stance/i.test(n || '');
+
+async function cortesAsimetria(){
+  try{
+    const { data } = await sb.from('biolab_normas')
+      .select('test_id,bloque,corte_verde,corte_amarillo')
+      .eq('test_id', 'R-LSI').eq('bloque', 'GENERICA').maybeSingle();
+    return {
+      verde: (data && data.corte_verde    != null) ? Number(data.corte_verde)    : 10,
+      amar:  (data && data.corte_amarillo != null) ? Number(data.corte_amarillo) : 15
+    };
+  }catch(e){ return { verde: 10, amar: 15 }; }
+}
+
+function aplicarDatosVald(datos, cortes){
   const detalle = [];
   let total = 0, pisados = 0;
   const contar = (ok, etiqueta) => { if(ok){ total++; detalle.push(etiqueta); } else pisados++; };
+  const c = cortes || { verde: 10, amar: 15 };
+  const colorAsim = a => { a = Math.abs(Number(a) || 0); return a < c.verde ? '🟢' : (a <= c.amar ? '🟡' : '🔴'); };
 
-  // Prensión (DynaMo)
+  const hallazgos = [];   // solo lo que NO está bien
+  const L_fuerza = [], L_potencia = [], L_equilibrio = [], L_movilidad = [];
+
+  // ── FUERZA (DynaMo): entra TODA, no solo la prensión ──────────────
+  for(const f of (datos.fuerza || [])){
+    const sinDato = (f.izquierda_N == null || f.izquierda_N === 0) && (f.derecha_N == null || f.derecha_N === 0);
+    const unLado  = !sinDato && ((f.izquierda_N == null) !== (f.derecha_N == null));
+    if(sinDato){
+      L_fuerza.push(`⚠️ ${f.grupo}: sin registro de fuerza — revisar la toma`);
+      hallazgos.push(`⚠️ ${f.grupo}: la toma no registró fuerza`);
+      continue;
+    }
+    if(unLado){
+      L_fuerza.push(`⚠️ ${f.grupo}: medición de UN SOLO LADO (izq ${f.izquierda_N ?? '—'} / der ${f.derecha_N ?? '—'} N)`);
+      hallazgos.push(`⚠️ ${f.grupo}: se midió un solo lado — posible fallo de equipo`);
+      continue;
+    }
+    const em = colorAsim(f.asimetria_pct);
+    const debil = (f.izquierda_N < f.derecha_N) ? 'IZQUIERDO' : (f.derecha_N < f.izquierda_N ? 'DERECHO' : 'simétrico');
+    let linea = `${em} ${f.grupo}: izq ${f.izquierda_N} N / der ${f.derecha_N} N · asimetría ${f.asimetria_pct} % · lado más débil: ${debil}`;
+    if(/prensi|grip/i.test(f.grupo || '')){
+      const Lk = f.izquierda_N / G, Rk = f.derecha_N / G;
+      linea += ` · ${Lk.toFixed(1)} / ${Rk.toFixed(1)} kg`;
+      if(Math.max(Lk, Rk) < 16) hallazgos.push(`🔴 Prensión por debajo del corte de EWGSOP2 (16 kg): mejor mano ${Math.max(Lk, Rk).toFixed(1)} kg`);
+    }
+    L_fuerza.push(linea);
+    if(em !== '🟢') hallazgos.push(`${em} ${f.grupo}: asimetría ${f.asimetria_pct} % (lado más débil: ${debil})`);
+  }
+
+  // ── FORCEDECKS: TODAS las métricas de TODAS las pruebas ───────────
+  for(const t of (datos.forceDecks || [])){
+    const destino = esPruebaEquilibrio(t.prueba) ? L_equilibrio : L_potencia;
+    destino.push(`— ${t.prueba} —`);
+    for(const nombre in (t.resultados || {})){
+      const r = t.resultados[nombre] || {};
+      const lados = r.lados || {};
+      const u = r.unidad || '';
+      const L = lados.Left, R = lados.Right, A = lados.Asym;
+      const uni = (lados.Trial != null) ? lados.Trial : lados.Both;
+
+      if(FD_ASIM_OK.has(nombre) && L != null && R != null){
+        const tasa = FD_TASA.has(nombre);
+        const mag = Math.max(Math.abs(L), Math.abs(R));
+        if(!tasa && (L < 0 || R < 0)){
+          destino.push(`⚠️ ${nombre}: izq ${L} / der ${R} ${u} — fuerza negativa, posible artefacto`);
+          hallazgos.push(`⚠️ ${t.prueba} · ${nombre}: valor negativo, revisar la toma`);
+          continue;
+        }
+        if(mag < 1){ destino.push(`⚪ ${nombre}: izq ${L} / der ${R} ${u} (valor ~0)`); continue; }
+        const asim = (A != null) ? A : Math.round((R - L) / (mag || 1) * 1000) / 10;
+        const em = colorAsim(asim);
+        const menor = (L < R) ? 'IZQUIERDO' : (R < L ? 'DERECHO' : 'simétrico');
+        destino.push(`${em} ${nombre}: izq ${L} / der ${R} ${u} · asimetría ${asim} % · menor: ${menor}`);
+        if(em !== '🟢') hallazgos.push(`${em} ${t.prueba} · ${nombre}: asimetría ${asim} % (menor: ${menor})`);
+        continue;
+      }
+      // Área del apoyo monopodal y RFD: en VALD quedan informativas porque no son
+      // asimetría de fuerza. Acá SÍ se marcan: son las dos que más dicen sobre
+      // riesgo de caída — cuánto oscila un lado más que el otro, y cuánto tarda
+      // en producir fuerza.
+      if(/area of cop ellipse|rfd/i.test(nombre) && L != null && R != null && Math.max(L, R) > 0){
+        const mayor = Math.max(Math.abs(L), Math.abs(R)), menorV = Math.min(Math.abs(L), Math.abs(R));
+        const asim = Math.round((mayor - menorV) / (mayor || 1) * 1000) / 10;
+        const em = colorAsim(asim);
+        const esArea = /area of cop/i.test(nombre);
+        const veces = menorV > 0 ? (mayor / menorV) : null;
+        const peor = esArea ? ((Math.abs(L) > Math.abs(R)) ? 'IZQUIERDO' : 'DERECHO')   // más área = peor control
+                            : ((Math.abs(L) < Math.abs(R)) ? 'IZQUIERDO' : 'DERECHO');  // menos RFD = más lento
+        destino.push(`${em} ${nombre}: izq ${L} / der ${R} ${u} · diferencia ${asim} %` +
+          (veces ? ` · ${veces.toFixed(1)} veces` : '') + ` · peor: ${peor}`);
+        if(em !== '🟢'){
+          hallazgos.push(esArea
+            ? `${em} ${t.prueba}: el apoyo ${peor.toLowerCase()} oscila ${veces ? veces.toFixed(1) + ' veces' : asim + ' %'} más que el otro`
+            : `${em} ${t.prueba} · ${nombre}: el lado ${peor.toLowerCase()} tarda más en producir fuerza (diferencia ${asim} %)`);
+        }
+        continue;
+      }
+      if(L != null && R != null)      destino.push(`⚪ ${nombre}: izq ${L} / der ${R} ${u}`.trim());
+      else if(uni != null)            destino.push(`⚪ ${nombre}: ${uni} ${u}`.trim());
+    }
+  }
+
+  // ── MOVILIDAD (HumanTrak / ROM de DynaMo) ─────────────────────────
+  for(const pr of (datos.movilidad || [])){
+    const met = pr.metricas || [];
+    L_movilidad.push(`— ${pr.prueba} —`);
+    for(const m of met){
+      const unLado = ((m.izquierda == null) !== (m.derecha == null)) && (m.valor == null);
+      if(unLado){
+        L_movilidad.push(`⚠️ ${m.metrica}: un solo lado (izq ${m.izquierda ?? '—'} / der ${m.derecha ?? '—'}°)`);
+        hallazgos.push(`⚠️ ${pr.prueba} · ${m.metrica}: se midió un solo lado`);
+        continue;
+      }
+      if(m.asimetria_pct == null){ L_movilidad.push(`🟢 ${m.metrica}: ${m.valor}°`); continue; }
+      const em = colorAsim(m.asimetria_pct);
+      const menor = (m.izquierda < m.derecha) ? 'IZQUIERDO' : (m.derecha < m.izquierda ? 'DERECHO' : 'simétrico');
+      L_movilidad.push(`${em} ${m.metrica}: izq ${m.izquierda}° / der ${m.derecha}° · asimetría ${m.asimetria_pct} % · menor: ${menor}`);
+      if(em !== '🟢') hallazgos.push(`${em} ${pr.prueba} · ${m.metrica}: asimetría ${m.asimetria_pct} % (menor: ${menor})`);
+    }
+  }
+
+  // ── POSTURA ───────────────────────────────────────────────────────
+  const post = datos.postura || null;
+  if(post && typeof post === 'object'){
+    const lineas = Object.keys(post)
+      .filter(k => post[k] != null && typeof post[k] !== 'object')
+      .map(k => `⚪ ${k}: ${post[k]}`);
+    if(lineas.length){ L_movilidad.push('— Postura estática —'); L_movilidad.push(...lineas); }
+  }
+
+  // ── Los pocos valores que alimentan cálculos ──────────────────────
   const grip = (datos.fuerza || []).find(f => /prensi|grip/i.test(f.grupo || ''));
   if(grip){
     const a = ponerSiVacio('prension_izq_n', grip.izquierda_N);
     const b = ponerSiVacio('prension_der_n', grip.derecha_N);
     contar(a || b, 'prensión');
   }
-
-  // IMTP (ForceDecks): pico por lado y RFD
   const imtp = (datos.forceDecks || []).find(t => /isometric mid|imtp/i.test(t.prueba || ''));
   if(imtp && imtp.resultados){
     const res = imtp.resultados;
@@ -1562,50 +1712,46 @@ function aplicarDatosVald(datos){
       const b = ponerSiVacio('imtp_pico_der_n', pico.lados.Right);
       contar(a || b, 'IMTP');
     }
-    // El RFD viene con nombres distintos según el equipo: se busca el que hable de 100 ms
-    const claveRfd = Object.keys(res).find(k => /rfd/i.test(k) && /100/.test(k))
-                  || Object.keys(res).find(k => /rfd/i.test(k));
-    if(claveRfd && res[claveRfd].lados){
-      const a = ponerSiVacio('imtp_rfd_izq', res[claveRfd].lados.Left);
-      const b = ponerSiVacio('imtp_rfd_der', res[claveRfd].lados.Right);
+    const kRfd = Object.keys(res).find(k => /rfd/i.test(k) && /100/.test(k)) || Object.keys(res).find(k => /rfd/i.test(k));
+    if(kRfd && res[kRfd].lados){
+      const a = ponerSiVacio('imtp_rfd_izq', res[kRfd].lados.Left);
+      const b = ponerSiVacio('imtp_rfd_der', res[kRfd].lados.Right);
       contar(a || b, 'RFD');
     }
   }
-
-  // Apoyo monopodal: área de la elipse del centro de masa
   const sls = (datos.forceDecks || []).find(t => /single leg|monopodal|unilateral stance/i.test(t.prueba || ''));
   if(sls && sls.resultados){
-    const area = Object.keys(sls.resultados).find(k => /area of cop ellipse/i.test(k));
-    if(area && sls.resultados[area].lados){
-      const a = ponerSiVacio('sls_area_izq', sls.resultados[area].lados.Left);
-      const b = ponerSiVacio('sls_area_der', sls.resultados[area].lados.Right);
+    const kArea = Object.keys(sls.resultados).find(k => /area of cop ellipse/i.test(k));
+    if(kArea && sls.resultados[kArea].lados){
+      const a = ponerSiVacio('sls_area_izq', sls.resultados[kArea].lados.Left);
+      const b = ponerSiVacio('sls_area_der', sls.resultados[kArea].lados.Right);
       contar(a || b, 'apoyo monopodal');
     }
   }
 
-  // Los resúmenes se llenan con lo que llegó, SOLO si están vacíos
-  const listar = (arr, fn) => (arr || []).map(fn).filter(Boolean).join('\n');
-  const resFuerza = listar(datos.fuerza, f =>
-    `${f.grupo}: izq ${f.izquierda_N ?? '—'} N / der ${f.derecha_N ?? '—'} N` +
-    (f.asimetria_pct != null ? ` · asimetría ${f.asimetria_pct} %` : ''));
-  const resFD = listar(datos.forceDecks, t => {
-    const m = Object.keys(t.resultados || {}).slice(0, 8)
-      .map(k => `  ${k}: ${(t.resultados[k].lados && (t.resultados[k].lados.Trial ?? t.resultados[k].lados.Both ??
-        ((t.resultados[k].lados.Left ?? '—') + ' / ' + (t.resultados[k].lados.Right ?? '—')))) ?? '—'} ${t.resultados[k].unidad || ''}`)
-      .join('\n');
-    return `${t.prueba}\n${m}`;
-  });
-  const resMov = listar(datos.movilidad, m => m.prueba);
-
-  const pegar = (id, texto) => {
+  // ── Los resúmenes se llenan con el volcado completo del Hub ───────
+  const volcar = (id, lineas) => {
     const el = document.getElementById(id);
-    if(el && texto && !(el.value || '').trim()){ el.value = texto; return true; }
-    return false;
+    if(!el || !lineas.length) return false;
+    el.value = lineas.join('\n');
+    return true;
   };
-  if(pegar('resumen_neuromuscular', resFuerza)) detalle.push('resumen de fuerza');
-  if(pegar('resumen_potencia', resFD))          detalle.push('resumen de ForceDecks');
-  if(pegar('resumen_movilidad', resMov))        detalle.push('movilidad HumanTrak');
-  if(resFuerza || resFD || resMov) total++;
+  if(volcar('resumen_neuromuscular', L_fuerza))   detalle.push('fuerza completa');
+  if(volcar('resumen_potencia', L_potencia))      detalle.push('ForceDecks completo');
+  if(volcar('resumen_equilibrio', L_equilibrio))  detalle.push('equilibrio');
+  if(volcar('resumen_movilidad', L_movilidad))    detalle.push('movilidad y postura');
+  if(L_fuerza.length || L_potencia.length || L_equilibrio.length || L_movilidad.length) total++;
+
+  // ── Hallazgos: lo que NO está bien, junto y a la vista ────────────
+  const cajaH = document.getElementById('hallazgos');
+  if(cajaH) cajaH.value = hallazgos.length ? hallazgos.join('\n') : 'Sin hallazgos fuera de norma en esta toma.';
+  const panel = document.getElementById('panel-hallazgos');
+  if(panel){
+    panel.innerHTML = hallazgos.length
+      ? `<b style="color:var(--rojo-x)">${hallazgos.length} ${hallazgos.length === 1 ? 'hallazgo' : 'hallazgos'} fuera de norma</b>`
+      : '<b style="color:var(--verde)">Sin hallazgos fuera de norma</b>';
+  }
+  if(hallazgos.length) detalle.push(hallazgos.length + ' hallazgos');
 
   return { total, detalle, pisados };
 }
