@@ -716,22 +716,49 @@ function badgeArea(area) {
 // ===== MOPLEX: total real = evaluación + plantilla (con precio de convenio) =====
 // Mismo criterio que la caja de cobro: el total NO sale del campo total_pagar (que para
 // MOPLEX solo tiene la evaluación), sino que se recalcula desde el catálogo. Solo lectura.
-function _precioPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
+// Reglas espejo de consultas_moplex.html (12/8): 0 explícito = sin cargo,
+// cortesía PuntoBiO = el paciente paga SOLO lo de MOPLEX.
+const _MOPLEX_PCT_CONSULTA = 0.20
+const _MOPLEX_PCT_DESDE = '2026-08'
+function _tieneValMoplex(x){ return x !== null && x !== undefined && x !== '' && !isNaN(Number(x)) }
+function _precioConsultaMoplex(ev, t){
+  if(!ev) return 0
+  const precioDef = Number(ev.precio_paciente)||0
+  // 0 explícito en el ✂️ = consulta sin cargo (también cubre el ítem Pedido de plantillas, precio 0)
+  const precio = _tieneValMoplex(t.moplex_consulta_monto) ? Number(t.moplex_consulta_monto) : precioDef
+  if (t.moplex_consulta_cortesia_pb){
+    // Cortesía PuntoBiO: paga solo el 20% de MOPLEX (vigente desde agosto 2026)
+    const cobra = String(t.fecha_alta || '').slice(0,7) >= _MOPLEX_PCT_DESDE
+    return cobra ? Math.round(precio * _MOPLEX_PCT_CONSULTA) : 0
+  }
+  return precio
+}
+function _precioPlantillaMoplex(p, t){
   if(!p) return 0
+  const rectif = !!t.moplex_plantilla_rectif
   if(rectif){
-    // Rectificación: el paciente paga el monto indicado (o la mitad del precio por defecto).
-    return (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2)
+    // Rectificación: el monto indicado por MOPLEX (0 explícito = sin cargo; vacío = mitad por defecto).
+    const base = _tieneValMoplex(t.moplex_rectif_monto) ? Number(t.moplex_rectif_monto) : Math.round((Number(p.precio_paciente)||0)/2)
+    if (t.moplex_plantilla_cortesia_pb) return Math.round(base * 0.85)   // cortesía: paga solo lo de MOPLEX
+    return base
   }
   // Plantilla nueva: precio de convenio si se cargó, si no el de lista.
   const precioDef = Number(p.precio_paciente)||0
-  return (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef
+  const custom = (Number(t.moplex_plantilla_monto) > 0)
+  const precio = custom ? Number(t.moplex_plantilla_monto) : precioDef
+  if (t.moplex_plantilla_cortesia_pb){
+    // Cortesía: paga solo el costo MOPLEX (escalado si hay convenio)
+    const moplexBase = Number(p.costo_moplex)||0
+    return (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+  }
+  return precio
 }
 function totalMoplexTto(t){
   const byId = estado.moplexCatById || {}
   const ev = byId[t.moplex_consulta_id]
   const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null
-  const evalPrecio  = ev ? (Number(ev.precio_paciente)||0) : 0
-  const plantPrecio = _precioPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0)
+  const evalPrecio  = _precioConsultaMoplex(ev, t)
+  const plantPrecio = _precioPlantillaMoplex(pl, t)
   return evalPrecio + plantPrecio
 }
 // Igual que totalMoplexTto pero devolviendo eval y plantilla por separado (para el detalle).
@@ -739,8 +766,8 @@ function desgloseMoplexTto(t){
   const byId = estado.moplexCatById || {}
   const ev = byId[t.moplex_consulta_id]
   const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null
-  const evalPrecio  = ev ? (Number(ev.precio_paciente)||0) : 0
-  const plantPrecio = _precioPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0)
+  const evalPrecio  = _precioConsultaMoplex(ev, t)
+  const plantPrecio = _precioPlantillaMoplex(pl, t)
   return {
     evalPrecio, plantPrecio,
     evalNombre:  ev ? ev.nombre : null,
