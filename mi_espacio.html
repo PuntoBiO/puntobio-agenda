@@ -3242,7 +3242,10 @@ function bloqueRecuperatorios(recus){
   _est.forEach(r => {
     if (r.tipo === 'falta') {
       if (r.recuperable) disponibles.push({ fecha: r.fecha_ausencia, dias: r.dias_restantes });
-      else noRecuperables.push({ fecha: r.fecha_ausencia });
+      // NUEVO 19/08/2026: las faltas que se cayeron por BAJAR DE PLAN no se le
+      // muestran al alumno de ninguna forma (el equipo sí las ve, en la bitácora
+      // de Administración). Las de aviso tardío / sin aviso siguen como estaban.
+      else if (r.motivo_no_recuperable !== 'Se perdió al bajar de plan') noRecuperables.push({ fecha: r.fecha_ausencia });
     } else if (r.tipo === 'cierre') {
       const t = _turnoMapRec[String(r.turno_origen_id)];
       const srv = t ? ((typeof nombreServicio === 'function') ? nombreServicio(t.servicio) : (t.servicio||'')) : '';
@@ -5958,6 +5961,22 @@ function _pbPorFechaAsc(a, b) {
   return String(a.fecha_ausencia||'') < String(b.fecha_ausencia||'') ? -1 : 1;
 }
 
+// NUEVO 19/08/2026 · la función madre es el juez.
+// recuperatoriosPendientes sale de leer recuperatorios_tf directo, así que una
+// fila puede seguir viva aunque fn_estado_recuperatorios ya no la dé por
+// recuperable (caso típico: el alumno bajó de plan). Acá se cruzan las dos
+// fuentes para que el modal no ofrezca nada que el sistema ya dio por perdido.
+// Si por algún motivo no cargó el estado, se comporta como antes.
+function _pbRecupesUsables() {
+  const data = window._agendaData || {};
+  const lista = (data.recuperatoriosPendientes || []).slice().sort(_pbPorFechaAsc);
+  const caidas = new Set((window._estadoRecu || [])
+    .filter(r => r && r.tipo === 'falta' && !r.recuperable)
+    .map(r => String(r.fecha_ausencia)));
+  if (!caidas.size) return lista;
+  return lista.filter(r => !caidas.has(String(r.fecha_ausencia)));
+}
+
 // Chip "· vence en X días" para cada opción del modal. Mismo cálculo que la
 // tarjeta de recuperatorios (la regla de los 60 días vive en la base).
 window.pbChipVence = function(fechaAusencia) {
@@ -5972,7 +5991,7 @@ window.pbChipVence = function(fechaAusencia) {
 window.pbAbrirRecuperar = function(turnoDestinoId, fechaISO) {
   const data = window._agendaData;
   const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
-  const recupes = (data.recuperatoriosPendientes || []).slice().sort(_pbPorFechaAsc);
+  const recupes = _pbRecupesUsables();   // 19/08/2026: sin las que la función madre dio por caídas
   const feriados = data.feriadosPendientes || [];
   const cierres = (typeof pbCierresPendientes === 'function') ? pbCierresPendientes() : [];
   if (!destino) { alert('Turno no encontrado.'); return; }
@@ -6167,7 +6186,7 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
   const data = window._agendaData;
   const destino = (data.turnos||[]).find(t => t.id === turnoDestinoId);
   if (!destino) { alert('Turno no encontrado.'); return; }
-  const recupes = (data.recuperatoriosPendientes || []).slice().sort(_pbPorFechaAsc);
+  const recupes = _pbRecupesUsables();   // 19/08/2026: sin las que la función madre dio por caídas
   const cupoS = data.cupoSueltas;
   const fechaTxt = fechaISO.split('-').reverse().join('/');
 
