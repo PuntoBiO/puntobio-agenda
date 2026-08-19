@@ -3677,11 +3677,25 @@ async function estadoRecuperatorios(personaId) {
   const { plan: codPlan, diaCorte } = await planDePersona(personaId);
   const cupoMes = cupoRecuperatorios(codPlan);
   const recuperables = [];
+  const noRecuperables = [];   // NUEVO 19/08/2026: las que la madre da por caídas, con SU motivo
   const usadosPorMes = {};
   const { data: _est, error: _err } = await sbCliente.rpc('fn_estado_recuperatorios', { p_persona_id: personaId });
   if (_err) throw _err;
   (_est || []).forEach(r => {
-    if (!r.recuperable) return;                         // faltas sin aviso no van acá
+    if (!r.recuperable) {
+      // NUEVO 19/08/2026: en vez de descartarlas en silencio, se guardan con el
+      // motivo que da la función madre (sin aviso, fuera de las 2 hs, sin cupo
+      // del ciclo, perdida por bajar de plan). El equipo tiene que poder leerlo.
+      if (r.tipo === 'falta' && r.motivo_no_recuperable) {
+        noRecuperables.push({
+          fecha: r.fecha_ausencia,
+          mes: cicloDe(r.fecha_ausencia, diaCorte),
+          motivo: r.motivo_no_recuperable,
+          diasRestantes: r.dias_restantes
+        });
+      }
+      return;
+    }
     const tipo = (r.tipo === 'falta') ? 'recuperatorio' : r.tipo;
     const mes  = cicloDe(r.fecha_ausencia, diaCorte);   // mismo formato de ciclo de siempre
     const item = { fecha: r.fecha_ausencia, diasRestantes: r.dias_restantes, mes, tipo };
@@ -3692,7 +3706,7 @@ async function estadoRecuperatorios(personaId) {
       usadosPorMes[mes] = Math.max(0, (r.cupo_mes != null ? r.cupo_mes : cupoMes) - r.cupo_disponible);
     }
   });
-  return { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes };
+  return { codPlan, diaCorte, cupoMes, recuperables, noRecuperables, usadosPorMes };
 }
 
 // ¿La clase está COMPLETA? (todos los alumnos tienen evolución o están ausentes)
@@ -4684,13 +4698,16 @@ window.abrirSelectorRecupero = async () => {
     cont.innerHTML = `<div style="color:var(--rojo);font-size:13px;padding:12px 4px">No se pudo calcular: ${e.message}</div>`;
     return;
   }
-  const { codPlan, diaCorte, cupoMes, recuperables, usadosPorMes } = est;
+  const { codPlan, diaCorte, cupoMes, recuperables, noRecuperables, usadosPorMes } = est;
   // Separar los que NO gastan cupo (feriados + cierres del centro) de las faltas normales
   const feriados = recuperables.filter(r => r.tipo === 'feriado' || r.tipo === 'cierre');
-  const faltas    = recuperables.filter(r => r.tipo !== 'feriado' && r.tipo !== 'cierre');
-  // De las faltas normales: las que todavía tienen cupo en su ciclo
-  const disponibles = faltas.filter(r => (usadosPorMes[r.mes] || 0) < cupoMes);
-  const sinCupo     = faltas.filter(r => (usadosPorMes[r.mes] || 0) >= cupoMes);
+  // CAMBIO 19/08/2026 · LA MADRE MANDA. Antes agenda volvía a calcular el cupo acá
+  // con usadosPorMes y decidía por su cuenta cuáles ofrecer. Ahora el cupo del
+  // ciclo, el corte por bajada de plan y el de baja/reingreso los resuelve
+  // fn_estado_recuperatorios: lo que llega en `recuperables` se ofrece, y lo que
+  // llega en `noRecuperables` se muestra con el motivo que dio la función.
+  const disponibles = recuperables.filter(r => r.tipo !== 'feriado' && r.tipo !== 'cierre');
+  const sinCupo     = (noRecuperables || []);
   // PRIORIDAD: la que MENOS días le quedan (la más por vencer) va primero, para que no se venza ninguna.
   const _porVencer = (a, b) => (a.diasRestantes - b.diasRestantes);
   feriados.sort(_porVencer);
@@ -4706,7 +4723,7 @@ window.abrirSelectorRecupero = async () => {
   if (!codPlan) {
     html += `<div style="background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:12px;font-size:13px">
       No se encontró un plan de TF activo para esta persona. No puede recuperar.</div>`;
-  } else if (!recuperables.length) {
+  } else if (!recuperables.length && !(noRecuperables || []).length) {
     html += `<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:12px;font-size:13px">
       No tiene ausencias <b>con aviso</b> ni feriados pendientes de recuperar (o venció el plazo: feriados 30 días, faltas y cierres 60).<br>
       <span style="font-size:12px">Para una falta normal, primero marcá el ausente justificado en la clase.</span></div>`;
@@ -4742,14 +4759,14 @@ window.abrirSelectorRecupero = async () => {
         return `<button onclick="confirmarRecupero('${r.fecha}','recuperatorio')"
           style="width:100%;text-align:left;background:#fffbeb;border:1.5px solid #fde68a;border-radius:11px;padding:11px 13px;margin-bottom:8px;cursor:pointer">
           <div style="font-weight:700;font-size:14px;color:#92400e">Faltó el ${formatearFechaLarga(r.fecha)}</div>
-          <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · ciclo ${cicloLegible(r.mes)} (${usados}/${cupoMes} usados)</div>
+          <div style="font-size:12px;color:#a16207;margin-top:2px">${venceTxt} · ciclo ${cicloLegible(r.mes)} · cupo del plan ${cupoMes}</div>
         </button>`;
       }).join('');
     }
     if (sinCupo.length) {
       html += `<div style="margin-top:6px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;border-radius:10px;padding:10px 12px;font-size:12px">
-        ⚠️ Estas faltas no se pueden recuperar porque ya usó todo el cupo de su ciclo:<br>
-        ${sinCupo.map(r => `· ${formatearFechaLarga(r.fecha)} (ciclo ${cicloLegible(r.mes)})`).join('<br>')}</div>`;
+        ⚠️ Estas faltas NO se pueden recuperar:<br>
+        ${sinCupo.map(r => `· ${formatearFechaLarga(r.fecha)} — ${r.motivo} (ciclo ${cicloLegible(r.mes)})`).join('<br>')}</div>`;
     }
   }
   html += `<button onclick="elegirPersonaAgregar(${pid})" style="background:none;border:none;color:var(--texto-suave);font-size:12px;margin-top:12px;cursor:pointer;text-decoration:underline">← Volver</button>
@@ -4787,10 +4804,9 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
     const est = await estadoRecuperatorios(pid);
     const r = est.recuperables.find(x => x.fecha === fechaAusencia && x.tipo === tipoRecup);
     if (!r) { cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Esa fecha ya no está disponible para recuperar.</div>'; return; }
-    // El cupo solo aplica a faltas normales; feriados y cierres del centro NO gastan cupo.
-    if (!esSinCupo && (est.usadosPorMes[r.mes] || 0) >= est.cupoMes) {
-      cont.innerHTML = '<div style="color:var(--rojo);font-size:13px;padding:12px 4px">Ya usó todo el cupo de recuperatorios de ese ciclo.</div>'; return;
-    }
+    // 19/08/2026: el cupo del ciclo ya lo resolvió fn_estado_recuperatorios — si
+    // esta falta hubiera pasado el cupo, no estaría en est.recuperables y el
+    // chequeo de arriba ya habría cortado. Se saca el cálculo duplicado de acá.
     // 0) Anti-duplicado / reutilización de crédito:
     //    - Si ya existe una fila CON destino (fecha_recupero) para esta falta,
     //      ya está reprogramada → no duplicar.
