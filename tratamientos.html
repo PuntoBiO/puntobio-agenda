@@ -454,7 +454,6 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="MANUAL">Manual (monto libre)</option>
           <option value="SOLO_COSEGURO">Solo coseguro</option>
           <option value="BONIF_CENTRO">Bonificación del centro</option>
-          <option value="CORTESIA_PB">🎁 Cortesía PuntoBiO (MOPLEX) — paga solo lo de MOPLEX</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
         <div id="nuevo-cobro-previa" class="cobro-previa"></div>
@@ -1587,7 +1586,7 @@ let MOPLEX_CONSULTAS = []   // baropodometrías del catálogo (Nuevo / Control /
 async function cargarMoplexConsultasCat() {
   try {
     const { data } = await sb.from('moplex_catalogo')
-      .select('id, nombre, precio_paciente, costo_moplex, pct_profesional, activo, orden').eq('activo', true).order('orden')
+      .select('id, nombre, precio_paciente, costo_moplex, pct_profesional, es_garantia, activo, orden').eq('activo', true).order('orden')
     const cat = data || []
     // Mapa completo (consultas + plantillas) para recalcular el total real de los MOPLEX.
     estado.moplexCatById = {}
@@ -1603,8 +1602,14 @@ async function cargarMoplexConsultasCat() {
 function poblarMoplexConsultas() {
   const sel = $('nuevo-moplex-consulta')
   if (!sel) return
-  sel.innerHTML = `<option value="">— elegí tipo —</option>` +
-    MOPLEX_CONSULTAS.map(c => `<option value="${c.id}">${c.nombre} — $${Number(c.precio_paciente||0).toLocaleString('es-AR')}</option>`).join('')
+  // Opciones normales + CORTESÍA PUNTOBIO (19/8, pedido de Lu: "ahí abajo de la
+  // garantía debería decir Cortesía PuntoBiO"): el paciente paga SOLO el 20% de
+  // MOPLEX y PB regala el resto. Elegirla deja el tratamiento con el tilde puesto.
+  const normales = MOPLEX_CONSULTAS.map(c => `<option value="${c.id}">${c.nombre} — $${Number(c.precio_paciente||0).toLocaleString('es-AR')}</option>`).join('')
+  const cortesias = MOPLEX_CONSULTAS
+    .filter(c => (Number(c.precio_paciente)||0) > 0 && !c.es_garantia)
+    .map(c => `<option value="${c.id}|CPB">🎁 ${c.nombre} · Cortesía PuntoBiO — $${Math.round((Number(c.precio_paciente)||0)*0.20).toLocaleString('es-AR')} (paga solo MOPLEX)</option>`).join('')
+  sel.innerHTML = `<option value="">— elegí tipo —</option>` + normales + cortesias
 }
 function esMoplexNuevo() {
   return $('nuevo-area')?.value === 'biolab' && $('nuevo-practica')?.value === 'MOPLEX'
@@ -1620,11 +1625,13 @@ function toggleMoplexConsulta() {
   }
 }
 window.onMoplexConsultaChange = function() {
-  const id = $('nuevo-moplex-consulta').value
-  const c = MOPLEX_CONSULTAS.find(x => String(x.id) === String(id))
+  const raw = String($('nuevo-moplex-consulta').value || '')
+  const [idStr, flag] = raw.split('|')
+  const cortesia = (flag === 'CPB')
+  const c = MOPLEX_CONSULTAS.find(x => String(x.id) === idStr)
   let precio = c ? Number(c.precio_paciente || 0) : 0
   // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX (el 20% de la evaluación)
-  if ($('nuevo-tipo-cobro')?.value === 'CORTESIA_PB') precio = Math.round(precio * 0.20)
+  if (cortesia) precio = Math.round(precio * 0.20)
   $('nuevo-sesiones').value = 1
   $('nuevo-valor-sesion').value = precio
   $('nuevo-total').value = precio
@@ -1680,11 +1687,13 @@ window.crearTratamiento = async function() {
 
   // MOPLEX: dejar taggeado el tipo de baropodometría (lo lee Consultas MOPLEX / caja / liquidaciones)
   if (practicaCod === 'MOPLEX') {
-    const mc = $('nuevo-moplex-consulta')?.value
-    if (mc) payload.moplex_consulta_id = Number(mc)
-    // Cortesía PuntoBiO elegida en el alta: queda el tilde puesto en la consulta,
-    // así Consultas MOPLEX, la caja de BioLab y Liquidaciones la heredan solas.
-    if ($('nuevo-tipo-cobro').value === 'CORTESIA_PB') payload.moplex_consulta_cortesia_pb = true
+    const raw = String($('nuevo-moplex-consulta')?.value || '')
+    const [idStr, flag] = raw.split('|')
+    if (idStr) payload.moplex_consulta_id = Number(idStr)
+    // Cortesía PuntoBiO elegida en el desplegable: queda el tilde puesto en la consulta
+    // (Consultas MOPLEX, la caja de BioLab y Liquidaciones la heredan solas) y el tipo
+    // de cobro queda registrado en la ficha.
+    if (flag === 'CPB') { payload.moplex_consulta_cortesia_pb = true; payload.tipo_cobro = 'CORTESIA_PB' }
   }
 
   try {
@@ -1875,7 +1884,7 @@ $('ed-modalidad').addEventListener('change', () => { toggleObraSocial('ed-modali
 $('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); autocompletarPrecioNuevo() })
 $('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
 $('ed-obra').addEventListener('change', autocompletarPrecioEd)
-const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa'); if (esMoplexNuevo() && $('nuevo-moplex-consulta')?.value) onMoplexConsultaChange() })
+const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
 const elTipoCobroE = $('ed-tipo-cobro'); if (elTipoCobroE) elTipoCobroE.addEventListener('change', () => { autocompletarPrecioEd(); actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa') })
 
 // ===== TRATAMIENTOS SIN ACTIVIDAD (creados para dar turno, nunca realizados) =====
