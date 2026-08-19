@@ -643,30 +643,42 @@
      Mismas fórmulas que consultas_moplex.html / liquidaciones.html. */
   const MOPLEX_FACTURA_DESDE = '2026-06';
   function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_FACTURA_DESDE; }
-  function calcConsultaMoplex(c){
+  // Reglas espejo de consultas_moplex.html (18/8): 20% a MOPLEX desde agosto, 0 explícito
+  // = sin cargo, cortesía PuntoBiO = el paciente paga SOLO lo de MOPLEX.
+  const MOPLEX_PCT_CONSULTA = 0.20;
+  const MOPLEX_PCT_CONSULTA_DESDE = '2026-08';
+  function _tieneValMoplex(x){ return x !== null && x !== undefined && x !== '' && !isNaN(Number(x)); }
+  function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
     if(!c) return null;
-    const precio = Number(c.precio_paciente)||0;
-    const moplex = Number(c.costo_moplex)||0;
+    const precioDef = Number(c.precio_paciente)||0;
+    const tiene = _tieneValMoplex(montoCustom);
+    const precio = tiene ? Number(montoCustom) : precioDef;      // 0 explícito = sin cargo
+    const custom = tiene && Number(montoCustom) !== precioDef;
+    const cobra = String(fechaC||'').slice(0,7) >= MOPLEX_PCT_CONSULTA_DESDE;
+    let moplex;
+    if (cobra){ moplex = Math.round(precio * MOPLEX_PCT_CONSULTA); }
+    else { const b = Number(c.costo_moplex)||0; moplex = (custom && precioDef > 0) ? Math.round(b * precio / precioDef) : b; }
+    if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0 };
     const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof };
   }
-  function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla){
+  function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
     if(!p) return null;
     if(rectif){
-      // El monto de la rectificación se puede editar (se sabe al cargar el pedido).
-      // Si no se editó, por defecto sugiere la mitad del precio de la plantilla.
-      const precio = (Number(montoCustom) > 0) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2);
+      // El monto de la rectificación se puede editar (0 explícito = sin cargo;
+      // vacío = por defecto la mitad del precio de la plantilla).
+      const precio = _tieneValMoplex(montoCustom) ? Number(montoCustom) : Math.round((Number(p.precio_paciente)||0)/2);
       const moplex = Math.round(precio*0.85);
+      if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0, rectif:true };
       return { precio, moplex, prof:0, centro: precio - moplex, rectif:true };
     }
-    // Nueva: precio editable (convenios MOPLEX). Por defecto el del catálogo; si Lu cargó
-    // un precio de convenio en la pantalla de MOPLEX (moplex_plantilla_monto), se usa ese.
-    // El descuento se reparte proporcional: MOPLEX baja igual que el precio; prof ya es %.
+    // Nueva: precio editable (convenios MOPLEX). El descuento se reparte proporcional.
     const precioDef = Number(p.precio_paciente)||0;
     const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
     const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
     const moplexBase = Number(p.costo_moplex)||0;
     const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+    if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0, rectif:false };
     const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof, rectif:false };
   }
@@ -704,8 +716,8 @@
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
     const ev = byId[t.moplex_consulta_id];
     const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
-    const er = ev ? calcConsultaMoplex(ev) : null;
-    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0) : null;
+    const er = ev ? calcConsultaMoplex(ev, t.moplex_consulta_monto, t.fecha_alta, t.moplex_consulta_cortesia_pb) : null;
+    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb) : null;
     const evalPrecio  = er ? er.precio : 0;
     const plantPrecio = pr ? pr.precio : 0;
     return {
@@ -754,7 +766,7 @@
     const rectif = !!t.moplex_plantilla_rectif;
     const txt = $('moplexPlantillaTxt'), btn = $('btnPlantilla');
     if (pl){
-      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0).precio) + '</b>';
+      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb).precio) + '</b>';
       btn.textContent = 'Cambiar';
     } else {
       txt.textContent = 'Ninguna';
@@ -792,7 +804,7 @@
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
     const box = $('modalPlantillaPrev');
     if (!id){ box.innerHTML = 'Sin plantilla — se cobra solo la evaluación.'; return; }
-    const custom = rectif ? (Number($('modalRectifMonto').value)||0) : 0;
+    const custom = rectif ? $('modalRectifMonto').value : 0;
     const r = calcPlantillaMoplex(byId[id], rectif, custom);
     box.innerHTML = `Precio plantilla: <b>${fmt(r.precio)}</b><br>Profesional: ${fmt(r.prof)} · Centro: ${fmt(r.centro)} · MOPLEX: ${fmt(r.moplex)}`;
   };
