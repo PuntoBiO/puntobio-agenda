@@ -1650,6 +1650,13 @@ async function cargarEspacio(per){
   // Convertir claves de string a int para los fijos (el RPC los devuelve como string en JSON)
   const fijosPorTurno = {};
   Object.entries(cupos.fijos || {}).forEach(([k,v]) => { fijosPorTurno[parseInt(k,10)] = v; });
+  // Fijos POR FECHA (clave "turno_id|fecha"): solo los vigentes ese día.
+  // Es lo que hace fijosVigentes() en la agenda del profe. Si la RPC es vieja
+  // y no manda este campo, queda null y fijosEn() usa el número sin fecha.
+  const fijosPorClave = cupos.fijos_por_fecha || null;
+  // Ocupación y capacidad ya resueltas por fecha del lado de la base.
+  const ocupadosPorClave    = cupos.ocupados    || null;
+  const capacidadesPorClave = cupos.capacidades || null;
   // Las claves "turno_id|fecha" ya vienen listas
   const agregadosPorClave = cupos.agregados || {};
   const ausentesPorClave  = cupos.ausentes  || {};
@@ -1752,6 +1759,9 @@ async function cargarEspacio(per){
   window._agendaData = {
     turnos: todosTurnosRes.data || [],
     fijosPorTurno,
+    fijosPorClave,
+    ocupadosPorClave,
+    capacidadesPorClave,
     agregadosPorClave,
     ausentesPorClave,
     actividadAlumno: (inscripcion && inscripcion.actividad) ? inscripcion.actividad : 'AMBOS',
@@ -2277,6 +2287,10 @@ window.refrescarDatosAgenda = async function(){
     const fijosPorTurno = {};
     Object.entries(cupos.fijos || {}).forEach(([k,v]) => { fijosPorTurno[parseInt(k,10)] = v; });
     data.fijosPorTurno = fijosPorTurno;
+    // Espejo del mapeo de la carga inicial: fijos por "turno_id|fecha".
+    data.fijosPorClave = cupos.fijos_por_fecha || null;
+    data.ocupadosPorClave    = cupos.ocupados    || null;
+    data.capacidadesPorClave = cupos.capacidades || null;
     data.agregadosPorClave = cupos.agregados || {};
     data.ausentesPorClave  = cupos.ausentes  || {};
 
@@ -2866,6 +2880,65 @@ window.cambiarDiaAgenda = function(fechaISO){
   renderAgendaDia(fechaISO);
 };
 
+// ============================================================================
+// CUPO EN MI ESPACIO · UNA SOLA REGLA
+//   lugares libres = capacidad de ESE día − personas que ocupan ESE día
+// No importa si el que ocupa es un alumno fijo, un recuperatorio o una clase
+// suelta: ocupa un lugar igual. Si en una clase de 7 hay 6 ocupados, queda 1
+// libre y el alumno tiene que poder elegirla desde Mi Espacio.
+//
+// Los dos números salen de la RPC alumno_agenda_cupos, ya calculados por fecha
+// y con la MISMA cuenta que la agenda del profe:
+//   · `ocupados`    clave "turno_id|fecha" · fijos vigentes ese día + agregados
+//                   de ese día, contando PERSONAS (si alguien es fijo y además
+//                   agregado cuenta una sola vez), menos los ausentes firmes.
+//   · `capacidades` clave "turno_id|fecha" · la capacidad vigente ese día según
+//                   la línea de tiempo turnos_capacidad (la misma fuente que usa
+//                   Gestión de Cupos para escribir), no el espejo turnos.capacidad.
+//
+// Si la RPC todavía es una versión vieja y no manda estos campos, las funciones
+// caen a la cuenta anterior y la pantalla se comporta como antes: no se rompe.
+// ============================================================================
+
+// Fijos vigentes de un turno en una fecha (espejo de fijosVigentes() de agenda_tf.html).
+function fijosEn(data, turnoId, fechaISO){
+  const porClave = (data && data.fijosPorClave) || null;
+  if (porClave) {
+    const v = porClave[turnoId + '|' + fechaISO];
+    if (v !== undefined && v !== null) return v;
+    // Clave ausente con mapa presente = ese día no hay ningún fijo vigente.
+    if (Object.keys(porClave).length > 0) return 0;
+  }
+  return ((data && data.fijosPorTurno) || {})[turnoId] || 0;
+}
+
+// Personas que OCUPAN un lugar en ese turno ese día.
+function ocupadosEn(data, turnoId, fechaISO){
+  const porClave = (data && data.ocupadosPorClave) || null;
+  if (porClave) {
+    const v = porClave[turnoId + '|' + fechaISO];
+    if (v !== undefined && v !== null) return v;
+    // Clave ausente con mapa presente = ese día no ocupa nadie.
+    if (Object.keys(porClave).length > 0) return 0;
+  }
+  // Fallback (RPC vieja): fijos + agregados − ausentes, sin deduplicar.
+  const fijos = fijosEn(data, turnoId, fechaISO);
+  const agreg = ((data && data.agregadosPorClave) || {})[turnoId + '|' + fechaISO] || 0;
+  const aus   = ((data && data.ausentesPorClave)  || {})[turnoId + '|' + fechaISO] || 0;
+  return Math.max(0, fijos + agreg - aus);
+}
+
+// Capacidad vigente de un turno en una fecha.
+function capacidadEn(data, turno, fechaISO){
+  const porClave = (data && data.capacidadesPorClave) || null;
+  if (porClave && turno) {
+    const v = porClave[turno.id + '|' + fechaISO];
+    if (v !== undefined && v !== null) return v;
+  }
+  // Fallback (RPC vieja): el espejo turnos.capacidad.
+  return (turno && turno.capacidad) || 0;
+}
+
 // Devuelve {cls, pct} para el badge y la barra de cupo según ocupación
 function nivelDeOcupacion(efectivos, cap){
   if(!cap || cap===0) return {cls:'libre', pct:0};
@@ -2979,11 +3052,9 @@ function renderAgendaDia(fechaISO){
 
     let filas = '';
     tsHora.forEach(t => {
-      const fijos = data.fijosPorTurno[t.id] || 0;
-      const agreg = data.agregadosPorClave[t.id+'|'+fechaISO] || 0;
-      const aus   = data.ausentesPorClave[t.id+'|'+fechaISO] || 0;
-      const efectivos = Math.max(0, fijos + agreg - aus);
-      const cap = t.capacidad || 0;
+      // CUPO · una sola regla: capacidad del día − personas que ocupan el día.
+      const efectivos = ocupadosEn(data, t.id, fechaISO);
+      const cap = capacidadEn(data, t, fechaISO);
       const niv = nivelDeOcupacion(efectivos, cap);
       const dot = dotServicio(t.servicio);
       const nom = nombreServicio(t.servicio);
@@ -3055,10 +3126,7 @@ function renderAgendaDia(fechaISO){
           const _dn = {'lunes':1,'martes':2,'miércoles':3,'miercoles':3,'jueves':4,'viernes':5};
           if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
           // tiene cupo
-          const fOtro = data.fijosPorTurno[otro.id]||0;
-          const aOtro = data.agregadosPorClave[otro.id+'|'+fechaISO]||0;
-          const auOtro = data.ausentesPorClave[otro.id+'|'+fechaISO]||0;
-          if ((otro.capacidad||0) <= Math.max(0, fOtro+aOtro-auOtro)) return false;
+          if (capacidadEn(data, otro, fechaISO) <= ocupadosEn(data, otro.id, fechaISO)) return false;
           // no bloqueado
           if (window.Bloqueos) {
             const hi = (otro.hora||'').slice(0,5);
@@ -5917,10 +5985,7 @@ window.pbAbrirCambioArea = function(turnoOrigenId, fechaISO) {
     if ((otro.hora||'').slice(0,5) !== (origen.hora||'').slice(0,5)) return false;
     if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
     if (!turnoCoincideConActividad(otro.servicio, data.actividadAlumno, data.esBonificado)) return false;
-    const fOtro = data.fijosPorTurno[otro.id]||0;
-    const aOtro = data.agregadosPorClave[otro.id+'|'+fechaISO]||0;
-    const auOtro = data.ausentesPorClave[otro.id+'|'+fechaISO]||0;
-    if ((otro.capacidad||0) <= Math.max(0, fOtro+aOtro-auOtro)) return false;
+    if (capacidadEn(data, otro, fechaISO) <= ocupadosEn(data, otro.id, fechaISO)) return false;
     if (window.Bloqueos) {
       const hi = (otro.hora||'').slice(0,5);
       const hf = hi ? String(parseInt(hi.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
