@@ -3157,16 +3157,28 @@ window.enviarRespuestaAlumno = async function(alumnoId) {
   }
 };
 
-// Helpers locales para Supabase (usan sbCliente que ya existe en el archivo)
+// Helpers locales para Supabase.
+// FIX 20/08/2026 — sbCliente se crea con la clave anónima y NUNCA inicia sesión:
+// esta pantalla loguea por fetch y guarda el token en sessionStorage (pb_token).
+// Por eso sbCliente.auth.getSession() devolvía vacío y estos dos insert salían
+// como ANÓNIMO → mi_persona_id() daba null → la política de RLS los rechazaba
+// ("new row violates row-level security policy for table mensajes_equipo").
+// Leer andaba porque el resto del archivo usa obtenerToken(). Ahora todos usan
+// la misma fuente de token.
+function sbTokenSesion() {
+  const t = obtenerToken();
+  if (!t) throw new Error('Sesión vencida. Volvé a entrar con tu usuario.');
+  return t;
+}
+
 async function sbInsertarLecturas(filas) {
   if (!filas || !filas.length) return;
-  const sess = await sbCliente.auth.getSession();
-  const token = sess && sess.data && sess.data.session && sess.data.session.access_token;
+  const token = sbTokenSesion();
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/mensajes_lecturas?on_conflict=mensaje_id,persona_id`, {
     method: 'POST',
     headers: {
       apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${token || SUPABASE_KEY}`,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Prefer: 'resolution=ignore-duplicates',
     },
@@ -3176,13 +3188,12 @@ async function sbInsertarLecturas(filas) {
 }
 
 async function sbInsertarMensaje(fila) {
-  const sess = await sbCliente.auth.getSession();
-  const token = sess && sess.data && sess.data.session && sess.data.session.access_token;
+  const token = sbTokenSesion();
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/mensajes_equipo`, {
     method: 'POST',
     headers: {
       apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${token || SUPABASE_KEY}`,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Prefer: 'return=representation',
     },
@@ -3690,8 +3701,20 @@ async function estadoRecuperatorios(personaId) {
   const recuperables = [];
   const noRecuperables = [];   // NUEVO 19/08/2026: las que la madre da por caídas, con SU motivo
   const usadosPorMes = {};
-  const { data: _est, error: _err } = await sbCliente.rpc('fn_estado_recuperatorios', { p_persona_id: personaId });
-  if (_err) throw _err;
+  // FIX 20/08/2026 — antes iba por sbCliente (sin sesión), o sea ANÓNIMA.
+  // Funcionaba de casualidad porque la función no exige identidad; el día que
+  // le pongan un candado se caía sin aviso. Ahora va con el token del profe.
+  const _estResp = await fetch(`${SUPABASE_URL}/rest/v1/rpc/fn_estado_recuperatorios`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${sbTokenSesion()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ p_persona_id: personaId }),
+  });
+  if (!_estResp.ok) throw new Error('fn_estado_recuperatorios ' + _estResp.status + ' · ' + (await _estResp.text()));
+  const _est = await _estResp.json();
   (_est || []).forEach(r => {
     if (!r.recuperable) {
       // NUEVO 19/08/2026: en vez de descartarlas en silencio, se guardan con el
