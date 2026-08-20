@@ -3258,6 +3258,10 @@ async function cargarClasesCerradas() {
 // se marcan como AUSENTE sin justificar ("Sin asistencia registrada al cerrar la clase").
 async function cerrarClasesViejasAuto() {
   try {
+    // NUEVO 19/08/2026 · si no se pudo leer la tabla de feriados, NO cerramos
+    // nada. Cerrar a ciegas marca ausente sin aviso a todo un día de gente por
+    // una clase que nunca existió.
+    if (!FERIADOS_OK) { console.warn('Cierre automático omitido: no se pudo verificar los feriados'); return; }
     const hoy = hoyIso();
     const lunes = getLunes(offsetSemana);
     const fmt = (f) => `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
@@ -3394,12 +3398,19 @@ function motivoCierreCentroDe(turnoId, fecha) {
 // =============================================
 // Mapa fecha (YYYY-MM-DD) -> motivo del feriado
 let FERIADOS = {};
+// NUEVO 19/08/2026 · ¿la lista de feriados cargó bien?
+// Si falla el fetch, FERIADOS queda vacío y TODO parece día hábil. Antes eso
+// hacía que el cierre automático arrasara con un feriado entero (17/08/2026:
+// 118 alumnos marcados ausentes sin aviso en un día que el centro estuvo
+// cerrado). Con esta bandera, ante la duda NO se cierra nada.
+let FERIADOS_OK = false;
 async function cargarFeriados() {
   try {
     const filas = await supabaseQuery('feriados', `?select=fecha,motivo`);
     FERIADOS = {};
     (filas || []).forEach(f => { FERIADOS[f.fecha] = f.motivo || 'Feriado'; });
-  } catch (e) { FERIADOS = {}; console.warn('No se pudo cargar feriados', e); }
+    FERIADOS_OK = true;
+  } catch (e) { FERIADOS = {}; FERIADOS_OK = false; console.warn('No se pudo cargar feriados', e); }
 }
 // ¿Esta fecha (YYYY-MM-DD) es feriado? Devuelve el motivo o null.
 function feriadoDe(fecha) {
@@ -4172,6 +4183,12 @@ window.cerrarClase = async () => {
 };
 
 async function cerrarClaseFinal(t, fecha) {
+  // NUEVO 19/08/2026 · en un feriado no hubo clase: cerrarla marcaría ausentes
+  // a alumnos que no tenían nada a que venir.
+  if (feriadoDe(fecha)) {
+    toast('🟠 Es feriado (' + feriadoDe(fecha) + '): esta clase no se cierra.');
+    return;
+  }
   const btn = document.getElementById('cerrar-clase-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Cerrando...'; }
   try {
