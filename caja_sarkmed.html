@@ -449,14 +449,46 @@ function renderPacientes(){
       '<td>' + selectSoporte(t, i) + '</td>' +
       '<td class="num">' + fmt(cob) + '</td>' +
       '<td class="num">' + (ausente ? '—' : (saldo > 0 ? fmt(saldo) : '—')) + '</td>' +
-      '<td class="num"><button class="btn chico ' + (saldo > 0 ? '' : 'sec') + '" data-turno="' + i + '">Cobrar</button></td>' +
+      '<td class="num" style="white-space:nowrap">' +
+        (ausente && cob > 0 ? '<button class="btn chico" data-custodia="' + i + '">A custodia</button> ' : '') +
+        '<button class="btn chico ' + (saldo > 0 && !ausente ? '' : 'sec') + '" data-turno="' + i + '">Cobrar</button></td>' +
     '</tr>';
   }).join('');
   cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Estado</th><th>Soporte BiOLAB</th><th class="num">Cobrado</th><th class="num">Saldo</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
   cont.querySelectorAll('button[data-turno]').forEach(b =>
     b.addEventListener('click', () => abrirCobro(turnos[Number(b.dataset.turno)])));
+  cont.querySelectorAll('button[data-custodia]').forEach(b =>
+    b.addEventListener('click', () => mandarACustodia(turnos[Number(b.dataset.custodia)])));
   cont.querySelectorAll('select[data-soporte]').forEach(s =>
     s.addEventListener('change', () => guardarSoporte(turnos[Number(s.dataset.soporte)], s.value)));
+}
+
+/* Saca la plata de la jornada y la deja en custodia del paciente. Es lo mismo
+   que hace el trigger al marcar AUSENTE, pero a mano: sirve para los turnos
+   que ya estaban marcados antes de que existiera el automatismo, o cuando se
+   decide sacarla de la jornada sin tocar el estado. */
+async function mandarACustodia(turno){
+  if(!turno) return;
+  const mios = cobros.filter(c => !c.anulado && c.situacion === 'APLICADO' && c.paciente_id === turno.paciente_id);
+  if(!mios.length){ aviso($('alerta'), 'Ese paciente no tiene cobros en esta jornada.'); return; }
+  const total = mios.reduce((a,c) => a + num(c.importe), 0);
+  const quien = turno.paciente ? turno.paciente.apellido_nombre : 'este paciente';
+  if(!confirm('¿Pasar ' + fmt(total) + ' de ' + quien + ' a custodia?\n\nDeja de contar en esta jornada y queda a favor del paciente para cuando haga el circuito. Después podés usarla en otro sábado o mandarla al pozo.')) return;
+
+  const ahora = new Date().toISOString();
+  const res = await Promise.all(mios.map(c => sb.from('cobros_sarkmed').update({
+    situacion: 'A_FAVOR',
+    jornada_origen: c.jornada_origen || c.fecha_jornada || jornadaSel,
+    fecha_jornada: null,
+    situacion_en: ahora,
+    situacion_por_email: miEmail || null
+  }).eq('id', c.id)));
+  const fallo = res.find(r => r.error);
+  if(fallo){ aviso($('alerta'), fallo.error.message); return; }
+  aviso($('alerta'), fmt(total) + ' quedaron en custodia de ' + quien + '.', 'ok');
+  setTimeout(() => aviso($('alerta'), ''), 3500);
+  await cargarJornada();
+  render();
 }
 
 /* Quién acompañó en la estación BiOLAB. A veces va Bruno, a veces Male y a
