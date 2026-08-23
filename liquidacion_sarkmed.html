@@ -114,6 +114,11 @@
     <div class="card"><div id="tabla-pendientes"></div></div>
   </section>
 
+  <section class="seccion" id="sec-reserva">
+    <h2>Custodia y pozo de SARKMED</h2>
+    <div class="card" id="box-reserva"></div>
+  </section>
+
   <section class="seccion">
     <h2>Jornada por jornada</h2>
     <div class="card" id="detalle"></div>
@@ -150,6 +155,9 @@ let jornadas = [];      // realizadas del mes
 let turnos = [];        // de esas jornadas
 let cobros = [];        // aplicados de esas jornadas
 let calculo = null;     // resultado del reparto
+let custodia = [];      // señas de ausentes que siguen siendo del paciente
+let pozoCobros = [];    // señas que ya quedaron para SARKMED
+let pozoManual = [];    // movimientos del pozo cargados a mano
 
 /* ════════════════════════════════════════════════════════════════
    HELPERS
@@ -213,6 +221,20 @@ async function cargarTodo(){
     .gte('fecha', ini).lte('fecha', fin).order('fecha');
   if(jRes.error){ aviso('No se pudieron leer las jornadas: ' + jRes.error.message); jornadas = []; }
   else jornadas = jRes.data || [];
+
+  // Custodia y pozo NO son del mes: son un saldo que viene arrastrado.
+  const [cuRes, poRes, pmRes] = await Promise.all([
+    sb.from('cobros_sarkmed')
+      .select('id, paciente_id, importe, destino, jornada_origen, paciente:pacientes_sarkmed(apellido_nombre, dni)')
+      .eq('situacion','A_FAVOR').eq('anulado', false).limit(300),
+    sb.from('cobros_sarkmed')
+      .select('id, importe, destino, fecha_jornada')
+      .eq('situacion','POZO').eq('anulado', false).limit(500),
+    sb.from('pozo_sarkmed').select('id, fecha, importe, destino, detalle').eq('anulado', false).limit(300)
+  ]);
+  custodia   = cuRes.error ? [] : (cuRes.data || []);
+  pozoCobros = poRes.error ? [] : (poRes.data || []);
+  pozoManual = pmRes.error ? [] : (pmRes.data || []);
 
   const fechas = jornadas.map(j => String(j.fecha).slice(0,10));
   if(!fechas.length){ turnos = []; cobros = []; return; }
@@ -310,6 +332,7 @@ function render(){
   renderKpis();
   renderReparto();
   renderPlata();
+  renderReserva();
   renderPendientes();
   renderDetalle();
 }
@@ -390,6 +413,41 @@ function renderPlata(){
     '<div>Entró a PuntoBiO: <b>' + fmt(calculo.enPB) + '</b> · a ' + esc(nombreMedica) + ': <b>' + fmt(calculo.enMati) + '</b></div>' +
     '<div style="color:var(--muted);font-size:13.5px">A ' + esc(nombreMedica) + ' le corresponden ' + fmt(leToca) + ' por los circuitos del mes. ' + cierre + '</div>' +
     '<div style="color:var(--gris-claro);font-size:12.5px;margin-top:6px">Incluye todo lo cobrado de estas jornadas, también las señas de los que todavía no completaron: esa plata está en la mano de alguien aunque no se reparta.</div>';
+}
+
+/* La custodia y el pozo no son del mes: son un saldo que viene arrastrado y
+   que conviene tener a la vista cuando se reparte, porque es plata del
+   circuito que está en la mano de alguien pero todavía no se repartió. */
+function renderReserva(){
+  if(SOLO_MIO){ $('sec-reserva').hidden = true; return; }
+  $('sec-reserva').hidden = false;
+  const suma = (arr) => arr.reduce((a,c) => a + num(c.importe), 0);
+  const enMati = (arr) => arr.filter(c => c.destino === 'MATI').reduce((a,c) => a + num(c.importe), 0);
+  const quien = (arr) => {
+    const t = suma(arr), m = enMati(arr), pb = t - m;
+    if(!t) return '';
+    if(!m) return 'toda en PuntoBiO';
+    if(!pb) return 'toda en la cuenta de ' + nombreDeEstacion('MEDICA');
+    return fmt(pb) + ' en PuntoBiO · ' + fmt(m) + ' en ' + nombreDeEstacion('MEDICA');
+  };
+  const pozoTodo = pozoCobros.concat(pozoManual);
+  const totalCustodia = suma(custodia);
+  const totalPozo = suma(pozoTodo);
+  const pacientes = custodia.length
+    ? custodia.map(c => '<tr><td class="nombre">' + esc((c.paciente && c.paciente.apellido_nombre) || '—') + '</td>' +
+        '<td class="dim">' + (c.jornada_origen ? 'señó para el ' + fechaLarga(c.jornada_origen) : '') + '</td>' +
+        '<td class="num"><span class="pill destino">' + (c.destino === 'MATI' ? 'la tiene ' + esc(nombreDeEstacion('MEDICA')) : 'la tiene PuntoBiO') + '</span></td>' +
+        '<td class="num">' + fmt(c.importe) + '</td></tr>').join('')
+    : '';
+
+  $('box-reserva').innerHTML =
+    '<div class="rendicion">' +
+      '<div>En custodia: <b>' + fmt(totalCustodia) + '</b>' + (quien(custodia) ? ' · ' + quien(custodia) : '') + '</div>' +
+      '<div style="color:var(--muted);font-size:13.5px">Señas de pacientes que faltaron. Siguen siendo del paciente hasta que las use o venza el plazo, así que no entran en el reparto.</div>' +
+      '<div style="margin-top:10px">Pozo de SARKMED: <b>' + fmt(totalPozo) + '</b>' + (quien(pozoTodo) ? ' · ' + quien(pozoTodo) : '') + '</div>' +
+      '<div style="color:var(--muted);font-size:13.5px">Señas que ya no vuelven al paciente, más lo cargado a mano. Es del centro, tampoco se reparte entre profesionales.</div>' +
+    '</div>' +
+    (pacientes ? '<table style="border-top:1px solid var(--linea)"><tbody>' + pacientes + '</tbody></table>' : '');
 }
 
 function renderPendientes(){
@@ -627,6 +685,24 @@ async function pdfDelMes(){
     y += 14;
   }
 
+  // Custodia y pozo
+  {
+    const suma = (arr) => arr.reduce((a,c) => a + num(c.importe), 0);
+    const pozoTodo = pozoCobros.concat(pozoManual);
+    salto(110);
+    doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text('Custodia y pozo de SARKMED', M, y); y += 14;
+    doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 18;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    doc.text('En custodia (señas de ausentes, siguen siendo del paciente)', M, y);
+    doc.text(fmt(suma(custodia)), ancho - M, y, { align:'right' }); y += 18;
+    doc.text('Pozo de SARKMED (ya no vuelven al paciente)', M, y);
+    doc.text(fmt(suma(pozoTodo)), ancho - M, y, { align:'right' }); y += 18;
+    doc.setFontSize(9); doc.setTextColor(120);
+    doc.text('Ninguna de las dos entra en el reparto entre profesionales.', M, y);
+    doc.setTextColor(0); doc.setFontSize(10); y += 26;
+  }
+
   // Detalle por jornada
   const fechas = Object.keys(calculo.porJornada).sort();
   if(fechas.length){
@@ -683,7 +759,9 @@ function textoDelMes(){
              : '\nEl centro le paga ' + fmt(-dif) + ' a ' + nombreMedica + '.');
   return '*SARKMED · Liquidación de ' + nombreMes() + '*\n' +
          calculo.circuitosLiquidados + ' circuitos abonados · total ' + fmt(calculo.totalLiquidado) + '\n\n' +
-         filas + '\n\nEntró a PuntoBiO: ' + fmt(calculo.enPB) + ' · a ' + nombreMedica + ': ' + fmt(calculo.enMati) + cierre;
+         filas + '\n\nEntró a PuntoBiO: ' + fmt(calculo.enPB) + ' · a ' + nombreMedica + ': ' + fmt(calculo.enMati) + cierre +
+         '\n\n_En custodia: ' + fmt(custodia.reduce((a,c) => a + num(c.importe), 0)) +
+         ' · Pozo: ' + fmt(pozoCobros.concat(pozoManual).reduce((a,c) => a + num(c.importe), 0)) + '_';
 }
 
 /* ════════════════════════════════════════════════════════════════
