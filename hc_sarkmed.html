@@ -252,7 +252,7 @@ async function cargarSesionYAccesos(){
     miEmail = (session?.user?.email || '').toLowerCase().trim();
   }catch(e){ miEmail = ''; }
   try{
-    const { data, error } = await sb.from('sarkmed_accesos').select('email, carga_hc').eq('activo', true);
+    const { data, error } = await sb.from('sarkmed_accesos').select('email, carga_hc, puede_borrar_hc').eq('activo', true);
     if(error) throw error;
     accesos = (data || []).map(a => ({ ...a, email: (a.email || '').toLowerCase().trim() }));
   }catch(e){ console.warn('No se pudieron leer los accesos de SarkMED:', e); accesos = []; }
@@ -260,6 +260,13 @@ async function cargarSesionYAccesos(){
 function puedeCargar(){
   const mio = accesos.find(a => a.email === miEmail);
   return mio ? !!mio.carga_hc : true;   // sin fila (equipo del centro): puede
+}
+/* Borrar una evaluación entera. Es de ida: se lleva las cuatro solapas y los
+   adjuntos. Por eso el permiso es explícito y hoy lo tiene una sola persona;
+   la base vuelve a chequearlo antes de borrar. */
+function puedeBorrar(){
+  const mio = accesos.find(a => a.email === miEmail);
+  return !!(mio && mio.puede_borrar_hc);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -375,10 +382,36 @@ function render(){
             <td class="ocultar-chico codigo">${esc(e.codigo || '—')}</td>
             <td class="ocultar-chico celda-dim">${fechaLinda(e.fecha)}</td>
             <td><span class="tag ${e.estado === 'CERRADA' ? 'tag-cerrada' : 'tag-abierta'}">${esc(e.estado || '')}</span></td>
-            <td class="acciones"><button class="btn" onclick="abrirFicha(${e.id})">${puedeCargar() ? 'Abrir' : 'Ver'}</button></td>
+            <td class="acciones"><button class="btn" onclick="abrirFicha(${e.id})">${puedeCargar() ? 'Abrir' : 'Ver'}</button>${
+              puedeBorrar() ? ` <button class="btn" style="border-color:#fecaca;color:#991b1b" onclick="borrarEvaluacion(${e.id})">Borrar</button>` : ''
+            }</td>
           </tr>`).join('')}
       </tbody>
     </table>`;
+}
+
+/* Borra una evaluación con todo lo que cuelga de ella. Primero saca los
+   archivos del bucket (si no, quedan huérfanos ocupando lugar) y después
+   llama a la base, que vuelve a chequear el permiso. */
+async function borrarEvaluacion(id){
+  const e = evaluaciones.find(x => x.id === id);
+  if(!e) return;
+  const quien = (e.paciente && e.paciente.apellido_nombre) || 'sin paciente';
+  if(!confirm(`¿Borrar la evaluación ${e.codigo || ''} de ${quien}?\n\nSe va con las cuatro solapas y los archivos adjuntos. No se puede deshacer.`)) return;
+
+  try{
+    const { data: adj } = await sb.from('hc_sarkmed_adjuntos').select('path').eq('hc_id', id);
+    const paths = (adj || []).map(a => a.path).filter(Boolean);
+    if(paths.length) await sb.storage.from('sarkmed-hc').remove(paths);
+  }catch(err){ console.warn('No se pudieron borrar los archivos del bucket:', err); }
+
+  const { data, error } = await sb.rpc('fn_borrar_hc_sarkmed', { p_hc_id: id });
+  if(error){ toast('No se pudo borrar: ' + error.message, 'err'); return; }
+  const cod = Array.isArray(data) && data[0] ? (data[0].codigo || '') : '';
+  toast('Evaluación borrada' + (cod ? ' · ' + cod : ''), 'ok');
+  await cargarEvaluaciones();
+  if(vista === 'ficha' && fichaActual && fichaActual.id === id){ fichaActual = null; vista = 'lista'; }
+  render();
 }
 
 /* Busca en el PADRÓN a quien no tiene evaluación todavía y ofrece crearla. */
