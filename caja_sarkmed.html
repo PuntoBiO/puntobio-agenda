@@ -133,6 +133,11 @@
     <div class="card"><div id="tabla-creditos"></div></div>
   </section>
 
+  <section class="seccion" id="sec-pozo" hidden>
+    <h2>De dónde viene el pozo</h2>
+    <div class="card"><div id="tabla-pozo"></div></div>
+  </section>
+
   <section class="seccion">
     <h2>Movimientos</h2>
     <div class="card"><div id="tabla-movs"><div class="vacio">Cargando…</div></div></div>
@@ -238,7 +243,10 @@
         <div class="campo"><label for="mt-centro">Centro</label><input id="mt-centro" type="number" step="1" min="0"></div>
         <div class="campo"><label for="mt-sena">Seña (%)</label><input id="mt-sena" type="number" step="1" min="0" max="100"></div>
       </div>
-      <div class="campo" style="margin-top:12px"><label for="mt-soporte">Soporte BiOLAB ($ que cobra Bruno o Male, sale de la parte de BiOLAB)</label><input id="mt-soporte" type="number" step="1" min="0"></div>
+      <div class="grid2" style="margin-top:12px">
+        <div class="campo"><label for="mt-soporte">Soporte BiOLAB ($ que cobra Bruno o Male, sale de la parte de BiOLAB)</label><input id="mt-soporte" type="number" step="1" min="0"></div>
+        <div class="campo"><label for="mt-custodia">La custodia vence a los (meses)</label><input id="mt-custodia" type="number" step="1" min="1" max="36"></div>
+      </div>
     </div>
     <div class="modal-foot">
       <button class="btn gris" id="mt-cancelar">Cancelar</button>
@@ -351,7 +359,7 @@ async function cargarTarifa(){
 
 async function cargarJornada(){
   if(!jornadaSel){ turnos = []; cobros = []; return; }
-  const cols = 'id, paciente_id, fecha, concepto, importe, medio, destino, situacion, jornada_origen, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)';
+  const cols = 'id, paciente_id, fecha, concepto, importe, medio, destino, situacion, jornada_origen, motivo_situacion, situacion_en, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)';
   const [tRes, cRes, fRes, pRes] = await Promise.all([
     sb.from('turnos_sarkmed')
       .select('id, fecha, hora, estado, paciente_id, biolab_soporte, paciente:pacientes_sarkmed(id, apellido_nombre, dni)')
@@ -394,6 +402,7 @@ function render(){
   renderPacientes();
   renderReserva();
   renderCreditos();
+  renderPozo();
   renderMovs();
   renderTarifa();
 }
@@ -519,25 +528,68 @@ async function guardarSoporte(turno, valor){
    · pozo = señas que ya nadie va a usar y quedaron para SARKMED. */
 function renderReserva(){
   const mes = (jornadaSel || hoyISO()).slice(0,7);
-  const custodia = creditos.reduce((a,c) => a + num(c.importe), 0);
+  const enMati = (arr) => arr.filter(c => c.destino === 'MATI').reduce((a,c) => a + num(c.importe), 0);
+  const suma   = (arr) => arr.reduce((a,c) => a + num(c.importe), 0);
+  const quienLaTiene = (arr) => {
+    const t = suma(arr), m = enMati(arr), pb = t - m;
+    if(!t) return '';
+    if(!m) return 'toda en PuntoBiO';
+    if(!pb) return 'toda en la cuenta de Mati';
+    return fmt(pb) + ' en PuntoBiO · ' + fmt(m) + ' en Mati';
+  };
+  const pozoMes = pozos.filter(c => String(c.fecha_jornada || '').slice(0,7) === mes);
   const pacientes = new Set(creditos.map(c => c.paciente_id)).size;
-  const pozoMes = pozos.filter(c => String(c.fecha_jornada || '').slice(0,7) === mes)
-                       .reduce((a,c) => a + num(c.importe), 0);
-  const pozoTotal = pozos.reduce((a,c) => a + num(c.importe), 0);
   const nombreMes = MESES[Number(mes.slice(5,7)) - 1];
+  const detalle = (txt) => txt ? '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">' + txt + '</div>' : '';
 
   $('reserva').innerHTML = [
-    '<div class="card tile"><div class="n" style="color:var(--ambar)">' + fmt(custodia) + '</div>' +
+    '<div class="card tile"><div class="n" style="color:var(--ambar)">' + fmt(suma(creditos)) + '</div>' +
       '<div class="l">en custodia</div>' +
-      '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">' +
-      (pacientes ? pacientes + ' ' + (pacientes === 1 ? 'paciente que faltó y puede usarla' : 'pacientes que faltaron y pueden usarla') : 'nadie con plata a favor') +
-      '</div></div>',
-    '<div class="card tile"><div class="n" style="color:var(--azul)">' + fmt(pozoMes) + '</div>' +
-      '<div class="l">al pozo en ' + nombreMes + '</div></div>',
-    '<div class="card tile"><div class="n" style="color:var(--verde)">' + fmt(pozoTotal) + '</div>' +
+      detalle(creditos.length
+        ? quienLaTiene(creditos) + ' · ' + pacientes + (pacientes === 1 ? ' paciente' : ' pacientes')
+        : 'nadie con plata a favor') + '</div>',
+    '<div class="card tile"><div class="n" style="color:var(--azul)">' + fmt(suma(pozoMes)) + '</div>' +
+      '<div class="l">al pozo en ' + nombreMes + '</div>' + detalle(quienLaTiene(pozoMes)) + '</div>',
+    '<div class="card tile"><div class="n" style="color:var(--verde)">' + fmt(suma(pozos)) + '</div>' +
       '<div class="l">pozo acumulado</div>' +
-      '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">señas que quedaron para SARKMED</div></div>'
+      detalle(pozos.length ? quienLaTiene(pozos) : 'señas que quedaron para SARKMED') + '</div>'
   ].join('');
+}
+
+/* El pozo, movimiento por movimiento: de quién era la seña, para qué sábado
+   la había pagado, quién tiene la plata y por qué dejó de ser del paciente. */
+function renderPozo(){
+  const cont = $('tabla-pozo');
+  if(!pozos.length){ $('sec-pozo').hidden = true; return; }
+  $('sec-pozo').hidden = false;
+  const filas = [...pozos]
+    .sort((a,b) => String(b.fecha_jornada || '').localeCompare(String(a.fecha_jornada || '')))
+    .map(c => {
+      const p = c.paciente || {};
+      const motivo = c.motivo_situacion || 'Se decidió dejarla para SARKMED';
+      return '<tr>' +
+        '<td><div class="nombre">' + esc(p.apellido_nombre || '—') + '</div>' +
+          '<div class="dni">' + (c.jornada_origen ? 'señó para el ' + fechaCorta(c.jornada_origen) : 'sin jornada') +
+          ' · ' + esc(motivo.toLowerCase()) + '</div></td>' +
+        '<td><span class="pill destino">' + (c.destino === 'MATI' ? 'la tiene Mati' : 'la tiene PuntoBiO') + '</span></td>' +
+        '<td class="num">' + fmt(c.importe) + '</td>' +
+      '</tr>';
+    }).join('');
+  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Quién la tiene</th><th class="num">Importe</th></tr></thead><tbody>' + filas + '</tbody></table>';
+}
+
+/* Cuánto le queda a una custodia antes de caer al pozo. Los meses salen de
+   la tarifa, así que cambiarlos es editar la tarifa, no tocar el código. */
+function mesesCustodia(){ return tarifa && tarifa.meses_custodia ? num(tarifa.meses_custodia) : 3; }
+function venceEn(c){
+  const desde = c.jornada_origen || c.fecha;
+  if(!desde) return '';
+  const d = fechaDeISO(desde);
+  d.setMonth(d.getMonth() + mesesCustodia());
+  const dias = Math.round((d - fechaDeISO(hoyISO())) / 86400000);
+  if(dias <= 0) return ' · <b style="color:var(--rojo)">vencida</b>';
+  if(dias <= 21) return ' · <b style="color:var(--ambar)">pasa al pozo en ' + dias + ' días</b>';
+  return ' · pasa al pozo el ' + fechaCorta(fmtFecha(d));
 }
 
 function renderCreditos(){
@@ -546,21 +598,40 @@ function renderCreditos(){
   $('sec-creditos').hidden = false;
   const filas = creditos.map((c, i) => {
     const p = c.paciente || {};
+    const op = (v, t) => '<option value="' + v + '"' + (c.destino === v ? ' selected' : '') + '>' + t + '</option>';
     return '<tr>' +
       '<td><div class="nombre">' + esc(p.apellido_nombre || '—') + '</div>' +
         '<div class="dni">DNI ' + esc(p.dni || '—') +
-        (c.jornada_origen ? ' · señó para el ' + fechaCorta(c.jornada_origen) : '') + '</div></td>' +
+        (c.jornada_origen ? ' · señó para el ' + fechaCorta(c.jornada_origen) : '') +
+        ' · ' + esc(c.medio.toLowerCase()) + venceEn(c) + '</div></td>' +
+      '<td><select data-destino="' + i + '" style="padding:6px 8px;font-size:13px">' +
+        op('PUNTOBIO', 'la tiene PuntoBiO') + op('MATI', 'la tiene Mati') + '</select></td>' +
       '<td class="num">' + fmt(c.importe) + '</td>' +
       '<td class="num" style="white-space:nowrap">' +
         (jornadaSel ? '<button class="btn chico" data-usar="' + i + '">Usar acá</button> ' : '') +
         '<button class="btn chico gris" data-pozo="' + i + '">Al pozo</button></td>' +
     '</tr>';
   }).join('');
-  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th class="num">A favor</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
+  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Quién la tiene</th><th class="num">A favor</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
   cont.querySelectorAll('button[data-usar]').forEach(b =>
     b.addEventListener('click', () => usarCredito(creditos[Number(b.dataset.usar)])));
   cont.querySelectorAll('button[data-pozo]').forEach(b =>
     b.addEventListener('click', () => creditoAlPozo(creditos[Number(b.dataset.pozo)])));
+  cont.querySelectorAll('select[data-destino]').forEach(s =>
+    s.addEventListener('change', () => cambiarDestino(creditos[Number(s.dataset.destino)], s.value)));
+}
+
+/* Si la plata cambia de mano (Mati la transfiere al centro, o al revés),
+   se corrige acá: la liquidación mira este dato para saber a quién
+   descontarle y a quién pagarle. */
+async function cambiarDestino(c, valor){
+  if(!c) return;
+  const { error } = await sb.from('cobros_sarkmed').update({ destino: valor }).eq('id', c.id);
+  if(error){ aviso($('alerta'), error.message); return; }
+  c.destino = valor;
+  aviso($('alerta'), 'Listo: ahora figura en ' + (valor === 'MATI' ? 'la cuenta de Mati' : 'PuntoBiO') + '.', 'ok');
+  setTimeout(() => aviso($('alerta'), ''), 2500);
+  renderReserva();
 }
 
 async function usarCredito(c){
@@ -643,6 +714,7 @@ function renderTarifa(){
       ' · Centro ' + fmt(t.monto_centro) + '</div>' +
     '<div class="reparto">Si en BiOLAB acompaña Bruno o Male, se lleva ' + fmt(t.monto_soporte_biolab) +
       ' y a BiOLAB le quedan ' + fmt(num(t.monto_biolab) - num(t.monto_soporte_biolab)) + '.</div>' +
+    '<div class="reparto">La plata en custodia pasa al pozo a los ' + (num(t.meses_custodia) || 3) + ' meses.</div>' +
     '<div class="reparto">Rige desde el ' + fechaLarga(t.vigente_desde) + '.</div>' +
     (puedeEditarTarifa ? '<div style="margin-top:12px"><button class="btn sec chico" id="btn-nueva-tarifa">Cargar tarifa nueva</button></div>' : '');
   const b = $('btn-nueva-tarifa');
@@ -776,6 +848,7 @@ function abrirTarifa(){
   $('mt-centro').value = num(t.monto_centro);
   $('mt-sena').value = num(t.pct_sena) || 50;
   $('mt-soporte').value = num(t.monto_soporte_biolab);
+  $('mt-custodia').value = num(t.meses_custodia) || 3;
   abrir('modal-tarifa');
 }
 
@@ -791,6 +864,7 @@ $('mt-guardar').addEventListener('click', async () => {
     monto_centro: Number($('mt-centro').value) || 0,
     pct_sena: Number($('mt-sena').value) || 50,
     monto_soporte_biolab: Number($('mt-soporte').value) || 0,
+    meses_custodia: Number($('mt-custodia').value) || 3,
     creado_por_email: miEmail || null
   };
   if(!fila.vigente_desde){ aviso($('mt-alerta'), 'Poné desde cuándo rige.'); return; }
@@ -833,6 +907,20 @@ $('sel-jornada').addEventListener('change', async () => {
   render();
 });
 
+/* Al abrir la Caja se revisa si alguna custodia cumplió su plazo. Lo hace la
+   base y devuelve lo que movió, así se puede avisar en vez de que la plata
+   cambie de lugar en silencio. */
+async function vencerCustodias(){
+  try{
+    const { data, error } = await sb.rpc('fn_vencer_custodia_sarkmed');
+    if(error || !data || !data.length) return;
+    const total = data.reduce((a,c) => a + num(c.importe), 0);
+    aviso($('alerta'),
+      data.length + (data.length === 1 ? ' custodia cumplió ' : ' custodias cumplieron ') +
+      mesesCustodia() + ' meses y pasaron al pozo: ' + fmt(total) + '. Están detalladas abajo.', 'ok');
+  }catch(e){ console.warn('[caja] vencimiento de custodias:', e); }
+}
+
 (async function init(){
   const habilitado = await cargarPermisos();
   if(!habilitado){
@@ -844,6 +932,7 @@ $('sel-jornada').addEventListener('change', async () => {
   }
   await cargarJornadas();
   await cargarTarifa();
+  await vencerCustodias();
   await cargarJornada();
   render();
   // El botón Cobrar del sistema abre esta pantalla con ?cobrar=1
