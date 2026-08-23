@@ -133,9 +133,10 @@
     <div class="card"><div id="tabla-creditos"></div></div>
   </section>
 
-  <section class="seccion" id="sec-pozo" hidden>
+  <section class="seccion" id="sec-pozo">
     <h2>De dónde viene el pozo</h2>
     <div class="card"><div id="tabla-pozo"></div></div>
+    <div style="margin-top:10px"><button class="btn sec chico" id="btn-cargar-pozo">Cargar movimiento del pozo</button></div>
   </section>
 
   <section class="seccion">
@@ -218,6 +219,47 @@
   </div>
 </div>
 
+<!-- MODAL POZO -->
+<div class="modal-bg" id="modal-pozo">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Movimiento del pozo</h3>
+      <p>Para cargar lo que ya estaba guardado antes del sistema, o para sacar plata del pozo cuando se use.</p>
+    </div>
+    <div class="modal-body">
+      <div id="mp-alerta"></div>
+      <div class="grid2" style="margin-bottom:12px">
+        <div class="campo"><label for="mp-fecha">Fecha</label><input id="mp-fecha" type="date"></div>
+        <div class="campo">
+          <label for="mp-tipo">Qué es</label>
+          <select id="mp-tipo">
+            <option value="SUMA">Entra al pozo</option>
+            <option value="RESTA">Sale del pozo</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid2" style="margin-bottom:12px">
+        <div class="campo"><label for="mp-importe">Importe</label><input id="mp-importe" type="number" step="1" min="0" inputmode="decimal"></div>
+        <div class="campo">
+          <label for="mp-destino">Quién la tiene</label>
+          <select id="mp-destino">
+            <option value="PUNTOBIO">PuntoBiO</option>
+            <option value="MATI">Mati</option>
+          </select>
+        </div>
+      </div>
+      <div class="campo">
+        <label for="mp-detalle">De dónde viene</label>
+        <input id="mp-detalle" type="text" placeholder="Ej: señas juntadas antes de usar el sistema">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn gris" id="mp-cancelar">Cancelar</button>
+      <button class="btn" id="mp-guardar">Guardar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL TARIFA -->
 <div class="modal-bg" id="modal-tarifa">
   <div class="modal">
@@ -280,6 +322,7 @@ let cobros = [];          // cobros imputados a la jornada
 let creditos = [];        // plata a favor de pacientes que faltaron (situacion A_FAVOR)
 let verAnulados = false;  // los cobros anulados quedan escondidos hasta que se piden
 let pozos = [];           // señas que quedaron para SARKMED (situacion POZO), de todas las jornadas
+let pozoManual = [];      // movimientos del pozo cargados a mano (pozo_sarkmed)
 let cobroCtx = null;      // { paciente, cobrado } del modal
 let buscarTimer = null;
 let resultadosBusqueda = [];
@@ -360,7 +403,7 @@ async function cargarTarifa(){
 async function cargarJornada(){
   if(!jornadaSel){ turnos = []; cobros = []; return; }
   const cols = 'id, paciente_id, fecha, concepto, importe, medio, destino, situacion, jornada_origen, motivo_situacion, situacion_en, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)';
-  const [tRes, cRes, fRes, pRes] = await Promise.all([
+  const [tRes, cRes, fRes, pRes, mRes] = await Promise.all([
     sb.from('turnos_sarkmed')
       .select('id, fecha, hora, estado, paciente_id, biolab_soporte, paciente:pacientes_sarkmed(id, apellido_nombre, dni)')
       .eq('fecha', jornadaSel).neq('estado','CANCELADO').order('hora'),
@@ -371,12 +414,17 @@ async function cargarJornada(){
       .eq('situacion','A_FAVOR').eq('anulado', false).order('paciente_id').limit(300),
     // El pozo: señas que ya no vuelven al paciente y quedan para SARKMED.
     sb.from('cobros_sarkmed').select(cols)
-      .eq('situacion','POZO').eq('anulado', false).order('fecha_jornada').limit(500)
+      .eq('situacion','POZO').eq('anulado', false).order('fecha_jornada').limit(500),
+    // Y lo que se carga a mano: el saldo que ya existía, aportes y retiros.
+    sb.from('pozo_sarkmed')
+      .select('id, fecha, importe, destino, detalle, creado_por_email')
+      .eq('anulado', false).order('fecha').limit(300)
   ]);
   if(tRes.error){ aviso($('alerta'), 'Turnos: ' + tRes.error.message); turnos = []; } else turnos = tRes.data || [];
   if(cRes.error){ aviso($('alerta'), 'Cobros: ' + cRes.error.message); cobros = []; } else cobros = cRes.data || [];
   if(fRes.error){ creditos = []; } else creditos = fRes.data || [];
   if(pRes.error){ pozos = []; } else pozos = pRes.data || [];
+  if(mRes.error){ pozoManual = []; } else pozoManual = mRes.data || [];
 }
 
 /* Lo que el paciente tiene puesto en ESTA jornada. Un crédito a favor no
@@ -537,7 +585,9 @@ function renderReserva(){
     if(!pb) return 'toda en la cuenta de Mati';
     return fmt(pb) + ' en PuntoBiO · ' + fmt(m) + ' en Mati';
   };
-  const pozoMes = pozos.filter(c => String(c.fecha_jornada || '').slice(0,7) === mes);
+  const pozoMes = pozos.filter(c => String(c.fecha_jornada || '').slice(0,7) === mes)
+    .concat(pozoManual.filter(m => String(m.fecha || '').slice(0,7) === mes));
+  const pozoTodo = pozos.concat(pozoManual);
   const pacientes = new Set(creditos.map(c => c.paciente_id)).size;
   const nombreMes = MESES[Number(mes.slice(5,7)) - 1];
   const detalle = (txt) => txt ? '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">' + txt + '</div>' : '';
@@ -550,9 +600,9 @@ function renderReserva(){
         : 'nadie con plata a favor') + '</div>',
     '<div class="card tile"><div class="n" style="color:var(--azul)">' + fmt(suma(pozoMes)) + '</div>' +
       '<div class="l">al pozo en ' + nombreMes + '</div>' + detalle(quienLaTiene(pozoMes)) + '</div>',
-    '<div class="card tile"><div class="n" style="color:var(--verde)">' + fmt(suma(pozos)) + '</div>' +
+    '<div class="card tile"><div class="n" style="color:var(--verde)">' + fmt(suma(pozoTodo)) + '</div>' +
       '<div class="l">pozo acumulado</div>' +
-      detalle(pozos.length ? quienLaTiene(pozos) : 'señas que quedaron para SARKMED') + '</div>'
+      detalle(pozoTodo.length ? quienLaTiene(pozoTodo) : 'señas que quedaron para SARKMED') + '</div>'
   ].join('');
 }
 
@@ -560,22 +610,48 @@ function renderReserva(){
    la había pagado, quién tiene la plata y por qué dejó de ser del paciente. */
 function renderPozo(){
   const cont = $('tabla-pozo');
-  if(!pozos.length){ $('sec-pozo').hidden = true; return; }
-  $('sec-pozo').hidden = false;
-  const filas = [...pozos]
-    .sort((a,b) => String(b.fecha_jornada || '').localeCompare(String(a.fecha_jornada || '')))
-    .map(c => {
-      const p = c.paciente || {};
-      const motivo = c.motivo_situacion || 'Se decidió dejarla para SARKMED';
-      return '<tr>' +
-        '<td><div class="nombre">' + esc(p.apellido_nombre || '—') + '</div>' +
-          '<div class="dni">' + (c.jornada_origen ? 'señó para el ' + fechaCorta(c.jornada_origen) : 'sin jornada') +
-          ' · ' + esc(motivo.toLowerCase()) + '</div></td>' +
-        '<td><span class="pill destino">' + (c.destino === 'MATI' ? 'la tiene Mati' : 'la tiene PuntoBiO') + '</span></td>' +
-        '<td class="num">' + fmt(c.importe) + '</td>' +
-      '</tr>';
-    }).join('');
-  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Quién la tiene</th><th class="num">Importe</th></tr></thead><tbody>' + filas + '</tbody></table>';
+  if(!pozos.length && !pozoManual.length){
+    cont.innerHTML = '<div class="vacio">El pozo está en cero. Si ya tenés plata guardada, cargala con el botón de abajo.</div>';
+    return;
+  }
+  const deSenas = pozos.map(c => ({
+    orden: c.fecha_jornada || c.fecha,
+    quien: (c.paciente && c.paciente.apellido_nombre) || '—',
+    sub: (c.jornada_origen ? 'señó para el ' + fechaCorta(c.jornada_origen) : 'sin jornada') +
+         ' · ' + String(c.motivo_situacion || 'se decidió dejarla para SARKMED').toLowerCase(),
+    destino: c.destino,
+    importe: num(c.importe),
+    manual: null
+  }));
+  const aMano = pozoManual.map(m => ({
+    orden: m.fecha,
+    quien: num(m.importe) < 0 ? 'Salida del pozo' : 'Carga a mano',
+    sub: fechaCorta(m.fecha) + (m.detalle ? ' · ' + m.detalle : ''),
+    destino: m.destino,
+    importe: num(m.importe),
+    manual: m
+  }));
+  const filas = deSenas.concat(aMano)
+    .sort((a,b) => String(b.orden || '').localeCompare(String(a.orden || '')))
+    .map((r, i) => '<tr>' +
+      '<td><div class="nombre">' + esc(r.quien) + '</div><div class="dni">' + esc(r.sub) + '</div></td>' +
+      '<td><span class="pill destino">' + (r.destino === 'MATI' ? 'la tiene Mati' : 'la tiene PuntoBiO') + '</span></td>' +
+      '<td class="num"' + (r.importe < 0 ? ' style="color:var(--rojo)"' : '') + '>' + fmt(r.importe) + '</td>' +
+      '<td class="num">' + (r.manual ? '<button class="btn chico gris" data-borrar-pozo="' + r.manual.id + '">Sacar</button>' : '') + '</td>' +
+    '</tr>').join('');
+  cont.innerHTML = '<table><thead><tr><th>De dónde</th><th>Quién la tiene</th><th class="num">Importe</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
+  cont.querySelectorAll('button[data-borrar-pozo]').forEach(b =>
+    b.addEventListener('click', () => borrarPozoManual(Number(b.dataset.borrarPozo))));
+}
+
+async function borrarPozoManual(id){
+  if(!confirm('¿Sacar este movimiento del pozo?')) return;
+  const { error } = await sb.from('pozo_sarkmed')
+    .update({ anulado:true, anulado_por_email: miEmail || null, anulado_en: new Date().toISOString() })
+    .eq('id', id);
+  if(error){ aviso($('alerta'), error.message); return; }
+  await cargarJornada();
+  render();
 }
 
 /* Cuánto le queda a una custodia antes de caer al pozo. Los meses salen de
@@ -892,6 +968,35 @@ $('mt-guardar').addEventListener('click', async () => {
    ARRANQUE
    ════════════════════════════════════════════════════════════════ */
 $('mc-cancelar').addEventListener('click', () => cerrar('modal-cobro'));
+$('mp-cancelar').addEventListener('click', () => cerrar('modal-pozo'));
+$('modal-pozo').addEventListener('click', e => { if(e.target.id === 'modal-pozo') cerrar('modal-pozo'); });
+$('btn-cargar-pozo').addEventListener('click', () => {
+  aviso($('mp-alerta'), '');
+  $('mp-fecha').value = hoyISO();
+  $('mp-tipo').value = 'SUMA';
+  $('mp-importe').value = '';
+  $('mp-destino').value = 'PUNTOBIO';
+  $('mp-detalle').value = '';
+  abrir('modal-pozo');
+});
+$('mp-guardar').addEventListener('click', async () => {
+  aviso($('mp-alerta'), '');
+  const importe = Math.abs(Number($('mp-importe').value));
+  if(!importe){ aviso($('mp-alerta'), 'Poné el importe.'); return; }
+  if(!$('mp-fecha').value){ aviso($('mp-alerta'), 'Falta la fecha.'); return; }
+  const fila = {
+    fecha: $('mp-fecha').value,
+    importe: $('mp-tipo').value === 'RESTA' ? -importe : importe,
+    destino: $('mp-destino').value,
+    detalle: $('mp-detalle').value.trim() || null,
+    creado_por_email: miEmail || null
+  };
+  const { error } = await sb.from('pozo_sarkmed').insert(fila);
+  if(error){ aviso($('mp-alerta'), error.message); return; }
+  cerrar('modal-pozo');
+  await cargarJornada();
+  render();
+});
 $('mt-cancelar').addEventListener('click', () => cerrar('modal-tarifa'));
 $('modal-cobro').addEventListener('click', e => { if(e.target.id === 'modal-cobro') cerrar('modal-cobro'); });
 $('modal-tarifa').addEventListener('click', e => { if(e.target.id === 'modal-tarifa') cerrar('modal-tarifa'); });
