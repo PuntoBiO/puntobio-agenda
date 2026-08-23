@@ -217,6 +217,9 @@
           <button class="btn ghost" id="btnDiagNormas" onclick="copiarDiagNormas()" style="display:none;">🔍 Diagnóstico normas</button>
         </div>
       </div>
+      <div id="avisoSarkmed" style="display:none; margin-top:10px; background:#fff7ed; border:1px solid #fdba74; border-radius:10px; padding:10px 12px; font-size:13px; color:#9a3412;">
+        <b>Paciente de SARKMED.</b> Se puede traer la evaluación de VALD y redactar el informe con IA, pero <b>no se guarda acá</b>: su historia clínica es la de SARKMED. Al final vas a poder copiar el informe y las consideraciones para pegarlos en la solapa BiOLAB.
+      </div>
       <div id="retomarBanner" style="display:none; margin-top:10px; background:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:10px 12px; font-size:13px; color:#92400e;"></div>
     </div>
 
@@ -567,6 +570,13 @@ function escapeHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// Resultados de la última búsqueda: se elige por ÍNDICE, nunca incrustando
+// datos de la base dentro del atributo onclick (comillas en el nombre rompían el HTML).
+let resultadosBusqueda = [];
+
+// ¿El paciente seleccionado viene del padrón de SARKMED (tabla aparte)?
+function esSark() { return !!(pacienteSel && pacienteSel.origen === 'sarkmed'); }
+
 async function buscar() {
   const q = document.getElementById('q').value.trim();
   const cont = document.getElementById('results');
@@ -580,11 +590,40 @@ async function buscar() {
       .order('nombre', { ascending: true })
       .limit(20);
     if (error) throw error;
-    if (!data || data.length === 0) { cont.innerHTML = '<div class="hint">No se encontró ningún paciente.</div>'; return; }
-    cont.innerHTML = data.map(p => {
+    const dePb = (data || []).map(p => ({
+      id: p.id, dni: p.dni, nombre: p.nombre, fecha_nacimiento: p.fecha_nacimiento,
+      vald_profile_id: p.vald_profile_id, origen: 'puntobio', sexo: null
+    }));
+
+    // Padrón de SARKMED: es una tabla aparte (pacientes_sarkmed), por eso estos
+    // pacientes NO aparecían acá. Si falla la lectura, la búsqueda de PuntoBiO sigue viva.
+    let deSark = [];
+    let avisoSark = '';
+    try {
+      const { data: ds, error: es } = await sb
+        .from('pacientes_sarkmed')
+        .select('id, dni, apellido_nombre, fecha_nacimiento, sexo, vald_profile_id')
+        .or(`apellido_nombre.ilike.%${q}%,dni.ilike.%${q}%`)
+        .order('apellido_nombre', { ascending: true })
+        .limit(20);
+      if (es) throw es;
+      deSark = (ds || []).map(p => ({
+        id: p.id, dni: p.dni, nombre: p.apellido_nombre, fecha_nacimiento: p.fecha_nacimiento,
+        vald_profile_id: p.vald_profile_id, origen: 'sarkmed', sexo: p.sexo || null
+      }));
+    } catch (e2) {
+      avisoSark = '<div class="hint">⚠️ No pude leer el padrón de SARKMED: ' + escapeHtml(e2.message || e2) + '</div>';
+    }
+
+    resultadosBusqueda = dePb.concat(deSark);
+    if (!resultadosBusqueda.length) { cont.innerHTML = avisoSark + '<div class="hint">No se encontró ningún paciente (ni en PuntoBiO ni en SARKMED).</div>'; return; }
+    cont.innerHTML = avisoSark + resultadosBusqueda.map((p, i) => {
       const edad = calcEdad(p.fecha_nacimiento);
-      return `<div class="result-item" onclick='seleccionar(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
-        <span class="nom">${escapeHtml(p.nombre)}</span>
+      const chip = p.origen === 'sarkmed'
+        ? '<span style="background:#f47b20; color:#fff; font-size:10px; font-weight:700; letter-spacing:.4px; border-radius:6px; padding:2px 6px; margin-left:8px;">SARKMED</span>'
+        : '';
+      return `<div class="result-item" onclick="seleccionarIdx(${i})">
+        <span class="nom">${escapeHtml(p.nombre)}${chip}</span>
         <span class="meta">${p.dni ? 'DNI ' + escapeHtml(p.dni) : ''}${edad != null ? ' · ' + edad + ' años' : ''}</span>
       </div>`;
     }).join('');
@@ -593,14 +632,29 @@ async function buscar() {
   }
 }
 
+function seleccionarIdx(i) {
+  const p = resultadosBusqueda[i];
+  if (!p) { toast('No pude tomar ese resultado, buscá de nuevo.'); return; }
+  seleccionar(p);
+}
+
 function seleccionar(p) {
   pacienteSel = p;
   const edad = calcEdad(p.fecha_nacimiento);
   document.getElementById('pname').textContent = p.nombre || '—';
   document.getElementById('pmeta').textContent =
     (p.dni ? 'DNI ' + p.dni : '') + (edad != null ? ' · ' + edad + ' años' : '');
-  document.getElementById('btnHC').onclick = () =>
-    window.open('ver_hc.html?persona_id=' + encodeURIComponent(p.id), '_blank');
+  const bHC = document.getElementById('btnHC');
+  if (p.origen === 'sarkmed') {
+    // El paciente de SARKMED no tiene HC en PuntoBiO: su historia vive en hc_sarkmed.
+    bHC.style.display = 'none';
+    bHC.onclick = null;
+  } else {
+    bHC.style.display = '';
+    bHC.onclick = () => window.open('ver_hc.html?persona_id=' + encodeURIComponent(p.id), '_blank');
+  }
+  const avSark = document.getElementById('avisoSarkmed');
+  if (avSark) avSark.style.display = (p.origen === 'sarkmed') ? 'block' : 'none';
   document.getElementById('workspace').style.display = 'block';
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('results').innerHTML = '';
@@ -609,13 +663,29 @@ function seleccionar(p) {
 
   // Autocompletar edad y resetear la clasificación de población
   document.getElementById('f_edad').value = (edad != null ? edad : '');
+  // El padrón de SARKMED sí guarda el sexo: lo autocompletamos.
+  const selSexo = document.getElementById('f_sexo');
+  if (selSexo) selSexo.value = (p.sexo === 'F' || p.sexo === 'M') ? p.sexo : '';
   ultimaClasificacion = null;
   document.getElementById('pobResult').style.display = 'none';
   document.getElementById('btnGuardarPob').style.display = 'none';
-  // ¿Hay un borrador guardado para este paciente? -> ofrecer "Retomar"
-  buscarBorrador();
-  // ¿Es 1ª evaluación o reevaluación? (autodetecta si ya hay una anterior)
-  detectarTipoEval();
+  // OJO: biolab_evaluaciones y biolab_evolucion guardan persona_id del padrón de
+  // PuntoBiO. Un id de SARKMED podría coincidir con el de otra persona, así que
+  // para SARKMED no leemos ni escribimos esas tablas: el registro vive en su HC.
+  if (esSark()) {
+    const banner = document.getElementById('retomarBanner');
+    if (banner) { banner.style.display = 'none'; banner.innerHTML = ''; }
+    borradorActual = null;
+    tipoEval = 'primera';
+    renderTipoEval();
+    const hint = document.getElementById('evalTipoHint'); if (hint) hint.textContent = '';
+    const btnEvo = document.getElementById('btnEvolucion'); if (btnEvo) btnEvo.style.display = 'none';
+  } else {
+    // ¿Hay un borrador guardado para este paciente? -> ofrecer "Retomar"
+    buscarBorrador();
+    // ¿Es 1ª evaluación o reevaluación? (autodetecta si ya hay una anterior)
+    detectarTipoEval();
+  }
 }
 
 // ---- PASO 4: traer VALD + pintar 🟢🟡🔴 con las normas ----
@@ -1477,11 +1547,12 @@ async function vincularPerfilVALD(profileId, avisar) {
   if (!pacienteSel || !profileId) return;
   try {
     pacienteSel.vald_profile_id = profileId;
-    const { error } = await sb.from('personas').update({ vald_profile_id: profileId }).eq('id', pacienteSel.id);
+    const tabla = esSark() ? 'pacientes_sarkmed' : 'personas';
+    const { error } = await sb.from(tabla).update({ vald_profile_id: profileId }).eq('id', pacienteSel.id);
     if (error) throw error;
     if (avisar) toast('Perfil de VALD vinculado a ' + (pacienteSel.nombre || 'el paciente') + '.');
   } catch (e) {
-    if (avisar) toast('No pude guardar el vínculo (revisá permisos de personas): ' + (e.message || e));
+    if (avisar) toast('No pude guardar el vínculo (revisá permisos): ' + (e.message || e));
   }
 }
 
@@ -1869,7 +1940,7 @@ async function generar() {
     // Con red: si la tabla no existe o falla, seguimos sin evolución (el informe sale igual).
     const fechaVald = ultimaEvaluacion.datos.fechaEvaluacion || '';
     let evolucion = null;
-    if (tipoEval === 'reeval') {
+    if (tipoEval === 'reeval' && !esSark()) {
       try {
         const { data: snaps } = await sb.from('biolab_evolucion')
           .select('fecha_vald, fecha_registro, snapshot')
@@ -1890,7 +1961,7 @@ async function generar() {
     // Observaciones clínicas del profesional (lo que escribió Lu en la HC): limitaciones, indicaciones médicas, qué no se pudo hacer.
     // FIX: los informes auto-generados se excluyen EN LA CONSULTA (antes se filtraban después del limit y se comían el cupo).
     let observaciones = [];
-    try {
+    if (!esSark()) try {
       const { data: obs } = await sb.from('hc_observaciones')
         .select('texto, creado_en, autor_nombre')
         .eq('persona_id', pacienteSel.id)
@@ -1906,7 +1977,7 @@ async function generar() {
     // FIX: antes se filtraba por 'categoria', pero esa columna nunca se completa → no llegaba ningún PDF.
     // Ahora: se toman los PDF del paciente EXCLUYENDO los generados por VALD/el sistema (esos datos ya vienen por API).
     let documentos = [];
-    try {
+    if (!esSark()) try {
       const { data: adjs } = await sb.from('hc_adjuntos')
         .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
         .eq('persona_id', pacienteSel.id)
@@ -1938,7 +2009,7 @@ async function generar() {
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
     // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
     let contexto = null;
-    try {
+    if (!esSark()) try {
       const { data: hcs } = await sb.from('historias_clinicas')
         .select('*').eq('persona_id', pacienteSel.id).is('fusionada_en', null)
         .order('completado_en', { ascending: false }).limit(1);
@@ -1992,7 +2063,7 @@ async function generar() {
       .filter(it => it.manual && (valoresManual[it.id] || '').toString().trim())
       .map(it => ({ test: it.label, resultado: valoresManual[it.id], calcTipo: it.calc || null, ...calcNum(it.calc, calcData[it.id]) }));
     ultimaGeneracion = {
-      persona_id: String(pacienteSel.id),
+      persona_id: esSark() ? null : String(pacienteSel.id),
       fecha_vald: fechaVald,
       poblacion: body.paciente.poblacion,
       edad: body.paciente.edad,
@@ -2014,6 +2085,18 @@ async function generar() {
   }
 }
 
+async function copiarTexto(id) {
+  const ta = document.getElementById(id);
+  if (!ta) return;
+  try {
+    await navigator.clipboard.writeText(ta.value || '');
+    toast('Copiado. Pegalo en la solapa BiOLAB de la HC de SARKMED.');
+  } catch (_) {
+    ta.select(); document.execCommand('copy');
+    toast('Copiado.');
+  }
+}
+
 function mostrarBorradores(informe, nota) {
   const cont = document.getElementById('valdBorrador');
   const areaStyle = 'width:100%; min-height:240px; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:13px; line-height:1.5; box-sizing:border-box;';
@@ -2022,16 +2105,23 @@ function mostrarBorradores(informe, nota) {
     '<textarea id="valdInformeTxt" style="' + areaStyle + '"></textarea>' +
     '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#d97706; margin:14px 0 4px;">🔒 Consideraciones para el profesor · va a Notas para profes (interna)</div>' +
     '<textarea id="valdNotaTxt" style="' + areaStyle + '"></textarea>' +
-    '<div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
-      '<button class="btn" id="btnGuardarHC" onclick="guardarInformeYNota()">💾 Firmar y guardar en la HC</button>' +
-      '<span class="hint" style="margin:0;">El informe queda en Observaciones del profesional; las consideraciones, en Notas para profes (interna). Podés editar los dos antes de guardar.</span>' +
-    '</div>';
+    (esSark()
+      ? '<div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
+          '<button class="btn" onclick="copiarTexto(\'valdInformeTxt\')">📄 Copiar informe</button>' +
+          '<button class="btn ghost" onclick="copiarTexto(\'valdNotaTxt\')">🔒 Copiar consideraciones</button>' +
+          '<span class="hint" style="margin:0;">Paciente de <b>SARKMED</b>: no tiene HC en PuntoBiO. Editá acá y pegá el texto en la solapa <b>BiOLAB</b> de su historia clínica de SARKMED.</span>' +
+        '</div>'
+      : '<div style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
+          '<button class="btn" id="btnGuardarHC" onclick="guardarInformeYNota()">💾 Firmar y guardar en la HC</button>' +
+          '<span class="hint" style="margin:0;">El informe queda en Observaciones del profesional; las consideraciones, en Notas para profes (interna). Podés editar los dos antes de guardar.</span>' +
+        '</div>');
   document.getElementById('valdInformeTxt').value = informe || '';
   document.getElementById('valdNotaTxt').value = nota || '';
 }
 
 async function guardarInformeYNota() {
   if (!pacienteSel) { toast('Seleccioná un paciente.'); return; }
+  if (esSark()) { toast('Paciente de SARKMED: esto se guarda en su HC de SARKMED, no acá.'); return; }
   const taInf = document.getElementById('valdInformeTxt');
   const taNota = document.getElementById('valdNotaTxt');
   const informe = ((taInf && taInf.value) || '').trim();
@@ -2152,6 +2242,7 @@ function clasificarYMostrar() {
 
 async function guardarClasificacion() {
   if (!pacienteSel || !ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
+  if (esSark()) { toast('Paciente de SARKMED: esto se guarda en su HC de SARKMED, no acá.'); return; }
   const btn = document.getElementById('btnGuardarPob');
   btn.disabled = true;
   try {
@@ -2197,6 +2288,7 @@ function payloadEvaluacion(estado) {
 }
 async function guardarProtocolo() {
   if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  if (esSark()) { toast('Paciente de SARKMED: esto se guarda en su HC de SARKMED, no acá.'); return; }
   if (!ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
   if (!protocoloItems.length) { toast('No hay protocolo cargado.'); return; }
   const btn = document.getElementById('btnEvalRealizada');
@@ -2216,6 +2308,7 @@ async function guardarProtocolo() {
 }
 async function guardarBorrador() {
   if (!pacienteSel) { toast('Primero seleccioná un paciente.'); return; }
+  if (esSark()) { toast('Paciente de SARKMED: esto se guarda en su HC de SARKMED, no acá.'); return; }
   if (!ultimaClasificacion) { toast('Primero clasificá la población.'); return; }
   if (!protocoloItems.length) { toast('No hay protocolo cargado.'); return; }
   const btn = document.getElementById('btnGuardarBorrador');
