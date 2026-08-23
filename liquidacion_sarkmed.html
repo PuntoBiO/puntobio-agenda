@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Liquidación SARKMED</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <style>
   :root{
     --naranja:#f47b20; --celeste:#29abe2; --azul:#1c75bc;
@@ -353,12 +354,20 @@ function renderReparto(){
     return;
   }
   const total = filas.reduce((a,[,x]) => a + x.monto, 0);
-  cont.innerHTML = '<table><thead><tr><th>Profesional</th><th class="num">Circuitos</th><th class="num">Le toca</th></tr></thead><tbody>' +
-    filas.map(([,x]) =>
+  cont.innerHTML = '<table><thead><tr><th>Profesional</th><th class="num">Circuitos</th><th class="num">Le toca</th><th class="num">Comprobante</th></tr></thead><tbody>' +
+    filas.map(([clave,x]) =>
       '<tr><td class="nombre">' + esc(x.nombre) + '</td>' +
       '<td class="num">' + x.circuitos + '</td>' +
-      '<td class="num">' + fmt(x.monto) + '</td></tr>').join('') +
-    '</tbody><tfoot><tr><td>Total</td><td class="num"></td><td class="num">' + fmt(total) + '</td></tr></tfoot></table>';
+      '<td class="num">' + fmt(x.monto) + '</td>' +
+      '<td class="num" style="white-space:nowrap">' +
+        '<button class="btn sec" style="padding:6px 10px;font-size:13px" data-pdf="' + esc(clave) + '">PDF</button> ' +
+        '<button class="btn sec" style="padding:6px 10px;font-size:13px" data-wa="' + esc(clave) + '">WhatsApp</button>' +
+      '</td></tr>').join('') +
+    '</tbody><tfoot><tr><td>Total</td><td class="num"></td><td class="num">' + fmt(total) + '</td><td></td></tr></tfoot></table>';
+  cont.querySelectorAll('button[data-pdf]').forEach(b =>
+    b.addEventListener('click', () => comprobantePDF(b.dataset.pdf)));
+  cont.querySelectorAll('button[data-wa]').forEach(b =>
+    b.addEventListener('click', () => mandarWhatsApp(b.dataset.wa)));
 }
 
 /* Quién tiene la plata en la mano y qué tiene que pasar para que cierre. */
@@ -419,6 +428,119 @@ function renderDetalle(){
       '<span class="tot">' + j.pacientes.length + ' ' + (j.pacientes.length===1?'circuito':'circuitos') + ' · ' + fmt(totalDia) + '</span></summary>' +
       '<table><tbody>' + filas + '</tbody></table></details>';
   }).filter(Boolean).join('') || '<div class="vacio">Sin circuitos tuyos en el mes.</div>';
+}
+
+/* ════════════════════════════════════════════════════════════════
+   COMPROBANTE · un PDF por profesional, con el detalle de sus
+   circuitos del mes. En el celular se puede compartir directo a
+   WhatsApp; en la compu se descarga y se adjunta.
+   ════════════════════════════════════════════════════════════════ */
+function lineasDe(clave){
+  const salida = [];
+  Object.keys(calculo.porJornada).sort().forEach(iso => {
+    calculo.porJornada[iso].pacientes.forEach(p => {
+      const parte = p.partes.find(x => x.clave === clave);
+      if(parte) salida.push({ iso, paciente: p.nombre, monto: parte.monto, soporte: p.soporte });
+    });
+  });
+  return salida;
+}
+function nombreDe(clave){
+  const x = calculo.porProfesional[clave];
+  return x ? x.nombre : clave;
+}
+function nombreMes(){ return MESES[mesAncla.getMonth()] + ' ' + mesAncla.getFullYear(); }
+
+async function comprobantePDF(clave){
+  if(!calculo || !calculo.porProfesional[clave]) return;
+  if(!window.jspdf || !window.jspdf.jsPDF){ aviso('No se pudo cargar el generador de PDF. Probá recargar la página.'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const M = 56;                    // margen
+  const ancho = doc.internal.pageSize.getWidth();
+  const quien = nombreDe(clave);
+  const lineas = lineasDe(clave);
+  const total = calculo.porProfesional[clave].monto;
+  let y = M;
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  doc.text('SARKMED', M, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(120);
+  doc.text('PuntoBiO · circuito de valoración muscular', M, y + 16);
+  doc.setTextColor(0);
+  y += 46;
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text('Liquidación de ' + nombreMes(), M, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(12);
+  doc.text(quien, M, y + 18);
+  y += 44;
+
+  doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 22;
+  doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(120);
+  doc.text('FECHA', M, y); doc.text('PACIENTE', M + 90, y);
+  doc.text('IMPORTE', ancho - M, y, { align:'right' });
+  doc.setTextColor(0); y += 6;
+  doc.line(M, y, ancho - M, y); y += 18;
+
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  lineas.forEach(l => {
+    if(y > doc.internal.pageSize.getHeight() - 90){ doc.addPage(); y = M; }
+    const d = fechaDeISO(l.iso);
+    doc.text(String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0'), M, y);
+    doc.text(String(l.paciente).slice(0,42), M + 90, y);
+    doc.text(fmt(l.monto), ancho - M, y, { align:'right' });
+    y += 18;
+  });
+
+  y += 6; doc.setDrawColor(180); doc.line(M, y, ancho - M, y); y += 22;
+  doc.setFont('helvetica','bold'); doc.setFontSize(13);
+  doc.text('Total', M, y);
+  doc.text(fmt(total), ancho - M, y, { align:'right' });
+  y += 30;
+
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(120);
+  doc.text(lineas.length + (lineas.length === 1 ? ' circuito' : ' circuitos') + ' abonados por completo, de jornadas ya realizadas.', M, y);
+  y += 13;
+  if(clave === 'MEDICA' && calculo.enMati > 0){
+    const dif = calculo.enMati - total;
+    doc.text('Cobró ' + fmt(calculo.enMati) + ' de estas jornadas. ' +
+      (dif > 0 ? 'Rinde ' + fmt(dif) + ' al centro.' : dif < 0 ? 'El centro le paga ' + fmt(-dif) + '.' : 'Está justo.'), M, y);
+    y += 13;
+  }
+  const hoy = new Date();
+  doc.text('Emitido el ' + String(hoy.getDate()).padStart(2,'0') + '/' + String(hoy.getMonth()+1).padStart(2,'0') + '/' + hoy.getFullYear(), M, y);
+
+  const archivo = 'liquidacion-sarkmed-' + nombreMes().replace(' ', '-') + '-' + quien.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') + '.pdf';
+
+  // En el celular (y en Safari) se puede mandar directo; si no, se baja.
+  try{
+    const blob = doc.output('blob');
+    const file = new File([blob], archivo, { type:'application/pdf' });
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+      await navigator.share({ files:[file], title:'Liquidación SARKMED', text: textoDe(clave) });
+      return;
+    }
+  }catch(e){ /* si el compartir falla o lo cancelan, queda la descarga */ }
+  doc.save(archivo);
+}
+
+/* El mismo detalle en texto, para pegar en el chat. */
+function textoDe(clave){
+  const lineas = lineasDe(clave);
+  const total = calculo.porProfesional[clave].monto;
+  const filas = lineas.map(l => {
+    const d = fechaDeISO(l.iso);
+    return '• ' + String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') +
+           ' · ' + l.paciente + ' · ' + fmt(l.monto);
+  }).join('\n');
+  return '*SARKMED · Liquidación de ' + nombreMes() + '*\n' + nombreDe(clave) + '\n\n' +
+         filas + '\n\n*Total: ' + fmt(total) + '*';
+}
+
+function mandarWhatsApp(clave){
+  if(!calculo || !calculo.porProfesional[clave]) return;
+  window.open('https://wa.me/?text=' + encodeURIComponent(textoDe(clave)), '_blank');
 }
 
 /* ════════════════════════════════════════════════════════════════
