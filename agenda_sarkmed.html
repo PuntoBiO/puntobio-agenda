@@ -512,6 +512,8 @@ async function refrescarAgenda(){
 }
 
 function jornadaDe(iso){ return jornadas.find(j => j.fecha === iso && j.activo) || null; }
+// Una jornada REALIZADA sigue en la agenda: se ve completa, pero no toma turnos nuevos.
+function esRealizada(j){ return !!j && j.estado === 'REALIZADA'; }
 function turnosDe(iso){ return turnos.filter(t => t.fecha === iso && t.estado !== 'CANCELADO'); }
 
 /* ════════════════════════════════════════════════════════════════
@@ -530,9 +532,12 @@ function renderMes(){
     : '';
 
   const totalMes = turnos.filter(t => t.estado !== 'CANCELADO').length;
-  const sabadosAbiertos = jornadas.filter(j => j.activo).length;
+  const abiertosMes = jornadas.filter(j => j.activo && !esRealizada(j)).length;
+  const hechosMes   = jornadas.filter(j => j.activo && esRealizada(j)).length;
   document.getElementById('contador').textContent =
-    `${sabadosAbiertos} ${sabadosAbiertos === 1 ? 'sábado abierto' : 'sábados abiertos'} · ${totalMes} ${totalMes === 1 ? 'turno' : 'turnos'}`;
+    `${abiertosMes} ${abiertosMes === 1 ? 'sábado abierto' : 'sábados abiertos'}` +
+    (hechosMes ? ` · ${hechosMes} ${hechosMes === 1 ? 'realizado' : 'realizados'}` : '') +
+    ` · ${totalMes} ${totalMes === 1 ? 'turno' : 'turnos'}`;
 
   const y = mesAncla.getFullYear(), m = mesAncla.getMonth();
   const primero = new Date(y, m, 1);
@@ -562,7 +567,9 @@ function renderMes(){
       if(jor){
         cuerpo += '<div class="md-bar"></div>';
         cuerpo += `<div class="md-count">${cant} ${cant === 1 ? 'turno' : 'turnos'}</div>`;
-        cuerpo += `<div class="md-abrir">${jor.hora_inicio.slice(0,5)} a ${jor.hora_fin.slice(0,5)}</div>`;
+        cuerpo += esRealizada(jor)
+          ? '<div class="md-abrir" style="color:var(--verde,#16a34a);font-weight:700">Realizada</div>'
+          : `<div class="md-abrir">${jor.hora_inicio.slice(0,5)} a ${jor.hora_fin.slice(0,5)}</div>`;
       }else{
         cuerpo += '<div class="md-abrir">Sin circuito</div>';
       }
@@ -608,6 +615,7 @@ function renderJornada(){
       <div>
         <div class="jh-fecha">${fechaLarga(diaActual)}</div>
         <div class="jh-sub">Entrada cada ${paso} min · de ${jor.hora_inicio.slice(0,5)} a ${jor.hora_fin.slice(0,5)} · cada recorrido dura aprox. 1:30 hs</div>
+        ${esRealizada(jor) ? '<div class="jh-sub" style="margin-top:4px;color:var(--verde,#16a34a);font-weight:700">Jornada realizada · no se dan más turnos</div>' : ''}
         ${puedeGestionarTurnos() ? '' : '<div class="jh-sub" style="margin-top:4px">Los turnos los carga secretaría</div>'}
       </div>
       <div style="display:flex; gap:8px;">
@@ -653,7 +661,7 @@ function renderJornada(){
             ${seVaDeHora ? '<div class="aviso-cierre">Se pasa del cierre de la jornada</div>' : ''}
           </div>
           <div>
-            ${puedeGestionarTurnos()
+            ${(puedeGestionarTurnos() && !esRealizada(jor))
               ? `<button class="btn btn-primary" onclick="abrirNuevo('${diaActual}','${hora}',${jor.id})">Dar turno</button>`
               : ''}
           </div>
@@ -717,7 +725,14 @@ function abrirModalJornada(iso){
 
   const btns = [`<button class="btn" onclick="cerrarModal('modal-jornada')">Cerrar</button>`];
   if(jornadaSel && jornadaSel.activo){
-    btns.push(`<button class="btn btn-rojo" onclick="cerrarJornada()">Cerrar el circuito de ese día</button>`);
+    if(esRealizada(jornadaSel)){
+      btns.push(`<button class="btn" onclick="reabrirJornada()">Reabrir la jornada</button>`);
+    }else{
+      btns.push(`<button class="btn btn-rojo" onclick="cerrarJornada()">Dar por realizada</button>`);
+    }
+    if(!turnosDe(jornadaSel.fecha).length){
+      btns.push(`<button class="btn" onclick="borrarJornada()">Sacar de la agenda</button>`);
+    }
   }
   btns.push(`<button class="btn btn-primary" onclick="guardarJornada('${iso}')">${nueva ? 'Abrir jornada' : 'Guardar'}</button>`);
   document.getElementById('jornada-foot').innerHTML = btns.join('');
@@ -754,11 +769,12 @@ async function guardarJornada(iso){
   render();
 }
 
+/* Marcar el sábado como REALIZADO: el circuito ya se hizo. La jornada NO se
+   va de la agenda — sigue a la vista con sus pacientes, solo que no se dan
+   turnos nuevos. Para sacar de la agenda un sábado abierto por error está
+   borrarJornada(), que solo funciona si no tiene a nadie. */
 async function cerrarJornada(){
   if(!jornadaSel) return;
-  // Cerrar el circuito NO exige cancelar los turnos: lo que exige es que cada
-  // paciente tenga su estado puesto. Cancelar es otra cosa (el que nunca señó
-  // y se borra de todos lados), así que solo frenamos por los PENDIENTES.
   const delDia = turnosDe(jornadaSel.fecha);
   const pendientes = delDia.filter(t => t.estado === 'PENDIENTE');
   if(pendientes.length){
@@ -771,11 +787,40 @@ async function cerrarJornada(){
   const resumen = delDia.length
     ? `\n\nQuedan registrados ${presentes} ${presentes === 1 ? 'presente' : 'presentes'} y ${ausentes} ${ausentes === 1 ? 'ausente' : 'ausentes'}.`
     : '';
-  if(!confirm(`¿Cerrar el circuito del ${fechaLarga(jornadaSel.fecha)}?\n\nEse sábado deja de tener agenda.${resumen}`)) return;
+  if(!confirm(`¿Dar por realizada la jornada del ${fechaLarga(jornadaSel.fecha)}?\n\nSigue viéndose en la agenda con sus pacientes, pero no se dan más turnos.${resumen}`)) return;
+  const { error } = await sb.from('jornadas_sarkmed').update({ estado: 'REALIZADA' }).eq('id', jornadaSel.id);
+  if(error){ toast('Error: ' + error.message, 'err'); return; }
+  cerrarModal('modal-jornada');
+  toast('Jornada realizada', 'ok');
+  await cargarDatos();
+  render();
+}
+
+async function reabrirJornada(){
+  if(!jornadaSel) return;
+  const { error } = await sb.from('jornadas_sarkmed').update({ estado: 'ABIERTA' }).eq('id', jornadaSel.id);
+  if(error){ toast('Error: ' + error.message, 'err'); return; }
+  cerrarModal('modal-jornada');
+  toast('Jornada reabierta', 'ok');
+  await cargarDatos();
+  render();
+}
+
+/* Sacar de la agenda un sábado que se abrió por error. Solo si está vacío:
+   si hay pacientes, la jornada se marca realizada, no se borra. */
+async function borrarJornada(){
+  if(!jornadaSel) return;
+  const conTurnos = turnosDe(jornadaSel.fecha).length;
+  if(conTurnos){
+    document.getElementById('alerta-jornada').innerHTML =
+      `<div class="err-box">Ese sábado tiene ${conTurnos} ${conTurnos === 1 ? 'paciente' : 'pacientes'}. Si el circuito ya se hizo, marcalo como realizado; si de verdad no va, cancelá los turnos primero.</div>`;
+    return;
+  }
+  if(!confirm(`¿Sacar de la agenda el sábado ${fechaLarga(jornadaSel.fecha)}?\n\nEse día deja de tener circuito.`)) return;
   const { error } = await sb.from('jornadas_sarkmed').update({ activo: false }).eq('id', jornadaSel.id);
   if(error){ toast('Error: ' + error.message, 'err'); return; }
   cerrarModal('modal-jornada');
-  toast('Circuito cerrado', 'ok');
+  toast('Sábado sacado de la agenda', 'ok');
   await cargarDatos();
   vistaActual = 'mes';
   render();
