@@ -91,6 +91,8 @@
       <div class="nombre" id="mes-nombre">—</div>
       <button class="btn gris" id="mes-sig">›</button>
       <button class="btn sec" id="btn-refrescar">↻</button>
+      <button class="btn" id="btn-pdf-mes">PDF del mes</button>
+      <button class="btn sec" id="btn-wa-mes">WhatsApp</button>
     </div>
   </div>
 
@@ -302,6 +304,8 @@ function render(){
     $('titulo').textContent = 'Mi facturación · SARKMED';
     $('bajada').textContent = 'Lo que te corresponde de los circuitos pagos, jornada por jornada.';
     $('tit-reparto').textContent = 'Lo tuyo';
+    $('btn-pdf-mes').hidden = true;
+    $('btn-wa-mes').hidden = true;
   }
   renderKpis();
   renderReparto();
@@ -544,6 +548,145 @@ function mandarWhatsApp(clave){
 }
 
 /* ════════════════════════════════════════════════════════════════
+   EL MES COMPLETO · un PDF con todo el reparto, para mandarle a
+   quien lleva la cuenta del circuito (Mati, Jime).
+   ════════════════════════════════════════════════════════════════ */
+async function pdfDelMes(){
+  if(!calculo){ return; }
+  if(!window.jspdf || !window.jspdf.jsPDF){ aviso('No se pudo cargar el generador de PDF. Probá recargar la página.'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const M = 56;
+  const ancho = doc.internal.pageSize.getWidth();
+  const alto  = doc.internal.pageSize.getHeight();
+  let y = M;
+  const salto = (alto_necesario) => { if(y > alto - (alto_necesario || 80)){ doc.addPage(); y = M; } };
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(18);
+  doc.text('SARKMED', M, y);
+  doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(120);
+  doc.text('PuntoBiO · circuito de valoración muscular', M, y + 16);
+  doc.setTextColor(0); y += 46;
+
+  doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('Liquidación de ' + nombreMes(), M, y); y += 20;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(120);
+  doc.text(calculo.circuitosLiquidados + ' ' + (calculo.circuitosLiquidados===1?'circuito abonado':'circuitos abonados') +
+           ' en ' + jornadas.length + ' ' + (jornadas.length===1?'jornada realizada':'jornadas realizadas') +
+           ' · total ' + fmt(calculo.totalLiquidado), M, y);
+  doc.setTextColor(0); y += 30;
+
+  // Reparto
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('Lo que le toca a cada uno', M, y); y += 14;
+  doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 18;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  Object.values(calculo.porProfesional).forEach(x => {
+    salto();
+    doc.text(String(x.nombre).slice(0,44), M, y);
+    doc.text(x.circuitos + (x.circuitos===1?' circuito':' circuitos'), M + 260, y);
+    doc.text(fmt(x.monto), ancho - M, y, { align:'right' });
+    y += 18;
+  });
+  y += 4; doc.setDrawColor(180); doc.line(M, y, ancho - M, y); y += 20;
+  doc.setFont('helvetica','bold'); doc.setFontSize(12);
+  doc.text('Total', M, y); doc.text(fmt(calculo.totalLiquidado), ancho - M, y, { align:'right' });
+  y += 32;
+
+  // Dónde está la plata
+  const nombreMedica = nombreDeEstacion('MEDICA');
+  const leToca = calculo.porProfesional['MEDICA'] ? calculo.porProfesional['MEDICA'].monto : 0;
+  const dif = calculo.enMati - leToca;
+  salto(120);
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('Dónde está la plata', M, y); y += 14;
+  doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 18;
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  doc.text('Entró a PuntoBiO', M, y); doc.text(fmt(calculo.enPB), ancho - M, y, { align:'right' }); y += 18;
+  doc.text('Entró a ' + nombreMedica, M, y); doc.text(fmt(calculo.enMati), ancho - M, y, { align:'right' }); y += 20;
+  doc.setFont('helvetica','bold');
+  doc.text(Math.abs(dif) < 1 ? 'Está justo: cobró lo que le toca.'
+        : dif > 0 ? nombreMedica + ' rinde ' + fmt(dif) + ' al centro.'
+                  : 'El centro le paga ' + fmt(-dif) + ' a ' + nombreMedica + '.', M, y);
+  y += 30;
+
+  // Pendientes
+  if(calculo.pendientes.length){
+    salto(120);
+    doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text('Hicieron el circuito y falta cobrarles', M, y); y += 14;
+    doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 18;
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    calculo.pendientes.forEach(p => {
+      salto();
+      const d = fechaDeISO(p.iso);
+      doc.text(String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + ' · ' + String(p.nombre).slice(0,36), M, y);
+      doc.text('falta ' + fmt(p.falta), ancho - M, y, { align:'right' });
+      y += 18;
+    });
+    y += 14;
+  }
+
+  // Detalle por jornada
+  const fechas = Object.keys(calculo.porJornada).sort();
+  if(fechas.length){
+    salto(120);
+    doc.setFont('helvetica','bold'); doc.setFontSize(11);
+    doc.text('Jornada por jornada', M, y); y += 14;
+    doc.setDrawColor(220); doc.line(M, y, ancho - M, y); y += 18;
+    fechas.forEach(iso => {
+      const j = calculo.porJornada[iso];
+      salto(90);
+      doc.setFont('helvetica','bold'); doc.setFontSize(10);
+      doc.text(fechaLarga(iso), M, y);
+      doc.text(fmt(j.total), ancho - M, y, { align:'right' });
+      y += 16;
+      doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(90);
+      j.pacientes.forEach(p => {
+        salto();
+        const reparto = p.partes.map(x => String(x.nombre).split(' ')[0] + ' ' + fmt(x.monto)).join(' · ');
+        doc.text(String(p.nombre).slice(0,30), M + 12, y);
+        doc.text(reparto.slice(0,70), M + 170, y);
+        y += 14;
+      });
+      doc.setTextColor(0); y += 10;
+    });
+  }
+
+  salto(60);
+  const hoy = new Date();
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(120);
+  doc.text('Emitido el ' + String(hoy.getDate()).padStart(2,'0') + '/' + String(hoy.getMonth()+1).padStart(2,'0') + '/' + hoy.getFullYear() +
+           ' · se reparte solo el circuito abonado completo de jornadas realizadas.', M, y);
+
+  const archivo = 'liquidacion-sarkmed-' + nombreMes().replace(' ', '-') + '.pdf';
+  try{
+    const blob = doc.output('blob');
+    const file = new File([blob], archivo, { type:'application/pdf' });
+    if(navigator.canShare && navigator.canShare({ files:[file] })){
+      await navigator.share({ files:[file], title:'Liquidación SARKMED · ' + nombreMes(), text: textoDelMes() });
+      return;
+    }
+  }catch(e){ /* cancelado o no soportado: queda la descarga */ }
+  doc.save(archivo);
+}
+
+function textoDelMes(){
+  if(!calculo) return '';
+  const filas = Object.values(calculo.porProfesional)
+    .map(x => '• ' + x.nombre + ': ' + fmt(x.monto)).join('\n');
+  const nombreMedica = nombreDeEstacion('MEDICA');
+  const leToca = calculo.porProfesional['MEDICA'] ? calculo.porProfesional['MEDICA'].monto : 0;
+  const dif = calculo.enMati - leToca;
+  const cierre = Math.abs(dif) < 1 ? '' :
+    (dif > 0 ? '\n' + nombreMedica + ' rinde ' + fmt(dif) + ' al centro.'
+             : '\nEl centro le paga ' + fmt(-dif) + ' a ' + nombreMedica + '.');
+  return '*SARKMED · Liquidación de ' + nombreMes() + '*\n' +
+         calculo.circuitosLiquidados + ' circuitos abonados · total ' + fmt(calculo.totalLiquidado) + '\n\n' +
+         filas + '\n\nEntró a PuntoBiO: ' + fmt(calculo.enPB) + ' · a ' + nombreMedica + ': ' + fmt(calculo.enMati) + cierre;
+}
+
+/* ════════════════════════════════════════════════════════════════
    ARRANQUE
    ════════════════════════════════════════════════════════════════ */
 async function recargar(){
@@ -558,6 +701,8 @@ $('mes-sig').addEventListener('click', async () => {
   mesAncla = new Date(mesAncla.getFullYear(), mesAncla.getMonth()+1, 1); await recargar();
 });
 $('btn-refrescar').addEventListener('click', recargar);
+$('btn-pdf-mes').addEventListener('click', pdfDelMes);
+$('btn-wa-mes').addEventListener('click', () => window.open('https://wa.me/?text=' + encodeURIComponent(textoDelMes()), '_blank'));
 
 (async function init(){
   const habilitado = await cargarPermisos();
