@@ -90,7 +90,8 @@
 
   @media (max-width:680px){
     .wrap{padding:16px 12px 44px}
-    th:nth-child(3),td:nth-child(3){display:none}
+    #tabla-pacientes th:nth-child(4),#tabla-pacientes td:nth-child(4){display:none}
+    #tabla-movs th:nth-child(3),#tabla-movs td:nth-child(3){display:none}
     .grid2{grid-template-columns:1fr}
   }
 </style>
@@ -232,7 +233,7 @@
         <div class="campo"><label for="mt-centro">Centro</label><input id="mt-centro" type="number" step="1" min="0"></div>
         <div class="campo"><label for="mt-sena">Seña (%)</label><input id="mt-sena" type="number" step="1" min="0" max="100"></div>
       </div>
-      <div class="campo" style="margin-top:12px"><label for="mt-soporte">Soporte BiOLAB (% de la parte de BiOLAB)</label><input id="mt-soporte" type="number" step="1" min="0" max="100"></div>
+      <div class="campo" style="margin-top:12px"><label for="mt-soporte">Soporte BiOLAB ($ que cobra Bruno o Male, sale de la parte de BiOLAB)</label><input id="mt-soporte" type="number" step="1" min="0"></div>
     </div>
     <div class="modal-foot">
       <button class="btn gris" id="mt-cancelar">Cancelar</button>
@@ -434,14 +435,37 @@ function renderPacientes(){
       '<td><div class="nombre">' + esc(p.apellido_nombre || 'sin nombre') + '</div>' +
         '<div class="dni">DNI ' + esc(p.dni || '—') + (t.hora ? ' · ' + String(t.hora).slice(0,5) : '') + '</div></td>' +
       '<td><span class="pill ' + est + '">' + txt + '</span></td>' +
+      '<td>' + selectSoporte(t, i) + '</td>' +
       '<td class="num">' + fmt(cob) + '</td>' +
       '<td class="num">' + (ausente ? '—' : (saldo > 0 ? fmt(saldo) : '—')) + '</td>' +
       '<td class="num"><button class="btn chico ' + (saldo > 0 ? '' : 'sec') + '" data-turno="' + i + '">Cobrar</button></td>' +
     '</tr>';
   }).join('');
-  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Estado</th><th class="num">Cobrado</th><th class="num">Saldo</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
+  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Estado</th><th>Soporte BiOLAB</th><th class="num">Cobrado</th><th class="num">Saldo</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
   cont.querySelectorAll('button[data-turno]').forEach(b =>
     b.addEventListener('click', () => abrirCobro(turnos[Number(b.dataset.turno)])));
+  cont.querySelectorAll('select[data-soporte]').forEach(s =>
+    s.addEventListener('change', () => guardarSoporte(turnos[Number(s.dataset.soporte)], s.value)));
+}
+
+/* Quién acompañó en la estación BiOLAB. A veces va Bruno, a veces Male y a
+   veces nadie: se marca acá y la liquidación después le paga lo suyo. */
+function selectSoporte(t, i){
+  const v = t.biolab_soporte || '';
+  const op = (val, txt) => '<option value="' + val + '"' + (v === val ? ' selected' : '') + '>' + txt + '</option>';
+  return '<select class="chico" data-soporte="' + i + '" style="padding:6px 8px;font-size:13px">' +
+    op('', 'nadie') + op('BRUNO', 'Bruno') + op('MALE', 'Male') + '</select>';
+}
+
+async function guardarSoporte(turno, valor){
+  if(!turno) return;
+  const { error } = await sb.from('turnos_sarkmed')
+    .update({ biolab_soporte: valor || null })
+    .eq('id', turno.id);
+  if(error){ aviso($('alerta'), 'No se pudo guardar el soporte: ' + error.message); return; }
+  turno.biolab_soporte = valor || null;
+  aviso($('alerta'), valor ? 'Soporte guardado.' : 'Soporte sacado.', 'ok');
+  setTimeout(() => aviso($('alerta'), ''), 2000);
 }
 
 /* Plata de pacientes que faltaron. Dos salidas: se usa en una jornada nueva
@@ -547,7 +571,8 @@ function renderTarifa(){
     '<div class="reparto">Médica ' + fmt(t.monto_medica) + ' · Nutrición ' + fmt(t.monto_nutricion) +
       ' · Suelo pélvico ' + fmt(t.monto_suelo_pelvico) + ' · BiOLAB ' + fmt(t.monto_biolab) +
       ' · Centro ' + fmt(t.monto_centro) + '</div>' +
-    '<div class="reparto">Si en BiOLAB acompaña Bruno o Male, se lleva el ' + num(t.pct_soporte_biolab) + '% de la parte de BiOLAB.</div>' +
+    '<div class="reparto">Si en BiOLAB acompaña Bruno o Male, se lleva ' + fmt(t.monto_soporte_biolab) +
+      ' y a BiOLAB le quedan ' + fmt(num(t.monto_biolab) - num(t.monto_soporte_biolab)) + '.</div>' +
     '<div class="reparto">Rige desde el ' + fechaLarga(t.vigente_desde) + '.</div>' +
     (puedeEditarTarifa ? '<div style="margin-top:12px"><button class="btn sec chico" id="btn-nueva-tarifa">Cargar tarifa nueva</button></div>' : '');
   const b = $('btn-nueva-tarifa');
@@ -680,7 +705,7 @@ function abrirTarifa(){
   $('mt-biolab').value = num(t.monto_biolab);
   $('mt-centro').value = num(t.monto_centro);
   $('mt-sena').value = num(t.pct_sena) || 50;
-  $('mt-soporte').value = num(t.pct_soporte_biolab) || 50;
+  $('mt-soporte').value = num(t.monto_soporte_biolab);
   abrir('modal-tarifa');
 }
 
@@ -695,11 +720,15 @@ $('mt-guardar').addEventListener('click', async () => {
     monto_biolab: Number($('mt-biolab').value) || 0,
     monto_centro: Number($('mt-centro').value) || 0,
     pct_sena: Number($('mt-sena').value) || 50,
-    pct_soporte_biolab: Number($('mt-soporte').value) || 50,
+    monto_soporte_biolab: Number($('mt-soporte').value) || 0,
     creado_por_email: miEmail || null
   };
   if(!fila.vigente_desde){ aviso($('mt-alerta'), 'Poné desde cuándo rige.'); return; }
   if(!fila.precio_circuito){ aviso($('mt-alerta'), 'Poné el precio del circuito.'); return; }
+  if(fila.monto_soporte_biolab > fila.monto_biolab){
+    aviso($('mt-alerta'), 'El soporte sale de la parte de BiOLAB, no puede ser más de ' + fmt(fila.monto_biolab) + '.');
+    return;
+  }
   const suma = fila.monto_medica + fila.monto_nutricion + fila.monto_suelo_pelvico + fila.monto_biolab + fila.monto_centro;
   if(suma !== fila.precio_circuito){
     aviso($('mt-alerta'), 'Las partes suman ' + fmt(suma) + ' y el circuito vale ' + fmt(fila.precio_circuito) + '. Tienen que dar igual.');
