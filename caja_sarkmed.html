@@ -123,6 +123,11 @@
     <div class="card"><div id="tabla-pacientes"><div class="vacio">Cargando…</div></div></div>
   </section>
 
+  <section class="seccion">
+    <h2>Reserva de SARKMED</h2>
+    <div class="pulso" id="reserva"></div>
+  </section>
+
   <section class="seccion" id="sec-creditos" hidden>
     <h2>Crédito a favor</h2>
     <div class="card"><div id="tabla-creditos"></div></div>
@@ -266,6 +271,7 @@ let turnos = [];          // turnos de la jornada (con paciente)
 let cobros = [];          // cobros imputados a la jornada
 let creditos = [];        // plata a favor de pacientes que faltaron (situacion A_FAVOR)
 let verAnulados = false;  // los cobros anulados quedan escondidos hasta que se piden
+let pozos = [];           // señas que quedaron para SARKMED (situacion POZO), de todas las jornadas
 let cobroCtx = null;      // { paciente, cobrado } del modal
 let buscarTimer = null;
 let resultadosBusqueda = [];
@@ -346,7 +352,7 @@ async function cargarTarifa(){
 async function cargarJornada(){
   if(!jornadaSel){ turnos = []; cobros = []; return; }
   const cols = 'id, paciente_id, fecha, concepto, importe, medio, destino, situacion, jornada_origen, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)';
-  const [tRes, cRes, fRes] = await Promise.all([
+  const [tRes, cRes, fRes, pRes] = await Promise.all([
     sb.from('turnos_sarkmed')
       .select('id, fecha, hora, estado, paciente_id, biolab_soporte, paciente:pacientes_sarkmed(id, apellido_nombre, dni)')
       .eq('fecha', jornadaSel).neq('estado','CANCELADO').order('hora'),
@@ -354,11 +360,15 @@ async function cargarJornada(){
       .eq('fecha_jornada', jornadaSel).order('id'),
     // El crédito a favor no vive en ninguna jornada: es del paciente hasta que se use.
     sb.from('cobros_sarkmed').select(cols)
-      .eq('situacion','A_FAVOR').eq('anulado', false).order('paciente_id').limit(300)
+      .eq('situacion','A_FAVOR').eq('anulado', false).order('paciente_id').limit(300),
+    // El pozo: señas que ya no vuelven al paciente y quedan para SARKMED.
+    sb.from('cobros_sarkmed').select(cols)
+      .eq('situacion','POZO').eq('anulado', false).order('fecha_jornada').limit(500)
   ]);
   if(tRes.error){ aviso($('alerta'), 'Turnos: ' + tRes.error.message); turnos = []; } else turnos = tRes.data || [];
   if(cRes.error){ aviso($('alerta'), 'Cobros: ' + cRes.error.message); cobros = []; } else cobros = cRes.data || [];
   if(fRes.error){ creditos = []; } else creditos = fRes.data || [];
+  if(pRes.error){ pozos = []; } else pozos = pRes.data || [];
 }
 
 /* Lo que el paciente tiene puesto en ESTA jornada. Un crédito a favor no
@@ -382,6 +392,7 @@ function pctSena(){ return tarifa ? num(tarifa.pct_sena) : 50; }
 function render(){
   renderKpis();
   renderPacientes();
+  renderReserva();
   renderCreditos();
   renderMovs();
   renderTarifa();
@@ -470,6 +481,33 @@ async function guardarSoporte(turno, valor){
 
 /* Plata de pacientes que faltaron. Dos salidas: se usa en una jornada nueva
    o queda para PuntoBiO. Mientras tanto sigue siendo del paciente. */
+/* LA RESERVA DE SARKMED · dos plata distintas que conviene no mezclar:
+   · en custodia = señas de pacientes que no vinieron y todavía pueden usarlas.
+     Es del paciente, no de SARKMED.
+   · pozo = señas que ya nadie va a usar y quedaron para SARKMED. */
+function renderReserva(){
+  const mes = (jornadaSel || hoyISO()).slice(0,7);
+  const custodia = creditos.reduce((a,c) => a + num(c.importe), 0);
+  const pacientes = new Set(creditos.map(c => c.paciente_id)).size;
+  const pozoMes = pozos.filter(c => String(c.fecha_jornada || '').slice(0,7) === mes)
+                       .reduce((a,c) => a + num(c.importe), 0);
+  const pozoTotal = pozos.reduce((a,c) => a + num(c.importe), 0);
+  const nombreMes = MESES[Number(mes.slice(5,7)) - 1];
+
+  $('reserva').innerHTML = [
+    '<div class="card tile"><div class="n" style="color:var(--ambar)">' + fmt(custodia) + '</div>' +
+      '<div class="l">en custodia</div>' +
+      '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">' +
+      (pacientes ? pacientes + ' ' + (pacientes === 1 ? 'paciente que faltó y puede usarla' : 'pacientes que faltaron y pueden usarla') : 'nadie con plata a favor') +
+      '</div></div>',
+    '<div class="card tile"><div class="n" style="color:var(--azul)">' + fmt(pozoMes) + '</div>' +
+      '<div class="l">al pozo en ' + nombreMes + '</div></div>',
+    '<div class="card tile"><div class="n" style="color:var(--verde)">' + fmt(pozoTotal) + '</div>' +
+      '<div class="l">pozo acumulado</div>' +
+      '<div class="d" style="font-size:11.5px;color:var(--gris-claro);margin-top:6px">señas que quedaron para SARKMED</div></div>'
+  ].join('');
+}
+
 function renderCreditos(){
   const cont = $('tabla-creditos');
   if(!creditos.length){ $('sec-creditos').hidden = true; return; }
@@ -734,7 +772,10 @@ $('mt-guardar').addEventListener('click', async () => {
     aviso($('mt-alerta'), 'Las partes suman ' + fmt(suma) + ' y el circuito vale ' + fmt(fila.precio_circuito) + '. Tienen que dar igual.');
     return;
   }
-  const { error } = await sb.from('sarkmed_tarifa').insert(fila);
+  // Si ya hay una tarifa que rige desde esa fecha, se corrige (no se apila
+  // otra igual). Las de días anteriores no se tocan nunca.
+  const { error } = await sb.from('sarkmed_tarifa')
+    .upsert(fila, { onConflict: 'vigente_desde' });
   if(error){ aviso($('mt-alerta'), error.message); return; }
   cerrar('modal-tarifa');
   await cargarTarifa();
