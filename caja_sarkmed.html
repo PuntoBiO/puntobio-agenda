@@ -122,6 +122,11 @@
     <div class="card"><div id="tabla-pacientes"><div class="vacio">Cargando…</div></div></div>
   </section>
 
+  <section class="seccion" id="sec-creditos" hidden>
+    <h2>Crédito a favor</h2>
+    <div class="card"><div id="tabla-creditos"></div></div>
+  </section>
+
   <section class="seccion">
     <h2>Movimientos</h2>
     <div class="card"><div id="tabla-movs"><div class="vacio">Cargando…</div></div></div>
@@ -257,7 +262,8 @@ let tarifa = null;        // tarifa vigente para la jornada elegida
 let jornadas = [];        // sábados con circuito abierto
 let jornadaSel = null;    // ISO
 let turnos = [];          // turnos de la jornada (con paciente)
-let cobros = [];          // cobros de la jornada (no anulados incluidos, se filtra al mostrar)
+let cobros = [];          // cobros imputados a la jornada
+let creditos = [];        // plata a favor de pacientes que faltaron (situacion A_FAVOR)
 let cobroCtx = null;      // { paciente, cobrado } del modal
 let buscarTimer = null;
 let resultadosBusqueda = [];
@@ -337,22 +343,33 @@ async function cargarTarifa(){
 
 async function cargarJornada(){
   if(!jornadaSel){ turnos = []; cobros = []; return; }
-  const [tRes, cRes] = await Promise.all([
+  const cols = 'id, paciente_id, fecha, concepto, importe, medio, destino, situacion, jornada_origen, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)';
+  const [tRes, cRes, fRes] = await Promise.all([
     sb.from('turnos_sarkmed')
       .select('id, fecha, hora, estado, paciente_id, biolab_soporte, paciente:pacientes_sarkmed(id, apellido_nombre, dni)')
       .eq('fecha', jornadaSel).neq('estado','CANCELADO').order('hora'),
-    sb.from('cobros_sarkmed')
-      .select('id, paciente_id, fecha, concepto, importe, medio, destino, observaciones, anulado, creado_por_email, paciente:pacientes_sarkmed(id, apellido_nombre, dni)')
-      .eq('fecha_jornada', jornadaSel).order('id')
+    sb.from('cobros_sarkmed').select(cols)
+      .eq('fecha_jornada', jornadaSel).order('id'),
+    // El crédito a favor no vive en ninguna jornada: es del paciente hasta que se use.
+    sb.from('cobros_sarkmed').select(cols)
+      .eq('situacion','A_FAVOR').eq('anulado', false).order('paciente_id').limit(300)
   ]);
   if(tRes.error){ aviso($('alerta'), 'Turnos: ' + tRes.error.message); turnos = []; } else turnos = tRes.data || [];
   if(cRes.error){ aviso($('alerta'), 'Cobros: ' + cRes.error.message); cobros = []; } else cobros = cRes.data || [];
+  if(fRes.error){ creditos = []; } else creditos = fRes.data || [];
 }
 
+/* Lo que el paciente tiene puesto en ESTA jornada. Un crédito a favor no
+   cuenta hasta que alguien lo aplica: si no, la jornada figuraría cobrada
+   con plata de otro sábado. */
 function cobradoDe(pacienteId){
-  return cobros.filter(c => !c.anulado && c.paciente_id === pacienteId)
+  return cobros.filter(c => !c.anulado && c.situacion === 'APLICADO' && c.paciente_id === pacienteId)
                .reduce((a,c) => a + num(c.importe), 0);
 }
+function aFavorDe(pacienteId){
+  return creditos.filter(c => c.paciente_id === pacienteId).reduce((a,c) => a + num(c.importe), 0);
+}
+function esAusente(t){ return t && t.estado === 'AUSENTE'; }
 
 /* ════════════════════════════════════════════════════════════════
    RENDER
@@ -363,28 +380,38 @@ function pctSena(){ return tarifa ? num(tarifa.pct_sena) : 50; }
 function render(){
   renderKpis();
   renderPacientes();
+  renderCreditos();
   renderMovs();
   renderTarifa();
 }
 
 function renderKpis(){
   const vivos = cobros.filter(c => !c.anulado);
-  const total = vivos.reduce((a,c) => a + num(c.importe), 0);
-  const efectivo = vivos.filter(c => c.medio === 'EFECTIVO').reduce((a,c) => a + num(c.importe), 0);
+  const aplicados = vivos.filter(c => c.situacion === 'APLICADO');
+  const pozo = vivos.filter(c => c.situacion === 'POZO').reduce((a,c) => a + num(c.importe), 0);
+  const total = aplicados.reduce((a,c) => a + num(c.importe), 0);
+  const efectivo = aplicados.filter(c => c.medio === 'EFECTIVO').reduce((a,c) => a + num(c.importe), 0);
   const transf = total - efectivo;
-  const aMati = vivos.filter(c => c.destino === 'MATI').reduce((a,c) => a + num(c.importe), 0);
+  const aMati = aplicados.filter(c => c.destino === 'MATI').reduce((a,c) => a + num(c.importe), 0);
   const aPB = total - aMati;
-  const esperado = turnos.length * precio();
+  // Los que faltaron no deben plata: su seña ya salió de la jornada.
+  const vienen = turnos.filter(t => !esAusente(t));
+  const esperado = vienen.length * precio();
   const pendiente = Math.max(esperado - total, 0);
+  const ausentes = turnos.length - vienen.length;
 
-  $('kpis').innerHTML = [
+  const tiles = [
     '<div class="card kpi cobrado"><div class="n">'+fmt(total)+'</div><div class="l">cobrado en la jornada</div>' +
       '<div class="d">'+fmt(efectivo)+' efectivo · '+fmt(transf)+' transferencia</div></div>',
     '<div class="card kpi pendiente"><div class="n">'+fmt(pendiente)+'</div><div class="l">falta cobrar</div>' +
-      '<div class="d">'+turnos.length+' '+(turnos.length===1?'paciente':'pacientes')+' × '+fmt(precio())+'</div></div>',
+      '<div class="d">'+vienen.length+' '+(vienen.length===1?'paciente':'pacientes')+' × '+fmt(precio()) +
+      (ausentes ? ' · '+ausentes+' '+(ausentes===1?'ausente':'ausentes') : '') + '</div></div>',
     '<div class="card kpi"><div class="n">'+fmt(aPB)+'</div><div class="l">entró a PuntoBiO</div></div>',
     '<div class="card kpi"><div class="n">'+fmt(aMati)+'</div><div class="l">entró a Mati</div></div>'
-  ].join('');
+  ];
+  if(pozo > 0) tiles.push('<div class="card kpi"><div class="n">'+fmt(pozo)+'</div><div class="l">quedó en el pozo</div>' +
+    '<div class="d">señas de ausentes, no se reparten</div></div>');
+  $('kpis').innerHTML = tiles.join('');
 }
 
 function renderPacientes(){
@@ -397,20 +424,77 @@ function renderPacientes(){
     const p = t.paciente || {};
     const cob = cobradoDe(t.paciente_id);
     const saldo = precio() - cob;
-    const est = cob <= 0 ? 'SIN' : (saldo <= 0 ? 'SALDADO' : 'SENADO');
-    const txt = est === 'SIN' ? 'sin seña' : est === 'SENADO' ? 'señado' : 'saldado';
-    return '<tr>' +
+    const ausente = esAusente(t);
+    const favor = aFavorDe(t.paciente_id);
+    let est = cob <= 0 ? 'SIN' : (saldo <= 0 ? 'SALDADO' : 'SENADO');
+    let txt = est === 'SIN' ? 'sin seña' : est === 'SENADO' ? 'señado' : 'saldado';
+    if(ausente){ est = 'SENADO'; txt = favor > 0 ? 'no vino · ' + fmt(favor) + ' a favor' : 'no vino'; }
+    return '<tr' + (ausente ? ' style="opacity:.7"' : '') + '>' +
       '<td><div class="nombre">' + esc(p.apellido_nombre || 'sin nombre') + '</div>' +
         '<div class="dni">DNI ' + esc(p.dni || '—') + (t.hora ? ' · ' + String(t.hora).slice(0,5) : '') + '</div></td>' +
       '<td><span class="pill ' + est + '">' + txt + '</span></td>' +
       '<td class="num">' + fmt(cob) + '</td>' +
-      '<td class="num">' + (saldo > 0 ? fmt(saldo) : '—') + '</td>' +
+      '<td class="num">' + (ausente ? '—' : (saldo > 0 ? fmt(saldo) : '—')) + '</td>' +
       '<td class="num"><button class="btn chico ' + (saldo > 0 ? '' : 'sec') + '" data-turno="' + i + '">Cobrar</button></td>' +
     '</tr>';
   }).join('');
   cont.innerHTML = '<table><thead><tr><th>Paciente</th><th>Estado</th><th class="num">Cobrado</th><th class="num">Saldo</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
   cont.querySelectorAll('button[data-turno]').forEach(b =>
     b.addEventListener('click', () => abrirCobro(turnos[Number(b.dataset.turno)])));
+}
+
+/* Plata de pacientes que faltaron. Dos salidas: se usa en una jornada nueva
+   o queda para PuntoBiO. Mientras tanto sigue siendo del paciente. */
+function renderCreditos(){
+  const cont = $('tabla-creditos');
+  if(!creditos.length){ $('sec-creditos').hidden = true; return; }
+  $('sec-creditos').hidden = false;
+  const filas = creditos.map((c, i) => {
+    const p = c.paciente || {};
+    return '<tr>' +
+      '<td><div class="nombre">' + esc(p.apellido_nombre || '—') + '</div>' +
+        '<div class="dni">DNI ' + esc(p.dni || '—') +
+        (c.jornada_origen ? ' · señó para el ' + fechaCorta(c.jornada_origen) : '') + '</div></td>' +
+      '<td class="num">' + fmt(c.importe) + '</td>' +
+      '<td class="num" style="white-space:nowrap">' +
+        (jornadaSel ? '<button class="btn chico" data-usar="' + i + '">Usar acá</button> ' : '') +
+        '<button class="btn chico gris" data-pozo="' + i + '">Al pozo</button></td>' +
+    '</tr>';
+  }).join('');
+  cont.innerHTML = '<table><thead><tr><th>Paciente</th><th class="num">A favor</th><th></th></tr></thead><tbody>' + filas + '</tbody></table>';
+  cont.querySelectorAll('button[data-usar]').forEach(b =>
+    b.addEventListener('click', () => usarCredito(creditos[Number(b.dataset.usar)])));
+  cont.querySelectorAll('button[data-pozo]').forEach(b =>
+    b.addEventListener('click', () => creditoAlPozo(creditos[Number(b.dataset.pozo)])));
+}
+
+async function usarCredito(c){
+  if(!c || !jornadaSel) return;
+  if(!confirm('¿Usar ' + fmt(c.importe) + ' de ' + (c.paciente ? c.paciente.apellido_nombre : 'este paciente') +
+              ' en la jornada del ' + fechaLarga(jornadaSel) + '?')) return;
+  const turno = turnos.find(t => t.paciente_id === c.paciente_id) || null;
+  const { error } = await sb.from('cobros_sarkmed').update({
+    situacion: 'APLICADO',
+    fecha_jornada: jornadaSel,
+    turno_id: c.turno_id || (turno ? turno.id : null),
+    situacion_en: new Date().toISOString(),
+    situacion_por_email: miEmail || null
+  }).eq('id', c.id);
+  if(error){ aviso($('alerta'), error.message); return; }
+  await cargarJornada(); render();
+}
+
+async function creditoAlPozo(c){
+  if(!c) return;
+  if(!confirm('¿La seña de ' + fmt(c.importe) + ' queda para PuntoBiO?\n\nDeja de ser crédito del paciente y no se reparte entre profesionales.')) return;
+  const { error } = await sb.from('cobros_sarkmed').update({
+    situacion: 'POZO',
+    fecha_jornada: c.jornada_origen || null,
+    situacion_en: new Date().toISOString(),
+    situacion_por_email: miEmail || null
+  }).eq('id', c.id);
+  if(error){ aviso($('alerta'), error.message); return; }
+  await cargarJornada(); render();
 }
 
 function renderMovs(){
@@ -423,7 +507,8 @@ function renderMovs(){
     const p = c.paciente || {};
     return '<tr' + (c.anulado ? ' style="opacity:.45"' : '') + '>' +
       '<td><div class="nombre">' + esc(p.apellido_nombre || '—') + '</div>' +
-        '<div class="dni">' + fechaCorta(c.fecha) + ' · ' + esc(c.concepto) + (c.anulado ? ' · ANULADO' : '') + '</div></td>' +
+        '<div class="dni">' + fechaCorta(c.fecha) + ' · ' + esc(c.concepto) +
+        (c.situacion === 'POZO' ? ' · QUEDÓ EN EL POZO' : '') + (c.anulado ? ' · ANULADO' : '') + '</div></td>' +
       '<td><span class="pill medio">' + esc(c.medio) + '</span> <span class="pill destino">' + (c.destino === 'MATI' ? 'Mati' : 'PuntoBiO') + '</span></td>' +
       '<td class="num">' + fmt(c.importe) + '</td>' +
       '<td class="num">' + (c.anulado ? '' : '<button class="btn chico gris" data-anular="' + i + '">Anular</button>') + '</td>' +
