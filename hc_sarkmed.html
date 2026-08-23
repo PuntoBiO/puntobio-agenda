@@ -472,11 +472,35 @@ function buscarPaciente(q){
 async function crearEvaluacion(idx){
   const p = resultadosPac[idx];
   if(!p) return;
+
+  // Un paciente tiene UNA evaluación abierta por vez. Si ya la tiene, no se
+  // crea otra: se abre la que está. (La revaloración a 6 meses se hace cerrando
+  // la actual y creando la nueva, así no quedan dos fichas a medio llenar.)
+  const { data: yaTiene, error: eBusca } = await sb.from('hc_sarkmed')
+    .select('id, codigo')
+    .eq('paciente_id', p.id)
+    .eq('estado', 'ABIERTA')
+    .order('id', { ascending:false })
+    .limit(1);
+  if(eBusca){ toast('No se pudo revisar si ya tiene ficha: ' + eBusca.message, 'err'); return; }
+  if(yaTiene && yaTiene.length){
+    cerrarModal('modal-nueva');
+    toast('Ya tenía una evaluación abierta: te la abro', 'ok');
+    await cargarEvaluaciones();
+    abrirFicha(yaTiene[0].id);
+    return;
+  }
+
   const { data, error } = await sb.from('hc_sarkmed')
     .insert({ paciente_id: p.id, creado_por_email: miEmail })
     .select('id')
     .single();
-  if(error){ toast('No se pudo crear la ficha: ' + error.message, 'err'); return; }
+  if(error){
+    toast(error.message.includes('ux_hc_sarkmed_abierta')
+      ? 'Ese paciente ya tiene una evaluación abierta.'
+      : 'No se pudo crear la ficha: ' + error.message, 'err');
+    return;
+  }
   cerrarModal('modal-nueva');
   await cargarEvaluaciones();
   abrirFicha(data.id);
