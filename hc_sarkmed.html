@@ -1157,7 +1157,7 @@ const CAMPOS_BIOLAB_NUM = ['ishii_fuerza_kg','ishii_pantorrilla_cm','prension_iz
   'imtp_pico_izq_n','imtp_pico_der_n','imtp_rfd_izq','imtp_rfd_der','marcha_4m_seg','tug_seg',
   'sppb_balance','sppb_marcha','sppb_chair','step_2min','sls_area_izq','sls_area_der'];
 const CAMPOS_BIOLAB_TXT = ['hallazgos','resumen_neuromuscular','resumen_potencia','resumen_equilibrio',
-  'resumen_movilidad','resumen_flexibilidad','informe'];
+  'resumen_movilidad','resumen_flexibilidad','informe','nota_profe','observacion_prof','tipo_evaluacion'];
 
 
 /* ════════════════════════════════════════════════════════════════
@@ -1560,17 +1560,36 @@ function solapaBiolab(b, ro){
     <div class="bloque-head">Informe BiOLAB</div>
     <div class="bloque-body">
       ${ro ? '' : `
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-        <button class="btn" onclick="armarInformeBiolab()">↻ Rehacer con lo que trajo la toma</button>
-        <span style="font-size:12px;color:var(--muted)">
-          Se arma solo al traer de VALD. ${esProtocoloMayor()
-            ? 'Con los cortes de adulto mayor.' : 'Sin criterios de adulto mayor, por ser menor de 60.'}
-          Lo que escribas a mano queda: rehacer pregunta antes de pisarlo.
-        </span>
-      </div>`}
       <div class="campo">
-        <textarea id="informe" style="min-height:260px" placeholder="Acá va el informe interpretado. Se puede escribir a mano o pegar el borrador y corregirlo." ${ro}>${esc(b.informe || '')}</textarea>
+        <label>Lo que viste vos · se suma al informe</label>
+        <textarea id="observacion_prof" style="min-height:70px" oninput="biolab.observacion_prof=this.value"
+          placeholder="Algo que observaste en la evaluación o que te contó el paciente, para que el informe salga completo…">${esc(b.observacion_prof || '')}</textarea>
       </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0 10px">
+        <span style="font-size:12.5px;color:var(--muted)">Tipo de evaluación:</span>
+        <div class="chips" style="display:inline-flex">
+          <button class="chip ${b.tipo_evaluacion !== 'REEVALUACION' ? 'on' : ''}" onclick="setBiolab('tipo_evaluacion','PRIMERA')">1ª evaluación</button>
+          <button class="chip ${b.tipo_evaluacion === 'REEVALUACION' ? 'on' : ''}" onclick="setBiolab('tipo_evaluacion','REEVALUACION')">Reevaluación</button>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-azul" id="btn-informe-ia" onclick="crearInformeIA()">📋 Crear informe</button>
+        <button class="btn" onclick="armarInformeBiolab()">↻ Solo el resumen de datos</button>
+        <span style="font-size:12px;color:var(--muted)">
+          Lo redacta la IA con los hallazgos que ya clasificó el sistema. ${esProtocoloMayor()
+            ? 'Con los cortes de adulto mayor.' : 'Sin criterios de adulto mayor, por ser menor de 60.'}
+        </span>
+      </div>
+      <div id="estado-informe-ia" style="font-size:12.5px;margin-bottom:8px"></div>`}
+      <div class="campo">
+        <label>Informe para el paciente</label>
+        <textarea id="informe" style="min-height:260px" placeholder="Acá va el informe interpretado. Se puede escribir a mano o corregir el que armó la IA." ${ro}>${esc(b.informe || '')}</textarea>
+      </div>
+      ${(b.nota_profe || !ro) ? `
+      <div class="campo">
+        <label>🔒 Consideraciones para el profesor · nota interna</label>
+        <textarea id="nota_profe" style="min-height:150px" placeholder="Qué priorizar y qué evitar en las sesiones. La arma la IA junto con el informe." ${ro}>${esc(b.nota_profe || '')}</textarea>
+      </div>` : ''}
       ${b.informe_firmado
         ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
                        border-radius:6px;font-size:12px;font-weight:600">
@@ -1791,6 +1810,179 @@ function armarInformeBiolab(){
    lo único que cambió es que la pantalla dejó de pedir lo que el
    equipo ya midió.
    ════════════════════════════════════════════════════════════════ */
+/* ════════════════════════════════════════════════════════════════
+   CREAR INFORME  ·  la misma cañería del apartado VALD
+   El informe NO lo arma esta pantalla: lo arma la edge function
+   informe-biolab, con el criterio de la casa — los cálculos y la
+   clasificación 🟢🟡🔴⚠️ ya están hechos acá, la IA solo interpreta,
+   y Lu revisa y firma. Devuelve dos textos:
+     · informe → INFORME BIOMECÁNICO FUNCIONAL, para el paciente
+     · nota    → CONSIDERACIONES PARA EL PROFESOR, interna
+   ════════════════════════════════════════════════════════════════ */
+function posturaEstructurada(post){
+  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isNaN(n) ? null : n; };
+  const ladoDe = v => /right|derech/i.test(String(v)) ? 'derecho' : (/left|izquierd/i.test(String(v)) ? 'izquierdo' : null);
+  const buscar = re => { const k = Object.keys(post).find(k => re.test(k)); return k ? post[k] : null; };
+  const out = {};
+  const h = buscar(/shoulder drop|descenso.*hombro/i);
+  if(h != null) out.descenso_hombro = { cm: num(h), lado_descendido: ladoDe(h) || ladoDe(buscar(/shoulder.*(side|lado)/i)) };
+  const c = buscar(/hip drop|pelvis drop|descenso.*pelvis/i);
+  if(c != null) out.descenso_pelvis = { cm: num(c), lado_descendido: ladoDe(c) || ladoDe(buscar(/(hip|pelvis).*(side|lado)/i)) };
+  const a = buscar(/pelvis anterior tilt|antevers/i);
+  if(a != null) out.anteversion_pelvica_grados = num(a);
+  const f = buscar(/neck flexion|flexi.n cervical/i);
+  if(f != null) out.flexion_cervical_grados = num(f);
+  const fl = buscar(/neck lateral|lateral.*cervical/i);
+  if(fl != null) out.flexion_lateral_cervical_grados = num(fl);
+  return Object.keys(out).length ? out : null;
+}
+
+/* Las calculadoras ya resueltas: se mandan con el resultado hecho, para que la
+   IA no vuelva a puntuar nada. En menores de 60 no se mandan los cortes de
+   adulto mayor, solo el valor. */
+/* Los ratios se calculan ACÁ, no los calcula la IA (regla de la casa).
+   El H:Q es el que más pesa en el informe: isquiotibiales sobre cuádriceps,
+   por lado, con la referencia convencional 0,50-0,60. */
+function ratiosParaIA(){
+  const H = (biolab.protocolo_tests || {}).__hallazgos || {};
+  const dyn = H.dynamo || [];
+  const R = [];
+  const buscar = re => dyn.find(d => re.test(d.grupo || ''));
+  const cuad = buscar(/knee extension|extensi[oó]n de rodilla|extension rodilla|cu[aá]driceps/i);
+  const isq  = buscar(/knee flexion|flexi[oó]n de rodilla|flexion rodilla|isquio|hamstring/i);
+  if(cuad && isq){
+    const par = [['izquierdo', isq.L, cuad.L], ['derecho', isq.R, cuad.R]];
+    const txt = par.filter(([, i, c]) => i && c)
+      .map(([lado, i, c]) => `${lado} ${(i / c).toFixed(2)}`).join(' · ');
+    if(txt){
+      const bajos = par.filter(([, i, c]) => i && c && (i / c) < 0.50).map(([lado]) => lado);
+      R.push({ test:'Ratio isquiotibiales:cuádriceps (H:Q)',
+        resultado: `${txt} (referencia 0,50-0,60)` +
+          (bajos.length ? ` · POR DEBAJO DE LA REFERENCIA: ${bajos.join(' y ')}` : ' · dentro de referencia') });
+    }
+  }
+  const ii = valNum('imtp_pico_izq_n'), idd = valNum('imtp_pico_der_n');
+  const peso = Number(nutri.peso_kg) || null;
+  if(ii && idd && peso)
+    R.push({ test:'Fuerza relativa (IMTP / peso corporal)', resultado:`${((ii + idd) / peso).toFixed(2)} N/kg` });
+  return R;
+}
+
+function calculadorasParaIA(){
+  const mayor = esProtocoloMayor();
+  const p = fichaActual.paciente || {};
+  const sexo = (p.sexo || '').toUpperCase();
+  const varon = sexo.startsWith('M') && !sexo.startsWith('MU');
+  const edad = edadDe(p.fecha_nacimiento);
+  const C = [];
+  const pi = valNum('prension_izq_n'), pd = valNum('prension_der_n');
+  if(pi || pd){
+    const kgI = pi ? pi / G : null, kgD = pd ? pd / G : null, mejor = Math.max(kgI || 0, kgD || 0);
+    const corte = varon ? 27 : 16;
+    C.push({ test:'Prensión manual', resultado: `${fmt(kgI)} kg L / ${fmt(kgD)} kg R` +
+      (mayor ? ` · corte EWGSOP2 ${corte} kg: ${mejor >= corte ? 'por encima' : 'POR DEBAJO'}`
+             : ' · menor de 60: se informa el valor, sin aplicar el corte de EWGSOP2') });
+  }
+  C.push(...ratiosParaIA());          // los ratios van siempre, tenga la edad que tenga
+  if(!mayor) return C;
+  if(fichaActual.sarc_f != null)
+    C.push({ test:'SARC-F', resultado:`${fichaActual.sarc_f}/10 · ${fichaActual.sarc_f >= 4 ? 'sugestivo de sarcopenia (≥4)' : 'por debajo del punto de corte'}` });
+  const ent = entradasIshii();
+  if(edad != null && ent.fz && ent.pan){
+    const is = (0.80 * edad) - (5.09 * ent.fz) - (3.28 * ent.pan) + 206;
+    C.push({ test:'Ishii', resultado:`${fmt(is)} puntos · ${is >= 140 ? 'sarcopenia severa (≥140)' : is >= 105 ? 'alto riesgo (≥105)' : 'sin riesgo por esta escala'}` });
+  }
+  if(nutri.smi){
+    const c = varon ? 7.0 : 5.5;
+    C.push({ test:'SMI (masa muscular)', resultado:`${nutri.smi} kg/m² · ${Number(nutri.smi) < c ? 'POR DEBAJO' : 'por encima'} del corte EWGSOP2 (${c})` });
+  }
+  const m4 = valNum('marcha_4m_seg');
+  if(m4 > 0){
+    const vel = 4 / m4;
+    C.push({ test:'Velocidad de marcha', resultado:`${fmt(vel, 2)} m/s · ${vel <= 0.8 ? 'bajo el umbral de fragilidad (0,8)' : vel < 1 ? 'movilidad moderada' : 'adecuada para la independencia'}` });
+  }
+  const tug = valNum('tug_seg');
+  if(tug) C.push({ test:'Timed Up & Go', resultado:`${tug} s · ${tug < 10 ? 'independiente, bajo riesgo' : tug < 20 ? 'adecuada, algo de lentitud' : tug < 30 ? 'limitaciones y riesgo de caída' : 'dependencia y alto riesgo'}` });
+  const sb = valNum('sppb_balance'), sm = valNum('sppb_marcha'), sc = valNum('sppb_chair');
+  if(sb != null || sm != null || sc != null){
+    const t = (sb || 0) + (sm || 0) + (sc || 0);
+    C.push({ test:'SPPB', resultado:`${t}/12 · ${t <= 3 ? 'limitación severa' : t <= 6 ? 'limitación moderada' : t <= 9 ? 'limitación leve' : 'función física normal'}` });
+  }
+  const st = valNum('step_2min');
+  if(st) C.push({ test:'2-Minute Step Test', resultado:`${st} pasos` });
+  return C;
+}
+
+async function crearInformeIA(){
+  if(!puedeCargar()) return;
+  levantarBiolab();
+  const btn = document.getElementById('btn-informe-ia');
+  const est = document.getElementById('estado-informe-ia');
+  const H = (biolab.protocolo_tests || {}).__hallazgos;
+  if(!H){
+    est.innerHTML = '<span style="color:var(--rojo-x)">Primero traé la toma de VALD: el informe se arma con esos hallazgos.</span>';
+    return;
+  }
+  if((biolab.informe || '').trim() &&
+     !confirm('Ya hay un informe escrito.\n\n¿Reemplazarlo por el que arma la IA con esta toma?')) return;
+
+  btn.disabled = true; btn.textContent = 'Redactando…';
+  est.innerHTML = '<span style="color:var(--muted)">La IA está interpretando los hallazgos. Tarda unos segundos.</span>';
+  try{
+    const p = fichaActual.paciente || {};
+    const obs = (biolab.observacion_prof || '').trim();
+    const payload = {
+      paciente: {
+        nombre: p.apellido_nombre || '',
+        edad: edadDe(p.fecha_nacimiento),
+        sexo: p.sexo || '',
+        poblacion: esProtocoloMayor() ? 'C · Salud & Fuerza Vital' : 'B · Readaptación',
+        motivo: (fichaActual.motivo_consulta || '') || 'Circuito SARKMED de valoración muscular',
+        contexto: {
+          motivo:       fichaActual.motivo_consulta || '',
+          objetivo:     fichaActual.objetivo_funcional || '',
+          antecedentes: resumenAntecedentes(),
+        },
+      },
+      hallazgos: { postura: H.postura, movilidad: H.movilidad, fuerza: H.fuerza, forceDecks: H.forceDecks },
+      calculadoras: calculadorasParaIA(),
+      observaciones: obs ? [{ fecha: new Date().toISOString().slice(0,10), autor: miEmail, texto: obs }] : [],
+      fecha: (H.fecha || new Date().toISOString()).slice(0, 10),
+    };
+
+    const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const d = await resp.json();
+    if(!resp.ok) throw new Error(d && d.error ? d.error : ('HTTP ' + resp.status));
+
+    if(d.informe) biolab.informe = d.informe;
+    if(d.nota)    biolab.nota_profe = d.nota;
+    est.innerHTML = '<span style="color:var(--verde)"><b>Listo.</b> Revisá el informe y la nota para el profe, y tocá Guardar ficha.</span>';
+    renderFicha();
+  }catch(e){
+    est.innerHTML = '<span style="color:var(--rojo-x)">⚠️ No pude generar el informe: ' + esc(String(e && e.message ? e.message : e)) +
+      '. <br>Queda el borrador armado por el sistema, que podés completar a mano.</span>';
+    if(!(biolab.informe || '').trim()) biolab.informe = borradorInforme();
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '📋 Crear informe'; }
+  }
+}
+
+/* Los antecedentes marcados en la solapa Médica, en una línea */
+function resumenAntecedentes(){
+  const p = [];
+  Object.entries(fichaActual.antecedentes || {}).forEach(([cat, nodo]) => {
+    const items = Object.entries(nodo || {}).filter(([, v]) => v).map(([k]) => k);
+    if(items.length) p.push(`${cat}: ${items.join(', ')}`);
+  });
+  if(fichaActual.cirugias_previas)  p.push('cirugías: ' + fichaActual.cirugias_previas);
+  if(fichaActual.caidas_ultimo_anio) p.push('caídas último año: ' + fichaActual.caidas_ultimo_anio);
+  return p.join(' · ');
+}
+
 function valNum(id){
   const el = document.getElementById(id);
   if(el){ const s = el.value; return s === '' ? null : Number(s); }
@@ -2070,20 +2262,14 @@ async function traerDeVald(forzarProfileId){
     }
     biolab.vald_traido_en = new Date().toISOString();
 
-    // El informe se arma solo, como en el apartado VALD: la pantalla no pide
-    // que lo pidas. Si ya había uno escrito, no se toca.
-    let informeNuevo = false;
-    if(!(biolab.informe || '').trim() && !biolab.informe_firmado){
-      biolab.informe = borradorInforme();
-      const elInf = document.getElementById('informe');
-      if(elInf) elInf.value = biolab.informe;
-      informeNuevo = true;
-    }
+    // El informe NO se escribe acá: lo redacta informe-biolab con estos mismos
+    // hallazgos, igual que en el apartado VALD. Acá solo queda todo listo.
+    const listoParaIA = !(biolab.informe || '').trim() && !biolab.informe_firmado;
 
     est.innerHTML = `<span style="color:var(--verde)"><b>Listo</b> (tomas desde el ${esc(desdeLindo)}): ${n.detalle.join(' · ')}.</span>` +
       (n.traidos ? ` <span style="color:var(--verde)">El protocolo se armó con los ${n.traidos} tests que registraron los equipos.</span>` : '') +
-      (informeNuevo ? ` <span style="color:var(--verde)">El informe quedó armado abajo.</span>`
-                    : (biolab.informe ? ` <span style="color:var(--muted)">El informe ya tenía texto: no se tocó (podés rehacerlo con el botón).</span>` : '')) +
+      (listoParaIA ? ` <span style="color:var(--verde)">Ya podés tocar <b>Crear informe</b> abajo.</span>`
+                   : ` <span style="color:var(--muted)">El informe ya tenía texto: no se tocó.</span>`) +
       (n.pisados ? ` <span style="color:var(--muted)">Lo que ya estaba cargado no se tocó (${n.pisados}).</span>` : '') +
       ' <span style="color:var(--muted)">Revisá y tocá Guardar ficha.</span>';
     calcularBiolab();
@@ -2346,6 +2532,10 @@ function aplicarDatosVald(datos, cortes){
 
   const hallazgos = [];   // solo lo que NO está bien
   const L_fuerza = [], L_potencia = [], L_equilibrio = [], L_movilidad = [];
+  // Lo mismo, pero en la forma que espera la edge function informe-biolab:
+  // cada ítem con su semáforo, su nombre, su detalle y de qué equipo salió.
+  const IA = { postura: null, movilidad: [], fuerza: [], forceDecks: [], dynamo: [] };
+  const lado = (izq, der) => (izq < der) ? 'IZQUIERDO' : (der < izq ? 'DERECHO' : 'simétrico');
 
   // ── FUERZA (DynaMo): entra TODA, no solo la prensión ──────────────
   for(const f of (datos.fuerza || [])){
@@ -2354,11 +2544,13 @@ function aplicarDatosVald(datos, cortes){
     if(sinDato){
       L_fuerza.push(`⚠️ ${f.grupo}: sin registro de fuerza — revisar la toma`);
       hallazgos.push(`⚠️ ${f.grupo}: la toma no registró fuerza`);
+      IA.fuerza.push({ em:'⚠️', nom:f.grupo, det:'la toma no registró fuerza — repetir la medición', fuente:'DynaMo' });
       continue;
     }
     if(unLado){
       L_fuerza.push(`⚠️ ${f.grupo}: medición de UN SOLO LADO (izq ${f.izquierda_N ?? '—'} / der ${f.derecha_N ?? '—'} N)`);
       hallazgos.push(`⚠️ ${f.grupo}: se midió un solo lado — posible fallo de equipo`);
+      IA.fuerza.push({ em:'⚠️', nom:f.grupo, det:`se midió un solo lado (L ${f.izquierda_N ?? '—'} / R ${f.derecha_N ?? '—'} N) — repetir`, fuente:'DynaMo' });
       continue;
     }
     const em = colorAsim(f.asimetria_pct);
@@ -2370,13 +2562,17 @@ function aplicarDatosVald(datos, cortes){
       if(Math.max(Lk, Rk) < 16) hallazgos.push(`🔴 Prensión por debajo del corte de EWGSOP2 (16 kg): mejor mano ${Math.max(Lk, Rk).toFixed(1)} kg`);
     }
     L_fuerza.push(linea);
+    IA.dynamo.push({ grupo: f.grupo, L: f.izquierda_N, R: f.derecha_N });
+    IA.fuerza.push({ em, nom:f.grupo,
+      det:`${f.asimetria_pct}% asim · L ${f.izquierda_N} / R ${f.derecha_N} N · lado MÁS DÉBIL: ${debil}`, fuente:'DynaMo' });
     if(em !== '🟢') hallazgos.push(`${em} ${f.grupo}: asimetría ${f.asimetria_pct} % (lado más débil: ${debil})`);
   }
 
   // ── FORCEDECKS: TODAS las métricas de TODAS las pruebas ───────────
   for(const t of (datos.forceDecks || [])){
     const destino = esPruebaEquilibrio(t.prueba) ? L_equilibrio : L_potencia;
-    destino.push(`— ${t.prueba} —`);
+    const nomFD = traducirPrueba(t.prueba).nombre;    // nunca el código crudo del Hub
+    destino.push(`— ${nomFD} —`);
     for(const nombre in (t.resultados || {})){
       const r = t.resultados[nombre] || {};
       const lados = r.lados || {};
@@ -2389,7 +2585,7 @@ function aplicarDatosVald(datos, cortes){
         const mag = Math.max(Math.abs(L), Math.abs(R));
         if(!tasa && (L < 0 || R < 0)){
           destino.push(`⚠️ ${nombre}: izq ${L} / der ${R} ${u} — fuerza negativa, posible artefacto`);
-          hallazgos.push(`⚠️ ${t.prueba} · ${nombre}: valor negativo, revisar la toma`);
+          hallazgos.push(`⚠️ ${nomFD} · ${nombre}: valor negativo, revisar la toma`);
           continue;
         }
         if(mag < 1){ destino.push(`⚪ ${nombre}: izq ${L} / der ${R} ${u} (valor ~0)`); continue; }
@@ -2397,7 +2593,9 @@ function aplicarDatosVald(datos, cortes){
         const em = colorAsim(asim);
         const menor = (L < R) ? 'IZQUIERDO' : (R < L ? 'DERECHO' : 'simétrico');
         destino.push(`${em} ${nombre}: izq ${L} / der ${R} ${u} · asimetría ${asim} % · menor: ${menor}`);
-        if(em !== '🟢') hallazgos.push(`${em} ${t.prueba} · ${nombre}: asimetría ${asim} % (menor: ${menor})`);
+        IA.forceDecks.push({ em, nom:`${nomFD} · ${nombre}`,
+          det:`${asim}% asim · L ${L} / R ${R} ${u} · lado con MENOR valor: ${menor}`, fuente:'ForceDecks' });
+        if(em !== '🟢') hallazgos.push(`${em} ${nomFD} · ${nombre}: asimetría ${asim} % (menor: ${menor})`);
         continue;
       }
       // Área del apoyo monopodal y RFD: en VALD quedan informativas porque no son
@@ -2414,34 +2612,50 @@ function aplicarDatosVald(datos, cortes){
                             : ((Math.abs(L) < Math.abs(R)) ? 'IZQUIERDO' : 'DERECHO');  // menos RFD = más lento
         destino.push(`${em} ${nombre}: izq ${L} / der ${R} ${u} · diferencia ${asim} %` +
           (veces ? ` · ${veces.toFixed(1)} veces` : '') + ` · peor: ${peor}`);
+        IA.forceDecks.push({ em, nom:`${nomFD} · ${nombre}`,
+          det:`${asim}% asim · L ${L} / R ${R} ${u} · lado PEOR: ${peor}` + (veces ? ` (${veces.toFixed(1)} veces)` : ''),
+          fuente:'ForceDecks' });
         if(em !== '🟢'){
           hallazgos.push(esArea
-            ? `${em} ${t.prueba}: el apoyo ${peor.toLowerCase()} oscila ${veces ? veces.toFixed(1) + ' veces' : asim + ' %'} más que el otro`
-            : `${em} ${t.prueba} · ${nombre}: el lado ${peor.toLowerCase()} tarda más en producir fuerza (diferencia ${asim} %)`);
+            ? `${em} ${nomFD}: el apoyo ${peor.toLowerCase()} oscila ${veces ? veces.toFixed(1) + ' veces' : asim + ' %'} más que el otro`
+            : `${em} ${nomFD} · ${nombre}: el lado ${peor.toLowerCase()} tarda más en producir fuerza (diferencia ${asim} %)`);
         }
         continue;
       }
-      if(L != null && R != null)      destino.push(`⚪ ${nombre}: izq ${L} / der ${R} ${u}`.trim());
-      else if(uni != null)            destino.push(`⚪ ${nombre}: ${uni} ${u}`.trim());
+      if(L != null && R != null){
+        destino.push(`⚪ ${nombre}: izq ${L} / der ${R} ${u}`.trim());
+        IA.forceDecks.push({ em:'⚪', nom:`${nomFD} · ${nombre}`, det:`L ${L} / R ${R} ${u}`.trim(), fuente:'ForceDecks' });
+      }else if(uni != null){
+        destino.push(`⚪ ${nombre}: ${uni} ${u}`.trim());
+        IA.forceDecks.push({ em:'⚪', nom:`${nomFD} · ${nombre}`, det:`${uni} ${u}`.trim(), fuente:'ForceDecks' });
+      }
     }
   }
 
   // ── MOVILIDAD (HumanTrak / ROM de DynaMo) ─────────────────────────
   for(const pr of (datos.movilidad || [])){
     const met = pr.metricas || [];
-    L_movilidad.push(`— ${pr.prueba} —`);
+    L_movilidad.push(`— ${traducirPrueba(pr.prueba).nombre} —`);
     for(const m of met){
       const unLado = ((m.izquierda == null) !== (m.derecha == null)) && (m.valor == null);
+      const nomPrueba = traducirPrueba(pr.prueba).nombre;
       if(unLado){
         L_movilidad.push(`⚠️ ${m.metrica}: un solo lado (izq ${m.izquierda ?? '—'} / der ${m.derecha ?? '—'}°)`);
-        hallazgos.push(`⚠️ ${pr.prueba} · ${m.metrica}: se midió un solo lado`);
+        hallazgos.push(`⚠️ ${nomPrueba} · ${m.metrica}: se midió un solo lado`);
+        IA.movilidad.push({ em:'⚠️', nom:`${nomPrueba} · ${m.metrica}`, det:'se midió un solo lado — repetir', fuente:'HumanTrak' });
         continue;
       }
-      if(m.asimetria_pct == null){ L_movilidad.push(`🟢 ${m.metrica}: ${m.valor}°`); continue; }
+      if(m.asimetria_pct == null){
+        L_movilidad.push(`🟢 ${m.metrica}: ${m.valor}°`);
+        IA.movilidad.push({ em:'🟢', nom:`${nomPrueba} · ${m.metrica}`, det:`${m.valor}°`, fuente:'HumanTrak' });
+        continue;
+      }
       const em = colorAsim(m.asimetria_pct);
       const menor = (m.izquierda < m.derecha) ? 'IZQUIERDO' : (m.derecha < m.izquierda ? 'DERECHO' : 'simétrico');
       L_movilidad.push(`${em} ${m.metrica}: izq ${m.izquierda}° / der ${m.derecha}° · asimetría ${m.asimetria_pct} % · menor: ${menor}`);
-      if(em !== '🟢') hallazgos.push(`${em} ${pr.prueba} · ${m.metrica}: asimetría ${m.asimetria_pct} % (menor: ${menor})`);
+      IA.movilidad.push({ em, nom:`${nomPrueba} · ${m.metrica}`,
+        det:`${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}° · lado con MENOR valor: ${menor}`, fuente:'HumanTrak / LSI' });
+      if(em !== '🟢') hallazgos.push(`${em} ${nomPrueba} · ${m.metrica}: asimetría ${m.asimetria_pct} % (menor: ${menor})`);
     }
   }
 
@@ -2452,6 +2666,7 @@ function aplicarDatosVald(datos, cortes){
       .filter(k => post[k] != null && typeof post[k] !== 'object')
       .map(k => `⚪ ${k}: ${post[k]}`);
     if(lineas.length){ L_movilidad.push('— Postura estática —'); L_movilidad.push(...lineas); }
+    IA.postura = posturaEstructurada(post);
   }
 
   // ── Los pocos valores que alimentan cálculos ──────────────────────
@@ -2515,6 +2730,18 @@ function aplicarDatosVald(datos, cortes){
       : '<b style="color:var(--verde)">Sin hallazgos fuera de norma</b>';
   }
   if(hallazgos.length) detalle.push(hallazgos.length + ' hallazgos');
+
+  // El paquete para informe-biolab queda guardado con la ficha, así el botón
+  // Crear informe sigue andando aunque se recargue la pantalla.
+  biolab.protocolo_tests = biolab.protocolo_tests || {};
+  biolab.protocolo_tests.__hallazgos = {
+    fecha: new Date().toISOString(),
+    postura: IA.postura,
+    movilidad:  IA.movilidad.slice(0, 250),
+    fuerza:     IA.fuerza.slice(0, 60),
+    forceDecks: IA.forceDecks.slice(0, 250),
+    dynamo:     IA.dynamo.slice(0, 40),
+  };
 
   return { total, detalle, pisados, tildados, traidos };
 }
