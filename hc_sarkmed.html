@@ -1612,6 +1612,14 @@ function solapaBiolab(b, ro){
   <div class="bloque">
     <div class="bloque-head">Informe BiOLAB</div>
     <div class="bloque-body">
+      ${ro ? '' : `
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-azul" onclick="armarInformeBiolab()">✎ Armar borrador con lo hallado</button>
+        <span style="font-size:12px;color:var(--muted)">
+          Usa los tests que trajo la toma, los números cargados y los hallazgos. ${esProtocoloMayor()
+            ? 'Con los cortes de adulto mayor.' : 'Sin criterios de adulto mayor, por ser menor de 60.'}
+        </span>
+      </div>`}
       <div class="campo">
         <textarea id="informe" style="min-height:260px" placeholder="Acá va el informe interpretado. Se puede escribir a mano o pegar el borrador y corregirlo." ${ro}>${esc(b.informe || '')}</textarea>
       </div>
@@ -1670,6 +1678,160 @@ function pintarEntradasIshii(ent){
       inP.style.display = '';
     }
   }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   BORRADOR DEL INFORME
+   Se arma con lo que hay cargado: los tests que trajo la toma, los
+   números de los campos y los hallazgos. Los cálculos son los mismos
+   que muestra "Lo que calcula el sistema" — nada se inventa acá.
+   La lectura cambia con la edad: de 60 en adelante se aplican los
+   cortes de adulto mayor; por debajo se informa el valor sin veredicto
+   y el foco va a asimetrías y control. Es un BORRADOR: lo revisa,
+   lo corrige y lo firma quien evalúa.
+   ════════════════════════════════════════════════════════════════ */
+function fmt(v, dec){ return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(dec == null ? 1 : dec); }
+
+function borradorInforme(){
+  const p = fichaActual.paciente || {};
+  const edad = edadDe(p.fecha_nacimiento);
+  const mayor = esProtocoloMayor();
+  const peso = Number(nutri.peso_kg) || null;
+  const sexo = (p.sexo || '').toUpperCase();
+  const varon = sexo.startsWith('M') && !sexo.startsWith('MU');
+  const n = id => { const el = document.getElementById(id); const s = el ? el.value : ''; return s === '' ? null : Number(s); };
+  const T = [];
+
+  const hoy = new Date().toLocaleDateString('es-AR');
+  T.push('INFORME BiOLAB · SARKMED');
+  T.push(`${p.apellido_nombre || 'Paciente'}${edad != null ? ' · ' + edad + ' años' : ''} · ${hoy}`);
+  T.push(`Protocolo: ${PROTOCOLOS[protocoloActual()].nombre}`);
+  T.push('');
+
+  // ── Qué se tomó ────────────────────────────────────────────────
+  const trajo = listadoVald();
+  if(trajo){
+    T.push('QUÉ SE TOMÓ');
+    const porEq = {};
+    trajo.items.forEach(it => { (porEq[it.equipo] = porEq[it.equipo] || []).push(it.prueba); });
+    Object.keys(porEq).forEach(eq => T.push(`${eq}: ${porEq[eq].join(', ')}.`));
+  }
+  const gMan = (PROTOCOLOS[protocoloActual()].grupos || []).find(g => g.equipo === 'MANUAL');
+  if(gMan){
+    const hechos = gMan.tests.filter(([k]) => (biolab.protocolo_tests || {})[k]).map(([, t]) => t.split(' (')[0]);
+    if(hechos.length) T.push(`Manual: ${hechos.join(', ')}.`);
+  }
+  T.push('');
+
+  // ── Fuerza ─────────────────────────────────────────────────────
+  const F = [];
+  const pi = n('prension_izq_n'), pd = n('prension_der_n');
+  if(pi || pd){
+    const kgI = pi ? pi / G : null, kgD = pd ? pd / G : null;
+    const mejor = Math.max(kgI || 0, kgD || 0);
+    const corte = varon ? 27 : 16;
+    let l = `Prensión: ${fmt(kgI)} kg izquierda y ${fmt(kgD)} kg derecha`;
+    if(kgI && kgD) l += `, asimetría ${fmt(asim(kgI, kgD))} %`;
+    l += mayor
+      ? `. Corte EWGSOP2 para ${varon ? 'varón' : 'mujer'} ${corte} kg: ${mejor >= corte ? 'por encima del corte' : 'POR DEBAJO DEL CORTE'}.`
+      : '. Se informa el valor; en menores de 60 no se aplica el corte de EWGSOP2.';
+    F.push(l);
+  }
+  const ii = n('imtp_pico_izq_n'), idd = n('imtp_pico_der_n');
+  if(ii && idd){
+    const tot = ii + idd;
+    F.push(`IMTP: ${fmt(tot, 0)} N sumando ambos lados, asimetría ${fmt(asim(ii, idd))} %` +
+      (peso ? `, fuerza relativa ${fmt(tot / peso, 2)} N/kg.` : ' (falta el peso en Nutrición para la fuerza relativa).'));
+  }
+  const ri = n('imtp_rfd_izq'), rd = n('imtp_rfd_der');
+  if(ri && rd){
+    const a = Math.abs(asim(ri, rd));
+    F.push(`RFD 100 ms: ${fmt(ri, 0)} / ${fmt(rd, 0)} N/s, asimetría ${fmt(asim(ri, rd))} %` +
+      (a >= 20 ? `. Por encima del 20 % habitual: el lado ${ri < rd ? 'izquierdo' : 'derecho'} tarda más en producir fuerza.` : '.'));
+  }
+  if(F.length){ T.push('FUERZA Y PRODUCCIÓN DE FUERZA'); F.forEach(l => T.push('· ' + l)); T.push(''); }
+
+  // ── Equilibrio ─────────────────────────────────────────────────
+  const ai = n('sls_area_izq'), ad = n('sls_area_der');
+  if(ai && ad){
+    const veces = Math.max(ai, ad) / Math.min(ai, ad);
+    const peor = ai > ad ? 'izquierdo' : 'derecho';
+    T.push('EQUILIBRIO Y CONTROL POSTURAL');
+    T.push(`· Apoyo monopodal: ${fmt(ai, 0)} mm² izquierda y ${fmt(ad, 0)} mm² derecha, asimetría ${fmt(asim(ai, ad))} %. ` +
+      `El apoyo ${peor} oscila ${fmt(veces)} veces más que el otro` +
+      (mayor ? ', dato a considerar dentro del riesgo de caída.' : ', a considerar en el trabajo de control unipodal.'));
+    T.push('');
+  }
+
+  // ── Screening de adulto mayor: solo 60+ ────────────────────────
+  if(mayor){
+    const S = [];
+    if(fichaActual.sarc_f != null)
+      S.push(`SARC-F: ${fichaActual.sarc_f} puntos, ${fichaActual.sarc_f >= 4 ? 'sugestivo de sarcopenia (≥4)' : 'por debajo del punto de corte'}.`);
+    const ent = entradasIshii();
+    if(edad != null && ent.fz && ent.pan){
+      const is = (0.80 * edad) - (5.09 * ent.fz) - (3.28 * ent.pan) + 206;
+      S.push(`Ishii: ${fmt(is)} puntos, ${is >= 140 ? 'franja de sarcopenia severa (≥140)' : is >= 105 ? 'alto riesgo (≥105)' : 'sin riesgo por esta escala'}.`);
+    }
+    if(nutri.smi){
+      const c = varon ? 7.0 : 5.5;
+      S.push(`SMI (Nutrición): ${nutri.smi} kg/m², ${Number(nutri.smi) < c ? 'POR DEBAJO' : 'por encima'} del corte EWGSOP2 de ${c}.`);
+    }
+    const m4 = n('marcha_4m_seg');
+    if(m4 > 0){
+      const vel = 4 / m4;
+      S.push(`Velocidad de marcha: ${fmt(vel, 2)} m/s, ${vel <= 0.8 ? 'bajo el umbral de fragilidad (0,8)' : vel < 1 ? 'movilidad moderada' : 'adecuada para la independencia'}.`);
+    }
+    const tug = n('tug_seg');
+    if(tug) S.push(`TUG: ${tug} s, ${tug < 10 ? 'independiente, bajo riesgo' : tug < 20 ? 'adecuada, con algo de lentitud' : tug < 30 ? 'limitaciones y riesgo de caída' : 'dependencia y alto riesgo'}.`);
+    const sb = n('sppb_balance'), sm = n('sppb_marcha'), sc = n('sppb_chair');
+    if(sb != null || sm != null || sc != null){
+      const t = (sb || 0) + (sm || 0) + (sc || 0);
+      S.push(`SPPB: ${t}/12, ${t <= 3 ? 'limitación severa' : t <= 6 ? 'limitación moderada' : t <= 9 ? 'limitación leve' : 'función física normal'}.`);
+    }
+    const st = n('step_2min');
+    if(st) S.push(`2-Minute Step Test: ${st} pasos.`);
+    if(S.length){ T.push('SCREENING DE SARCOPENIA Y MOVILIDAD FUNCIONAL'); S.forEach(l => T.push('· ' + l)); T.push(''); }
+  }else{
+    T.push('LECTURA POR EDAD');
+    T.push('· Menor de 60: no se aplican los criterios de adulto mayor. Los valores se informan sin veredicto de sarcopenia ni de fragilidad, ' +
+           'y la lectura se apoya en las asimetrías, el control y los rangos de movimiento.');
+    T.push('');
+  }
+
+  // ── Hallazgos ──────────────────────────────────────────────────
+  const h = (document.getElementById('hallazgos') || {}).value || biolab.hallazgos || '';
+  const lineasH = h.split('\n').map(s => s.trim()).filter(s => s && !/^sin hallazgos/i.test(s));
+  T.push('HALLAZGOS FUERA DE NORMA');
+  if(lineasH.length) lineasH.forEach(l => T.push('· ' + l));
+  else T.push('· Sin hallazgos fuera de norma en esta toma.');
+  T.push('');
+
+  if(mayor && biolab.diagnostico_sarcopenia){
+    const dic = { NEGATIVO:'Negativo para sarcopenia', SARCOPENIA:'Sarcopenia (masa y fuerza)',
+                  FUNCIONAL:'Compromiso funcional (fuerza y rendimiento)', SEVERA:'Sarcopenia severa (masa, fuerza y rendimiento)' };
+    T.push('DIAGNÓSTICO (escala KWGS)');
+    T.push('· ' + (dic[biolab.diagnostico_sarcopenia] || biolab.diagnostico_sarcopenia));
+    T.push('');
+  }
+
+  T.push('INTERPRETACIÓN Y PLAN');
+  T.push('· (a completar por quien evalúa)');
+  T.push('');
+  T.push('— Borrador armado con los datos de la toma. Revisar, corregir y firmar.');
+  return T.join('\n');
+}
+
+function armarInformeBiolab(){
+  if(!puedeCargar()) return;
+  levantarBiolab();
+  const el = document.getElementById('informe');
+  if(!el) return;
+  if((el.value || '').trim() &&
+     !confirm('Ya hay texto escrito en el informe.\n\n¿Reemplazarlo por el borrador armado con los datos de la toma?')) return;
+  el.value = borradorInforme();
+  biolab.informe = el.value;
+  el.focus();
 }
 
 function calcularBiolab(){
@@ -2122,6 +2284,35 @@ function tildarTestsDeVald(datos, nombresExtra){
   return marcados;
 }
 
+/* El Hub no llama a las métricas como las llamamos nosotros: el área del apoyo
+   monopodal figura como "Centre of Mass 95% Ellipse Area", el pico del IMTP como
+   "Peak Vertical Force". Estos buscadores hacen la búsqueda tolerante, en vez de
+   pedir un nombre exacto que después no aparece y deja el campo vacío. */
+const RE_ELIPSE = /(95%?\s*)?ellipse area|area of cop|cop ellipse/i;
+const RE_PICO   = /peak (vertical )?force/i;
+const RE_NO_PICO = /asym|\/\s*bm|per kg|n\/kg|relative|impulse|rfd/i;
+
+function metricaFD(res, re, noRe){
+  const k = Object.keys(res || {}).find(k => re.test(k) && !(noRe && noRe.test(k)));
+  return (k && res[k] && res[k].lados) ? { nombre: k, lados: res[k].lados } : null;
+}
+
+function pruebaFD(datos, re, noRe){
+  return (datos.forceDecks || []).find(t => re.test(t.prueba || '') && !(noRe && noRe.test(t.prueba || '')));
+}
+
+/* Algunas de estas mediciones llegan por movilidad (HumanTrak) y no por ForceDecks:
+   el equilibrio monopodal es el caso típico. Se busca en los dos lados. */
+function metricaMovilidad(datos, rePrueba, reMetrica){
+  for(const pr of (datos.movilidad || [])){
+    const nom = limpiarCodigoHub(pr.prueba || '') + ' ' + normVald(traducirPrueba(pr.prueba).nombre);
+    if(!rePrueba.test(nom)) continue;
+    const m = (pr.metricas || []).find(m => reMetrica.test(m.metrica || ''));
+    if(m && (m.izquierda != null || m.derecha != null)) return { Left: m.izquierda, Right: m.derecha };
+  }
+  return null;
+}
+
 function aplicarDatosVald(datos, cortes){
   const reg = registrarTestsDeVald(datos);
   const tildados = reg.tildados, traidos = reg.traidos;
@@ -2191,11 +2382,11 @@ function aplicarDatosVald(datos, cortes){
       // asimetría de fuerza. Acá SÍ se marcan: son las dos que más dicen sobre
       // riesgo de caída — cuánto oscila un lado más que el otro, y cuánto tarda
       // en producir fuerza.
-      if(/area of cop ellipse|rfd/i.test(nombre) && L != null && R != null && Math.max(L, R) > 0){
+      if((RE_ELIPSE.test(nombre) || /rfd/i.test(nombre)) && L != null && R != null && Math.max(L, R) > 0){
         const mayor = Math.max(Math.abs(L), Math.abs(R)), menorV = Math.min(Math.abs(L), Math.abs(R));
         const asim = Math.round((mayor - menorV) / (mayor || 1) * 1000) / 10;
         const em = colorAsim(asim);
-        const esArea = /area of cop/i.test(nombre);
+        const esArea = RE_ELIPSE.test(nombre);
         const veces = menorV > 0 ? (mayor / menorV) : null;
         const peor = esArea ? ((Math.abs(L) > Math.abs(R)) ? 'IZQUIERDO' : 'DERECHO')   // más área = peor control
                             : ((Math.abs(L) < Math.abs(R)) ? 'IZQUIERDO' : 'DERECHO');  // menos RFD = más lento
@@ -2248,30 +2439,31 @@ function aplicarDatosVald(datos, cortes){
     const b = ponerSiVacio('prension_der_n', grip.derecha_N);
     contar(a || b, 'prensión');
   }
-  const imtp = (datos.forceDecks || []).find(t => /isometric mid|imtp/i.test(t.prueba || ''));
+  const imtp = pruebaFD(datos, /isometric mid|imtp|mid-thigh/i);
   if(imtp && imtp.resultados){
-    const res = imtp.resultados;
-    const pico = res['Peak Force'] || res['Peak Vertical Force'];
-    if(pico && pico.lados){
+    const pico = metricaFD(imtp.resultados, RE_PICO, RE_NO_PICO);
+    if(pico){
       const a = ponerSiVacio('imtp_pico_izq_n', pico.lados.Left);
       const b = ponerSiVacio('imtp_pico_der_n', pico.lados.Right);
       contar(a || b, 'IMTP');
     }
-    const kRfd = Object.keys(res).find(k => /rfd/i.test(k) && /100/.test(k)) || Object.keys(res).find(k => /rfd/i.test(k));
-    if(kRfd && res[kRfd].lados){
-      const a = ponerSiVacio('imtp_rfd_izq', res[kRfd].lados.Left);
-      const b = ponerSiVacio('imtp_rfd_der', res[kRfd].lados.Right);
+    const rfd = metricaFD(imtp.resultados, /rfd.*100|100.*rfd/i) || metricaFD(imtp.resultados, /rfd/i);
+    if(rfd){
+      const a = ponerSiVacio('imtp_rfd_izq', rfd.lados.Left);
+      const b = ponerSiVacio('imtp_rfd_der', rfd.lados.Right);
       contar(a || b, 'RFD');
     }
   }
-  const sls = (datos.forceDecks || []).find(t => /single leg|monopodal|unilateral stance/i.test(t.prueba || ''));
-  if(sls && sls.resultados){
-    const kArea = Object.keys(sls.resultados).find(k => /area of cop ellipse/i.test(k));
-    if(kArea && sls.resultados[kArea].lados){
-      const a = ponerSiVacio('sls_area_izq', sls.resultados[kArea].lados.Left);
-      const b = ponerSiVacio('sls_area_der', sls.resultados[kArea].lados.Right);
-      contar(a || b, 'apoyo monopodal');
-    }
+  // El apoyo monopodal: primero ForceDecks, y si no vino por ahí, HumanTrak.
+  // OJO con no agarrar el Single Leg SQUAT, que es otra prueba.
+  const sls = pruebaFD(datos, /single leg stand|unipodal|monopodal|unilateral stance/i, /squat/i);
+  let areaSls = (sls && sls.resultados) ? metricaFD(sls.resultados, RE_ELIPSE) : null;
+  let ladosArea = areaSls ? areaSls.lados : null;
+  if(!ladosArea) ladosArea = metricaMovilidad(datos, /single leg stand|stand sl|unipodal/i, RE_ELIPSE);
+  if(ladosArea){
+    const a = ponerSiVacio('sls_area_izq', ladosArea.Left);
+    const b = ponerSiVacio('sls_area_der', ladosArea.Right);
+    contar(a || b, 'apoyo monopodal');
   }
 
   // ── Los resúmenes se llenan con el volcado completo del Hub ───────
