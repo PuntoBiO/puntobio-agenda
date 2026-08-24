@@ -1159,8 +1159,161 @@ const CAMPOS_BIOLAB_NUM = ['ishii_fuerza_kg','ishii_pantorrilla_cm','prension_iz
 const CAMPOS_BIOLAB_TXT = ['hallazgos','resumen_neuromuscular','resumen_potencia','resumen_equilibrio',
   'resumen_movilidad','resumen_flexibilidad','informe'];
 
+
+/* ════════════════════════════════════════════════════════════════
+   EL PROTOCOLO DEL CIRCUITO
+   Los mismos tests que ya se toman desde el apartado VALD, pero
+   acá quedan tildados en la HC del paciente: sirve para no saltearse
+   ninguno el sábado y para que después conste qué se le hizo.
+
+   Lo único que cambia entre los dos protocolos es el equilibrio a una
+   pierna: de 60 para arriba se toma con ojos ABIERTOS, de 60 para abajo
+   con ojos CERRADOS. Los dos, con HumanTrak.
+   ════════════════════════════════════════════════════════════════ */
+const PROTOCOLOS = {
+  MAYOR: {
+    nombre: 'Salud & Fuerza Vital · 60 años o más',
+    grupos: [
+      { equipo:'HUMANTRAK', tests:[
+        ['ht_postura',      'Standing Posture'],
+        ['ht_tronco',       'Trunk Flexion'],
+        ['ht_squat',        'Squat (sentadilla 2 piernas)'],
+        ['ht_ohsquat',      'Overhead Squat'],
+        ['ht_dorsi',        'Weight Bearing Dorsiflexion (tobillo)'],
+        ['ht_sts30',        'Sit to Stand 30-second'],
+        ['ht_chair5',       'Chair Stand 5 rep'],
+        ['ht_tandem',       'Tandem Stand'],
+        ['ht_unipodal_oa',  'Equilibrio 1 pierna · OJOS ABIERTOS'],
+        ['ht_hombro',       'Shoulder Flexion'],
+      ]},
+      { equipo:'FORCEDECKS', tests:[
+        ['fd_quiet',        'Quiet Stand (balance bipodal)'],
+        ['fd_quiet1p',      'Quiet Stand 1 pierna (ojos abiertos)'],
+        ['fd_squat',        'Squat Assessment (suave)'],
+        ['fd_sts',          'Sit to Stand to Sit (fuerza funcional)'],
+        ['fd_imtp',         'IMTP (tirón de medio muslo)'],
+      ]},
+      { equipo:'DYNAMO', tests:[
+        ['dy_grip',         'Handgrip (prensión)'],
+        ['dy_kext',         'Knee Extension (cuádriceps)'],
+        ['dy_kflex',        'Knee Flexion (isquios)'],
+        ['dy_hipabd',       'Hip Abduction (glúteo medio)'],
+        ['dy_codo',         'Flexión de codo'],
+        ['dy_hombro',       'Abducción de hombro'],
+      ]},
+      { equipo:'MANUAL', tests:[
+        ['mn_sarcf',        'SARC-F (cuestionario de sarcopenia)'],
+        ['mn_marcha',       'Gait Speed (velocidad de marcha)'],
+        ['mn_sppb',         'SPPB (equilibrio + marcha + silla)'],
+        ['mn_tug',          'Timed Up & Go (TUG)'],
+        ['mn_step2',        '2-Minute Step Test'],
+        ['mn_ishii',        'Ishii Test (score de sarcopenia)'],
+      ]},
+    ],
+  },
+  MENOR: {
+    nombre: 'Readaptación · menores de 60',
+    grupos: [
+      { equipo:'HUMANTRAK', tests:[
+        ['ht_postura',      'Standing Posture'],
+        ['ht_tronco',       'Trunk Flexion'],
+        ['ht_squat',        'Squat (sentadilla 2 piernas)'],
+        ['ht_ohsquat',      'Overhead Squat'],
+        ['ht_slsquat',      'Single Leg Squat (1 pierna)'],
+        ['ht_lunge',        'Lunge'],
+        ['ht_dorsi',        'Weight Bearing Dorsiflexion (tobillo)'],
+        ['ht_unipodal_oc',  'Equilibrio 1 pierna · OJOS CERRADOS'],
+        ['ht_hombro',       'Shoulder Flexion'],
+      ]},
+      { equipo:'FORCEDECKS', tests:[
+        ['fd_quiet',        'Quiet Stand (balance bipodal)'],
+        ['fd_sls',          'Single Leg Stand (balance unipodal)'],
+        ['fd_squat',        'Squat Assessment (sentadilla 2 piernas)'],
+        ['fd_slsquat',      'Single Leg Squat Assessment (1 pierna)'],
+        ['fd_sts',          'Sit to Stand to Sit'],
+        ['fd_imtp',         'IMTP (tirón de medio muslo)'],
+        ['fd_cmj',          'CMJ (Countermovement Jump)'],
+      ]},
+      { equipo:'DYNAMO', tests:[
+        ['dy_grip',         'Handgrip (prensión)'],
+        ['dy_kext',         'Knee Extension (cuádriceps)'],
+        ['dy_kflex',        'Knee Flexion (isquios)'],
+        ['dy_hipabd',       'Hip Abduction (glúteo medio)'],
+        ['dy_codo',         'Flexión de codo'],
+        ['dy_hombro',       'Abducción de hombro'],
+      ]},
+    ],
+  },
+};
+
+/* El protocolo se propone por la edad, pero manda lo que haya elegido
+   quien evalúa: si lo cambió a mano, se respeta. */
+function protocoloActual(){
+  if(biolab.protocolo === 'MAYOR' || biolab.protocolo === 'MENOR') return biolab.protocolo;
+  const p = (fichaActual && fichaActual.paciente) || {};
+  const edad = edadDe(p.fecha_nacimiento);
+  return (edad != null && edad < 60) ? 'MENOR' : 'MAYOR';
+}
+
+function bloqueProtocolo(ro){
+  const clave = protocoloActual();
+  const prot = PROTOCOLOS[clave];
+  const hechos = biolab.protocolo_tests || {};
+  let total = 0, marcados = 0;
+  const grupos = prot.grupos.map(g => {
+    const filas = g.tests.map(([k, txt]) => {
+      total++;
+      const on = !!hechos[k];
+      if(on) marcados++;
+      return '<label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;cursor:' +
+        (ro ? 'default' : 'pointer') + '">' +
+        '<input type="checkbox" ' + (on ? 'checked' : '') + ' ' + (ro ? 'disabled' : '') +
+        ' onchange="marcarTest(\'' + k + '\', this.checked)">' +
+        '<span>' + txt + '</span></label>';
+    }).join('');
+    return '<div style="margin-bottom:10px">' +
+      '<div style="font-size:11px;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:2px">' + g.equipo + '</div>' +
+      filas + '</div>';
+  }).join('');
+
+  return `
+  <div class="bloque">
+    <div class="bloque-head">Protocolo del circuito</div>
+    <div class="bloque-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="font-weight:700;font-size:13.5px">${prot.nombre}</div>
+        <div style="font-size:12.5px;color:var(--muted)">${marcados}/${total} hechos</div>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Se propone por la edad del paciente. El equilibrio a una pierna va con ojos abiertos de 60 en
+        adelante y con ojos cerrados por debajo, siempre con HumanTrak.
+        ${ro ? '' : `<button class="btn" style="margin-left:8px" onclick="cambiarProtocolo()">Usar el otro protocolo</button>`}
+      </div>
+      ${grupos}
+    </div>
+  </div>`;
+}
+
+function marcarTest(clave, valor){
+  biolab.protocolo_tests = biolab.protocolo_tests || {};
+  if(valor) biolab.protocolo_tests[clave] = true;
+  else delete biolab.protocolo_tests[clave];
+  biolab.protocolo = protocoloActual();   // queda fijado el que se está usando
+  renderFicha();
+}
+
+function cambiarProtocolo(){
+  const ahora = protocoloActual();
+  const otro = ahora === 'MAYOR' ? 'MENOR' : 'MAYOR';
+  if(!confirm('¿Pasar al protocolo "' + PROTOCOLOS[otro].nombre + '"?\n\nLo que ya tildaste se conserva.')) return;
+  biolab.protocolo = otro;
+  renderFicha();
+}
+
 function solapaBiolab(b, ro){
   return `
+  ${bloqueProtocolo(ro)}
+
   ${ro ? '' : `
   <div class="bloque" style="border-color:var(--azul-border)">
     <div class="bloque-head" style="background:var(--azul)">Traer las mediciones de VALD</div>
@@ -1837,6 +1990,8 @@ async function guardarBiolab(){
   const fila = { hc_id: fichaActual.id, editado_en: new Date().toISOString(), editado_por_email: miEmail };
   CAMPOS_BIOLAB_NUM.forEach(c => { fila[c] = biolab[c] ?? null; });
   CAMPOS_BIOLAB_TXT.forEach(c => { fila[c] = biolab[c] || null; });
+  fila.protocolo       = biolab.protocolo || protocoloActual();
+  fila.protocolo_tests = biolab.protocolo_tests || {};
   fila.vald_profile_id = biolab.vald_profile_id || null;
   fila.vald_traido_en  = biolab.vald_traido_en  || null;
   fila.ishii_score      = ishii;
