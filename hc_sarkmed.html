@@ -1953,40 +1953,56 @@ async function subirAdjuntos(sol, input){
   const files = Array.from(input.files || []);
   if(!files.length) return;
   const cont = document.getElementById('lista-adjuntos');
-  const avisar = (txt) => { cont.innerHTML = '<div style="font-size:12px;color:var(--muted)">' + txt + '</div>'; };
-  avisar(files.length === 1 ? 'Subiendo…' : 'Subiendo 1 de ' + files.length + '…');
+  const pesoTotal = (files.reduce((a,f) => a + f.size, 0) / 1048576).toFixed(1);
+  let listos = 0;
+  const avisar = () => {
+    cont.innerHTML = '<div style="font-size:12px;color:var(--muted)">Subiendo ' +
+      (files.length === 1 ? 'el archivo' : listos + ' de ' + files.length) +
+      '… (' + pesoTotal + ' MB en total)</div>';
+  };
+  avisar();
 
-  let n = 0;
-  for(const original of files){
-    n++;
-    avisar(files.length === 1 ? 'Subiendo…' : 'Subiendo ' + n + ' de ' + files.length + '…');
-    const file = await achicarImagen(original);
-    // El nombre se limpia: los acentos y espacios rompen las rutas del bucket.
-    const limpio = file.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-                            .replace(/[^a-zA-Z0-9._-]/g, '_');
-    const path = `${fichaActual.id}/${sol}/${Date.now()}_${limpio}`;
-    const mb = (file.size / 1048576).toFixed(1);
-    avisar((files.length === 1 ? 'Subiendo' : 'Subiendo ' + n + ' de ' + files.length) + '… (' + mb + ' MB)');
-    const { error: eUp } = await sb.storage.from('sarkmed-hc').upload(path, file, { upsert:false });
-    if(eUp){
-      // El error también se muestra acá abajo: el cartelito de arriba no se ve
-      // cuando estás al pie de la ficha, y la subida parecía quedar colgada.
-      cont.innerHTML = '<div style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:10px;font-size:13px">' +
-        '<b>No se pudo subir ' + esc(original.name) + '</b><br>' + esc(eUp.message) +
-        '<br><span style="font-size:12px">Pesa ' + mb + ' MB.</span></div>';
-      toast('No se pudo subir ' + original.name + ': ' + eUp.message, 'err');
-      return;
+  const fallos = [];
+
+  // Los archivos van todos juntos, no en fila: con un PDF del Hub de 12 MB,
+  // subir de a uno hacía esperar el doble sin necesidad.
+  await Promise.all(files.map(async (original) => {
+    try{
+      const file = await achicarImagen(original);
+      // El nombre se limpia: los acentos y espacios rompen las rutas del bucket.
+      const limpio = file.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                              .replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `${fichaActual.id}/${sol}/${Date.now()}_${Math.random().toString(36).slice(2,7)}_${limpio}`;
+      const { error: eUp } = await sb.storage.from('sarkmed-hc').upload(path, file, { upsert:false });
+      if(eUp){ fallos.push(original.name + ': ' + eUp.message); return; }
+      const { error: eIns } = await sb.from('hc_sarkmed_adjuntos').insert({
+        hc_id: fichaActual.id, solapa: sol, path, nombre: file.name,
+        tipo: file.type || null, tamano: file.size || null, subido_por: miEmail
+      });
+      if(eIns) fallos.push(original.name + ' (se subió pero no se anotó): ' + eIns.message);
+    }catch(e){
+      fallos.push(original.name + ': ' + (e && e.message ? e.message : 'error inesperado'));
+    }finally{
+      listos++;
+      avisar();
     }
-    const { error: eIns } = await sb.from('hc_sarkmed_adjuntos').insert({
-      hc_id: fichaActual.id, solapa: sol, path, nombre: file.name,
-      tipo: file.type || null, tamano: file.size || null, subido_por: miEmail
-    });
-    if(eIns) toast('Se subió el archivo pero no se pudo anotar: ' + eIns.message, 'err');
-  }
+  }));
+
   input.value = '';
   await cargarAdjuntos(fichaActual.id);
   renderFicha();
-  toast(files.length === 1 ? 'Estudio cargado' : files.length + ' estudios cargados', 'ok');
+
+  if(fallos.length){
+    // El error se muestra acá abajo además del cartelito: cuando estás al pie
+    // de la ficha, el aviso de arriba no se ve y parecía quedar colgado.
+    const c2 = document.getElementById('lista-adjuntos');
+    if(c2) c2.innerHTML += '<div style="background:#fee2e2;color:#991b1b;padding:10px 12px;border-radius:10px;font-size:13px;margin-top:8px">' +
+      '<b>No se pudo subir ' + fallos.length + (fallos.length === 1 ? ' archivo' : ' archivos') + '</b><br>' +
+      fallos.map(esc).join('<br>') + '</div>';
+    toast('Hubo problemas al subir', 'err');
+  }else{
+    toast(files.length === 1 ? 'Estudio cargado' : files.length + ' estudios cargados', 'ok');
+  }
 }
 
 async function verAdjunto(i){
