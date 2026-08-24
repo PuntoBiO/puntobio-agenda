@@ -3190,24 +3190,75 @@ window.fichaActualizarFechaSugerida = () => {
   if (dia && inp) inp.value = proximaFechaDeDia(dia);
 };
 
+// ============================================================================
+// CUPO FIJO POR FECHA · FIX 24/08/2026
+// Antes esta pantalla decidía si un turno tenía lugar con dos números malos:
+//   · CAPACIDAD: leía turnos.capacidad, que es el ESPEJO y guarda la de HOY.
+//     Un cupo programado a futuro (Entrenamiento pasa a 12 en septiembre) no se
+//     veía, así que el turno ni siquiera aparecía en la lista para elegir.
+//   · OCUPADOS: contaba TODOS los fijos con activo=true, sin mirar la ventana
+//     de fechas. Un alumno con la baja sellada para dentro de unos días seguía
+//     ocupando su lugar, aunque para la fecha de arranque ya se hubiera ido.
+// Las dos cosas empujaban para el mismo lado: decir "lleno" cuando había lugar.
+// Ahora los dos números se calculan A LA FECHA EN QUE ARRANCA LA FIJA (la que
+// la pantalla propone por defecto: la próxima vez que cae ese día).
+// ============================================================================
+let _lineasCapacidad = null;   // cache: turno_id -> [{desde, capacidad}] desc
+
+async function cargarLineasCapacidad() {
+  if (_lineasCapacidad) return _lineasCapacidad;
+  _lineasCapacidad = {};
+  try {
+    const { data } = await sbLeerTodo(() => sb.from('turnos_capacidad')
+      .select('turno_id,desde,capacidad')
+      .order('desde', { ascending: false }));
+    (data || []).forEach(r => {
+      (_lineasCapacidad[r.turno_id] = _lineasCapacidad[r.turno_id] || []).push(r);
+    });
+    Object.values(_lineasCapacidad).forEach(a => a.sort((x, y) => (x.desde < y.desde ? 1 : -1)));
+  } catch (e) { console.warn('No se pudo leer turnos_capacidad', e); }
+  return _lineasCapacidad;
+}
+
+// Capacidad vigente de un turno en una fecha. Si no hay línea sembrada, cae al
+// espejo, así que nunca queda peor que antes.
+function capFijaEn(turno, fechaIso) {
+  const linea = (_lineasCapacidad || {})[turno.id] || [];
+  for (const l of linea) if (l.desde <= fechaIso) return l.capacidad;
+  return turno.capacidad;
+}
+
+// ¿Esta fija ocupa lugar en esa fecha? (misma ventana que usa la agenda)
+function _fijaVigenteEn(r, fechaIso) {
+  if (r.activo !== true) return false;
+  if (r.fecha_desde && r.fecha_desde > fechaIso) return false;
+  if (r.fecha_hasta && r.fecha_hasta < fechaIso) return false;
+  return true;
+}
+
 async function fichaSelectorTurno(turnoViejoId) {
   const cont = document.getElementById('fichaHorarios');
 
-  // Contar ocupados por turno (todos los alumnos fijos activos)
+  await cargarLineasCapacidad();
+
+  // Fijas con su ventana, para poder contar ocupados A LA FECHA de arranque
   const { data: ocupacion } = await sbLeerTodo(() => sb.from('turno_alumnos')
-    .select('turno_id')
+    .select('turno_id,activo,fecha_desde,fecha_hasta')
     .eq('activo', true)
     .order('id', { ascending: true }));
-  const ocupadosPorTurno = {};
+  const fijasPorTurno = {};
   (ocupacion || []).forEach(r => {
-    ocupadosPorTurno[r.turno_id] = (ocupadosPorTurno[r.turno_id] || 0) + 1;
+    (fijasPorTurno[r.turno_id] = fijasPorTurno[r.turno_id] || []).push(r);
   });
+  const ocupadosEnFecha = (turnoId, fechaIso) =>
+    (fijasPorTurno[turnoId] || []).filter(r => _fijaVigenteEn(r, fechaIso)).length;
 
   // Mostrar SOLO turnos con cupo libre (y excluir el turno viejo si es un cambio)
   const disponibles = fichaTurnosSistema.filter(t => {
     if (turnoViejoId && t.id === turnoViejoId) return false;        // no ofrecer el mismo de antes
-    const ocup = ocupadosPorTurno[t.id] || 0;
-    return !t.capacidad || ocup < t.capacidad;                       // hay lugar fijo
+    const f = proximaFechaDeDia(t.dia);
+    const cap = capFijaEn(t, f);
+    return !cap || ocupadosEnFecha(t.id, f) < cap;                   // hay lugar fijo ESA fecha
   });
 
   if (disponibles.length === 0) {
@@ -3219,8 +3270,10 @@ async function fichaSelectorTurno(turnoViejoId) {
     .sort((a,b) => ((ORDEN_DIAS[a.dia]||99)-(ORDEN_DIAS[b.dia]||99)) || a.hora.localeCompare(b.hora));
   const opciones = disponiblesOrd
     .map(t => {
-      const ocup = ocupadosPorTurno[t.id] || 0;
-      const libres = t.capacidad ? (t.capacidad - ocup) : '∞';
+      const f = proximaFechaDeDia(t.dia);
+      const cap = capFijaEn(t, f);
+      const ocup = ocupadosEnFecha(t.id, f);
+      const libres = cap ? (cap - ocup) : '∞';
       return `<option value="${t.id}" data-dia="${t.dia}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}</option>`;
     }).join('');
   const titulo = turnoViejoId ? '🔄 Cambiar a este horario:' : '➕ Elegí el horario:';
