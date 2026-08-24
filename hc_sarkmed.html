@@ -1767,9 +1767,12 @@ async function traerDeVald(forzarProfileId){
     biolab.vald_traido_en = new Date().toISOString();
 
     est.innerHTML = `<span style="color:var(--verde)"><b>Listo</b> (tomas desde el ${esc(desdeLindo)}): ${n.detalle.join(' · ')}.</span>` +
+      (n.tildados ? ` <span style="color:var(--verde)">Se tildaron ${n.tildados} tests del protocolo.</span>` : '') +
       (n.pisados ? ` <span style="color:var(--muted)">Lo que ya estaba cargado no se tocó (${n.pisados}).</span>` : '') +
       ' <span style="color:var(--muted)">Revisá y tocá Guardar ficha.</span>';
     calcularBiolab();
+    // Se redibuja para que el checklist muestre lo que la toma ya marcó.
+    if(n.tildados) renderFicha();
   }catch(e){
     est.innerHTML = '<span style="color:var(--rojo-x)">⚠️ ' + esc(String(e && e.message ? e.message : e)) + '</span>';
   }finally{
@@ -1805,7 +1808,65 @@ async function cortesAsimetria(){
   }catch(e){ return { verde: 10, amar: 15 }; }
 }
 
+/* Al traer de VALD, se tildan solos los tests que efectivamente aparecen en la
+   toma: si el equipo lo registró, es porque se hizo. Lo manual (SARC-F, TUG,
+   marcha) se sigue tildando a mano, porque no sale de ninguna máquina. */
+const PISTAS_TEST = [
+  ['ht_postura',     ['standing posture','postura de pie']],
+  ['ht_tronco',      ['trunk flexion','flexión de tronco','flexion de tronco']],
+  ['ht_squat',       ['squat']],
+  ['ht_ohsquat',     ['overhead squat']],
+  ['ht_slsquat',     ['single leg squat']],
+  ['ht_pistol',      ['pistol']],
+  ['ht_lunge',       ['lunge','estocada']],
+  ['ht_dorsi',       ['dorsiflex']],
+  ['ht_hombro',      ['shoulder flexion','flexión de hombro','flexion de hombro']],
+  ['ht_tandem_oa',   ['tandem']],
+  ['ht_unipodal_oa', ['single leg stand - eyes open','single leg stand (unipodal)','apoyo monopodal']],
+  ['ht_unipodal_oc', ['single leg stand - eyes closed','eyes closed']],
+  ['ht_quiet_oc',    ['quiet stand - eyes closed']],
+  ['ht_sts30',       ['sit to stand - 30','30 second','30-second','sit to stand 30']],
+  ['ht_sts5',        ['sit to stand - 5','5 rep','chair stand']],
+  ['fd_quiet',       ['quiet stand']],
+  ['fd_sls',         ['single leg stand']],
+  ['fd_squat',       ['squat assessment']],
+  ['fd_slsquat',     ['single leg squat assessment']],
+  ['fd_imtp',        ['mid-thigh','imtp']],
+  ['fd_cmj',         ['countermovement','cmj']],
+  ['dy_grip',        ['grip','prensión','prension']],
+  ['dy_kext',        ['knee extension','cuádriceps','cuadriceps','extensión rodilla','extension rodilla']],
+  ['dy_kflex',       ['knee flexion','isquiotibiales','isquios','flexión rodilla','flexion rodilla']],
+  ['dy_hipabd',      ['hip abd','abducción de cadera','abduccion de cadera','glúteo','gluteo']],
+  ['dy_hombroabd',   ['shoulder abd','abducción de hombro','abduccion de hombro']],
+  ['dy_codo',        ['elbow','codo']],
+];
+
+function tildarTestsDeVald(datos){
+  const nombres = [];
+  (datos.movilidad   || []).forEach(m => nombres.push(m.prueba || ''));
+  (datos.forceDecks  || []).forEach(f => nombres.push(f.prueba || ''));
+  (datos.fuerza      || []).forEach(f => nombres.push(f.grupo  || ''));
+  if(datos.postura) nombres.push('Standing Posture');
+
+  const limpio = nombres.map(n => String(n).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase());
+  const clave = protocoloActual();
+  const delProtocolo = new Set();
+  (PROTOCOLOS[clave].grupos || []).forEach(g => g.tests.forEach(([k]) => delProtocolo.add(k)));
+
+  biolab.protocolo_tests = biolab.protocolo_tests || {};
+  let marcados = 0;
+  PISTAS_TEST.forEach(([k, pistas]) => {
+    if(!delProtocolo.has(k)) return;                     // no está en este protocolo
+    if(biolab.protocolo_tests[k]) return;                // ya estaba tildado
+    const hay = pistas.some(pista => limpio.some(n => n.includes(pista)));
+    if(hay){ biolab.protocolo_tests[k] = true; marcados++; }
+  });
+  biolab.protocolo = clave;
+  return marcados;
+}
+
 function aplicarDatosVald(datos, cortes){
+  const tildados = tildarTestsDeVald(datos);
   const detalle = [];
   let total = 0, pisados = 0;
   const contar = (ok, etiqueta) => { if(ok){ total++; detalle.push(etiqueta); } else pisados++; };
@@ -1979,7 +2040,7 @@ function aplicarDatosVald(datos, cortes){
   }
   if(hallazgos.length) detalle.push(hallazgos.length + ' hallazgos');
 
-  return { total, detalle, pisados };
+  return { total, detalle, pisados, tildados };
 }
 
 function levantarBiolab(){
