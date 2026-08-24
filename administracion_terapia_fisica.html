@@ -3186,8 +3186,11 @@ window.fichaActualizarFechaSugerida = () => {
   const sel = document.getElementById('fichaNuevoTurno');
   const opt = sel && sel.options[sel.selectedIndex];
   const dia = opt ? opt.getAttribute('data-dia') : null;
+  // 24/08/2026: si la opción trae la primera fecha con lugar, se usa esa.
+  const fechaLibre = opt ? opt.getAttribute('data-fecha') : null;
   const inp = document.getElementById('fichaDesdeFecha');
-  if (dia && inp) inp.value = proximaFechaDeDia(dia);
+  if (inp && fechaLibre) inp.value = fechaLibre;
+  else if (dia && inp) inp.value = proximaFechaDeDia(dia);
 };
 
 // ============================================================================
@@ -3228,6 +3231,34 @@ function capFijaEn(turno, fechaIso) {
   return turno.capacidad;
 }
 
+// PRIMERA FECHA CON LUGAR · corrección 24/08/2026
+// La versión de la mañana miraba solo la PRÓXIMA vez que caía ese día, y ahí
+// se comía el caso real: Entrenamiento Jueves 09:00 está lleno el 27/8 (cap 8)
+// pero tiene 4 lugares el 17/9, cuando arranca la capacidad 12. El turno ni
+// aparecía en la lista. Ahora se busca hacia adelante, semana por semana, la
+// primera fecha en que ese turno tiene lugar fijo — y esa fecha es la que la
+// pantalla propone.
+const _HORIZONTE_SEMANAS = 26;   // medio año
+
+function _sumarDias(iso, n) {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  return _isoLocal(d);
+}
+
+// Devuelve {fecha, libres} o null si no hay lugar en todo el horizonte.
+function primeraFechaConLugar(turno, ocupadosEnFecha) {
+  let f = proximaFechaDeDia(turno.dia);
+  for (let i = 0; i < _HORIZONTE_SEMANAS; i++) {
+    const cap = capFijaEn(turno, f);
+    if (!cap) return { fecha: f, libres: null };          // sin tope declarado
+    const libres = cap - ocupadosEnFecha(turno.id, f);
+    if (libres > 0) return { fecha: f, libres };
+    f = _sumarDias(f, 7);
+  }
+  return null;
+}
+
 // ¿Esta fija ocupa lugar en esa fecha? (misma ventana que usa la agenda)
 function _fijaVigenteEn(r, fechaIso) {
   if (r.activo !== true) return false;
@@ -3253,12 +3284,16 @@ async function fichaSelectorTurno(turnoViejoId) {
   const ocupadosEnFecha = (turnoId, fechaIso) =>
     (fijasPorTurno[turnoId] || []).filter(r => _fijaVigenteEn(r, fechaIso)).length;
 
-  // Mostrar SOLO turnos con cupo libre (y excluir el turno viejo si es un cambio)
+  // Mostrar SOLO turnos que tengan lugar fijo en algún momento del horizonte
+  // (y excluir el turno viejo si es un cambio). Se guarda la primera fecha con
+  // lugar de cada uno para proponerla y para escribirla en la opción.
+  const _libreDe = {};
   const disponibles = fichaTurnosSistema.filter(t => {
     if (turnoViejoId && t.id === turnoViejoId) return false;        // no ofrecer el mismo de antes
-    const f = proximaFechaDeDia(t.dia);
-    const cap = capFijaEn(t, f);
-    return !cap || ocupadosEnFecha(t.id, f) < cap;                   // hay lugar fijo ESA fecha
+    const r = primeraFechaConLugar(t, ocupadosEnFecha);
+    if (!r) return false;
+    _libreDe[t.id] = r;
+    return true;
   });
 
   if (disponibles.length === 0) {
@@ -3270,14 +3305,18 @@ async function fichaSelectorTurno(turnoViejoId) {
     .sort((a,b) => ((ORDEN_DIAS[a.dia]||99)-(ORDEN_DIAS[b.dia]||99)) || a.hora.localeCompare(b.hora));
   const opciones = disponiblesOrd
     .map(t => {
-      const f = proximaFechaDeDia(t.dia);
-      const cap = capFijaEn(t, f);
-      const ocup = ocupadosEnFecha(t.id, f);
-      const libres = cap ? (cap - ocup) : '∞';
-      return `<option value="${t.id}" data-dia="${t.dia}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}</option>`;
+      const r = _libreDe[t.id];
+      const libres = (r.libres === null) ? '∞' : r.libres;
+      // Si el lugar recién aparece más adelante (porque sube la capacidad o se
+      // va alguien), se dice explícitamente desde cuándo.
+      const desde = (r.fecha !== proximaFechaDeDia(t.dia))
+        ? ` · desde el ${r.fecha.split('-').reverse().slice(0,2).join('/')}`
+        : '';
+      return `<option value="${t.id}" data-dia="${t.dia}" data-fecha="${r.fecha}">${t.dia} · ${t.hora} · ${t.servicio} · ${libres} lugar${libres===1?'':'es'}${desde}</option>`;
     }).join('');
   const titulo = turnoViejoId ? '🔄 Cambiar a este horario:' : '➕ Elegí el horario:';
-  const fechaDefault = proximaFechaDeDia((disponiblesOrd[0] || {}).dia);
+  const _prim = disponiblesOrd[0] ? _libreDe[disponiblesOrd[0].id] : null;
+  const fechaDefault = _prim ? _prim.fecha : proximaFechaDeDia((disponiblesOrd[0] || {}).dia);
   const notaFecha = turnoViejoId
     ? 'Arranca el nuevo día desde esta fecha. Las clases anteriores (incluida la de hoy) quedan FIJAS en el horario viejo — no se convierten en recuperatorio.'
     : 'El alumno empieza a figurar en este horario desde esta fecha.';
