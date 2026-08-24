@@ -1317,6 +1317,7 @@ function bloqueProtocoloReal(trajo, ro){
         '<span style="color:var(--muted);font-size:12px"> · ' +
         (vacio ? 'vino sin métricas, revisar la toma'
                : it.metricas + (it.metricas === 1 ? ' métrica' : ' métricas')) +
+        (it.crudo ? ' · <span style="opacity:.7">' + esc(it.crudo) + '</span>' : '') +
         '</span></span></div>';
     }).join('');
     return '<div style="margin-bottom:10px">' +
@@ -1972,20 +1973,80 @@ const PISTAS_TEST = [
   ['dy_codo',        ['elbow','codo']],
 ];
 
+/* ────────────────────────────────────────────────────────────────
+   LOS CÓDIGOS DEL HUB
+   El Hub no devuelve "Weight Bearing Dorsiflexion": devuelve
+   TT_DORSI-WB. Y así con casi todo HumanTrak. Por eso el protocolo
+   daba por ausentes tests que estaban en la misma pantalla.
+   Acá se traduce el código al nombre real y, cuando corresponde, se
+   dice a qué test del protocolo equivale. Lo que no esté en la tabla
+   se muestra igual, con las siglas expandidas.
+   ──────────────────────────────────────────────────────────────── */
+const CODIGOS_HUB = [
+  { re: /^posture|standing posture$/,              nombre: 'Standing Posture',                       clave: 'ht_postura' },
+  { re: /^trunk flex/,                             nombre: 'Trunk Flexion',                          clave: 'ht_tronco' },
+  { re: /^(squat oh|oh squat|overhead squat)/,     nombre: 'Overhead Squat',                         clave: 'ht_ohsquat' },
+  { re: /^(pistol squat sl|squat pistol sl|pistol)/, nombre: 'Single Leg Pistol Squat',              clave: 'ht_pistol' },
+  { re: /^(squat sl|sl squat)$/,                   nombre: 'Single Leg Squat',                       clave: 'ht_slsquat' },
+  { re: /^squat$/,                                 nombre: 'Squat (sentadilla 2 piernas)',           clave: 'ht_squat' },
+  { re: /^lunge/,                                  nombre: 'Lunge',                                  clave: 'ht_lunge' },
+  { re: /^dorsi wb|^wb dorsi|dorsiflex/,           nombre: 'Weight Bearing Dorsiflexion (tobillo)',  clave: 'ht_dorsi' },
+  { re: /^shoulder flex/,                          nombre: 'Shoulder Flexion',                       clave: 'ht_hombro' },
+  { re: /^sit to stand 30/,                        nombre: 'Sit to Stand · 30 segundos',             clave: 'ht_sts30' },
+  { re: /^sit to stand (5|five)/,                  nombre: 'Sit to Stand · 5 repeticiones',          clave: 'ht_sts5' },
+  { re: /^quiet stand eyes closed/,                nombre: 'Quiet Stand · ojos cerrados',            clave: 'ht_quiet_oc' },
+  { re: /^quiet stand eyes open|^quiet stand$/,    nombre: 'Quiet Stand · ojos abiertos',            clave: null },
+  { re: /^stand sl eyes open|^sl stand eyes open/, nombre: 'Single Leg Stand · ojos abiertos',       clave: 'ht_unipodal_oa' },
+  { re: /^stand sl eyes closed|^sl stand eyes closed/, nombre: 'Single Leg Stand · ojos cerrados',   clave: 'ht_unipodal_oc' },
+  { re: /tandem/,                                  nombre: 'Tandem Stand',                           clave: 'ht_tandem_oa' },
+  { re: /countermovement jump|^cmj$/,              nombre: 'Countermovement Jump',                   clave: null },
+];
+
+/* Siglas que usa el Hub adentro de sus códigos */
+const SIGLAS_HUB = [
+  [/\bsl\b/g, 'single leg'], [/\bwb\b/g, 'weight bearing'], [/\boh\b/g, 'overhead'],
+  [/\bflex\b/g, 'flexion'],  [/\bext\b/g, 'extension'],     [/\bdorsi\b/g, 'dorsiflexion'],
+  [/\babd\b/g, 'abduction'], [/\badd\b/g, 'adduction'],     [/\brot\b/g, 'rotation'],
+];
+
+function limpiarCodigoHub(raw){
+  return normVald(raw).replace(/^tt[\s_-]+/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function traducirPrueba(raw){
+  const crudo = String(raw == null ? '' : raw).trim();
+  const base  = limpiarCodigoHub(crudo);
+  for(const c of CODIGOS_HUB){
+    if(c.re.test(base)) return { nombre: c.nombre, clave: c.clave || null, crudo };
+  }
+  // No está en la tabla: se muestra igual, pero legible
+  if(/^tt[\s_-]/i.test(crudo)){
+    let t = base;
+    SIGLAS_HUB.forEach(([re, txt]) => { t = t.replace(re, txt); });
+    t = t.replace(/\b\w/g, ch => ch.toUpperCase());
+    return { nombre: t, clave: null, crudo };
+  }
+  return { nombre: crudo, clave: null, crudo };
+}
+
+
 /* Arma el listado REAL: recorre lo que devolvió el Hub y lo agrupa por equipo.
    No parte de ninguna lista prevista — si el Hub devuelve una prueba que este
    código no conoce, igual entra (queda bajo el nombre de la lista que la trajo).
    Además sigue tildando el protocolo por edad, que ahora es solo referencia. */
 function registrarTestsDeVald(datos){
-  const items = [], vistos = new Set();
+  const items = [], vistos = new Set(), claves = new Set(), nombresLindos = [];
   const agregar = (equipo, prueba, metricas) => {
-    const nombre = String(prueba == null ? '' : prueba).trim();
-    if(!nombre) return;
+    if(prueba == null || !String(prueba).trim()) return;
+    const t  = traducirPrueba(prueba);
     const eq = String(equipo || 'OTROS').toUpperCase().replace(/[\s_-]+/g, '');
-    const llave = eq + '|' + normVald(nombre);
+    const llave = eq + '|' + normVald(t.nombre);
     if(vistos.has(llave)) return;
     vistos.add(llave);
-    items.push({ equipo: eq, prueba: nombre, metricas: Number(metricas) || 0 });
+    nombresLindos.push(t.nombre);
+    if(t.clave) claves.add(t.clave);
+    items.push({ equipo: eq, prueba: t.nombre, metricas: Number(metricas) || 0,
+                 crudo: (normVald(t.crudo) !== normVald(t.nombre)) ? t.crudo : null });
   };
 
   (datos.movilidad || []).forEach(pr =>
@@ -2019,16 +2080,26 @@ function registrarTestsDeVald(datos){
     });
   });
 
-  const tildados = tildarTestsDeVald(datos);
-
   biolab.protocolo_tests = biolab.protocolo_tests || {};
+
+  // Lo que el código del Hub identifica sin lugar a dudas se tilda directo;
+  // las pistas por nombre quedan de refuerzo para lo que no está en la tabla.
+  const clave = protocoloActual();
+  const delProtocolo = new Set();
+  (PROTOCOLOS[clave].grupos || []).forEach(g => g.tests.forEach(([k]) => delProtocolo.add(k)));
+  let tildados = 0;
+  claves.forEach(k => {
+    if(delProtocolo.has(k) && !biolab.protocolo_tests[k]){ biolab.protocolo_tests[k] = true; tildados++; }
+  });
+  tildados += tildarTestsDeVald(datos, nombresLindos);
+
   if(items.length) biolab.protocolo_tests.__vald = { fecha: new Date().toISOString(), items };
 
   return { traidos: items.length, tildados };
 }
 
-function tildarTestsDeVald(datos){
-  const nombres = [];
+function tildarTestsDeVald(datos, nombresExtra){
+  const nombres = (nombresExtra || []).slice();
   (datos.movilidad   || []).forEach(m => nombres.push(m.prueba || ''));
   (datos.forceDecks  || []).forEach(f => nombres.push(f.prueba || ''));
   (datos.fuerza      || []).forEach(f => nombres.push(f.grupo  || ''));
