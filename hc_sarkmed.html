@@ -1260,7 +1260,129 @@ function protocoloActual(){
   return (edad != null && edad < 60) ? 'MENOR' : 'MAYOR';
 }
 
+/* ────────────────────────────────────────────────────────────────
+   Lo que trajo la toma MANDA.
+   Mientras no haya traída de VALD, el listado es el protocolo por edad
+   y se tilda a mano. Apenas se trae una toma, el listado se rehace con
+   lo que el equipo registró de verdad, agrupado por aparato: si un test
+   está en la toma, figura; si no está, no figura. El protocolo por edad
+   pasa a ser referencia —sirve para ver qué faltó— y no la lista de lo
+   hecho. Lo manual (SARC-F, marcha, TUG, SPPB, Ishii) se sigue tildando
+   a mano, porque no sale de ninguna máquina.
+   La toma queda guardada dentro de protocolo_tests, bajo __vald.
+   ──────────────────────────────────────────────────────────────── */
+const ORDEN_EQUIPOS = ['HUMANTRAK','FORCEDECKS','DYNAMO','NORDBORD','SMARTSPEED','MANUAL','OTROS'];
+
+function normVald(s){
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+}
+
+function listadoVald(){
+  const v = (biolab.protocolo_tests || {}).__vald;
+  return (v && Array.isArray(v.items) && v.items.length) ? v : null;
+}
+
+function filaCheck(k, txt, on, ro){
+  return '<label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;cursor:' +
+    (ro ? 'default' : 'pointer') + '">' +
+    '<input type="checkbox" ' + (on ? 'checked' : '') + ' ' + (ro ? 'disabled' : '') +
+    ' onchange="marcarTest(\'' + k + '\', this.checked)">' +
+    '<span>' + txt + '</span></label>';
+}
+
 function bloqueProtocolo(ro){
+  const trajo = listadoVald();
+  return trajo ? bloqueProtocoloReal(trajo, ro) : bloqueProtocoloPorEdad(ro);
+}
+
+/* Listado armado con la toma real */
+function bloqueProtocoloReal(trajo, ro){
+  const clave  = protocoloActual();
+  const prot   = PROTOCOLOS[clave];
+  const hechos = biolab.protocolo_tests || {};
+
+  const porEquipo = {};
+  trajo.items.forEach(it => { (porEquipo[it.equipo] = porEquipo[it.equipo] || []).push(it); });
+  const equipos = Object.keys(porEquipo).sort((a, b) => {
+    const ia = ORDEN_EQUIPOS.indexOf(a), ib = ORDEN_EQUIPOS.indexOf(b);
+    return ((ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)) || a.localeCompare(b);
+  });
+
+  const bloques = equipos.map(eq => {
+    const filas = porEquipo[eq].map(it => {
+      const vacio = !it.metricas;
+      return '<div style="display:flex;align-items:flex-start;gap:9px;padding:5px 0;font-size:13.5px">' +
+        '<span style="font-weight:700;color:' + (vacio ? 'var(--rojo-x)' : 'var(--verde)') + '">' +
+        (vacio ? '⚠' : '✓') + '</span><span>' + esc(it.prueba) +
+        '<span style="color:var(--muted);font-size:12px"> · ' +
+        (vacio ? 'vino sin métricas, revisar la toma'
+               : it.metricas + (it.metricas === 1 ? ' métrica' : ' métricas')) +
+        '</span></span></div>';
+    }).join('');
+    return '<div style="margin-bottom:10px">' +
+      '<div style="font-size:11px;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:2px">' +
+      esc(eq) + ' · ' + porEquipo[eq].length + '</div>' + filas + '</div>';
+  }).join('');
+
+  // Lo manual sigue con tilde: no sale de ningún equipo
+  const gManual = (prot.grupos || []).find(g => g.equipo === 'MANUAL');
+  let bloqueManual = '';
+  if(gManual){
+    const filas = gManual.tests.map(([k, txt]) => filaCheck(k, txt, !!hechos[k], ro)).join('');
+    const hechosMan = gManual.tests.filter(([k]) => hechos[k]).length;
+    bloqueManual =
+      '<div style="margin-bottom:10px;border-top:1px solid var(--border);padding-top:8px">' +
+      '<div style="font-size:11px;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:2px">' +
+      'MANUAL · ' + hechosMan + '/' + gManual.tests.length + ' — se tilda a mano</div>' + filas + '</div>';
+  }
+
+  // El protocolo por edad, como referencia: qué esperaba y no vino
+  const nombresToma = trajo.items.map(it => normVald(it.prueba));
+  const faltan = [];
+  (prot.grupos || []).forEach(g => {
+    if(g.equipo === 'MANUAL') return;
+    g.tests.forEach(([k, txt]) => {
+      if(hechos[k]) return;
+      // Segundo chequeo por nombre, por si vino escrito distinto de las pistas
+      const base = normVald(String(txt).split(/[·(]/)[0]);
+      if(base && nombresToma.some(n => n.includes(base) || base.includes(n))) return;
+      faltan.push(g.equipo + ' · ' + txt);
+    });
+  });
+
+  const cuando = trajo.fecha ? new Date(trajo.fecha).toLocaleString('es-AR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
+
+  return `
+  <div class="bloque">
+    <div class="bloque-head">Protocolo del circuito · lo que trajo la toma</div>
+    <div class="bloque-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+        <div style="font-weight:700;font-size:13.5px">${trajo.items.length} tests registrados por los equipos</div>
+        <div style="font-size:12.5px;color:var(--muted)">${cuando ? 'traído el ' + esc(cuando) : ''}</div>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Esta lista sale de la toma de VALD, agrupada por equipo: es lo que la máquina registró, no una
+        lista prevista. Referencia por edad: ${esc(prot.nombre)}.
+        ${ro ? '' : `<button class="btn" style="margin-left:8px" onclick="usarListadoPorEdad()">Volver al listado por edad</button>`}
+      </div>
+      ${bloques}
+      ${bloqueManual}
+      ${faltan.length ? `
+      <details style="margin-top:6px">
+        <summary style="cursor:pointer;font-size:12.5px;color:var(--muted)">
+          Del protocolo por edad no aparecieron ${faltan.length} ${faltan.length === 1 ? 'test' : 'tests'} — ver cuáles
+        </summary>
+        <div style="font-size:12.5px;color:var(--muted);padding:6px 0 0 4px">
+          ${faltan.map(f => '· ' + esc(f)).join('<br>')}
+          <div style="margin-top:6px">Puede ser que no se hayan tomado, o que en el Hub se llamen distinto.</div>
+        </div>
+      </details>` : ''}
+    </div>
+  </div>`;
+}
+
+/* Listado por edad: lo que se ve mientras no haya toma traída */
+function bloqueProtocoloPorEdad(ro){
   const clave = protocoloActual();
   const prot = PROTOCOLOS[clave];
   const hechos = biolab.protocolo_tests || {};
@@ -1270,11 +1392,7 @@ function bloqueProtocolo(ro){
       total++;
       const on = !!hechos[k];
       if(on) marcados++;
-      return '<label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;cursor:' +
-        (ro ? 'default' : 'pointer') + '">' +
-        '<input type="checkbox" ' + (on ? 'checked' : '') + ' ' + (ro ? 'disabled' : '') +
-        ' onchange="marcarTest(\'' + k + '\', this.checked)">' +
-        '<span>' + txt + '</span></label>';
+      return filaCheck(k, txt, on, ro);
     }).join('');
     return '<div style="margin-bottom:10px">' +
       '<div style="font-size:11px;letter-spacing:.1em;color:var(--muted);font-weight:700;margin-bottom:2px">' + g.equipo + '</div>' +
@@ -1291,12 +1409,20 @@ function bloqueProtocolo(ro){
       </div>
       <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
         Se propone por la edad del paciente. El equilibrio a una pierna va con ojos abiertos de 60 en
-        adelante y con ojos cerrados por debajo, siempre con HumanTrak.
+        adelante y con ojos cerrados por debajo, siempre con HumanTrak. Cuando se traiga la toma de VALD,
+        esta lista se rehace con los tests que hayan quedado registrados.
         ${ro ? '' : `<button class="btn" style="margin-left:8px" onclick="cambiarProtocolo()">Usar el otro protocolo</button>`}
       </div>
       ${grupos}
     </div>
   </div>`;
+}
+
+function usarListadoPorEdad(){
+  if(!puedeCargar()) return;
+  if(!confirm('¿Volver al listado por edad?\n\nSe deja de mostrar el listado que armó la toma de VALD. Lo tildado se conserva, y volviendo a traer de VALD el listado real vuelve a aparecer.')) return;
+  if(biolab.protocolo_tests) delete biolab.protocolo_tests.__vald;
+  renderFicha();
 }
 
 function marcarTest(clave, valor){
@@ -1772,12 +1898,12 @@ async function traerDeVald(forzarProfileId){
     biolab.vald_traido_en = new Date().toISOString();
 
     est.innerHTML = `<span style="color:var(--verde)"><b>Listo</b> (tomas desde el ${esc(desdeLindo)}): ${n.detalle.join(' · ')}.</span>` +
-      (n.tildados ? ` <span style="color:var(--verde)">Se tildaron ${n.tildados} tests del protocolo.</span>` : '') +
+      (n.traidos ? ` <span style="color:var(--verde)">El protocolo se armó con los ${n.traidos} tests que registraron los equipos.</span>` : '') +
       (n.pisados ? ` <span style="color:var(--muted)">Lo que ya estaba cargado no se tocó (${n.pisados}).</span>` : '') +
       ' <span style="color:var(--muted)">Revisá y tocá Guardar ficha.</span>';
     calcularBiolab();
-    // Se redibuja para que el checklist muestre lo que la toma ya marcó.
-    if(n.tildados) renderFicha();
+    // Se redibuja para que el listado se rehaga con lo que trajo la toma.
+    if(n.traidos || n.tildados) renderFicha();
   }catch(e){
     est.innerHTML = '<span style="color:var(--rojo-x)">⚠️ ' + esc(String(e && e.message ? e.message : e)) + '</span>';
   }finally{
@@ -1846,6 +1972,61 @@ const PISTAS_TEST = [
   ['dy_codo',        ['elbow','codo']],
 ];
 
+/* Arma el listado REAL: recorre lo que devolvió el Hub y lo agrupa por equipo.
+   No parte de ninguna lista prevista — si el Hub devuelve una prueba que este
+   código no conoce, igual entra (queda bajo el nombre de la lista que la trajo).
+   Además sigue tildando el protocolo por edad, que ahora es solo referencia. */
+function registrarTestsDeVald(datos){
+  const items = [], vistos = new Set();
+  const agregar = (equipo, prueba, metricas) => {
+    const nombre = String(prueba == null ? '' : prueba).trim();
+    if(!nombre) return;
+    const eq = String(equipo || 'OTROS').toUpperCase().replace(/[\s_-]+/g, '');
+    const llave = eq + '|' + normVald(nombre);
+    if(vistos.has(llave)) return;
+    vistos.add(llave);
+    items.push({ equipo: eq, prueba: nombre, metricas: Number(metricas) || 0 });
+  };
+
+  (datos.movilidad || []).forEach(pr =>
+    agregar(pr.equipo || pr.fuente || pr.dispositivo || 'HUMANTRAK', pr.prueba, (pr.metricas || []).length));
+
+  (datos.forceDecks || []).forEach(t =>
+    agregar(t.equipo || 'FORCEDECKS', t.prueba, Object.keys(t.resultados || {}).length));
+
+  (datos.fuerza || []).forEach(f =>
+    agregar(f.equipo || f.fuente || 'DYNAMO', f.grupo || f.prueba,
+      ((f.izquierda_N != null && f.izquierda_N !== 0) ? 1 : 0) +
+      ((f.derecha_N   != null && f.derecha_N   !== 0) ? 1 : 0)));
+
+  if(datos.postura && typeof datos.postura === 'object'){
+    const n = Object.keys(datos.postura)
+      .filter(k => datos.postura[k] != null && typeof datos.postura[k] !== 'object').length;
+    if(n) agregar('HUMANTRAK', 'Standing Posture', n);
+  }
+
+  // Red de seguridad: si el Hub devuelve una lista que este código todavía no
+  // conoce (otro equipo, otra prueba), se muestra igual en vez de perderse.
+  const conocidas = new Set(['movilidad','forceDecks','fuerza','postura','candidatos']);
+  Object.keys(datos || {}).forEach(k => {
+    if(conocidas.has(k) || !Array.isArray(datos[k])) return;
+    datos[k].forEach(it => {
+      if(!it || typeof it !== 'object') return;
+      const nombre = it.prueba || it.grupo || it.nombre || it.test;
+      if(!nombre) return;
+      agregar(it.equipo || it.fuente || k, nombre,
+        (it.metricas || []).length || Object.keys(it.resultados || {}).length);
+    });
+  });
+
+  const tildados = tildarTestsDeVald(datos);
+
+  biolab.protocolo_tests = biolab.protocolo_tests || {};
+  if(items.length) biolab.protocolo_tests.__vald = { fecha: new Date().toISOString(), items };
+
+  return { traidos: items.length, tildados };
+}
+
 function tildarTestsDeVald(datos){
   const nombres = [];
   (datos.movilidad   || []).forEach(m => nombres.push(m.prueba || ''));
@@ -1871,7 +2052,8 @@ function tildarTestsDeVald(datos){
 }
 
 function aplicarDatosVald(datos, cortes){
-  const tildados = tildarTestsDeVald(datos);
+  const reg = registrarTestsDeVald(datos);
+  const tildados = reg.tildados, traidos = reg.traidos;
   const detalle = [];
   let total = 0, pisados = 0;
   const contar = (ok, etiqueta) => { if(ok){ total++; detalle.push(etiqueta); } else pisados++; };
@@ -2045,7 +2227,7 @@ function aplicarDatosVald(datos, cortes){
   }
   if(hallazgos.length) detalle.push(hallazgos.length + ' hallazgos');
 
-  return { total, detalle, pisados, tildados };
+  return { total, detalle, pisados, tildados, traidos };
 }
 
 function levantarBiolab(){
