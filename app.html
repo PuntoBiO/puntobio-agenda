@@ -1167,6 +1167,14 @@ const EMAILS_PROFE_SUELDO = [
   'leacrespin97@gmail.com',
   'leut.molina@gmail.com'
 ]
+// Quiénes ven "Mi bono" (su propio bono, solo lo suyo): los profes TF que cobran bono
+// → Santi, Lean, Lauti y Male. Lu y Jime lo ven todo en el Calculador de Bonos TF.
+const EMAILS_MI_BONO = [
+  'santiagoferreira1999@gmail.com',  // Santi
+  'leacrespin97@gmail.com',          // Lean
+  'leut.molina@gmail.com',           // Lauti
+  'loz.magdalena@gmail.com'          // Male
+]
 // Quiénes ven "Alertas Paciente" (cómo se vienen sintiendo): Santi, Lauti, Lean, Lu, Jime, Male.
 const EMAILS_ALERTAS_PACIENTE = [
   'liclucianavelaz@gmail.com',       // Lu
@@ -1842,6 +1850,16 @@ function buildNav() {
     </div>`)
   }
 
+  // Mi bono: cada profe ve SOLO su propio bono y sus horas extra (nunca los de los
+  // compañeros). Lu y Jime no lo necesitan: tienen el Calculador de Bonos TF completo.
+  if (!permisos.admin_total && EMAILS_MI_BONO.includes(miEmailNav)) {
+    items.push(`<div class="nav-item" onclick="irA('mi-bono')">
+      <span class="nav-icon">🧮</span>
+      <span class="nav-label">Mi bono</span>
+      ${window.badgeNuevo('2026-08-25')}
+    </div>`)
+  }
+
   // Grilla del equipo (jornada 78): horarios de todos, visible para todo el equipo de TF
   // y administración. Editable solo por Lu/Jime (a través de Gestión de Turnos).
   items.push(`<div class="nav-item" onclick="irA('grilla')">
@@ -2229,6 +2247,7 @@ window.irA = function(modulo) {
   else if (modulo === 'cajas-historicas') renderCajasHistoricas()
   else if (modulo === 'cuentas-pagar') renderCuentasPagar()
   else if (modulo === 'calculador-bonos') renderCalculadorBonos()
+  else if (modulo === 'mi-bono') renderMiBono()
   else if (modulo === 'sueldos-tarifas') renderSueldosTarifas()
   else if (modulo === 'feriados') renderFeriados()
   else if (modulo === 'coberturas') renderCoberturas()
@@ -4045,6 +4064,96 @@ window.calcCambiarMes = function(delta) {
   if (CALC_MES_OFFSET + delta > 2) return
   CALC_MES_OFFSET += delta
   renderCalculadorBonos()
+}
+
+// =============================================
+// MI BONO (cada profe ve SOLO lo suyo)
+// Mismo motor que el panel Desempeño y que el Calculador de Bonos TF, pero acotado
+// al profe logueado: nunca se muestran los números ni los sueldos de los compañeros.
+// El sueldo y la tarifa propios llegan por el RPC seguro mi_bono_cobertura_datos
+// (el profe NO puede leer la tabla sueldos_profes_tf).
+// =============================================
+let MIBONO_MES_OFFSET = 0   // 0 = mes actual · hasta 3 meses para atrás
+function renderMiBono() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  if (!EMAILS_MI_BONO.includes(miEmail)) {
+    contentEl.innerHTML = `<div class="hero"><h1>🧮 Mi bono</h1></div>
+      <div class="panel"><div class="panel-body"><div class="empty-state">Esta sección es de los profes de TF que cobran bono.</div></div></div>`
+    return
+  }
+  const base = new Date()
+  const mesVer = new Date(base.getFullYear(), base.getMonth() + MIBONO_MES_OFFSET, 1)
+  const titulo = mesVer.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' })
+  const btnStyle = 'border:1px solid rgba(0,0,0,0.12); background:#fff; border-radius:8px; padding:6px 12px; cursor:pointer; font-size:14px;'
+  contentEl.innerHTML = `
+    <div class="hero">
+      <div class="hero-tag">Tu bono</div>
+      <h1>🧮 Mi bono</h1>
+      <p class="hero-sub">Cuánto llevás acumulado este mes: bono, coberturas y horas extra. Es tuyo y solo lo ves vos.</p>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; margin:6px 0 14px;">
+      <button onclick="miBonoCambiarMes(-1)" ${MIBONO_MES_OFFSET <= -3 ? 'disabled style="opacity:0.35; ' + btnStyle + '"' : 'style="' + btnStyle + '"'}>←</button>
+      <span style="font-weight:800; font-size:15px; text-transform:capitalize; min-width:160px; text-align:center;">${titulo}</span>
+      <button onclick="miBonoCambiarMes(1)" ${MIBONO_MES_OFFSET >= 0 ? 'disabled style="opacity:0.35; ' + btnStyle + '"' : 'style="' + btnStyle + '"'}>→</button>
+    </div>
+    <div id="mibono-body">
+      <div class="panel"><div class="panel-body"><div class="empty-state"><span class="empty-state-icon">⏳</span>Calculando tu bono…</div></div></div>
+    </div>
+    <div style="font-size:11.5px; color:var(--text-dim); padding:10px 4px;">
+      🧮 El bono sale de tu <b>promedio de alumnos por hora</b> del mes: <b>10%</b> (4,0–4,4) · <b>20%</b> (4,5–4,9) · <b>30%</b> (5,0+), sobre tu sueldo de bolsillo.
+      Se suma <b>5% por cada día que cubrís</b> a un compañero (tope 15%) y <b>2%</b> cuando esa cobertura genera horas extra (tope 6%).
+      Las <b>horas extra</b> se pagan aparte, por hora. Si faltás sin cobertura, el bono base de ese mes no se cobra —las coberturas que hiciste sí, porque te las ganaste trabajando—.
+      El mes se cierra el último día y se cobra a mediados del mes siguiente.
+    </div>`
+  cargarMiBono(mesVer)
+}
+window.miBonoCambiarMes = function(delta) {
+  const n = MIBONO_MES_OFFSET + delta
+  if (n > 0 || n < -3) return
+  MIBONO_MES_OFFSET = n
+  renderMiBono()
+}
+async function cargarMiBono(mesVer) {
+  const body = document.getElementById('mibono-body')
+  if (!body) return
+  const mesStr = mesVer.getFullYear() + '-' + String(mesVer.getMonth() + 1).padStart(2, '0')
+  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
+  const esMesActual = mesStr === new Date().toISOString().slice(0, 7)
+  try {
+    // Mismo motor que Desempeño: deja listos EQUIPO_DETALLE (bitácora, sueldo y tarifa
+    // propios) y BONO_DATOS_MES. Recalcula siempre, así toma las coberturas recién cargadas.
+    await cargarEquipoDesempeno(mesVer)
+    const lista = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
+    const yo = lista.find(p => (p.email || '').toLowerCase() === miEmail)
+    if (!yo) {
+      body.innerHTML = `<div class="panel"><div class="panel-body"><div class="empty-state">Todavía no hay clases tuyas cargadas en este mes.</div></div></div>`
+      return
+    }
+    const esc = yo.bonoCaido ? { pct: 0, label: '🤒 Bono caído este mes', color: '#dc2626' }
+      : yo.alxh >= 5.0 ? { pct: 30, label: '🏆 Excelencia · 30%', color: '#16a34a' }
+      : yo.alxh >= 4.5 ? { pct: 20, label: '🚀 Crecimiento · 20%', color: '#0c7bb8' }
+      : yo.alxh >= 4.0 ? { pct: 10, label: '🤝 Compromiso · 10%', color: '#d97706' }
+      : { pct: 0, label: 'En camino al primer escalón', color: '#d97706' }
+    const falta = yo.alxh >= 5.0 ? null : Math.round(((yo.alxh >= 4.5 ? 5.0 : yo.alxh >= 4.0 ? 4.5 : 4.0) - yo.alxh) * 10) / 10
+    const sub = yo.bonoCaido
+      ? 'Faltaste un día o una hora sin cobertura, así que este mes quedás fuera del bono base. Lo que cubriste sí lo cobrás. El mes que viene arranca de nuevo. 💛'
+      : (falta !== null
+        ? `Tu promedio: <b>${yo.alxh}</b> alumnos por hora · estás a <b>${falta}</b> del próximo escalón. 💪`
+        : `Tu promedio: <b>${yo.alxh}</b> alumnos por hora · ¡escalón máximo! 🏆`)
+    body.innerHTML = `
+      <div style="background:#fff; border:2px solid ${esc.color}; border-radius:14px; padding:14px 16px; margin:4px 4px 12px;">
+        <div style="font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px;">💰 Tu escalón${esMesActual ? ' · si el mes cerrara hoy' : ''}</div>
+        <div style="font-size:24px; font-weight:800; color:${esc.color}; line-height:1.2;">${esc.label}</div>
+        <div style="font-size:12.5px; color:var(--text-dim); margin-top:4px;">${sub}</div>
+      </div>
+      ${bitacoraDesempenoHTML(miEmail)}
+      <div id="mi-bono-sala" style="margin:0 4px 12px;"></div>`
+    if (typeof window.pintarMiBonoSala === 'function') window.pintarMiBonoSala(mesStr)
+  } catch (e) {
+    body.innerHTML = `<div class="panel"><div class="panel-body"><div class="empty-state">No se pudo calcular tu bono. Recargá la página.<br><span style="font-size:12px;">${(e && e.message) || ''}</span></div></div></div>`
+  }
 }
 
 async function cargarCalculadorBonos(mesVer) {
