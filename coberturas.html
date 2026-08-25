@@ -168,6 +168,9 @@
   .debt-grid{display:flex;flex-direction:column;gap:8px}
   .debt-card{background:var(--warn-dim);border:1px solid rgba(255,178,77,.25);border-radius:12px;padding:11px 15px;font-size:14px;font-weight:600}
   .debt-h{color:var(--warn);font-weight:800}
+  .hx-card{background:var(--blue-dim);border:1px solid rgba(30,159,224,.28);border-radius:12px;padding:11px 15px;
+    font-size:14px;font-weight:600;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .hx-card .hx-m{color:var(--blue);font-weight:800}
   @media(max-width:520px){.cf-form{grid-template-columns:1fr}}
 </style>
 </head>
@@ -228,6 +231,7 @@
 
   let FERIADOS_FUTUROS=[];
   let AH_DATA=[];
+  let HX_DATA=[];
   let VAC_DATA=[];
   const VAC_PROFES=['Santi','Lean','Lauti','Male','Lu','Jime']; // quién puede irse de vacaciones / cubrir
   let COB_ADMIN=false, COB_VE_TODO=false, MI_PROFE=null, SUELDO_DE={}, SUELDO_LATEST={}, TARIFA_DE={};
@@ -267,6 +271,7 @@
       return first.startsWith(lp)||lp.startsWith(first)||first.slice(0,4)===lp.slice(0,4);})||null;
   }
   const fmtPeso=n=>'$'+Math.round(n||0).toLocaleString('es-AR');
+  const hxMonto=r=>(Number(r.horas)||0)*(Number(r.tarifa)||0);
   function sueldoDeCobertura(cubre,fecha){
     const k=sueldoKey(cubre),m=SUELDO_DE[k];
     if(m&&m[(fecha||'').slice(0,7)]!=null)return m[fecha.slice(0,7)];
@@ -347,6 +352,7 @@
     try{const{data}=await sb.from('feriados_cobertura').select('*');FC_MAPA={};(data||[]).forEach(r=>FC_MAPA[r.fecha]=r);}catch(e){FC_MAPA={};}
     try{const{data}=await sb.from('coberturas_faltas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});CF_DATA=data||[];}catch(e){CF_DATA=[];}
     try{const{data}=await sb.from('ausencias_horas').select('*').order('creado_en',{ascending:false,nullsFirst:false}).order('fecha',{ascending:false});AH_DATA=data||[];}catch(e){AH_DATA=[];}
+    try{const{data}=await sb.from('horas_extra_profes').select('*').order('fecha',{ascending:false}).order('creado_en',{ascending:false,nullsFirst:false});HX_DATA=data||[];}catch(e){HX_DATA=[];}
     try{const{data}=await sb.from('vacaciones_profes').select('*').order('desde',{ascending:false});VAC_DATA=data||[];}catch(e){VAC_DATA=[];}
     COB_ADMIN=false; COB_VE_TODO=false; MI_PROFE=null;
     try{
@@ -483,6 +489,19 @@
         <div class="full"><button class="btn" id="ah-add">➕ Agregar a la bitácora</button></div>
       </div>`;
 
+    // ===== HORAS EXTRA SUELTAS (no atadas a una cobertura) =====
+    html+=`<div class="cf-sub" style="margin-top:26px">⏰ Horas extra — se le pagan aparte del sueldo</div>
+      <div class="cov-intro">Para las horas que un profe hace <b>de más</b> sin que sea cobertura de nadie (se quedó, vino un sábado, tapó un evento). Se paga <b>horas × tarifa</b>, sin bono del 2%. Si son horas extra <b>por cubrir a otro</b>, cargalas arriba en Faltas y cambios.</div>
+      <div class="cf-form">
+        <div><label>Profe</label><select id="hx-profe">${profeOpts('')}</select></div>
+        <div><label>Día</label><input type="date" id="hx-fecha"></div>
+        <div><label>Cuántas horas extra</label><input type="number" id="hx-horas" min="0" step="0.5" placeholder="Ej: 3"></div>
+        <div><label>Tarifa por hora</label><input type="number" id="hx-tarifa" min="0" step="100" placeholder="Se completa sola"></div>
+        <div class="full" id="hx-preview" style="font-size:12.5px;color:var(--muted);font-weight:600">Elegí el profe y las horas para ver cuánto se le paga.</div>
+        <div class="full"><label>Motivo</label><input id="hx-motivo" maxlength="160" placeholder="Ej: sábado de jornada de evaluaciones"></div>
+        <div class="full"><button class="btn" id="hx-add">➕ Cargar horas extra</button></div>
+      </div>`;
+
     // ===== VACACIONES (doble entrada: un profe lo pueden cubrir varios, por franja) =====
     if(COB_VE_TODO){
       const vacOps=VAC_PROFES.map(p=>`<option value="${p}">${p}</option>`).join('');
@@ -530,9 +549,11 @@
         grpV[k].sort((a,b)=>((a.fecha||'').localeCompare(b.fecha||''))||((a.creado_en||'').localeCompare(b.creado_en||'')));
         grpV[k].forEach((r,i)=>{ EXTRA_ORDINAL[r.id]=i+1; });
       });
+      const hxVis = COB_VE_TODO ? HX_DATA : (MI_PROFE ? HX_DATA.filter(r=>r.profe===MI_PROFE) : []);
       const merged = [
         ...CF_DATA.map(r=>({kind:'cf', r:r, fecha:r.fecha, creado:r.creado_en||''})),
-        ...(ahVis||[]).map(r=>({kind:'ah', r:r, fecha:r.fecha, creado:r.creado_en||''}))
+        ...(ahVis||[]).map(r=>({kind:'ah', r:r, fecha:r.fecha, creado:r.creado_en||''})),
+        ...(hxVis||[]).map(r=>({kind:'hx', r:r, fecha:r.fecha, creado:r.creado_en||''}))
       ];
       merged.sort((a,b)=> a.fecha!==b.fecha ? (b.fecha||'').localeCompare(a.fecha||'') : (b.creado||'').localeCompare(a.creado||''));
       if(merged.length){
@@ -545,6 +566,15 @@
               <div class="cf-main"><div class="cf-line"><b>${r.profe||'?'}</b> · <span class="badge badge-extra">${r.horas||'?'} h no asistió${r.hora!=null?` (${r.hora}h)`:''}</span>${r.cubre?` · lo cubre <b>${r.cubre}</b> <span class="badge badge-cambio">favor · sin bono</span>`:''}</div>
                 ${r.motivo?`<div class="cf-nota">📝 ${(r.motivo||'').replace(/</g,'&lt;')}</div>`:''}</div>
               <div class="cf-actions"><button class="btn-del" data-ahdel="${r.id}" title="Borrar">✕</button></div>
+            </div>`;
+          } else if(it.kind==='hx'){
+            const m=hxMonto(r);
+            html+=`<div class="cf-item">
+              <div class="cf-db"><div class="d">${fch.getDate()}</div><div class="m">${MESES[fch.getMonth()]}</div></div>
+              <div class="cf-main"><div class="cf-line"><b>${r.profe||'?'}</b> · <span class="badge badge-extra">⏰ ${r.horas||0} h extra</span></div>
+                ${r.motivo?`<div class="cf-nota">📝 ${(r.motivo||'').replace(/</g,'&lt;')}</div>`:''}
+                ${COB_VE_TODO?`<div class="cf-calc"><div class="cf-calc-row total"><span>${r.horas||0} h × ${fmtPeso(r.tarifa)}</span><b>${fmtPeso(m)}</b></div></div>`:''}</div>
+              ${COB_VE_TODO?`<div class="cf-actions"><button class="btn-del" data-hxdel="${r.id}" title="Borrar">✕</button></div>`:''}
             </div>`;
           } else {
             const esCambio=r.tipo==='cambio';
@@ -580,6 +610,27 @@
         html+=`</div>`;
       } else {
         html+=`<div class="cf-empty">Todavía no hay faltas, coberturas ni horas cargadas.</div>`;
+      }
+    }
+
+    // Resumen del mes en curso: qué hay que sumarle a cada uno arriba del sueldo
+    if(COB_VE_TODO && HX_DATA.length){
+      const _h=new Date(), mesAct=_h.getFullYear()+'-'+String(_h.getMonth()+1).padStart(2,'0');
+      const porProfe={};
+      HX_DATA.forEach(r=>{
+        if((r.fecha||'').slice(0,7)!==mesAct)return;
+        const p=r.profe||'?';
+        porProfe[p]=porProfe[p]||{horas:0,monto:0};
+        porProfe[p].horas+=Number(r.horas)||0;
+        porProfe[p].monto+=hxMonto(r);
+      });
+      const nombres=Object.keys(porProfe).sort();
+      if(nombres.length){
+        html+=`<div class="cf-sub" style="margin-top:30px">⏰ Horas extra de ${MESES_LARGO[_h.getMonth()]} — para sumar al sueldo</div><div class="debt-grid">`;
+        nombres.forEach(p=>{
+          html+=`<div class="hx-card"><span><b>${p}</b> · ${Math.round(porProfe[p].horas*10)/10} h extra</span><span class="hx-m">${fmtPeso(porProfe[p].monto)}</span></div>`;
+        });
+        html+=`</div>`;
       }
     }
 
@@ -730,6 +781,49 @@
     box.querySelectorAll('[data-ahdel]').forEach(b=>b.addEventListener('click',async()=>{
       if(!pedirBorrar('Vas a borrar esta hora de la bitácora.'))return;
       try{await sb.from('ausencias_horas').delete().eq('id',b.dataset.ahdel);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
+    }));
+
+    // ===== HORAS EXTRA SUELTAS =====
+    const hxProfe=document.getElementById('hx-profe'),hxHoras=document.getElementById('hx-horas'),
+          hxTarifa=document.getElementById('hx-tarifa'),hxPrev=document.getElementById('hx-preview');
+    function hxPintar(){
+      if(!hxPrev)return;
+      const p=hxProfe?hxProfe.value:'',h=Number(hxHoras&&hxHoras.value)||0,t=Number(hxTarifa&&hxTarifa.value)||0;
+      if(!p){hxPrev.innerHTML='Elegí el profe y las horas para ver cuánto se le paga.';return;}
+      if(!t){hxPrev.innerHTML='⚠️ '+p+' no tiene tarifa de hora extra cargada. Poné el valor de la hora a mano.';return;}
+      if(!h){hxPrev.innerHTML='Tarifa de '+p+': <b>'+fmtPeso(t)+'</b> la hora. Poné cuántas horas hizo.';return;}
+      hxPrev.innerHTML='Se le pagan <b style="color:var(--blue)">'+fmtPeso(h*t)+'</b> ('+h+' h × '+fmtPeso(t)+') aparte del sueldo.';
+    }
+    if(hxProfe)hxProfe.addEventListener('change',()=>{
+      const t=TARIFA_DE[hxProfe.value];
+      if(hxTarifa)hxTarifa.value=t?t:'';
+      hxPintar();
+    });
+    if(hxHoras)hxHoras.addEventListener('input',hxPintar);
+    if(hxTarifa)hxTarifa.addEventListener('input',hxPintar);
+
+    const hxBtn=document.getElementById('hx-add');
+    if(hxBtn)hxBtn.addEventListener('click',async()=>{
+      const profe=hxProfe?hxProfe.value:'';
+      const fecha=document.getElementById('hx-fecha').value;
+      const horas=Number(hxHoras&&hxHoras.value)||0;
+      const tarifa=Number(hxTarifa&&hxTarifa.value)||0;
+      const motivo=document.getElementById('hx-motivo').value.trim();
+      if(!profe||!fecha||!horas){alert('Poné el profe, el día y cuántas horas extra hizo.');return;}
+      if(!tarifa&&!confirm('No pusiste tarifa: se guardan las horas pero el monto queda en $0. ¿Guardo igual?'))return;
+      hxBtn.disabled=true;hxBtn.textContent='Guardando…';
+      try{
+        const{error}=await sb.from('horas_extra_profes').insert({
+          profe,fecha,horas,tarifa,motivo:motivo||null,
+          creado_por:COB_EMAIL||'equipo',creado_en:new Date().toISOString()
+        });
+        if(error)throw error;
+        await cargarCobertura();
+      }catch(e){alert('No se pudo guardar: '+(e.message||e));hxBtn.disabled=false;hxBtn.textContent='➕ Cargar horas extra';}
+    });
+    box.querySelectorAll('[data-hxdel]').forEach(b=>b.addEventListener('click',async()=>{
+      if(!pedirBorrar('Vas a borrar estas horas extra.'))return;
+      try{await sb.from('horas_extra_profes').delete().eq('id',b.dataset.hxdel);await cargarCobertura();}catch(e){alert('No se pudo borrar.');}
     }));
 
     const vacBtn=document.getElementById('vac-add');
