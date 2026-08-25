@@ -4763,6 +4763,26 @@ window.abrirSelectorRecupero = async () => {
   disponibles.sort(_porVencer);
   sinCupo.sort(_porVencer);
 
+  // NUEVO 25/08/2026 · los que YA tienen fecha reservada.
+  // La función madre no los devuelve (un crédito con destino ya no se ofrece),
+  // así que cuando no había nada para elegir el cartel decía "no tiene nada
+  // pendiente" y parecía que se le había perdido la clase. Ahora se avisa.
+  let yaAgendados = [];
+  try {
+    yaAgendados = await supabaseQueryAll('recuperatorios_tf',
+      `?select=fecha_ausencia,tipo,estado,fecha_recupero,turno_recupero_id`
+      + `&persona_id=eq.${pid}&estado=in.(pendiente,asignado)`
+      + `&fecha_recupero=gte.${hoyIso()}`, 'fecha_recupero.asc') || [];
+  } catch (e) { console.warn('No se pudieron leer los recuperos ya agendados', e); }
+
+  const _txtAgendados = () => yaAgendados.map(r => {
+    const t  = HORARIOS.find(x => x.id === r.turno_recupero_id);
+    const tt = t ? `${t.servicio} ${t.dia} ${t.hora}` : '';
+    const que = (r.tipo === 'feriado') ? 'el feriado'
+              : (r.tipo === 'cierre')  ? 'la clase cancelada' : 'la falta';
+    return `· ${formatearFechaLarga(r.fecha_recupero)}${tt ? ' · ' + tt : ''} — por ${que} del ${formatearFechaLarga(r.fecha_ausencia)}`;
+  }).join('<br>');
+
   let html = `<div style="padding:6px 4px 14px">
     <div style="font-weight:700;font-size:16px;margin-bottom:3px">${nombre}</div>
     <div style="font-size:12px;color:var(--texto-suave);margin-bottom:14px">
@@ -4776,6 +4796,12 @@ window.abrirSelectorRecupero = async () => {
     html += `<div style="background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;padding:12px;font-size:13px">
       No tiene ausencias <b>con aviso</b> ni feriados pendientes de recuperar (o venció el plazo: feriados 30 días, faltas y cierres 60).<br>
       <span style="font-size:12px">Para una falta normal, primero marcá el ausente justificado en la clase.</span></div>`;
+    if (yaAgendados.length) {
+      html += `<div style="margin-top:8px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;border-radius:10px;padding:12px;font-size:13px">
+        📅 <b>Ya tiene ${yaAgendados.length} recuperatorio${yaAgendados.length!==1?'s':''} agendado${yaAgendados.length!==1?'s':''}:</b><br>
+        <span style="font-size:12.5px">${_txtAgendados()}</span><br>
+        <span style="font-size:11.5px;color:#3b82f6">Si lo querés mover, primero sacalo de esa clase y el crédito vuelve a quedar disponible.</span></div>`;
+    }
   } else {
     // FERIADOS y CIERRES DEL CENTRO primero (no gastan cupo)
     if (feriados.length) {
