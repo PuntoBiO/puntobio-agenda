@@ -1258,6 +1258,14 @@ window._pidActivo = function(){
   const tit = Number((window._titularPer || {}).id || 0);
   return (act && tit && act !== tit) ? act : null;
 };
+// NUEVO 26/08/2026 · A QUIÉN SE ESTÁ VIENDO, siempre con un id concreto.
+// _pidActivo devuelve null cuando mirás tu propio espacio, que sirve para las
+// RPC que aceptan el parámetro opcional. Pero las funciones que EXIGEN el id
+// necesitan uno siempre; si no, resuelven por la persona logueada y muestran
+// los datos del titular aunque estés viendo a otro (bug del apoderado, 26/08).
+window._pidVista = function(){
+  return Number(window._personaActivaId || (window._titularPer || {}).id || 0) || null;
+};
 async function montarSelectorPersonas(titular){
   window._titularPer = titular;
   window._personaActivaId = Number(titular.id);
@@ -1882,13 +1890,21 @@ async function cargarEspacio(per){
   // FUENTE ÚNICA de recuperatorios: traemos el estado del alumno LOGUEADO desde la
   // base (alumno_estado_recuperatorios → mismo cálculo que Agenda y Administración)
   // y lo guardamos para que bloqueRecuperatorios lo muestre.
+  // ARREGLO 26/08/2026 · APODERADO. alumno_estado_recuperatorios() no recibe a
+  // quién mirar: resuelve siempre la persona LOGUEADA. Cuando una madre entra a
+  // ver el espacio de su hija (o al revés), la tarjeta le mostraba los
+  // recuperatorios del titular de la cuenta y no los de la persona que está
+  // viendo. Si se está viendo a otro, se pide con su id a la función madre, que
+  // ya tiene el candado que deja pasar al apoderado (puedo_ver_persona).
+  // Si eso falla, se muestra vacío: mejor nada que los datos de otra persona.
   try {
-    const _er = await sb.rpc('alumno_estado_recuperatorios');
+    const _er = await sb.rpc('fn_estado_recuperatorios',
+                             { p_persona_id: Number(window._pidVista() || pid) });
     if (_er && _er.error) throw _er.error;
     window._estadoRecu = (_er && _er.data) || [];
   } catch (e) {
     window._estadoRecu = [];
-    console.warn('No se pudo leer alumno_estado_recuperatorios', e);
+    console.warn('No se pudo leer el estado de recuperatorios', e);
   }
 
   const html = [
@@ -2324,8 +2340,10 @@ window.refrescarDatosAgenda = async function(){
         const dNew = w.querySelector('details');
         if (dNew && abierto !== null) dNew.open = abierto;
       };
-      const est = await sb.rpc('alumno_estado_recuperatorios');
-      if (est && !est.error) window._estadoRecu = est.data || [];
+      // ARREGLO 26/08/2026 · mismo criterio que en la carga inicial (apoderado)
+      const est = await sb.rpc('fn_estado_recuperatorios',
+                               { p_persona_id: Number(window._pidVista() || pid) });
+      window._estadoRecu = (est && !est.error) ? (est.data || []) : [];
       if (!window._esBonifAlumno) _reRenderCard('recu-card-wrap', bloqueRecuperatorios(recus.data || []));
       // Contadores de ASISTENCIAS (asistí / recup / ausentes) también en vivo,
       // con los mismos datos frescos que ya se trajeron arriba.
