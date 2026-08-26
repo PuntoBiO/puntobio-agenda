@@ -666,12 +666,29 @@
   // $22.000 → $18.700 MOPLEX (85%) · $3.300 centro (15%) · $0 profesional.
   // Se suma arriba del encargo (nueva o rectificación) sin tocar su reparto.
   // Con cortesía PuntoBiO el paciente paga solo los $18.700. Espejo de consultas_moplex.html.
+  // La tarifa sale del CATÁLOGO (categoría 'adicional') con vigencia por fecha.
+  // Los números de acá son el respaldo por si no se corrió el SQL de vigencias.
   const URG_TOTAL  = 22000;
   const URG_MOPLEX = 18700;
-  function sumarUrgente(m, urgente, cortesiaPB){
+  function tarifaUrgente(fecha){
+    const byId = (state.moplexCat && state.moplexCat.byId) || {};
+    const f = String(fecha || '').slice(0,10) || '9999-12-31';
+    let best = null;
+    Object.keys(byId).forEach(k => {
+      const c = byId[k];
+      if (!c || (c.categoria || '') !== 'adicional') return;
+      const desde = String(c.vigente_desde || '0000-01-01').slice(0,10);
+      if (desde > f) return;
+      if (!best || desde > String(best.vigente_desde || '0000-01-01').slice(0,10)) best = c;
+    });
+    if (!best) return { total: URG_TOTAL, moplex: URG_MOPLEX };
+    return { total: Number(best.precio_paciente)||0, moplex: Number(best.costo_moplex)||0 };
+  }
+  function sumarUrgente(m, urgente, cortesiaPB, tarifa){
     if (!m || !urgente) return m;
-    const uMoplex = URG_MOPLEX;
-    const uCentro = cortesiaPB ? 0 : (URG_TOTAL - URG_MOPLEX);
+    const tf = tarifa || { total: URG_TOTAL, moplex: URG_MOPLEX };
+    const uMoplex = tf.moplex;
+    const uCentro = cortesiaPB ? 0 : (tf.total - tf.moplex);
     return Object.assign({}, m, {
       precio: (Number(m.precio)||0) + uMoplex + uCentro,
       moplex: (Number(m.moplex)||0) + uMoplex,
@@ -679,8 +696,8 @@
       urg: { precio: uMoplex + uCentro, moplex: uMoplex, centro: uCentro }
     });
   }
-  function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente){
-    return sumarUrgente(_calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB);
+  function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente, fechaEnc){
+    return sumarUrgente(_calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB, tarifaUrgente(fechaEnc));
   }
   function _calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
     if(!p) return null;
@@ -737,7 +754,7 @@
     const ev = byId[t.moplex_consulta_id];
     const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const er = ev ? calcConsultaMoplex(ev, t.moplex_consulta_monto, t.fecha_alta, t.moplex_consulta_cortesia_pb) : null;
-    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente) : null;
+    const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, t.fecha_alta) : null;
     const evalPrecio  = er ? er.precio : 0;
     const plantPrecio = pr ? pr.precio : 0;
     return {
@@ -772,7 +789,7 @@
   function moplexPlantillasCat(){
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
     return Object.values(byId)
-      .filter(c => c.activo && !(c.nombre||'').toLowerCase().startsWith('baropod') && !c.es_rectificacion)
+      .filter(c => c.activo && (c.categoria||'') !== 'adicional' && !(c.nombre||'').toLowerCase().startsWith('baropod') && !c.es_rectificacion)
       .sort((a,b) => (a.orden||0) - (b.orden||0));
   }
   function actualizarBoxPlantilla(){
@@ -786,7 +803,7 @@
     const rectif = !!t.moplex_plantilla_rectif;
     const txt = $('moplexPlantillaTxt'), btn = $('btnPlantilla');
     if (pl){
-      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + (t.moplex_plantilla_urgente ? ' ⚡ urgente' : '') + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente).precio) + '</b>';
+      txt.innerHTML = (rectif ? 'Rectif. ' : '') + pl.nombre + (t.moplex_plantilla_urgente ? ' ⚡ urgente' : '') + ' — <b>' + fmt(calcPlantillaMoplex(pl, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, t.fecha_alta).precio) + '</b>';
       btn.textContent = 'Cambiar';
     } else {
       txt.textContent = 'Ninguna';
@@ -828,7 +845,7 @@
     // La previa respeta la cortesía y la urgencia YA cargadas en el tratamiento,
     // así el número del modal coincide con el que se va a cobrar.
     const tSel = state.ttoSel || {};
-    const r = calcPlantillaMoplex(byId[id], rectif, custom, 0, tSel.moplex_plantilla_cortesia_pb, tSel.moplex_plantilla_urgente);
+    const r = calcPlantillaMoplex(byId[id], rectif, custom, 0, tSel.moplex_plantilla_cortesia_pb, tSel.moplex_plantilla_urgente, tSel.fecha_alta);
     box.innerHTML = `Precio plantilla: <b>${fmt(r.precio)}</b><br>Profesional: ${fmt(r.prof)} · Centro: ${fmt(r.centro)} · MOPLEX: ${fmt(r.moplex)}`
       + (r.urg ? `<br><span style="color:#b45309;font-weight:700;">⚡ incluye urgente ${fmt(r.urg.precio)}</span>` : '');
   };

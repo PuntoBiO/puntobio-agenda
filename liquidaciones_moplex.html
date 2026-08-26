@@ -169,12 +169,30 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
 // Se suma arriba del encargo (nueva o rectificación) sin tocar su reparto.
 // Con cortesía PuntoBiO el paciente paga solo los $18.700 y PB regala los $3.300.
 // Espejo de consultas_moplex.html.
+// La tarifa sale del CATÁLOGO (categoría 'adicional') con vigencia por fecha, así
+// un encargo de agosto liquida con el extra que regía en agosto. Los números de acá
+// son el respaldo por si todavía no se corrió el SQL de vigencias.
 const URG_TOTAL  = 22000;
 const URG_MOPLEX = 18700;
-function sumarUrgente(m, urgente, cortesiaPB){
+function tarifaUrgente(fecha){
+  const byId = (window._moplexCat && window._moplexCat.byId) || {};
+  const f = String(fecha || '').slice(0,10) || '9999-12-31';
+  let best = null;
+  Object.keys(byId).forEach(k => {
+    const c = byId[k];
+    if (!c || (c.categoria || '') !== 'adicional') return;
+    const desde = String(c.vigente_desde || '0000-01-01').slice(0,10);
+    if (desde > f) return;
+    if (!best || desde > String(best.vigente_desde || '0000-01-01').slice(0,10)) best = c;
+  });
+  if (!best) return { total: URG_TOTAL, moplex: URG_MOPLEX };
+  return { total: Number(best.precio_paciente)||0, moplex: Number(best.costo_moplex)||0 };
+}
+function sumarUrgente(m, urgente, cortesiaPB, tarifa){
   if (!m || !urgente) return m;
-  const uMoplex = URG_MOPLEX;
-  const uCentro = cortesiaPB ? 0 : (URG_TOTAL - URG_MOPLEX);
+  const tf = tarifa || { total: URG_TOTAL, moplex: URG_MOPLEX };
+  const uMoplex = tf.moplex;
+  const uCentro = cortesiaPB ? 0 : (tf.total - tf.moplex);
   return Object.assign({}, m, {
     precio: (Number(m.precio)||0) + uMoplex + uCentro,
     moplex: (Number(m.moplex)||0) + uMoplex,
@@ -182,8 +200,8 @@ function sumarUrgente(m, urgente, cortesiaPB){
     urg: { precio: uMoplex + uCentro, moplex: uMoplex, centro: uCentro }
   });
 }
-function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente){
-  return sumarUrgente(_calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB);
+function calcPlantillaMoplex(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente, fechaEnc){
+  return sumarUrgente(_calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB, tarifaUrgente(fechaEnc));
 }
 function _calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
   if (!p) return null;
@@ -253,7 +271,7 @@ function prepararMoplex(monthPagos){
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
     const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha, t.moplex_consulta_cortesia_pb) : null;
-    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente) : null;
+    const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, t.fecha_alta || p0.fecha) : null;
     const paciente = (t.personas && t.personas.nombre) || '—';
     const prof     = normProf(p0.profesional);
 
@@ -473,7 +491,7 @@ async function cargar(){
         const fact = moplexFacturable(fc);
         const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc, t.moplex_consulta_cortesia_pb) : null;
         const rectif   = !!t.moplex_plantilla_rectif;
-        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente) : null;
+        const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, fc) : null;
         const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
         const precio = (ev.precio||0) + (pl.precio||0);
         lista.push({

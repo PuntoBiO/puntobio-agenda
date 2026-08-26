@@ -66,7 +66,7 @@ tbody tr:hover{background:var(--bg-soft)}
 </head>
 <body>
   <h1>🦶 MOPLEX</h1>
-  <p class="sub">Consultas MOPLEX desde cualquier lado. En cada una elegí el <b>tipo de consulta</b> (Nuevo / Control). Si pide plantilla, marcá el interruptor y elegí el <b>tipo</b> y si es <b>Nueva o Rectificación</b>. Abajo de cada selección ves cuánto va al <b>centro</b>, al <b>profesional</b> y a <b>MOPLEX</b>. Las plantillas las cobra el mismo profesional que hizo el estudio. Si el pedido va <b>urgente</b>, tildá ⚡: MOPLEX cobra $22.000 extra ($18.700 MOPLEX · $3.300 PuntoBiO · $0 profesional).</p>
+  <p class="sub">Consultas MOPLEX desde cualquier lado. En cada una elegí el <b>tipo de consulta</b> (Nuevo / Control). Si pide plantilla, marcá el interruptor y elegí el <b>tipo</b> y si es <b>Nueva o Rectificación</b>. Abajo de cada selección ves cuánto va al <b>centro</b>, al <b>profesional</b> y a <b>MOPLEX</b>. Las plantillas las cobra el mismo profesional que hizo el estudio. Si el pedido va <b>urgente</b>, tildá ⚡: MOPLEX cobra un extra fijo (85% MOPLEX · 15% PuntoBiO · $0 profesional). El monto sale de <b>Precios MOPLEX</b>.</p>
 
   <div id="msg" class="res"></div>
 
@@ -136,12 +136,30 @@ function calcConsulta(c, montoCustom, fechaC, cortesiaPB){
 // Es un ADICIONAL: se suma arriba del encargo (plantilla nueva o rectificación) sin
 // tocar el reparto de la plantilla en sí. Con cortesía PuntoBiO el paciente paga solo
 // la parte de MOPLEX ($18.700) y PB regala los $3.300 del centro.
+// La tarifa sale del CATÁLOGO (categoría 'adicional'), con vigencia por fecha:
+// cuando MOPLEX la actualiza, Pau carga el precio nuevo en Precios MOPLEX y los
+// encargos viejos siguen calculando con el que regía ese día. Estos números son
+// solo el respaldo por si todavía no se corrió el SQL de vigencias.
 const URG_TOTAL  = 22000
 const URG_MOPLEX = 18700
-function sumarUrgente(m, urgente, cortesiaPB){
+function tarifaUrgente(fecha){
+  const f = String(fecha || '').slice(0,10) || '9999-12-31'
+  let best = null
+  Object.keys(state.cat.byId).forEach(k => {
+    const c = state.cat.byId[k]
+    if (!c || (c.categoria || '') !== 'adicional') return
+    const desde = String(c.vigente_desde || '0000-01-01').slice(0,10)
+    if (desde > f) return
+    if (!best || desde > String(best.vigente_desde || '0000-01-01').slice(0,10)) best = c
+  })
+  if (!best) return { total: URG_TOTAL, moplex: URG_MOPLEX }
+  return { total: Number(best.precio_paciente)||0, moplex: Number(best.costo_moplex)||0 }
+}
+function sumarUrgente(m, urgente, cortesiaPB, tarifa){
   if (!m || !urgente) return m
-  const uMoplex = URG_MOPLEX
-  const uCentro = cortesiaPB ? 0 : (URG_TOTAL - URG_MOPLEX)
+  const tf = tarifa || { total: URG_TOTAL, moplex: URG_MOPLEX }
+  const uMoplex = tf.moplex
+  const uCentro = cortesiaPB ? 0 : (tf.total - tf.moplex)
   const uPrecio = uMoplex + uCentro
   return Object.assign({}, m, {
     precio: (Number(m.precio)||0) + uPrecio,
@@ -150,8 +168,8 @@ function sumarUrgente(m, urgente, cortesiaPB){
     urg: { precio: uPrecio, moplex: uMoplex, centro: uCentro, cortesiaPB: !!cortesiaPB }
   })
 }
-function calcPlantilla(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente){
-  return sumarUrgente(_calcPlantillaBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB)
+function calcPlantilla(p, rectif, montoCustom, montoPlantilla, cortesiaPB, urgente, fechaEnc){
+  return sumarUrgente(_calcPlantillaBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB), urgente, cortesiaPB, tarifaUrgente(fechaEnc))
 }
 function _calcPlantillaBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
   if(!p) return null
@@ -186,6 +204,14 @@ function _calcPlantillaBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
   const centro = precio - moplex - prof
   return { precio, moplex, prof, centro, rectif:false, custom }
 }
+// Devuelve la lista de opciones vigentes + el ítem archivado que este tratamiento
+// esté usando, para que un tratamiento viejo no aparezca sin tipo seleccionado.
+function conOpcionArchivada(lista, idElegido){
+  if (!idElegido) return lista
+  if (lista.some(c => String(c.id) === String(idElegido))) return lista
+  const viejo = state.cat.byId[idElegido]
+  return viejo ? lista.concat([viejo]) : lista
+}
 function montosLine(m){
   if(!m) return ''
   return `<div class="montos">Paciente <b>${fmt(m.precio)}</b><br>Centro <b>${fmt(m.centro)}</b> · Prof <b>${fmt(m.prof)}</b> · <span class="mx">MOPLEX <b>${fmt(m.moplex)}</b></span></div>`
@@ -207,14 +233,20 @@ async function cargar(){
   try{
     const [ttoR, catR] = await Promise.all([
       sb.from('tratamientos').select('*').eq('practica_codigo','MOPLEX').order('fecha_alta', { ascending: false }),
-      sb.from('moplex_catalogo').select('*').eq('activo', true).order('orden')
+      sb.from('moplex_catalogo').select('*').order('orden')
     ])
     if (ttoR.error) throw ttoR.error
     if (catR.error) throw catR.error
     state.ttos = ttoR.data || []
     state.cat = { consultas: [], plantillas: [], byId: {} }
+    // PRECIOS CON VIGENCIA (26/8): al cambiar un precio se archiva la fila vieja
+    // (activo=false) y nace una nueva. byId tiene que traer TODAS — los tratamientos
+    // de meses cerrados apuntan a filas archivadas y sin ellas perderían su precio.
+    // En los desplegables, en cambio, solo van las vigentes.
     ;(catR.data || []).forEach(c => {
       state.cat.byId[c.id] = c
+      if (!c.activo) return
+      if (c.categoria === 'adicional') return            // el extra de urgente no se elige a mano
       if (c.categoria === 'consulta') state.cat.consultas.push(c)
       else state.cat.plantillas.push(c)
     })
@@ -302,8 +334,8 @@ function filaTto(t){
   const factura = facturable(t)
 
   // --- Consulta ---
-  const consOpts = state.cat.consultas.map(c =>
-    `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}</option>`).join('')
+  const consOpts = conOpcionArchivada(state.cat.consultas, t.moplex_consulta_id).map(c =>
+    `<option value="${c.id}" ${String(t.moplex_consulta_id)===String(c.id)?'selected':''}>${c.nombre}${c.activo === false ? ' (precio anterior)' : ''}</option>`).join('')
   const consSel = `<select class="sel" onchange="setConsulta(${t.id}, this.value)"><option value="">— elegir —</option>${consOpts}</select>`
   const consCat = state.cat.byId[t.moplex_consulta_id]
   const consPrecioDef = consCat ? (Number(consCat.precio_paciente)||0) : 0
@@ -342,8 +374,8 @@ function filaTto(t){
   let plCell
   if (pide){
     const rectif = !!t.moplex_plantilla_rectif
-    const plOpts = state.cat.plantillas.map(p =>
-      `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}</option>`).join('')
+    const plOpts = conOpcionArchivada(state.cat.plantillas, t.moplex_plantilla_id).map(p =>
+      `<option value="${p.id}" ${String(t.moplex_plantilla_id)===String(p.id)?'selected':''}>${p.nombre}${p.activo === false ? ' (precio anterior)' : ''}</option>`).join('')
     const plSel = `<select class="sel" onchange="setPlantilla(${t.id}, this.value)"><option value="">— tipo —</option>${plOpts}</select>`
     const rectSel = `<select class="sel sel-sm" onchange="setRectif(${t.id}, this.value)"><option value="0" ${!rectif?'selected':''}>Nueva</option><option value="1" ${rectif?'selected':''}>Rectificación</option></select>`
     const plCat = state.cat.byId[t.moplex_plantilla_id]
@@ -363,14 +395,15 @@ function filaTto(t){
     // cortesía de la consulta pero la plantilla no"): la plantilla tiene su propio tilde.
     const cortPBPl = !!t.moplex_plantilla_cortesia_pb
     const urgente = !!t.moplex_plantilla_urgente
-    const pRep = aplicarFactura(calcPlantilla(plCat, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, cortPBPl, urgente), factura)
+    const tarUrg = tarifaUrgente(fechaConsulta(t))
+    const pRep = aplicarFactura(calcPlantilla(plCat, rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, cortPBPl, urgente, fechaConsulta(t)), factura)
     // El chip de urgencia sale del tilde, aunque todavía no haya tipo de plantilla elegido.
     const urgChip = !urgente ? '' : (
       (pRep && pRep.urg)
         ? (pRep.urg.cortesiaPB
-            ? `<div class="muted" style="color:#b45309;font-weight:700;">⚡ urgente — el paciente paga solo lo de MOPLEX (${fmt(pRep.urg.moplex)}); PB regala los ${fmt(URG_TOTAL - URG_MOPLEX)}</div>`
+            ? `<div class="muted" style="color:#b45309;font-weight:700;">⚡ urgente — el paciente paga solo lo de MOPLEX (${fmt(pRep.urg.moplex)}); PB regala los ${fmt(tarUrg.total - tarUrg.moplex)}</div>`
             : `<div class="muted" style="color:#b45309;font-weight:700;">⚡ urgente — ${fmt(pRep.urg.precio)} extra (MOPLEX ${fmt(pRep.urg.moplex)} · centro ${fmt(pRep.urg.centro)} · prof $0), ya sumado arriba</div>`)
-        : `<div class="muted" style="color:#b45309;font-weight:700;">⚡ urgente — ${fmt(URG_TOTAL)} extra: elegí el tipo de plantilla para ver el total</div>`)
+        : `<div class="muted" style="color:#b45309;font-weight:700;">⚡ urgente — ${fmt(tarUrg.total)} extra: elegí el tipo de plantilla para ver el total</div>`)
     const pMon = montosLine(pRep)
       + ((pRep && pRep.cortesiaPB) ? `<div class="muted" style="color:#9a3412;font-weight:700;">🎁 cortesía PuntoBiO — el paciente paga solo lo de MOPLEX (${fmt(pRep.moplex)}); PB regala el resto</div>`
         : ((pRep && pRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 rectificación sin cargo (MOPLEX no cobra${urgente ? ' la rectificación' : ''})</div>` : ''))
@@ -382,9 +415,9 @@ function filaTto(t){
           <input type="checkbox" ${cortPBPl ? 'checked' : ''} onchange="setPlantillaCortesiaPB(${t.id}, this.checked)" style="width:13px;height:13px;cursor:pointer;">
           🎁 Cortesía PuntoBiO (plantilla)</label></div>`
     // Normal por defecto; se tilda solo si el pedido va urgente (MOPLEX cobra el extra fijo).
-    const urgChk = `<div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11.5px;color:#b45309;" title="Pedido urgente: MOPLEX cobra ${fmt(URG_TOTAL)} extra (${fmt(URG_MOPLEX)} MOPLEX · ${fmt(URG_TOTAL - URG_MOPLEX)} PuntoBiO · $0 profesional).">
+    const urgChk = `<div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11.5px;color:#b45309;" title="Pedido urgente: MOPLEX cobra ${fmt(tarUrg.total)} extra (${fmt(tarUrg.moplex)} MOPLEX · ${fmt(tarUrg.total - tarUrg.moplex)} PuntoBiO · $0 profesional).">
           <input type="checkbox" ${urgente ? 'checked' : ''} onchange="setPlantillaUrgente(${t.id}, this.checked)" style="width:13px;height:13px;cursor:pointer;">
-          ⚡ Urgente (+${fmt(URG_TOTAL)})</label></div>`
+          ⚡ Urgente (+${fmt(tarUrg.total)})</label></div>`
     plCell = `<div class="plrow">${plSel} ${rectSel} ${extraInput}</div>${cortPlChk}${urgChk}${pMon}${convChip}`
   } else {
     plCell = `<span class="badge b-no">—</span>`

@@ -736,11 +736,27 @@ function _precioConsultaMoplex(ev, t){
 // URGENTE (26/8/26): extra fijo de MOPLEX por fabricación express. $22.000 en total
 // ($18.700 MOPLEX / $3.300 centro / $0 profesional). Con cortesía PuntoBiO el paciente
 // paga solo los $18.700. Acá solo interesa lo que PAGA EL PACIENTE (el total del tto).
+// Números de respaldo por si todavía no se corrió el SQL de vigencias.
 const _URG_TOTAL  = 22000
 const _URG_MOPLEX = 18700
+function _tarifaUrgenteMoplex(fecha){
+  const byId = estado.moplexCatById || {}
+  const f = String(fecha || '').slice(0,10) || '9999-12-31'
+  let best = null
+  Object.keys(byId).forEach(k => {
+    const c = byId[k]
+    if (!c || (c.categoria || '') !== 'adicional') return
+    const desde = String(c.vigente_desde || '0000-01-01').slice(0,10)
+    if (desde > f) return
+    if (!best || desde > String(best.vigente_desde || '0000-01-01').slice(0,10)) best = c
+  })
+  if (!best) return { total: _URG_TOTAL, moplex: _URG_MOPLEX }
+  return { total: Number(best.precio_paciente)||0, moplex: Number(best.costo_moplex)||0 }
+}
 function _extraUrgenteMoplex(t){
   if (!t.moplex_plantilla_urgente) return 0
-  return t.moplex_plantilla_cortesia_pb ? _URG_MOPLEX : _URG_TOTAL
+  const tf = _tarifaUrgenteMoplex(t.fecha_alta)
+  return t.moplex_plantilla_cortesia_pb ? tf.moplex : tf.total
 }
 function _precioPlantillaMoplex(p, t){
   if(!p) return 0
@@ -1603,13 +1619,15 @@ let MOPLEX_CONSULTAS = []   // baropodometrías del catálogo (Nuevo / Control /
 async function cargarMoplexConsultasCat() {
   try {
     const { data } = await sb.from('moplex_catalogo')
-      .select('id, nombre, precio_paciente, costo_moplex, pct_profesional, es_garantia, activo, orden').eq('activo', true).order('orden')
+      .select('id, categoria, nombre, precio_paciente, costo_moplex, pct_profesional, es_garantia, activo, orden, vigente_desde, vigente_hasta').order('orden')
     const cat = data || []
     // Mapa completo (consultas + plantillas) para recalcular el total real de los MOPLEX.
     estado.moplexCatById = {}
     cat.forEach(c => { estado.moplexCatById[c.id] = c })
-    // Solo las baropodometrías para el selector del form de "nuevo".
-    MOPLEX_CONSULTAS = cat.filter(c => (c.nombre || '').toLowerCase().startsWith('baropod'))
+    // Solo las baropodometrías VIGENTES para el selector del form de "nuevo"
+    // (el mapa de arriba sí trae las archivadas: los tratamientos viejos las necesitan
+    //  para conservar el precio con el que se cargaron).
+    MOPLEX_CONSULTAS = cat.filter(c => c.activo && (c.nombre || '').toLowerCase().startsWith('baropod'))
   } catch (e) {
     MOPLEX_CONSULTAS = []
     console.warn('No se pudo cargar moplex_catalogo (consultas):', e.message)
