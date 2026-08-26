@@ -133,7 +133,7 @@ function moplexFacturable(fecha){ return String(fecha||'').slice(0,7) >= MOPLEX_
 // misma regla que consultas_moplex.html). Julio 2026 para atrás: $0 como siempre.
 const MOPLEX_PCT_CONSULTA = 0.20;
 const MOPLEX_PCT_CONSULTA_DESDE = '2026-08';
-function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
+function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   if (!c) return null;
   // Precio corregido/convenio (✏️ de Consultas MOPLEX): manda sobre el catálogo.
   // UN 0 EXPLÍCITO VALE = consulta sin cargo (12/8, mismo criterio que consultas_moplex.html).
@@ -157,6 +157,11 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
     moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
   }
   // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
+  // INCLUIDA EN UNA EVALUACIÓN (26/8): el paciente no paga nada (ya pagó la eval),
+  // MOPLEX cobra igual su 20% y el centro lo absorbe → su parte queda negativa.
+  if (incluidaEval && moplex > 0){
+    return { precio: 0, moplex, prof: 0, centro: -moplex, incluidaEval: true };
+  }
   if (cortesiaPB && moplex > 0){
     return { precio: moplex, moplex, prof: 0, centro: 0 };
   }
@@ -270,7 +275,7 @@ function prepararMoplex(monthPagos){
     const evalItem  = byId[t.moplex_consulta_id];
     const plantItem = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
     const rectif    = !!t.moplex_plantilla_rectif;
-    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha, t.moplex_consulta_cortesia_pb) : null;
+    const evalRep   = evalItem  ? calcConsultaMoplex(evalItem, t.moplex_consulta_monto, t.fecha_alta || p0.fecha, t.moplex_consulta_cortesia_pb, t.moplex_consulta_incluida_eval) : null;
     const plantRep  = plantItem ? calcPlantillaMoplex(plantItem, rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, t.fecha_alta || p0.fecha) : null;
     const paciente = (t.personas && t.personas.nombre) || '—';
     const prof     = normProf(p0.profesional);
@@ -382,7 +387,7 @@ async function cargar(){
       tratamientos!inner (
         id, codigo_id, practica_codigo, fecha_alta,
         moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-        moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente, solicita_plantillas,
+        moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente, moplex_consulta_incluida_eval, solicita_plantillas,
         personas ( id, nombre )
       )
     `)
@@ -432,7 +437,7 @@ async function cargar(){
           tratamientos (
             id, practica_codigo, fecha_alta,
             moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto,
-            moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente, solicita_plantillas,
+            moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente, moplex_consulta_incluida_eval, solicita_plantillas,
             personas ( id, nombre )
           )
         `)
@@ -449,7 +454,7 @@ async function cargar(){
   window._moplexConsultasMes = [];
   try {
     const { data: mopTtos } = await sb.from('tratamientos')
-      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente')
+      .select('id, codigo_id, persona_id, fecha_alta, profesional, solicita_plantillas, moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, moplex_consulta_monto, moplex_plantilla_monto, moplex_consulta_cortesia_pb, moplex_plantilla_cortesia_pb, moplex_plantilla_urgente, moplex_consulta_incluida_eval')
       .eq('practica_codigo','MOPLEX');
     const ttos = mopTtos || [];
     if (ttos.length){
@@ -489,7 +494,7 @@ async function cargar(){
         const fc = fechaSesion[t.id] || fechaTurno[t.codigo_id] || t.fecha_alta || '';
         if (String(fc).slice(0,7) !== mes) continue;
         const fact = moplexFacturable(fc);
-        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc, t.moplex_consulta_cortesia_pb) : null;
+        const evalRep  = t.moplex_consulta_id ? calcConsultaMoplex(byId[t.moplex_consulta_id], t.moplex_consulta_monto, fc, t.moplex_consulta_cortesia_pb, t.moplex_consulta_incluida_eval) : null;
         const rectif   = !!t.moplex_plantilla_rectif;
         const plantRep = (t.solicita_plantillas && t.moplex_plantilla_id) ? calcPlantillaMoplex(byId[t.moplex_plantilla_id], rectif, Number(t.moplex_rectif_monto)||0, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, fc) : null;
         const ev = scale(evalRep, fact), pl = scale(plantRep, fact);
@@ -497,7 +502,7 @@ async function cargar(){
         lista.push({
           tratId: t.id, fecha: fc, paciente: nombres[t.persona_id] || '—',
           prof: normProf(t.profesional) || profSesion[t.id] || profTurno[t.codigo_id] || '',
-          consultaNombre: (byId[t.moplex_consulta_id]||{}).nombre || '—',
+          consultaNombre: ((byId[t.moplex_consulta_id]||{}).nombre || '—') + (t.moplex_consulta_incluida_eval ? ' 🔗 en evaluación' : ''),
           plantillaNombre: plantRep ? ((rectif?'Rectif. ':'') + ((byId[t.moplex_plantilla_id]||{}).nombre||'') + ((fact && t.moplex_plantilla_urgente) ? ' ⚡ urgente' : '')) : '',
           precio, prof_monto: (ev.prof||0)+(pl.prof||0), centro: (ev.centro||0)+(pl.centro||0), moplex: (ev.moplex||0)+(pl.moplex||0),
           // Componentes discriminados (consulta vs plantilla) para mostrar qué se paga

@@ -649,7 +649,7 @@
   const MOPLEX_PCT_CONSULTA = 0.20;
   const MOPLEX_PCT_CONSULTA_DESDE = '2026-08';
   function _tieneValMoplex(x){ return x !== null && x !== undefined && x !== '' && !isNaN(Number(x)); }
-  function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB){
+  function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
     if(!c) return null;
     const precioDef = Number(c.precio_paciente)||0;
     const tiene = _tieneValMoplex(montoCustom);
@@ -659,6 +659,9 @@
     let moplex;
     if (cobra){ moplex = Math.round(precio * MOPLEX_PCT_CONSULTA); }
     else { const b = Number(c.costo_moplex)||0; moplex = (custom && precioDef > 0) ? Math.round(b * precio / precioDef) : b; }
+    // Incluida en una evaluación (26/8): el paciente no paga nada acá — ya lo pagó
+    // en la evaluación. MOPLEX cobra igual y el centro lo absorbe.
+    if (incluidaEval && moplex > 0) return { precio: 0, moplex, prof:0, centro:-moplex, incluidaEval:true };
     if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0 };
     const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof };
@@ -754,7 +757,7 @@
     const byId = (state.moplexCat && state.moplexCat.byId) || {};
     const ev = byId[t.moplex_consulta_id];
     const pl = (t.solicita_plantillas && t.moplex_plantilla_id) ? byId[t.moplex_plantilla_id] : null;
-    const er = ev ? calcConsultaMoplex(ev, t.moplex_consulta_monto, t.fecha_alta, t.moplex_consulta_cortesia_pb) : null;
+    const er = ev ? calcConsultaMoplex(ev, t.moplex_consulta_monto, t.fecha_alta, t.moplex_consulta_cortesia_pb, t.moplex_consulta_incluida_eval) : null;
     const pr = pl ? calcPlantillaMoplex(pl, !!t.moplex_plantilla_rectif, t.moplex_rectif_monto, Number(t.moplex_plantilla_monto)||0, t.moplex_plantilla_cortesia_pb, t.moplex_plantilla_urgente, t.fecha_alta) : null;
     const evalPrecio  = er ? er.precio : 0;
     const plantPrecio = pr ? pr.precio : 0;
@@ -828,7 +831,8 @@
       lineas.push(linea(
         R.evalNombre || 'Consulta',
         R.evalPrecio,
-        t.moplex_consulta_cortesia_pb ? '🎁 cortesía PuntoBiO' : ''
+        t.moplex_consulta_incluida_eval ? '🔗 incluida en la evaluación — ya la pagó ahí'
+          : (t.moplex_consulta_cortesia_pb ? '🎁 cortesía PuntoBiO' : '')
       ));
     }
     if (R.pr){

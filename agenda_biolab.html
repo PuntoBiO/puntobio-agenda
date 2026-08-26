@@ -1613,8 +1613,32 @@ async function guardarTurnoNuevo(){
     return;
   }
 
-  const dur = duracionMin(practica, profesional);
+  // EVALUACIÓN QUE VA CON MOPLEX (26/8, pedido de Lu): si al crear la evaluación en
+  // Tratamientos se tildó "va con baropodometría", existe un tratamiento MOPLEX
+  // colgado de ésta (moplex_eval_origen = codigo_id de la evaluación). En ese caso
+  // la hora se parte: 45' de evaluación + 15' de MOPLEX, y el segundo turno se
+  // genera solo más abajo. Si el MOPLEX ya tiene turno, no se duplica.
+  const ES_EVAL_PRACT = p => ['EVALUACION_INGRESO','EVALUACION_DEPORTISTA'].includes(p);
+  let ttoMoplexDeEval = null;
+  if (ES_EVAL_PRACT(practica) && idTto){
+    try{
+      const { data: mx } = await sb.from('tratamientos')
+        .select('codigo_id, moplex_consulta_id')
+        .eq('practica_codigo','MOPLEX').eq('moplex_eval_origen', idTto).limit(1);
+      const cand = (mx && mx[0]) ? mx[0] : null;
+      if (cand){
+        const { count } = await sb.from('turnos_biolab')
+          .select('id_turno', { count:'exact', head:true })
+          .eq('tratamiento_id', cand.codigo_id).neq('estado','CANCELADO');
+        if (!count) ttoMoplexDeEval = cand;
+      }
+    }catch(e){ /* si falla la consulta, sigue como una evaluación normal de 60' */ }
+  }
+
+  const dur = ttoMoplexDeEval ? 45 : duracionMin(practica, profesional);
   const horaFin = minH(hMin(horaInicio) + dur);
+  const horaIniMoplex = horaFin;                       // los 15' van al final de la hora
+  const horaFinMoplex = minH(hMin(horaFin) + 15);
 
   // Validar conflictos.
   // BioLab es UN espacio físico: en una misma hora hay UN solo profesional activo.
@@ -1695,6 +1719,29 @@ async function guardarTurnoNuevo(){
     practica, obra_social: obraSocial, estado: 'RESERVADO', observaciones: obs
   });
   if(error){ alertaEl.innerHTML = `<div class="err-box">Error: ${error.message}</div>`; return; }
+
+  // El turno de 15' de MOPLEX que acompaña a la evaluación. Va pegado al final,
+  // mismo profesional y mismo paciente, colgado del tratamiento MOPLEX que se creó
+  // junto con la evaluación. No pasa por la validación de capacidad ni por la de
+  // exclusividad: nace adentro de la hora que la evaluación ya ocupó.
+  if (ttoMoplexDeEval){
+    try{
+      const { error: eMx } = await sb.from('turnos_biolab').insert({
+        id_turno: idTurno + '-M', fecha: slotActual.fecha,
+        hora_inicio: horaIniMoplex, hora_fin: horaFinMoplex,
+        profesional, persona_id: Number(personaId), paciente,
+        tratamiento_id: ttoMoplexDeEval.codigo_id,
+        practica: 'MOPLEX', obra_social: obraSocial, estado: 'RESERVADO',
+        observaciones: 'Baropodometría incluida en la evaluación ' + idTto
+      });
+      if (eMx) throw eMx;
+      await sb.from('tratamientos')
+        .update({ profesional: (CODE_TO_NOMBRE[profesional] || profesional) })
+        .eq('codigo_id', ttoMoplexDeEval.codigo_id);
+    }catch(e){
+      alertaEl.innerHTML = `<div class="err-box">La evaluación quedó reservada, pero NO se pudo crear el turno de MOPLEX de las ${horaIniMoplex}: ${e.message || e}. Cargalo a mano.</div>`;
+    }
+  }
 
   // MOPLEX: guardar en el tratamiento el tipo de consulta, la plantilla y el
   // profesional que hizo el estudio (para que el apartado MOPLEX lo muestre).

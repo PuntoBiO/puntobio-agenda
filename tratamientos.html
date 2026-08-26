@@ -413,6 +413,19 @@ tbody tr:last-child td { border-bottom: 0; }
         <select id="nuevo-practica" class="form-select"></select>
       </div>
 
+      <div class="form-field span-2" id="nuevo-eval-moplex-field" style="display:none;">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;">
+          <input type="checkbox" id="chk-eval-con-moplex" onchange="toggleEvalConMoplex()" style="width:15px;height:15px;cursor:pointer;">
+          <span>🦶 <b>Va con baropodometría MOPLEX</b> <span style="color:var(--text-faint);font-weight:400;">— se crea también el tratamiento MOPLEX y el turno de 15' sale solo al reservar la evaluación</span></span>
+        </label>
+        <div id="nuevo-eval-moplex-box" style="display:none;margin-top:8px;">
+          <select id="sel-eval-moplex-consulta" class="form-select"><option value="">— tipo de baropodometría —</option></select>
+          <div style="font-size:12px;color:var(--text-faint);margin-top:6px;line-height:1.5;">
+            El paciente <b>no paga nada extra</b>: ya paga la evaluación. MOPLEX cobra igual su parte y la absorbe PuntoBiO (el profesional no cobra por esta consulta).
+          </div>
+        </div>
+      </div>
+
       <div class="form-field span-2" id="nuevo-moplex-field" style="display:none;">
         <label class="form-label">Tipo de baropodometría <span style="color:var(--text-faint);font-weight:400;text-transform:none;letter-spacing:0;">— fija el valor de la evaluación (la plantilla se asigna después en Consultas MOPLEX)</span></label>
         <select id="nuevo-moplex-consulta" class="form-select" onchange="onMoplexConsultaChange()"><option value="">— elegí tipo —</option></select>
@@ -726,6 +739,9 @@ function _precioConsultaMoplex(ev, t){
   const precioDef = Number(ev.precio_paciente)||0
   // 0 explícito en el ✂️ = consulta sin cargo (también cubre el ítem Pedido de plantillas, precio 0)
   const precio = _tieneValMoplex(t.moplex_consulta_monto) ? Number(t.moplex_consulta_monto) : precioDef
+  // Incluida en una evaluación (26/8): el paciente ya la pagó dentro de la evaluación,
+  // así que este tratamiento no le cobra nada. Lo que va a MOPLEX lo pone el centro.
+  if (t.moplex_consulta_incluida_eval) return 0
   if (t.moplex_consulta_cortesia_pb){
     // Cortesía PuntoBiO: paga solo el 20% de MOPLEX (vigente desde agosto 2026)
     const cobra = String(t.fecha_alta || '').slice(0,7) >= _MOPLEX_PCT_DESDE
@@ -1500,6 +1516,10 @@ window.abrirNuevo = function() {
   $('paciente-resultados').innerHTML = ''
   renderPickerPaciente()
   const mc = $('nuevo-moplex-consulta'); if (mc) mc.value = ''
+  const ce = $('chk-eval-con-moplex'); if (ce) ce.checked = false
+  const eb = $('nuevo-eval-moplex-box'); if (eb) eb.style.display = 'none'
+  const es = $('sel-eval-moplex-consulta'); if (es) es.value = ''
+  const ef = $('nuevo-eval-moplex-field'); if (ef) ef.style.display = 'none'
   poblarPracticasSelect()
   autocompletarPrecioNuevo() // pre-carga el valor por sesión de la práctica/modalidad por defecto
   $('modal-nuevo').classList.add('is-open')
@@ -1649,6 +1669,33 @@ function poblarMoplexConsultas() {
 function esMoplexNuevo() {
   return $('nuevo-area')?.value === 'biolab' && $('nuevo-practica')?.value === 'MOPLEX'
 }
+// Evaluaciones que pueden llevar MOPLEX adentro (26/8, pedido de Lu)
+const PRACTICAS_EVAL_CON_MOPLEX = ['EVAL', 'EVALDEP']
+function esEvalNueva() {
+  return $('nuevo-area')?.value === 'biolab' && PRACTICAS_EVAL_CON_MOPLEX.includes($('nuevo-practica')?.value)
+}
+window.toggleEvalConMoplex = function() {
+  const on = $('chk-eval-con-moplex')?.checked
+  const box = $('nuevo-eval-moplex-box')
+  if (box) box.style.display = on ? '' : 'none'
+}
+function toggleEvalConMoplexField() {
+  const field = $('nuevo-eval-moplex-field')
+  if (!field) return
+  if (esEvalNueva()) {
+    field.style.display = ''
+    // El desplegable trae SOLO las baropodometrías vigentes con precio (sin garantía
+    // ni las opciones de cortesía: acá la regla de plata es otra).
+    const sel = $('sel-eval-moplex-consulta')
+    if (sel) sel.innerHTML = '<option value="">— tipo de baropodometría —</option>' +
+      MOPLEX_CONSULTAS.filter(c => (Number(c.precio_paciente)||0) > 0 && !c.es_garantia)
+        .map(c => `<option value="${c.id}">${c.nombre} — MOPLEX cobra $${Math.round((Number(c.precio_paciente)||0)*0.20).toLocaleString('es-AR')}</option>`).join('')
+  } else {
+    field.style.display = 'none'
+    if ($('chk-eval-con-moplex')) $('chk-eval-con-moplex').checked = false
+    if ($('nuevo-eval-moplex-box')) $('nuevo-eval-moplex-box').style.display = 'none'
+  }
+}
 function toggleMoplexConsulta() {
   const field = $('nuevo-moplex-field')
   if (!field) return
@@ -1672,7 +1719,7 @@ window.onMoplexConsultaChange = function() {
   $('nuevo-total').value = precio
 }
 
-$('nuevo-area').addEventListener('change', () => { poblarPracticasSelect(); autocompletarPrecioNuevo() })
+$('nuevo-area').addEventListener('change', () => { poblarPracticasSelect(); toggleEvalConMoplexField(); autocompletarPrecioNuevo() })
 
 window.recalcularTotal = function() {
   const ses = Number($('nuevo-sesiones').value) || 0
@@ -1731,10 +1778,58 @@ window.crearTratamiento = async function() {
     if (flag === 'CPB') { payload.moplex_consulta_cortesia_pb = true; payload.tipo_cobro = 'CORTESIA_PB' }
   }
 
+  // EVALUACIÓN QUE VA CON MOPLEX (26/8, pedido de Lu): validar ANTES de crear nada,
+  // así no queda la evaluación suelta si falta elegir el tipo de baropodometría.
+  const evalConMoplex = esEvalNueva() && !!$('chk-eval-con-moplex')?.checked
+  const evalMoplexConsultaId = Number($('sel-eval-moplex-consulta')?.value || 0)
+  if (evalConMoplex && !evalMoplexConsultaId) {
+    toast('Elegí el tipo de baropodometría de la evaluación', 'err')
+    btn.disabled = false; btn.textContent = 'Crear tratamiento'
+    return
+  }
+
   try {
     const { data, error } = await sb.from('tratamientos').insert(payload).select().single()
     if (error) throw error
-    toast(`✓ Tratamiento #${data.id} creado (${data.codigo_id || '—'})`, 'ok')
+
+    // El tratamiento MOPLEX que acompaña a la evaluación. Nace atado a ella por
+    // moplex_eval_origen (la Agenda BioLab lo usa para generar el turno de 15').
+    // Plata: el paciente ya pagó la evaluación, así que este va en $0 — MOPLEX
+    // cobra igual su parte y la absorbe el centro (regla moplex_consulta_incluida_eval).
+    if (evalConMoplex) {
+      try {
+        const tsM = new Date()
+        const codigoMoplex = `MOPLEX${tsM.getFullYear()}${pad(tsM.getMonth()+1)}${pad(tsM.getDate())}${pad(tsM.getHours())}${pad(tsM.getMinutes())}`
+        const { error: eM } = await sb.from('tratamientos').insert({
+          persona_id: estado.pacienteSel.id,
+          codigo_id: codigoMoplex,
+          practica_codigo: 'MOPLEX',
+          modalidad: modalidad,
+          obra_social: obraSocial,
+          total_sesiones: 1,
+          valor_sesion: 0,
+          total_pagar: 0,
+          total_abonado: 0,
+          descuento_monto: 0,
+          tipo_cobro: 'INCLUIDA_EVAL',
+          estado: 'Pendiente',
+          fecha_alta: payload.fecha_alta,
+          moplex_consulta_id: evalMoplexConsultaId,
+          moplex_consulta_incluida_eval: true,
+          moplex_eval_origen: data.codigo_id,
+          solicita_plantillas: false
+        })
+        if (eM) throw eM
+        toast(`✓ Evaluación ${data.codigo_id} + MOPLEX ${codigoMoplex} creados`, 'ok', 6000)
+      } catch (eM) {
+        // La evaluación YA quedó creada: se avisa fuerte para que lo carguen a mano
+        // y no se pierda la baropodometría.
+        console.error('Error creando el MOPLEX de la evaluación:', eM)
+        toast(`⚠️ La evaluación ${data.codigo_id} se creó, pero NO se pudo crear el MOPLEX: ${eM.message}. Cargalo a mano.`, 'err', 9000)
+      }
+    } else {
+      toast(`✓ Tratamiento #${data.id} creado (${data.codigo_id || '—'})`, 'ok')
+    }
     cerrarNuevo()
     await cargarDatos()
   } catch (err) {
@@ -1916,7 +2011,7 @@ function actualizarPreviaCobro(tipoCobroSelId, previaId) {
 
 $('nuevo-modalidad').addEventListener('change', () => { toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'); autocompletarPrecioNuevo() })
 $('ed-modalidad').addEventListener('change', () => { toggleObraSocial('ed-modalidad', 'ed-obra-field'); autocompletarPrecioEd() })
-$('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); autocompletarPrecioNuevo() })
+$('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); toggleEvalConMoplexField(); autocompletarPrecioNuevo() })
 $('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
 $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })

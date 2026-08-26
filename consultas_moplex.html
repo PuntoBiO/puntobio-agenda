@@ -100,7 +100,7 @@ const state = { ttos: [], personas: {}, cat: { consultas: [], plantillas: [], by
 // y rectificación sin cargo.
 const MOPLEX_PCT_CONSULTA = 0.20
 const MOPLEX_PCT_CONSULTA_DESDE = '2026-08'
-function calcConsulta(c, montoCustom, fechaC, cortesiaPB){
+function calcConsulta(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   if(!c) return null
   // Precio editable (✂️ correcciones / convenios). Por defecto el del catálogo; si Lu lo cambió, ese.
   // UN 0 EXPLÍCITO VALE (12/8, caso Manuel Arias segundo par / bonificación de MOPLEX):
@@ -119,6 +119,14 @@ function calcConsulta(c, montoCustom, fechaC, cortesiaPB){
     // Regla vieja: costo fijo del catálogo (hoy $0 para consultas), escalado si hay convenio
     const moplexBase = Number(c.costo_moplex)||0
     moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+  }
+  // INCLUIDA EN UNA EVALUACIÓN (26/8): la baropodometría se hizo dentro de una
+  // evaluación de ingreso/deportista que el paciente ya pagó. Acá el paciente NO
+  // paga nada por la consulta, pero MOPLEX cobra igual su 20% — y eso lo pone el
+  // centro de su bolsillo, así que su parte queda NEGATIVA. Ojo: no es lo mismo
+  // que la cortesía de abajo, donde el paciente sí paga la parte de MOPLEX.
+  if (incluidaEval && moplex > 0){
+    return { precio: 0, moplex, prof: 0, centro: -moplex, custom: false, sinCargo: false, cortesiaPB: false, incluidaEval: true }
   }
   // CORTESÍA PUNTOBIO (12/8, "ej para una amiga mía"): el paciente paga SOLO lo de
   // MOPLEX (esa plata es de la franquicia, no se puede regalar) y PB regala el resto:
@@ -351,7 +359,8 @@ function filaTto(t){
         <input type="checkbox" ${cortPB ? 'checked' : ''} onchange="setConsultaCortesiaPB(${t.id}, this.checked)" style="width:13px;height:13px;cursor:pointer;">
         🎁 Cortesía PuntoBiO (consulta)</label></div>`
     : ''
-  const cRep = aplicarFactura(calcConsulta(consCat, t.moplex_consulta_monto, fechaConsulta(t), cortPB), factura)
+  const inclEval = !!t.moplex_consulta_incluida_eval
+  const cRep = aplicarFactura(calcConsulta(consCat, t.moplex_consulta_monto, fechaConsulta(t), cortPB, inclEval), factura)
   // "PEDIDO DE PLANTILLAS" (12/8, caso Arias: el 13/8 no hizo otra baropodometría,
   // solo dejó el par viejo a rectificar / pide otro par más — la consulta que vale es
   // la que YA se hizo): ítem del catálogo con precio $0 que no es garantía. La consulta
@@ -366,7 +375,8 @@ function filaTto(t){
   const cMon = (esPedido
     ? `<div class="muted" style="color:#475569;font-weight:700;">📦 pedido de plantillas — sin consulta ($0): la baropodometría que vale es la que ya se hizo. La plantilla/rectificación de al lado sigue su curso normal.</div>`
     : montosLine(cRep)
-      + ((cRep && cRep.cortesiaPB) ? `<div class="muted" style="color:#9a3412;font-weight:700;">🎁 cortesía PuntoBiO — el paciente paga solo lo de MOPLEX (${fmt(cRep.moplex)}); PB regala el resto</div>`
+      + ((cRep && cRep.incluidaEval) ? `<div class="muted" style="color:#7c3aed;font-weight:700;">🔗 incluida en la evaluación — el paciente ya la pagó ahí; MOPLEX cobra ${fmt(cRep.moplex)} y lo absorbe PuntoBiO</div>`
+        : (cRep && cRep.cortesiaPB) ? `<div class="muted" style="color:#9a3412;font-weight:700;">🎁 cortesía PuntoBiO — el paciente paga solo lo de MOPLEX (${fmt(cRep.moplex)}); PB regala el resto</div>`
         : ((cRep && cRep.sinCargo) ? `<div class="muted" style="color:#166534;font-weight:700;">🎁 consulta sin cargo (nadie cobra — cortesía/bonificado MOPLEX)</div>`
         : ((cRep && cRep.custom) ? `<div class="muted" style="color:var(--turquoise-dim);font-weight:700;">precio corregido (catálogo ${fmt(consPrecioDef)})</div>` : ''))))
 
@@ -431,7 +441,7 @@ function filaTto(t){
     <td>${fmtFechaCorta(fechaConsulta(t))}</td>
     <td>${profSel}</td>
     <td><span class="est2 ${estCls}">${estTxt}</span></td>
-    <td>${consSel}${(esPedido || cortPB) ? '' : consInput}${esPedido ? '' : cortChk}${cMon}</td>
+    <td>${consSel}${(esPedido || cortPB || inclEval) ? '' : consInput}${(esPedido || inclEval) ? '' : cortChk}${cMon}</td>
     <td class="c">
       <label class="sw">
         <input type="checkbox" ${pide?'checked':''} onchange="togglePlantilla(${t.id}, this)">
