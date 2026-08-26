@@ -733,14 +733,24 @@ function _precioConsultaMoplex(ev, t){
   }
   return precio
 }
+// URGENTE (26/8/26): extra fijo de MOPLEX por fabricación express. $22.000 en total
+// ($18.700 MOPLEX / $3.300 centro / $0 profesional). Con cortesía PuntoBiO el paciente
+// paga solo los $18.700. Acá solo interesa lo que PAGA EL PACIENTE (el total del tto).
+const _URG_TOTAL  = 22000
+const _URG_MOPLEX = 18700
+function _extraUrgenteMoplex(t){
+  if (!t.moplex_plantilla_urgente) return 0
+  return t.moplex_plantilla_cortesia_pb ? _URG_MOPLEX : _URG_TOTAL
+}
 function _precioPlantillaMoplex(p, t){
   if(!p) return 0
+  const urg = _extraUrgenteMoplex(t)
   const rectif = !!t.moplex_plantilla_rectif
   if(rectif){
     // Rectificación: el monto indicado por MOPLEX (0 explícito = sin cargo; vacío = mitad por defecto).
     const base = _tieneValMoplex(t.moplex_rectif_monto) ? Number(t.moplex_rectif_monto) : Math.round((Number(p.precio_paciente)||0)/2)
-    if (t.moplex_plantilla_cortesia_pb) return Math.round(base * 0.85)   // cortesía: paga solo lo de MOPLEX
-    return base
+    if (t.moplex_plantilla_cortesia_pb) return Math.round(base * 0.85) + urg   // cortesía: paga solo lo de MOPLEX
+    return base + urg
   }
   // Plantilla nueva: precio de convenio si se cargó, si no el de lista.
   const precioDef = Number(p.precio_paciente)||0
@@ -749,9 +759,9 @@ function _precioPlantillaMoplex(p, t){
   if (t.moplex_plantilla_cortesia_pb){
     // Cortesía: paga solo el costo MOPLEX (escalado si hay convenio)
     const moplexBase = Number(p.costo_moplex)||0
-    return (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+    return ((custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase) + urg
   }
-  return precio
+  return precio + urg
 }
 function totalMoplexTto(t){
   const byId = estado.moplexCatById || {}
@@ -773,6 +783,8 @@ function desgloseMoplexTto(t){
     evalNombre:  ev ? ev.nombre : null,
     plantNombre: pl ? pl.nombre : null,
     rectif: !!t.moplex_plantilla_rectif,
+    urgente: !!t.moplex_plantilla_urgente,
+    urgExtra: pl ? _extraUrgenteMoplex(t) : 0,
     total: evalPrecio + plantPrecio
   }
 }
@@ -1086,7 +1098,7 @@ window.verDetalle = async function(ttoId) {
     ['Diagnóstico', t.diagnostico ? `<strong>${t.diagnostico}</strong>` : '<span style="color:var(--text-faint);">— sin completar (editá para agregarlo)</span>'],
     ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
-    ['Total a pagar', t._moplexRecalc ? `${fmt(t._totalReal)} <span style="color:var(--text-faint);font-size:11px;">(evaluación ${fmt(desgloseMoplexTto(t).evalPrecio)} + plantilla ${fmt(desgloseMoplexTto(t).plantPrecio)})</span>` : fmt(t.total_pagar)],
+    ['Total a pagar', t._moplexRecalc ? `${fmt(t._totalReal)} <span style="color:var(--text-faint);font-size:11px;">(evaluación ${fmt(desgloseMoplexTto(t).evalPrecio)} + plantilla ${fmt(desgloseMoplexTto(t).plantPrecio)}${desgloseMoplexTto(t).urgExtra ? ` — incluye ⚡ urgente ${fmt(desgloseMoplexTto(t).urgExtra)}` : ''})</span>` : fmt(t.total_pagar)],
     ['Total abonado', fmt(t.total_abonado)],
     ['Saldo pendiente', fmt(t._moplexRecalc ? t._saldoReal : t.saldo_pendiente)],
     ['Tipo de cobro', t.tipo_cobro || '—'],
