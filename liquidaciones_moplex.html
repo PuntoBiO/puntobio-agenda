@@ -508,7 +508,13 @@ async function cargar(){
           // Componentes discriminados (consulta vs plantilla) para mostrar qué se paga
           ev: { precio: ev.precio||0, prof: ev.prof||0, centro: ev.centro||0, moplex: ev.moplex||0 },
           pl: { precio: pl.precio||0, prof: pl.prof||0, centro: pl.centro||0, moplex: pl.moplex||0 },
-          gratis: (precio <= 0.5), cobrado: false
+          // "no factura" solo si NO hay nada que pagarle a MOPLEX. Una consulta incluida
+          // en una evaluación cobra $0 al paciente pero SÍ le debe su parte a la
+          // franquicia — marcarla como gratis escondía esa deuda (26/8).
+          gratis: (precio <= 0.5 && ((ev.moplex||0) + (pl.moplex||0)) <= 0.5), cobrado: false,
+          // Si tiene sesión cargada, el estudio SE HIZO — pase lo que pase con la plata
+          // (26/8, pedido de Lu: "por más que no se pague, que figure como realizado").
+          realizada: !!fechaSesion[t.id]
         });
       }
       const listIds = lista.map(x=>x.tratId);
@@ -737,8 +743,17 @@ function render(pagos){
       return out;
     };
     for (const c of cons){
-      const estado = c.gratis ? '<span style="color:#9ca3af;">$0 (no factura)</span>'
+      // Dos datos distintos en la misma celda: si el estudio SE HIZO y qué pasó con la
+      // plata. Antes una consulta hecha sin cargo aparecía solo como "$0 (no factura)"
+      // y no se veía que el trabajo estaba realizado.
+      const plata = (c.ev && c.ev.precio <= 0.5 && c.ev.moplex > 0.5)
+        ? '<span style="color:#7c3aed;font-weight:700;">🔗 en evaluación · PB le debe a MOPLEX</span>'
+        : c.gratis ? '<span style="color:#9ca3af;">$0 · no factura</span>'
         : (c.cobrado ? '<span style="color:#065f46;font-weight:600;">✅ Cobrada</span>' : '<span style="color:#92400e;font-weight:600;">⏳ Sin cobrar</span>');
+      const hecha = c.realizada
+        ? '<div style="color:#065f46;font-weight:700;">✅ Realizada</div>'
+        : '<div style="color:#92400e;font-weight:700;">⏳ Pendiente</div>';
+      const estado = hecha + `<div style="font-size:11.5px;margin-top:2px;">${plata}</div>`;
       html += `<tr><td>${c.fecha||'—'}</td><td>${c.paciente}</td><td>${badge(c.prof)}</td>
         <td>${c.consultaNombre}</td><td>${c.plantillaNombre||'—'}</td>
         <td class="num">${celDesg(c,'precio')}</td><td class="num">${celDesg(c,'prof')}</td>
