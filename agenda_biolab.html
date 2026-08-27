@@ -670,6 +670,9 @@ let semanaActual = lunesDeFecha(new Date());
 let turnosSemana = [];
 let moplexCat = { byId:{}, consultas:[], plantillas:[] };
 let moplexTipoPorTto = {};
+// codigo_id del MOPLEX → codigo_id de la evaluación que lo trajo. Solo los que vinieron
+// de una evaluación se pueden deshacer desde el detalle del turno.
+let moplexOrigenPorTto = {};
 let vistaActual = 'semana';        // 'semana' | 'mes'
 let mesAncla = new Date();         // fecha de referencia del mes mostrado
 let personasCache = [];
@@ -780,11 +783,14 @@ async function cargarTurnos(){
     const ttoIds = [...new Set(turnosSemana.filter(t => t.practica==='MOPLEX' && t.tratamiento_id).map(t => t.tratamiento_id))];
     moplexTipoPorTto = {};
     if(ttoIds.length){
-      const { data: tts } = await sb.from('tratamientos').select('codigo_id, moplex_consulta_id').in('codigo_id', ttoIds);
+      const { data: tts } = await sb.from('tratamientos').select('codigo_id, moplex_consulta_id, moplex_eval_origen').in('codigo_id', ttoIds);
+      moplexOrigenPorTto = {};
       (tts||[]).forEach(r => {
         const c = r.moplex_consulta_id ? moplexCat.byId[r.moplex_consulta_id] : null;
         const tp = tipoCortoMoplex(c);
         if(tp) moplexTipoPorTto[r.codigo_id] = tp;
+        // Los que vinieron de una evaluación se pueden deshacer desde el detalle del turno
+        if(r.moplex_eval_origen) moplexOrigenPorTto[r.codigo_id] = r.moplex_eval_origen;
       });
     }
   }catch(e){ /* sin tipos, el chip muestra MOPLEX */ }
@@ -1806,6 +1812,12 @@ function abrirDetalle(t){
   if(t.estado === 'RESERVADO'){
     btns.push(`<button class="btn btn-verde" onclick="cambiarEstado('PRESENTE')">✓ Marcar presente</button>`);
     btns.push(`<button class="btn" onclick="cambiarEstado('AUSENTE')">Ausente</button>`);
+    // Baropodometría que venía con la evaluación y al final no se hizo (o no correspondía):
+    // se borra el turno Y el tratamiento, así desaparece de Consultas MOPLEX y de la
+    // liquidación en vez de quedar como una consulta pendiente que nadie hizo.
+    if (t.practica === 'MOPLEX' && moplexOrigenPorTto[t.tratamiento_id]){
+      btns.push(`<button class="btn btn-rojo" onclick="deshacerMoplexDeEval()">🚫 No se hizo — quitar el MOPLEX</button>`);
+    }
     btns.push(`<button class="btn btn-rojo" onclick="borrarTurno()">🗑 Cancelar (borra)</button>`);
   } else if(['PRESENTE','AUSENTE'].includes(t.estado)){
     btns.push(`<button class="btn" onclick="cambiarEstado('RESERVADO')">↩ Reabrir</button>`);
@@ -1822,6 +1834,62 @@ async function cambiarEstado(nuevo){
   cerrarModal('modal-detalle');
   toast('Estado → '+nuevo,'ok');
   await cargarTurnos(); render();
+}
+
+// Deshace la baropodometría incluida en una evaluación: borra el turno de 15', borra
+// el tratamiento MOPLEX (con lo que sale de Consultas MOPLEX y de la liquidación) y
+// le devuelve los 15 minutos a la evaluación que lo trajo.
+// SOLO si no tiene actividad: si ya se marcó presente, hay sesión o hay algún cobro,
+// no se toca nada — eso ya es historia y se resuelve a mano.
+async function deshacerMoplexDeEval(){
+  if(!turnoSel) return;
+  const tId = turnoSel.tratamiento_id;
+  const evalOrigen = moplexOrigenPorTto[tId];
+  if(!tId || !evalOrigen){ toast('Este turno no viene de una evaluación','err'); return; }
+
+  if(!confirm(
+    `¿Quitar la baropodometría de ${turnoSel.paciente}?\n\n` +
+    `· Se borra el turno de las ${turnoSel.hora_inicio}\n` +
+    `· Se borra el tratamiento ${tId}\n` +
+    `· Deja de figurar en Consultas MOPLEX y en la liquidación\n` +
+    `· La evaluación ${evalOrigen} vuelve a durar la hora entera\n\n` +
+    `La evaluación NO se toca. Esto no se puede deshacer.`
+  )) return;
+
+  try{
+    // Red de seguridad: nada de esto se borra si ya tiene actividad cargada.
+    const [{ count: ses }, { count: pag }] = await Promise.all([
+      sb.from('sesiones').select('id', { count:'exact', head:true }).eq('tratamiento_id', tId),
+      sb.from('pagos_consultorio').select('id', { count:'exact', head:true }).eq('tratamiento_id', tId)
+    ]);
+    if (ses || pag){
+      toast('Ese MOPLEX ya tiene sesión o cobro cargado — no se puede borrar desde acá','err', 6000);
+      return;
+    }
+
+    const { error: eT } = await sb.from('turnos_biolab').delete().eq('id', turnoSel.id);
+    if (eT) throw eT;
+    const { error: eTt } = await sb.from('tratamientos').delete().eq('codigo_id', tId);
+    if (eTt) throw eTt;
+
+    // Devolverle los 15' a la evaluación: se estira su hora_fin hasta donde terminaba
+    // el MOPLEX, solo si efectivamente venían pegados.
+    try{
+      const { data: ev } = await sb.from('turnos_biolab')
+        .select('id, hora_fin').eq('tratamiento_id', evalOrigen)
+        .eq('fecha', turnoSel.fecha).neq('estado','CANCELADO').limit(1);
+      const evT = (ev && ev[0]) ? ev[0] : null;
+      if (evT && evT.hora_fin === turnoSel.hora_inicio){
+        await sb.from('turnos_biolab').update({ hora_fin: turnoSel.hora_fin }).eq('id', evT.id);
+      }
+    }catch(e){ /* si no se pudo estirar, el turno igual quedó bien borrado */ }
+
+    cerrarModal('modal-detalle');
+    toast('MOPLEX quitado · la evaluación recupera la hora completa','ok', 5000);
+    await cargarTurnos(); render();
+  }catch(e){
+    toast('No se pudo quitar: ' + (e.message || e), 'err', 6000);
+  }
 }
 
 async function borrarTurno(){
