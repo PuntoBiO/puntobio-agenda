@@ -1763,6 +1763,22 @@ function capEn(turnoId, fecha) {
 }
 // Atajo comodo: capT(turno, fecha). Sin fecha usa el dia que se esta mirando.
 function capT(t, fecha) { return capEn(t.id, fecha); }
+
+// CLASE FANTASMA: una clase con cupo 0 EN ESA FECHA y sin una sola persona anotada
+// ese dia es una clase que ya no existe (ej. el viernes 07:00, que se cerro).
+// No tiene por que seguir apareciendo en la grilla como 0/0 ni contar en "faltan
+// cerrar". Se evalua POR FECHA, asi que los dias en que la clase si existia
+// siguen mostrandose igual: no se pierde nada de lo que ya paso.
+// Si tiene aunque sea un anotado (un fijo o un recuperatorio suelto) se muestra,
+// para que no desaparezca nadie de la vista.
+function claseVisible(t, fecha) {
+  const f = fecha || fechaRealDiaActivo();
+  if (capEn(t.id, f) > 0) return true;
+  const key = `${t.dia}-${t.hora}-${t.servicio}`;
+  if (fijosVigentes(key, f).length) return true;
+  if ((AGREGADOS_POR_TURNO[`${t.id}-${f}`] || []).length) return true;
+  return false;
+}
 let HORARIOS = [];
 let ALUMNOS_POR_TURNO = {};
 // Agregados puntuales (recuperatorio/suelto) de la semana visible.
@@ -2013,9 +2029,11 @@ function seleccionarDia(dia) {
   renderTurnos();
 }
 function getTurnosDia() {
+  const _f = fechaRealDiaActivo();
   return HORARIOS.filter(t => {
     if (t.dia !== diaActivo) return false;
     if (filtroActivo !== 'todos' && t.servicio !== filtroActivo) return false;
+    if (!claseVisible(t, _f)) return false;
     return true;
   }).sort((a,b) => {
     const ha = parseInt(a.hora.replace(':',''));
@@ -2153,7 +2171,8 @@ function renderResumen() {
     if (feriadoDe(fechaIso)) return;    // feriado: no aplica
     const esHoyDia = (fechaIso === hoyIso_);
     const turnosDelDia = HORARIOS.filter(t =>
-      t.dia === diaNombre && (filtroActivo === 'todos' || t.servicio === filtroActivo));
+      t.dia === diaNombre && (filtroActivo === 'todos' || t.servicio === filtroActivo)
+      && claseVisible(t, fechaIso));
     const turnosConPendientes = [];
     turnosDelDia.forEach(t => {
       // Cerrada POR EL CENTRO (cancelada): no genera pendientes ni cuenta por cerrar.
@@ -2197,6 +2216,7 @@ function renderResumen() {
   if (!feriadoDe(fechaDiaSel) && fechaDiaSel >= pisoSistema) {
     HORARIOS.filter(t => t.dia === diaActivo && (filtroActivo === 'todos' || t.servicio === filtroActivo))
       .forEach(t => {
+        if (!claseVisible(t, fechaDiaSel)) return;                 // clase que ya no existe ese dia
         if (cierreCentroDe(t.id, fechaDiaSel)) return;             // cancelada por centro: no cuenta
         if (claseEstaCerrada(t.id, fechaDiaSel)) diaCerradas++;
         else diaPorCerrar++;
@@ -2435,7 +2455,7 @@ async function cargarPendientesMes() {
       const diaNombre = DIAS[dow - 1];
 
       const turnosPendientes = [];
-      HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
+      HORARIOS.filter(t => t.dia === diaNombre && claseVisible(t, fechaIso)).forEach(t => {
         // SOLO clases YA CERRADAS cuentan como pendientes (mismo criterio que el semanal).
         const cInfo = cerM.get(`${t.id}-${fechaIso}`);
         if (!cInfo) return;                    // clase no cerrada → no cuenta
@@ -2489,7 +2509,7 @@ async function cargarPendientesMes() {
       const dow = fObj.getDay();
       if (dow === 0 || dow === 6) continue; // sin clases en fin de semana
       const diaNombre = DIAS[dow - 1];
-      HORARIOS.filter(t => t.dia === diaNombre).forEach(t => {
+      HORARIOS.filter(t => t.dia === diaNombre && claseVisible(t, fechaIso)).forEach(t => {
         const cInfo = cerM.get(`${t.id}-${fechaIso}`);
         if (cInfo && cInfo.tipo === 'centro') return; // cancelada por el centro: no cuenta
         if (!cInfo) porCerrar++;                        // no cerrada → por cerrar
@@ -3464,7 +3484,7 @@ async function cerrarClasesViejasAuto() {
       const fIso = fmt(fObj);
       if (fIso >= hoy) return;                 // solo días YA pasados (no hoy ni futuro)
       if (feriadoDe(fIso)) return;             // los feriados no se cierran (no hubo clase)
-      HORARIOS.filter(t => t.dia === dia).forEach(t => {
+      HORARIOS.filter(t => t.dia === dia && claseVisible(t, fIso)).forEach(t => {
         if (!CLASES_CERRADAS.has(`${t.id}-${fIso}`)) {
           aCerrar.push({ turno: t, fecha: fIso });
         }
