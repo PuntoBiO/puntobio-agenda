@@ -1160,30 +1160,56 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 let usuario = null
 let permisos = null
 
-// Profes TF a SUELDO FIJO (Santi, Lean, Lauti): vista acotada, sin liquidación.
+// =============================================
+// ROSTER TF — la única lista de profes de Terapia Física.
+// Cuando entra o sale alguien del equipo, SE TOCA ACÁ Y EN NINGÚN OTRO LADO.
+// Antes esto estaba escrito a mano en una docena de lugares del archivo y cada
+// cambio de personal había que ir a cazarlos uno por uno.
+//
+//   corto   → etiqueta corta (la que usan el ranking, la grilla y el cartel del profe)
+//   calc    → nombre en el Calculador de Bonos y en la tabla sueldos_profes_tf
+//   tarifa  → nombre en la tabla tarifas_hora_extra (ojo: Santi va como 'Santiago')
+//   desde   → primer mes 'YYYY-MM' que entra en carrera por el bono (null = desde siempre)
+//   hasta   → último mes 'YYYY-MM' que cobra bono (null = sigue activo)
+//   sala    → si entra en el reparto de los $150.000 del bono de orden de sala
+// =============================================
+const ROSTER_TF = [
+  { corto:'Santi',   calc:'Santi',   tarifa:'Santiago', email:'santiagoferreira1999@gmail.com', sueldoFijo:true,  sala:true,  desde:null,      hasta:null },
+  { corto:'Lean',    calc:'Lean',    tarifa:'Lean',     email:'leacrespin97@gmail.com',         sueldoFijo:true,  sala:true,  desde:null,      hasta:null },
+  { corto:'Lauti',   calc:'Lautaro', tarifa:'Lautaro',  email:'leut.molina@gmail.com',          sueldoFijo:true,  sala:true,  desde:null,      hasta:'2026-07' },
+  { corto:'Binaghi', calc:'Binaghi', tarifa:'Binaghi',  email:'snbinaghi1@gmail.com',           sueldoFijo:true,  sala:true,  desde:'2026-09', hasta:null },
+  { corto:'Male',    calc:'Male',    tarifa:'Male',     email:'loz.magdalena@gmail.com',        sueldoFijo:false, sala:false, desde:null,      hasta:null }
+]
+// Mes 'YYYY-MM' de hoy, en hora local (nunca toISOString, que es UTC).
+function _mesHoyTF() {
+  const d = new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+}
+// ¿Le corresponde bono en ese mes? (mes = 'YYYY-MM')
+function enRosterTF(r, mes) {
+  const m = mes || _mesHoyTF()
+  return (!r.desde || m >= r.desde) && (!r.hasta || m <= r.hasta)
+}
+// Los que siguen en el centro HOY (para permisos de pantalla: alguien que se fue
+// pierde el acceso ya, aunque su último mes con bono haya sido anterior).
+function rosterActivoTF() {
+  return ROSTER_TF.filter(r => !r.hasta || r.hasta >= _mesHoyTF())
+}
+const profesBonoMes      = mes => ROSTER_TF.filter(r => enRosterTF(r, mes)).map(r => r.calc)
+const profesSalaMes      = mes => ROSTER_TF.filter(r => r.sala && enRosterTF(r, mes)).map(r => r.calc)
+const profesSalaCortoMes = mes => ROSTER_TF.filter(r => r.sala && enRosterTF(r, mes)).map(r => r.corto)
+
+// Profes TF a SUELDO FIJO: vista acotada, sin liquidación.
 // (Male/Bruno/Vero SÍ liquidan al 65%, así que NO van en esta lista.)
-const EMAILS_PROFE_SUELDO = [
-  'santiagoferreira1999@gmail.com',
-  'leacrespin97@gmail.com',
-  'leut.molina@gmail.com'
-]
-// Quiénes ven "Mi bono" (su propio bono, solo lo suyo): los profes TF que cobran bono
-// → Santi, Lean, Lauti y Male. Lu y Jime lo ven todo en el Calculador de Bonos TF.
-const EMAILS_MI_BONO = [
-  'santiagoferreira1999@gmail.com',  // Santi
-  'leacrespin97@gmail.com',          // Lean
-  'leut.molina@gmail.com',           // Lauti
-  'loz.magdalena@gmail.com'          // Male
-]
-// Quiénes ven "Alertas Paciente" (cómo se vienen sintiendo): Santi, Lauti, Lean, Lu, Jime, Male.
+const EMAILS_PROFE_SUELDO = rosterActivoTF().filter(r => r.sueldoFijo).map(r => r.email)
+// Quiénes ven "Mi bono" (su propio bono, solo lo suyo): los profes TF que cobran
+// bono. Lu y Jime lo ven todo en el Calculador de Bonos TF.
+const EMAILS_MI_BONO = rosterActivoTF().map(r => r.email)
+// Quiénes ven "Alertas Paciente" (cómo se vienen sintiendo): los profes TF + Lu y Jime.
 const EMAILS_ALERTAS_PACIENTE = [
   'liclucianavelaz@gmail.com',       // Lu
-  'jimenahllorente@gmail.com',       // Jime
-  'loz.magdalena@gmail.com',         // Male
-  'santiagoferreira1999@gmail.com',  // Santi
-  'leacrespin97@gmail.com',          // Lean
-  'leut.molina@gmail.com'            // Lauti
-]
+  'jimenahllorente@gmail.com'        // Jime
+].concat(rosterActivoTF().map(r => r.email))
 // Quiénes ven el módulo MOPLEX (Consultas MOPLEX): solo administración → Ale, Pau, Jime, Lu.
 const EMAILS_MOPLEX = [
   'liclucianavelaz@gmail.com',   // Lu
@@ -2826,7 +2852,8 @@ const ALIAS_EQUIPO = {
   'veronicasandler@hotmail.com': ['VERO', 'VERONICA'],
   'santiagoferreira1999@gmail.com': ['SANTI', 'SANTIAGO'],
   'leacrespin97@gmail.com': ['LEAN', 'LEANDRO'],
-  'leut.molina@gmail.com': ['LAUTI', 'LAUTARO']
+  'leut.molina@gmail.com': ['LAUTI', 'LAUTARO'],
+  'snbinaghi1@gmail.com': ['BINAGHI', 'SNBINAGHI']
 }
 function normTexto(s) {
   return String(s || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
@@ -3118,7 +3145,8 @@ const NOMBRES_RANKING = {
   'veronicasandler@hotmail.com': 'Vero',
   'santiagoferreira1999@gmail.com': 'Santi',
   'leacrespin97@gmail.com': 'Lean',
-  'leut.molina@gmail.com': 'Lauti'
+  'leut.molina@gmail.com': 'Lauti',
+  'snbinaghi1@gmail.com': 'Binaghi'
 }
 async function rankingEvolucionesMesHTML() {
   const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
@@ -4092,7 +4120,7 @@ function renderCajasHistoricas() {
 // Cargás el sueldo de bolsillo de cada profe (cambia mes a mes) y calcula el bono
 // según su promedio real de alumnos/hora del mes (mismo motor que el panel Desempeño).
 // =============================================
-const PROFES_BONO_TF = ['Santi', 'Lean', 'Lautaro', 'Male']
+// (la lista de profes de cada mes sale de ROSTER_TF vía profesBonoMes)
 let CALC_MES_OFFSET = 0  // 0 = mes actual
 let CALC_AJUSTES = {}    // ajustes manuales del mes: 'profe|tipo' -> bool
 let CALC_ESCALON = {}    // override manual del escalón por profe: 'profe' -> 0|10|20|30 (null = automático)
@@ -4237,6 +4265,7 @@ async function cargarCalculadorBonos(mesVer) {
   // (el último conocido), y se cobra a mediados del mes SIGUIENTE.
   const _capMes = s => s.charAt(0).toUpperCase() + s.slice(1)
   const fmtMesAnio = dt => _capMes(dt.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' }))
+  window.CALC_MES_STR = mesStr
   const mesTrabajadoTxt = fmtMesAnio(mesVer)
   const mesSueldoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() - 1, 1))
   const mesPagoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() + 1, 1))
@@ -4258,7 +4287,7 @@ async function cargarCalculadorBonos(mesVer) {
     const datoDe = nombre => datos.find(d => (d.nombre || '').toLowerCase() === nombre.toLowerCase()
       || (nombre === 'Lautaro' && (d.nombre || '').toLowerCase() === 'lauti'))
     let filas = ''
-    PROFES_BONO_TF.forEach(profe => {
+    profesBonoMes(mesStr).forEach(profe => {
       const d = datoDe(profe) || { alxh: 0, bonoCaido: false, diasCubiertos: 0, bonoCobertura: 0, cubrioVacaciones: false }
       const sueldo = sueldoDe[profe] || 0
       filas += filaCalc(profe, d, sueldo, mesStr)
@@ -4298,10 +4327,10 @@ async function cargarCalculadorBonos(mesVer) {
             <input type="checkbox" id="calc-sala-ok" ${salaOk ? 'checked' : ''} onchange="toggleSalaOk('${mesStr}', this.checked)" style="width:17px; height:17px; cursor:pointer;">
             🤝 La sala estuvo impecable este mes
           </label>
-          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> entre <b>Santi, Lautaro y Lean</b>. Se pierde con <b>más de 2 faltas</b> en el mes.</span>
+          <span style="font-size:12.5px; color:#9a3412;">→ reparte <b>$150.000</b> entre <b>${profesSalaMes(mesStr).join(', ')}</b>. Se pierde con <b>más de 2 faltas</b> en el mes.</span>
         </div>
         <div id="calc-sala-detalle" style="margin-top:8px; font-size:13px; color:#9a3412; ${salaOk ? '' : 'display:none;'}">
-          ✅ Santi: <b>$50.000</b> · Lautaro: <b>$50.000</b> · Lean: <b>$50.000</b>
+          ${profesSalaMes(mesStr).map(p => `✅ ${p}: <b>$${Math.round(150000 / Math.max(1, profesSalaMes(mesStr).length)).toLocaleString('es-AR')}</b>`).join(' · ')}
         </div>
         <div style="margin-top:6px; font-size:11.5px; color:#b45309;">Si hubo un día de desorden, dejalo destildado: el bono de sala se cae para los tres. Si la sala estuvo bien, cada profe conserva su parte siempre que no tenga <b>más de 2 faltas</b> (de día u hora) en el mes; con la 3ª pierde su parte y los $150.000 se reparten entre los que siguen en carrera. Un viernes al mes que le cubran a Lean no cuenta como falta (el que sea, no necesariamente el primero). Arranca en agosto.</div>
       </div>
@@ -4447,7 +4476,7 @@ function recalcularTotalGeneral() {
   // del mes no cuenta como falta; eso ya viene descontado en data-faltas.)
   const salaChk = document.getElementById('calc-sala-ok')
   const salaOk = !!(salaChk && salaChk.checked)
-  const PROFES_SALA = ['Santi', 'Lautaro', 'Lean']
+  const PROFES_SALA = profesSalaMes(window.CALC_MES_STR)
   const faltasDeProfe = {}
   document.querySelectorAll('#calc-tbody tr').forEach(tr => {
     if (PROFES_SALA.includes(tr.dataset.profe)) faltasDeProfe[tr.dataset.profe] = Number(tr.dataset.faltas) || 0
@@ -4521,9 +4550,10 @@ function renderSueldosTarifas() {
 
 async function cargarSueldosTarifas() {
   const mesStr = window.SYT_MES
-  const PROF_SUELDO = ['Santi', 'Lean', 'Lautaro', 'Male']
-  const PROF_TARIFA = ['Santiago', 'Lean', 'Lautaro', 'Male']
-  const TARIFA_DEF = { Santiago: 7300, Lean: 7300, Lautaro: 7300, Male: 16500 }
+  const PROF_SUELDO = profesBonoMes(mesStr)
+  const PROF_TARIFA = ROSTER_TF.filter(r => enRosterTF(r, mesStr)).map(r => r.tarifa)
+  const TARIFA_DEF = {}
+  ROSTER_TF.forEach(r => { TARIFA_DEF[r.tarifa] = (r.corto === 'Male' ? 16500 : 7300) })
   // ---- SUELDOS (por mes) ----
   const boxS = document.getElementById('syt-sueldos')
   if (boxS) try {
@@ -4756,6 +4786,7 @@ async function renderGrilla() {
       if (u.includes('SANTI')) return 'Santi'
       if (u.includes('LEAN') || u.includes('LEANDRO')) return 'Lean'
       if (u.includes('LAUT')) return 'Lauti'
+      if (u.includes('BINAGHI')) return 'Binaghi'
       if (u.includes('MALE') || u.includes('MAGDA')) return 'Male'
       if (u.includes('JIME')) return 'Jime'
       if (u.includes('LUCIANA') || u === 'LU') return 'Lu'
@@ -4786,7 +4817,7 @@ async function renderGrilla() {
       totalProf[prof] = (totalProf[prof] || 0) + 1
     })
 
-    const COLOR = { 'Santi':'#16a34a','Lean':'#dc2626','Lauti':'#d97706','Male':'#7c3aed','Lu':'#0c7bb8','Jime':'#0891b2' }
+    const COLOR = { 'Santi':'#16a34a','Lean':'#dc2626','Lauti':'#d97706','Binaghi':'#d97706','Male':'#7c3aed','Lu':'#0c7bb8','Jime':'#0891b2' }
     const chip = (p) => `<span style="display:inline-block; background:${(COLOR[p]||'#64748b')}1a; color:${COLOR[p]||'#64748b'}; border-radius:6px; padding:1px 7px; font-size:11.5px; font-weight:700; margin:1px 2px;">${p}</span>`
 
     const resumen = Object.keys(totalProf).sort((a,b)=>totalProf[b]-totalProf[a])
@@ -4954,7 +4985,7 @@ window.pintarMiBonoSala = async function(mesStr) {
   // 'Lautaro' (ese nombre es el de las tablas sueldos_profes_tf / tarifas_hora_extra y
   // solo vale en el calculador admin). Con 'Lautaro' el cartel nunca le aparecía a Lauti
   // y su conteo de faltas no entraba en el reparto que se le muestra a los otros dos.
-  const PROFES_SALA = ['Santi', 'Lauti', 'Lean']
+  const PROFES_SALA = profesSalaCortoMes(mesStr)
   const lista = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
   const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
   const yo = lista.find(p => (p.email || '').toLowerCase() === miEmail)
@@ -5716,7 +5747,7 @@ async function cargarEquipoDesempeno(mesVer) {
               ${mensaje}
             </div>
           </div>
-        </div>${['Santi', 'Lautaro', 'Lean'].includes(yo.nombre) ? '<div id="mi-bono-sala" style="margin:0 4px 12px;"></div>' : ''}`
+        </div>${profesSalaCortoMes(mesStr).includes(yo.nombre) ? '<div id="mi-bono-sala" style="margin:0 4px 12px;"></div>' : ''}`
       }
     }
 
@@ -6494,7 +6525,9 @@ function textoWhatsappCierre(c) {
     L.push(`   Sueldo base: ${_fmt$(p.sueldo)}`)
   })
   L.push('')
-  L.push(`🤝 Bono de sala: ${c.salaOk ? _fmt$(c.salaMonto) + ' ($50.000 c/u: Santi, Lautaro, Lean)' : 'no aplica este mes'}`)
+  const _salaProfes = profesSalaMes(c.mesStr)
+  const _salaCU = _salaProfes.length ? Math.round(150000 / _salaProfes.length) : 0
+  L.push(`🤝 Bono de sala: ${c.salaOk ? _fmt$(c.salaMonto) + ` (${_fmt$(_salaCU)} c/u: ${_salaProfes.join(', ')})` : 'no aplica este mes'}`)
   L.push('')
   L.push(`💰 *GRAN TOTAL: ${_fmt$(c.granTotal)}*`)
   const autor = (usuario && usuario.email ? (NOMBRES_RANKING[usuario.email.toLowerCase()] || usuario.email) : '')
@@ -6642,7 +6675,7 @@ window.copiarHistorialCierre = async function(btn) {
 // ======================
 // VACACIONES DE PROFES (solo admin): registrar período y quién queda a cargo
 // ======================
-const PROFES_VACAS = ['Santi', 'Lean', 'Lauti', 'Male', 'Lu', 'Jime']
+const PROFES_VACAS = rosterActivoTF().map(r => r.corto).concat(['Lu', 'Jime'])
 window.abrirVacasProfes = async function() {
   let filas = ''
   try {
@@ -6737,11 +6770,11 @@ window.abrirReglasBono = function() {
         <p style="margin:0 0 10px;"><b>5b · Vacaciones:</b> se registran en el sistema con quién queda a cargo. Al que se va, esos días <b>no le cuentan</b> — su mes se mide sobre los días trabajados. El que cubre las vacaciones de un compañero: (1) los alumnos que atienda esos días <b>le suman a su propio promedio</b>, y (2) cobra un <b>Bono de Compensación del 20% de su sueldo</b> por cubrir todo lo agendado de ese profe y ayudar al centro a mantener los cupos activos. Las clases nunca se suspenden por vacaciones del equipo.</p>
         <p style="margin:0 0 10px;"><b>5c · Falta del profe (no devuelve las horas):</b> si un profe no va y <b>no devuelve esas horas</b>, <b>pierde el bono de desempeño de ese mes</b> — lo cubran o no. Si otro profe lo cubre, esa clase se da igual y los alumnos que atiende ese día son <b>100% del que cubre</b>. El que cubre cobra, además, un extra por hacerse cargo de la sala, que depende de si lo hace en su horario o como hora extra:<br>
         • <b>5% por día (tope 15%):</b> cuando lo cubre <b>dentro de su horario</b> (no hace horas de más, solo se hace cargo de toda la sala).<br>
-        • <b>2% por día (tope 6%):</b> cuando lo cubre como <b>hora extra</b> (fuera de su horario). Cobra menos porque esas horas ya se le pagan aparte en $. Ej: si Santi cubre el viernes a la mañana de Lautaro, para Santi es hora extra → 2%, no 5%.<br>
+        • <b>2% por día (tope 6%):</b> cuando lo cubre como <b>hora extra</b> (fuera de su horario). Cobra menos porque esas horas ya se le pagan aparte en $. Ej: si Santi cubre una mañana de Binaghi fuera de su horario, para Santi es hora extra → 2%, no 5%.<br>
         Si nadie cubre, la clase se cierra y los alumnos recuperan sin gastar cupo. Lo cargan Lu, Jime, Pau o Ale.</p>
         <p style="margin:0 0 10px;"><b>5d · Cambio (devuelve las horas):</b> si lo cubren con el acuerdo de <b>devolver esas horas otro día</b>, <b>no cobra nadie bono</b> y queda la <b>deuda de horas pendiente</b> (con botón saldar). El reparto de alumnos depende del turno:<br>
-        &nbsp;&nbsp;• <b>Turno compartido</b> (los dos están normalmente en esa sala — Santi+Lean a la tarde, Santi+Lauti a la mañana): los alumnos van <b>50% y 50%</b>.<br>
-        &nbsp;&nbsp;• <b>Turno solo del titular</b> (ej. Santi cubre el viernes a la mañana de Lauti): los alumnos van <b>100% al titular</b> (Lauti). Cuando Lauti le devuelva esas horas a Santi cubriéndole un turno, esos alumnos serán de Santi.<br>
+        &nbsp;&nbsp;• <b>Turno compartido</b> (los dos están normalmente en esa sala — Santi+Lean a la tarde, Santi+Binaghi a la mañana): los alumnos van <b>50% y 50%</b>.<br>
+        &nbsp;&nbsp;• <b>Turno solo del titular</b> (ej. uno cubre una hora que el otro hace solo): los alumnos van <b>100% al titular</b>. Cuando el titular le devuelva esas horas cubriéndole un turno, esos alumnos serán del que cubrió.<br>
         Se carga en <b>Coberturas y faltas</b>.</p>
         <p style="margin:0 0 10px;"><b>5d-bis · 🎂 Cumpleaños:</b> el día de tu cumpleaños <b>no venís y no perdés el premio del mes</b> (no cuenta como falta). El compañero que te cubre <b>sí cobra su bono de cobertura</b> (5% de ese día, tope 15%), como cualquier cobertura. Los alumnos de ese día son <b>del cumpleañero</b>: <b>100%</b> si el turno es solo suyo, <b>50/50</b> si es un turno compartido. <b>No genera deuda de horas</b> (es un regalo, no un cambio con devolución). Se carga en <b>Coberturas y faltas</b> con el tipo <b>🎂 Cumpleaños</b>.</p>
         <p style="margin:0 0 10px;"><b>5e · Horas extra fijas (Lean):</b> son horas <b>fuera del sueldo</b>.<br>
@@ -6749,7 +6782,7 @@ window.abrirReglasBono = function() {
         • <b>Miércoles (20 h = 1 h):</b> cobra esa <b>hora en $</b> (queda a la vista de él y de las admin), pero <b>sin el 2%</b> y sin perdón de premio — es solo una hora extra suelta.</p>
         <p style="margin:0 0 10px;"><b>6 · Compromiso:</b> una inasistencia sin cobertura registrada (por el motivo que sea, enfermedad incluida) o una <b>llegada tarde</b> a tu clase hace <b>caer el reconocimiento del mes completo</b>, automáticamente. La presencia y la puntualidad son la base del programa. El espacio también es parte del compromiso: <b>la sala se entrega ordenada y en condiciones</b> al cierre de cada turno — las observaciones registradas por orden de sala afectan el escalón del mes.</p>
         <p style="margin:0 0 10px;"><b>7 · Auditoría:</b> las evoluciones deben corresponder a alumnos presentes. Se cruza con la asistencia.</p>
-        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000</b> para los profes de TF (Santi, Lautaro y Lean) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Aparte, cada profe conserva su parte siempre que no tenga <b>más de 2 faltas en el mes</b> (de día u hora): con la 3ª <b>pierde su parte</b> y los $150.000 <b>se reparten entre los que siguen en carrera</b> (ej. si queda uno afuera, los otros dos cobran $75.000 cada uno). <b>Un viernes al mes</b> que le cubran a Lean no cuenta como falta (el que sea, no necesariamente el primero). <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
+        <p style="margin:0 0 10px;"><b>8 · 🤝 Bono de Equipo (orden de sala):</b> <b>$150.000</b> para los profes de TF (Santi, Binaghi y Lean) si la sala se mantiene impecable día a día, sin cosas fuera de lugar. Es trabajo en equipo: <b>un solo día con la sala fuera de lugar y se cae el bono del mes completo para los tres</b>. Aparte, cada profe conserva su parte siempre que no tenga <b>más de 2 faltas en el mes</b> (de día u hora): con la 3ª <b>pierde su parte</b> y los $150.000 <b>se reparten entre los que siguen en carrera</b> (ej. si queda uno afuera, los otros dos cobran $75.000 cada uno). <b>Un viernes al mes</b> que le cubran a Lean no cuenta como falta (el que sea, no necesariamente el primero). <b>Se explica en junio, se construye en julio</b> (mes de prueba, sin plata) y si julio sale impecable <b>se cobra en agosto</b>.</p>
         <p style="margin:0;"><b>9 · Cierre y pago:</b> el mes cierra el último día a las 23:59. <b>Calendario:</b> el bono por promedio arranca en junio y se paga a partir del 15 de julio; el Bono Estrella (julio vs junio) y el Bono de Equipo de sala se pagan recién a partir de agosto. Todo se paga por separado del sueldo, a partir del 15 del mes siguiente al que se ganó.</p>
       </div>
     </div>`
