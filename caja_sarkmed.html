@@ -267,8 +267,8 @@
 <div class="modal-bg" id="modal-tarifa">
   <div class="modal">
     <div class="modal-head">
-      <h3>Nueva tarifa</h3>
-      <p>La tarifa vieja no se toca: esta rige desde la fecha que pongas. Las partes tienen que sumar el precio del circuito. Lo que va al pozo de SARKMED no se liquida a ningún profesional.</p>
+      <h3 id="mt-titulo">Nueva tarifa</h3>
+      <p id="mt-sub">La tarifa vieja no se toca: esta rige desde la fecha que pongas. Las partes tienen que sumar el precio del circuito. Lo que va al pozo de SARKMED no se liquida a ningún profesional.</p>
     </div>
     <div class="modal-body">
       <div id="mt-alerta"></div>
@@ -804,9 +804,16 @@ function renderTarifa(){
       ' y a BiOLAB le quedan ' + fmt(num(t.monto_biolab) - num(t.monto_soporte_biolab)) + '.</div>' +
     '<div class="reparto">La plata en custodia pasa al pozo a los ' + (num(t.meses_custodia) || 3) + ' meses.</div>' +
     '<div class="reparto">Rige desde el ' + fechaLarga(t.vigente_desde) + '.</div>' +
-    (puedeEditarTarifa ? '<div style="margin-top:12px"><button class="btn sec chico" id="btn-nueva-tarifa">Cargar tarifa nueva</button></div>' : '');
+    (puedeEditarTarifa
+      ? '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="btn sec chico" id="btn-nueva-tarifa">Cargar tarifa nueva</button>' +
+          '<button class="btn sec chico" id="btn-corregir-tarifa">Corregir esta tarifa</button>' +
+        '</div>'
+      : '');
   const b = $('btn-nueva-tarifa');
-  if(b) b.addEventListener('click', abrirTarifa);
+  if(b) b.addEventListener('click', () => abrirTarifa(false));
+  const bc = $('btn-corregir-tarifa');
+  if(bc) bc.addEventListener('click', () => abrirTarifa(true));
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -924,10 +931,17 @@ async function anularCobro(c){
 /* ════════════════════════════════════════════════════════════════
    TARIFA NUEVA
    ════════════════════════════════════════════════════════════════ */
-function abrirTarifa(){
+function abrirTarifa(corregir){
   aviso($('mt-alerta'), '');
   const t = tarifa || {};
-  $('mt-desde').value = hoyISO();
+  // Corregir = pisar la tarifa que YA rige para la jornada elegida (sirve para
+  // arreglar los montos de un sábado que ya pasó). Nueva = rige de hoy en más.
+  $('mt-desde').value = (corregir && t.vigente_desde) ? String(t.vigente_desde).slice(0,10) : hoyISO();
+  $('mt-titulo').textContent = corregir ? 'Corregir la tarifa vigente' : 'Nueva tarifa';
+  $('mt-sub').textContent = corregir
+    ? 'Se pisan los montos de la tarifa que rige desde el ' + fechaLarga(t.vigente_desde) +
+      '. Cambia para todas las jornadas desde esa fecha, incluidas las que ya pasaron.'
+    : 'La tarifa vieja no se toca: esta rige desde la fecha que pongas. Las partes tienen que sumar el precio del circuito.';
   $('mt-precio').value = num(t.precio_circuito);
   $('mt-medica').value = num(t.monto_medica);
   $('mt-nutricion').value = num(t.monto_nutricion);
@@ -971,7 +985,12 @@ $('mt-guardar').addEventListener('click', async () => {
   // otra igual). Las de días anteriores no se tocan nunca.
   const { error } = await sb.from('sarkmed_tarifa')
     .upsert(fila, { onConflict: 'vigente_desde' });
-  if(error){ aviso($('mt-alerta'), error.message); return; }
+  if(error){
+    console.error('[caja] guardar tarifa:', error);
+    aviso($('mt-alerta'), 'No se pudo guardar: ' + (error.message || '') +
+      (error.details ? ' · ' + error.details : '') + (error.code ? ' (' + error.code + ')' : ''));
+    return;
+  }
   cerrar('modal-tarifa');
   await cargarTarifa();
   render();
