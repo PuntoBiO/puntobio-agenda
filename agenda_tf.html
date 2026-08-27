@@ -888,6 +888,29 @@
   }
   .evo-sala-btn:hover { border-color: #16a34a; }
   .evo-sala-btn.sel { background: #16a34a; color: white; border-color: #16a34a; }
+  /* ===== Sala/Área POR ALUMNO (distribución previa a la clase) ===== */
+  .sala-al-fila { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
+  .sala-al-lbl { font-size: 10px; font-weight: 700; color: #64748b; letter-spacing: .3px; margin-right: 2px; }
+  .sala-al-chip {
+    background: #fff; border: 1px solid var(--gris-borde); color: #475569;
+    border-radius: 7px; padding: 3px 9px; font-size: 11px; font-weight: 700;
+    cursor: pointer; font-family: 'DM Sans', sans-serif; transition: all .12s; white-space: nowrap;
+  }
+  .sala-al-chip:hover { border-color: #7c3aed; color: #6d28d9; }
+  .sala-al-chip.sel { background: #7c3aed; color: #fff; border-color: #7c3aed; box-shadow: 0 1px 3px rgba(124,58,237,.35); }
+  .sala-al-chip.guardando { opacity: .5; pointer-events: none; }
+  /* Resumen de distribución arriba de la lista */
+  .sala-resumen {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    background: #faf5ff; border: 1px solid #e9d5ff; border-radius: 9px;
+    padding: 8px 12px; margin: 10px 0 4px;
+  }
+  .sala-resumen-tit { font-size: 11px; font-weight: 800; color: #6d28d9; letter-spacing: .3px; margin-right: 4px; }
+  .sala-resumen-item {
+    font-size: 11px; font-weight: 700; color: #5b21b6;
+    background: #fff; border: 1px solid #ddd6fe; border-radius: 6px; padding: 2px 8px;
+  }
+  .sala-resumen-item.sinasignar { color: #92400e; background: #fffbeb; border-color: #fde68a; }
   .evo-dolor { display: flex; gap: 6px; }
   .evo-dolor-btn {
     background: var(--blanco); border: 1px solid var(--gris-borde);
@@ -2775,12 +2798,32 @@ function toggleEstado(dia, hora, servicio, id, nuevoEstado) {
 const CARITAS = ['😀 Muy bien','🙂 Bien','😴 Cansado','😐 Molesto','😣 Mal'];
 const CARITA_DEFAULT = CARITAS[0]; // 😀 Muy bien queda marcado por defecto
 
-// Salas (solo para Kinefilaxia)
-const SALAS_TF = ['Kinefilaxia Sala 1', 'Kinefilaxia Sala 2', 'Kinefilaxia Sala 3'];
-let evoSalaSel = '';   // sala elegida para la anotación actual
+// ===== SALAS / ÁREAS =====
+// Kinefilaxia se dicta en 3 salas, y la Sala 2 está partida en A y B.
+// Entrenamiento se dicta en 3 áreas. Sirve para dos cosas:
+//   1) la DISTRIBUCIÓN previa a la clase (a dónde mandamos a cada uno al entrar)
+//   2) el campo `sala` de la evolución de ese alumno
+const SALAS_KINE = ['Kinefilaxia Sala 1', 'Kinefilaxia Sala 2 A', 'Kinefilaxia Sala 2 B', 'Kinefilaxia Sala 3'];
+const AREAS_ENT  = ['Área 1', 'Área 2', 'Área 3'];
+const SALAS_TF = SALAS_KINE;   // (compatibilidad con el nombre viejo)
+let evoSalaSel = '';   // sala elegida para la anotación actual (aplica a todos los tildados)
 // ¿El turno abierto es de Kinefilaxia? (para mostrar el selector de sala)
 function esKinefilaxia(servicio) {
   return String(servicio||'').trim().toLowerCase().startsWith('kine');
+}
+// Opciones que corresponden según el servicio de la clase
+function salasDeServicio(servicio) {
+  return esKinefilaxia(servicio) ? SALAS_KINE : AREAS_ENT;
+}
+// Cómo se llama en pantalla: "Sala" para Kinefilaxia, "Área" para Entrenamiento
+function palabraSala(servicio) {
+  return esKinefilaxia(servicio) ? 'Sala' : 'Área';
+}
+// Etiqueta corta para los chips de la lista ("Kinefilaxia Sala 2 A" → "Sala 2A")
+function salaCorta(s) {
+  return String(s || '')
+    .replace(/^Kinefilaxia\s+/i, '')
+    .replace(/Sala\s+(\d)\s+([AB])/i, 'Sala $1$2');
 }
 
 // ¿Quién puede editar la lista de módulos? (solo Lu)
@@ -3782,6 +3825,128 @@ async function cargarEvolucionesTurno(t) {
   } catch (e) { console.warn('No se pudo cargar evoluciones', e); }
 }
 
+// ===================================================================
+// DISTRIBUCIÓN DE SALA/ÁREA POR ALUMNO  (tabla `sala_alumno_turno`)
+// Pedido de Lu (26/8/26): antes de que arranque la clase hay que saber a
+// dónde dirigir a cada persona. Es una decisión ORGANIZATIVA previa al
+// ingreso, así que se guarda apenas se tilda — no espera a la evolución.
+// Después, al evolucionar, esta sala se copia a evoluciones_tf.sala.
+// ===================================================================
+let SALA_ALUMNO = {};   // { persona_id (string) : 'Kinefilaxia Sala 2 A' }
+
+// Trae la distribución ya guardada de este turno + fecha
+async function cargarSalasTurno(t) {
+  SALA_ALUMNO = {};
+  const fecha = fechaRealDiaActivo();
+  try {
+    const filas = await supabaseQuery('sala_alumno_turno',
+      `?select=persona_id,sala&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => { if (f.sala) SALA_ALUMNO[String(f.persona_id)] = f.sala; });
+  } catch (e) { console.warn('No se pudo cargar la distribución de salas', e); }
+}
+
+// Guarda (o borra) la sala de UN alumno. Se llama al tocar el chip.
+async function guardarSalaAlumno(personaId, sala) {
+  const t = evoTurnoActual;
+  if (!t) throw new Error('No hay clase abierta');
+  const fecha = fechaRealDiaActivo();
+  const pid = parseInt(personaId);
+  if (!sala) {
+    // Destildar = borrar la asignación
+    const res = await fetchSupabase(
+      `${SUPABASE_URL}/rest/v1/sala_alumno_turno?turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${pid}`,
+      { method: 'DELETE', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error(`No se pudo borrar (${res.status}): ${await res.text()}`);
+    return;
+  }
+  const fila = {
+    turno_id: t.id,
+    fecha,
+    persona_id: pid,
+    servicio: t.servicio,
+    sala,
+    marcado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+    marcado_por_email: USUARIO_ACTUAL?.email || null,
+    actualizado_en: new Date().toISOString()
+  };
+  // return=representation a propósito: con RLS, un return=minimal puede tapar
+  // una escritura rechazada (lección de Gestión de Cupos). Si vuelve vacío, avisamos.
+  const res = await fetchSupabase(
+    `${SUPABASE_URL}/rest/v1/sala_alumno_turno?on_conflict=turno_id,fecha,persona_id`,
+    {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify(fila)
+    });
+  if (!res.ok) throw new Error(`No se pudo guardar (${res.status}): ${await res.text()}`);
+  const devuelto = await res.json().catch(() => null);
+  if (!Array.isArray(devuelto) || devuelto.length === 0) {
+    throw new Error('La base no guardó la fila (permisos). Avisale a Lu.');
+  }
+}
+
+// Toggle del chip: si ya estaba en esa sala, la saca; si no, la asigna.
+window.setSalaAlumno = async (personaId, sala) => {
+  const pid = String(personaId);
+  const anterior = SALA_ALUMNO[pid] || '';
+  const nueva = (anterior === sala) ? '' : sala;
+  // Pintado optimista (para que se sienta instantáneo) + bloqueo mientras guarda
+  const chips = document.querySelectorAll(`[data-sala-al="${pid}"]`);
+  chips.forEach(el => {
+    el.classList.add('guardando');
+    el.classList.toggle('sel', el.getAttribute('data-sala-val') === nueva);
+  });
+  try {
+    await guardarSalaAlumno(pid, nueva);
+    if (nueva) SALA_ALUMNO[pid] = nueva; else delete SALA_ALUMNO[pid];
+    pintarResumenSalas();
+  } catch (e) {
+    // Volver atrás si falló
+    chips.forEach(el => el.classList.toggle('sel', el.getAttribute('data-sala-val') === anterior));
+    toast(e.message, 'err');
+  } finally {
+    chips.forEach(el => el.classList.remove('guardando'));
+  }
+};
+
+// Fila de chips que se dibuja debajo del nombre de cada alumno
+function chipsSalaAlumno(a, servicio) {
+  const pid = String(a.id);
+  const actual = SALA_ALUMNO[pid] || '';
+  const opciones = salasDeServicio(servicio).slice();
+  // Si ya tenía guardada una sala que hoy no está en la lista (dato viejo), la mostramos igual
+  if (actual && !opciones.includes(actual)) opciones.push(actual);
+  const btns = opciones.map(s =>
+    `<button class="sala-al-chip${s === actual ? ' sel' : ''}" data-sala-al="${pid}" data-sala-val="${_escAttr(s)}"
+       onclick="event.stopPropagation();setSalaAlumno(${a.id},'${String(s).replace(/'/g, "\\'")}')"
+       title="Mandar a ${_escAttr(s)}">${salaCorta(s)}</button>`).join('');
+  return `<div class="sala-al-fila"><span class="sala-al-lbl">${palabraSala(servicio).toUpperCase()}:</span>${btns}</div>`;
+}
+
+// Resumen de cómo quedó repartida la clase (se repinta solo, sin re-render completo)
+function pintarResumenSalas() {
+  const cont = document.getElementById('sala-resumen');
+  if (!cont || !evoTurnoActual) return;
+  const servicio = evoTurnoActual.servicio;
+  const alumnos = getAlumnos(evoTurnoActual);
+  const cuenta = {};
+  let sin = 0;
+  alumnos.forEach(a => {
+    const s = SALA_ALUMNO[String(a.id)];
+    if (s) cuenta[s] = (cuenta[s] || 0) + 1; else sin++;
+  });
+  const orden = salasDeServicio(servicio).slice();
+  Object.keys(cuenta).forEach(s => { if (!orden.includes(s)) orden.push(s); });
+  const items = orden.filter(s => cuenta[s])
+    .map(s => `<span class="sala-resumen-item">${salaCorta(s)}: ${cuenta[s]}</span>`).join('');
+  const itemSin = sin ? `<span class="sala-resumen-item sinasignar">sin asignar: ${sin}</span>` : '';
+  cont.innerHTML = `<span class="sala-resumen-tit">📍 REPARTO DE ${palabraSala(servicio).toUpperCase()}</span>${items || '<span class="sala-resumen-item sinasignar">todavía no repartiste a nadie</span>'}${itemSin}`;
+}
+
 // Carga las últimas anotaciones distintas (para el cajón de "recientes")
 async function cargarEvolucionesRecientes(servicio) {
   try {
@@ -3982,7 +4147,7 @@ window.evoUsarNotaPred = (i) => {
   evoCaritaSel = n.como_se_sintio || CARITA_DEFAULT;
   evoDolorSel = !!n.dolor;
   // La sala solo aplica si la clase es de Kinefilaxia
-  if (esKinefilaxia(evoTurnoActual?.servicio)) evoSalaSel = n.sala || '';
+  evoSalaSel = n.sala || '';   // la sala/área guardada en la nota (kine o entrenamiento)
   // Traer los ejercicios guardados en la plantilla (si tiene)
   if (Array.isArray(n.ejercicios) && n.ejercicios.length) {
     evoEjercicios = n.ejercicios.map(r => ({ ej: r.ej||'', series: r.series||'', reps: r.reps||'', carga: r.carga||'' }));
@@ -4008,7 +4173,7 @@ window.evoGuardarNotaPred = async () => {
   if (!email) { toast('No se pudo identificar tu usuario', 'err'); return; }
   const modulos = evoModulosSel.join(', ');
   const contenido = (document.getElementById('evo-contenido')?.value || '').trim();
-  const sala = esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null;
+  const sala = evoSalaSel || null;
   const _ejer = (evoEjercicios || [])
     .map(r => ({ ej: (r.ej||'').trim(), series: (r.series||'').trim(), reps: _cleanReps(r.reps), carga: (r.carga||'').trim() }))
     .filter(r => r.ej || r.series || r.reps || r.carga);
@@ -4175,7 +4340,9 @@ window.evoAplicarLote = async () => {
   btn.disabled = true; btn.textContent = 'Guardando...';
   let ok = 0, fallaron = 0, ultimoError = '';
   for (const pid of evoSeleccion) {
-    try { await guardarEvolucionAlumno(t, pid, datosBase); ok++; }
+    // La sala que se le marcó a ESE alumno en su fila manda sobre la del panel.
+    const _datosAl = { ...datosBase, sala: SALA_ALUMNO[String(pid)] || datosBase.sala || null };
+    try { await guardarEvolucionAlumno(t, pid, _datosAl); ok++; }
     catch (e) { fallaron++; ultimoError = e.message; console.error('evo', pid, e); }
   }
   try { await cargarEvolucionesTurno(t); } catch (e) { console.error('recargar evo', e); }
@@ -5661,7 +5828,7 @@ function leerPanelEvo() {
     ejercicio_series: _ejer[0]?.series || null,
     ejercicio_reps: _ejer[0]?.reps || null,
     carga: _ejer[0]?.carga || null,
-    sala: esKinefilaxia(evoTurnoActual?.servicio) ? (evoSalaSel || null) : null
+    sala: evoSalaSel || null
   };
 }
 window.evoSetSala = (s) => {
@@ -5782,7 +5949,8 @@ window.abrirEvoIndividual = (personaId) => {
   const ev = EVO_TURNO[String(personaId)];
   // Cargar al panel los datos del alumno (o vacío) y seleccionarlo solo a él
   evoModulosSel = (ev?.modulo || '').split(',').map(s=>s.trim()).filter(Boolean);
-  evoSalaSel = ev?.sala || '';
+  // Si todavía no tiene evolución, arranca con la sala/área que se le repartió al entrar
+  evoSalaSel = ev?.sala || SALA_ALUMNO[String(personaId)] || '';
   document.getElementById('evo-contenido').value = ev?.contenido || '';
   document.getElementById('evo-obs').value = ev?.observacion || '';
   evoCaritaSel = ev ? (ev.como_se_sintio || '') : CARITA_DEFAULT;
@@ -5895,6 +6063,7 @@ function renderModalBody(dia, hora, servicio) {
         style="background:#1e9fe0;color:white;border:none;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
         title="Agregar un alumno a este turno">➕ Agregar alumno</button>
     </div>
+    ${alumnos.length ? '<div class="sala-resumen" id="sala-resumen"></div>' : ''}
     ${alumnos.length===0
       ? '<div style="color:var(--texto-suave);font-size:13px;padding:8px 0">Sin alumnos anotados</div>'
       : (() => {
@@ -6003,6 +6172,7 @@ function renderModalBody(dia, hora, servicio) {
               <div class="alumno-nombre">${alertaDolor}${chipMsj}${chipDevoCompe}${chipBitaReciente}${a.nombre}${etiquetaNuevo}</div>
               <div class="alumno-id">#${a.id}${_cierreCentro?' · <span style="color:#b91c1c;font-size:11px;font-weight:700">🚫 clase cancelada</span>':est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''} ${_cierreCentro?'':chipEvo}</div>
               ${(etiquetaAgregado || etiquetaOrigenME || etiquetaPendienteFijo) ? `<div>${etiquetaAgregado}${etiquetaOrigenME}${etiquetaPendienteFijo}</div>` : ''}
+              ${(_cierreCentro || esAusente) ? '' : chipsSalaAlumno(a, servicio)}
               ${motivo ? `<div style="font-size:11px;color:var(--texto-suave);margin-top:2px">${motivo}</div>` : ''}
               ${resumenEvo}
             </div>
@@ -6083,13 +6253,15 @@ function renderPanelEvo() {
   const opcionesMod = modsFiltrados.map(m => `<option value="${m.nombre.replace(/"/g,'&quot;')}">${m.nombre}</option>`).join('');
   const btnAdminMod = puedeEditarModulos()
     ? `<button class="evo-mod-admin" onclick="evoAdminModulos()" title="Agregar o quitar módulos de la lista">⚙️ Editar lista</button>` : '';
-  // Selector de sala: solo si la clase es de Kinefilaxia
-  const salaHtml = esKinefilaxia(evoTurnoActual?.servicio)
-    ? `<div class="evo-sublabel">Sala</div>
+  // Selector de sala/área del PANEL: aplica a todos los tildados que no tengan
+  // una sala propia marcada en su fila (esa manda). Kinefilaxia → salas, Entrenamiento → áreas.
+  const _servPanel = evoTurnoActual?.servicio;
+  const _opcPanel = salasDeServicio(_servPanel).slice();
+  if (evoSalaSel && !_opcPanel.includes(evoSalaSel)) _opcPanel.push(evoSalaSel);   // valor viejo guardado
+  const salaHtml = `<div class="evo-sublabel">${palabraSala(_servPanel)} <span style="font-weight:400;color:#94a3b8">· para los que no tengan una marcada</span></div>
        <div class="evo-salas">
-         ${SALAS_TF.map(s => `<button class="evo-sala-btn" data-evo-sala="${s}" onclick="evoSetSala('${s}')">${s}</button>`).join('')}
-       </div>`
-    : '';
+         ${_opcPanel.map(s => `<button class="evo-sala-btn" data-evo-sala="${_escAttr(s)}" onclick="evoSetSala('${String(s).replace(/'/g, "\\'")}')">${s}</button>`).join('')}
+       </div>`;
   // Cartel de quién está cargando (el profe logueado)
   const nombreProfe = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || '';
   const iniProfe = nombreProfe.split(/\s+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase() || '··';
@@ -6201,6 +6373,7 @@ function renderPanelEvo() {
   document.getElementById('evo-dolor-si')?.classList.toggle('sel', evoDolorSel);
   document.getElementById('evo-dolor-no')?.classList.toggle('sel', !evoDolorSel);
   pintarSeleccionEvo();
+  pintarResumenSalas();
 }
 // =============================================
 // ¿QUIÉN ESTÁ EVOLUCIONANDO? (29/7/26)
@@ -6373,9 +6546,11 @@ async function abrirModal(dia, hora, servicio) {
   renderModalBody(dia, hora, servicio);
   document.getElementById('modal-body').insertAdjacentHTML('afterbegin',
     '<div id="evo-cargando" style="font-size:12px;color:var(--celeste);padding:4px 0">⟳ Cargando asistencia y evoluciones...</div>');
+  SALA_ALUMNO = {};
   const tareas = [
     cargarAsistenciaTurno(t),
     cargarEvolucionesTurno(t),
+    cargarSalasTurno(t),
     cargarDolorReciente(t),
     cargarMensajesPendientes(t),
     cargarAvisosAlumno(t)
