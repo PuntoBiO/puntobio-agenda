@@ -1185,12 +1185,22 @@ window.verDetalle = async function(ttoId) {
   } else {
     sesionesHtml = `
       ${sesionesAsoc.some(s => s.excedente) ? `<div style="padding:10px 12px;margin-bottom:8px;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;color:#92400e;font-size:12px;font-weight:600;">⚠ Este tratamiento tiene ${sesionesAsoc.filter(s => s.excedente).length} sesión(es) EXCEDENTE(S): se dieron y se cobraron después de agotar el total contratado. Ampliá el total del tratamiento para que la cuenta cierre.</div>` : ''}
+      ${(() => {
+        const vTto = Math.round(Number(t.valor_sesion || 0))
+        const desaj = sesionesAsoc.filter(s => sesionDesajustada(s, vTto))
+        if (!desaj.length) return ''
+        return `<div style="padding:10px 12px;margin-bottom:8px;background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;color:#92400e;font-size:12px;">
+          <b>⚠ ${desaj.length} sesión(es) están estampadas con un valor distinto al del tratamiento (${fmt(vTto)}).</b><br>
+          Liquidaciones cobra por lo estampado en la sesión, no por el valor del tratamiento → por eso puede figurar una deuda que ya no existe.
+          <button class="btn" style="margin-top:8px;padding:6px 12px;font-size:12px;" onclick="reestamparDesdeDetalle()">🔄 Re-estampar con ${fmt(vTto)}</button>
+        </div>`
+      })()}
       <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">${sesionesAsoc.length} sesión(es) realizada(s)</div>
       <div style="display: flex; flex-direction: column; gap: 6px;">
         ${sesionesAsoc.map(s => `
           <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;">
             <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 11px; color: var(--text-dim);">#${s.id}</span>
-            <span style="flex: 1;">${fmtFecha(s.fecha)} ${s.hora ? '· ' + s.hora : ''} ${s.profesional ? '· ' + s.profesional : ''} ${s.estado ? '· <strong>' + s.estado + '</strong>' : ''}${s.excedente ? ' <span style="padding:1px 6px;border-radius:4px;background:#fde68a;color:#92400e;font-size:10px;font-weight:700;" title="Sesión dada después de agotar el total contratado">EXCEDENTE</span>' : ''}</span>
+            <span style="flex: 1;">${fmtFecha(s.fecha)} ${s.hora ? '· ' + s.hora : ''} ${s.profesional ? '· ' + s.profesional : ''} ${s.estado ? '· <strong>' + s.estado + '</strong>' : ''}${s.excedente ? ' <span style="padding:1px 6px;border-radius:4px;background:#fde68a;color:#92400e;font-size:10px;font-weight:700;" title="Sesión dada después de agotar el total contratado">EXCEDENTE</span>' : ''}${totalEstampado(s) > 0 ? ` <span style="color:var(--text-dim);font-size:12px;">· estampada ${fmt(totalEstampado(s))} (profesional ${fmt(s.monto_profesional)} · centro ${fmt(s.monto_centro)})</span>` : ''}${sesionDesajustada(s, Math.round(Number(t.valor_sesion || 0))) ? ` <span style="padding:1px 6px;border-radius:4px;background:#fde68a;color:#92400e;font-size:10px;font-weight:700;" title="El tratamiento vale otra cosa">VALOR VIEJO</span>` : ''}</span>
             <button class="btn btn-danger" style="padding: 6px 12px; font-size: 12px;" onclick="borrarSesion(${s.id})">🗑️</button>
           </div>
         `).join('')}
@@ -1324,6 +1334,90 @@ window.borrarPago = async function(pagoId) {
   }
 }
 
+// ===== RE-ESTAMPAR SESIONES (el valor del tratamiento manda) =====
+// Cada sesión guarda su plata ESTAMPADA (monto_profesional / monto_centro) en el
+// momento en que se marca presente. Si después se corrige el valor del tratamiento
+// (monto libre, descuento, precio de convenio), esas sesiones se quedan con el valor
+// viejo y Liquidaciones sigue cobrando por el viejo → aparece una deuda que no existe.
+// REGLA DE ORO: solo se re-estampan las sesiones del MES EN CURSO. Las de meses
+// anteriores ya se liquidaron y se pagaron: no se tocan nunca desde acá.
+const CAND_VALOR_SESION = ['valor', 'valor_sesion', 'monto', 'monto_total', 'importe', 'precio', 'total']
+
+function primerDiaMesActual() {
+  const h = new Date()
+  return `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-01`
+}
+
+// Lo que la sesión tiene estampado hoy (lo que mira Liquidaciones)
+function totalEstampado(s) {
+  return Math.round(Number(s.monto_profesional || 0) + Number(s.monto_centro || 0))
+}
+
+// ¿Esta sesión quedó con un valor distinto al del tratamiento y todavía se puede tocar?
+function sesionDesajustada(s, valorTto) {
+  const viejo = totalEstampado(s)
+  if (viejo === 0) return false                       // MOPLEX / sesiones sin reparto: se dejan
+  if (!valorTto) return false
+  if (viejo === Math.round(valorTto)) return false
+  return (s.fecha || '') >= primerDiaMesActual()
+}
+
+// Re-estampa conservando el REPARTO (el % que se llevaba el profesional no cambia)
+async function reestamparSesiones(ttoId, valorSesion) {
+  const res = { tocadas: 0, viejas: 0, sinReparto: 0, error: null }
+  const valor = Math.round(Number(valorSesion || 0))
+  if (!valor) return res
+  const { data: sesiones, error } = await sb.from('sesiones').select('*').eq('tratamiento_id', ttoId)
+  if (error) { res.error = error.message; return res }
+  const corte = primerDiaMesActual()
+  for (const s of (sesiones || [])) {
+    const viejo = totalEstampado(s)
+    if (viejo === 0) { res.sinReparto++; continue }
+    if (viejo === valor) continue
+    if ((s.fecha || '') < corte) { res.viejas++; continue }
+    const pct = Number(s.monto_profesional || 0) / viejo
+    const nuevoProf = Math.round(valor * pct)
+    const payload = { monto_profesional: nuevoProf, monto_centro: valor - nuevoProf }
+    // Si la fila además guarda el valor de la sesión en una columna propia, se mueve con él
+    for (const k of CAND_VALOR_SESION) {
+      if (k in s && Number(s[k]) === viejo) payload[k] = valor
+    }
+    // .select() obligatorio: sin él un rechazo de RLS pasa como escritura muda
+    const { data: upd, error: e2 } = await sb.from('sesiones').update(payload).eq('id', s.id).select('id')
+    if (e2) { res.error = e2.message; return res }
+    if (!upd || upd.length === 0) {
+      res.error = `la base aceptó el cambio de la sesión #${s.id} pero no devolvió la fila (RLS bloqueó la escritura)`
+      return res
+    }
+    res.tocadas++
+  }
+  return res
+}
+
+function mensajeReestampado(rs) {
+  if (rs.error) return { txt: '⚠️ Las sesiones NO se pudieron re-estampar: ' + rs.error, tipo: 'err' }
+  const partes = []
+  if (rs.tocadas) partes.push(`${rs.tocadas} sesión(es) re-estampada(s) con el valor nuevo`)
+  if (rs.viejas) partes.push(`${rs.viejas} de meses anteriores quedaron como estaban (ya liquidadas)`)
+  if (!partes.length) return null
+  return { txt: partes.join(' · '), tipo: rs.viejas && !rs.tocadas ? 'err' : 'ok' }
+}
+
+window.reestamparDesdeDetalle = async function() {
+  const t = estado.ttoSeleccionado
+  if (!t) return
+  const valor = Math.round(Number(t.valor_sesion || 0))
+  const desaj = (estado.sesionesAsoc || []).filter(s => sesionDesajustada(s, valor))
+  if (!desaj.length) { toast('No hay sesiones para re-estampar', 'ok'); return }
+  const lista = desaj.map(s => `• ${s.fecha || '—'} · estampada en ${fmt(totalEstampado(s))} → pasa a ${fmt(valor)}`).join('\n')
+  if (!confirm(`¿Re-estampar ${desaj.length} sesión(es) con el valor del tratamiento (${fmt(valor)})?\n\n${lista}\n\nEl reparto (qué % se lleva el profesional) no cambia. Solo se tocan sesiones del mes en curso.`)) return
+  const rs = await reestamparSesiones(t.id, valor)
+  const m = mensajeReestampado(rs)
+  if (m) toast(m.txt, m.tipo, m.tipo === 'err' ? 8000 : 5000)
+  await cargarDatos()
+  await verDetalle(t.id)
+}
+
 // ===== BORRAR SESIÓN ASOCIADA =====
 window.borrarSesion = async function(sesId) {
   const s = (estado.sesionesAsoc || []).find(x => x.id === sesId)
@@ -1449,7 +1543,11 @@ window.guardarEdicion = async function() {
   try {
     const { data, error } = await sb.from('tratamientos').update(payload).eq('id', t.id).select().single()
     if (error) throw error
-    toast(`✓ Tratamiento #${t.id} actualizado`, 'ok')
+    // El valor del tratamiento manda: las sesiones del mes en curso se re-estampan
+    // con el monto nuevo para que Liquidaciones no siga cobrando por el valor viejo.
+    const rs = await reestamparSesiones(t.id, payload.valor_sesion)
+    const m = mensajeReestampado(rs)
+    toast(`✓ Tratamiento #${t.id} actualizado${m ? ' · ' + m.txt : ''}`, m && m.tipo === 'err' ? 'err' : 'ok', m ? 7000 : 3500)
     cerrarEditar()
     await cargarDatos()
   } catch (err) {
