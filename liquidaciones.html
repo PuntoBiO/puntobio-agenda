@@ -305,6 +305,32 @@ function normProf(txt){
   const map = {'bruno':'Bruno','male':'Male','vero':'Vero','jime':'Jime','lu':'Lu'};
   return map[t] || (txt ? String(txt).trim() : '');
 }
+// Masoterapia se liquida POR PAGO, y hasta ahora el dueno del masaje salia del
+// campo `profesional` DEL PAGO. Ese campo lo llena la caja y a veces queda en 'Lu'
+// (resto del modelo viejo) -> el masaje caia en la liquidacion equivocada y, como
+// Lu es 100% centro, el profesional se quedaba sin su parte.
+// Ahora manda QUIEN LO ATENDIO, que es lo que ya dice la sesion estampada.
+function mapaProfPorTratamiento(sesAll){
+  const m = {};
+  for (const s of (sesAll || [])){
+    const tid = s.tratamiento_id, pr = normProf(s.profesional);
+    if (tid == null || !pr || m[tid]) continue;
+    m[tid] = pr;
+  }
+  return m;
+}
+// BONIF_CENTRO = el centro regala SU parte: el paciente paga solo lo del
+// profesional, asi que TODO lo cobrado es del profesional y el centro se lleva $0.
+// (solo aplica a los que cobran porcentaje; para Lu/Jime no tiene sentido)
+function esBonifCentro(p){
+  const t = p.tratamientos || {};
+  return String(t.tipo_cobro || p.tipo_cobro || '').toUpperCase() === 'BONIF_CENTRO';
+}
+// Orden de prioridad: quien atendio (sesion) -> profesional del pago -> Vero
+function profDeMaso(p, mapa){
+  return (mapa && mapa[p.tratamiento_id]) || normProf(p.profesional) || 'Vero';
+}
+
 // Solo profesionales reales (para cruces)
 const PROFS_VALIDOS = ['Bruno','Male','Vero','Jime','Lu'];
 // Etiqueta legible de práctica desde su código
@@ -580,7 +606,7 @@ async function cargar(){
         id, fecha, importe, medio_pago, profesional, quien_cobro, tipo_cobro,
         monto_centro, monto_profesional, monto_moplex, tratamiento_id,
         tratamientos (
-          id, codigo_id, practica_codigo, modalidad, obra_social,
+          id, codigo_id, practica_codigo, modalidad, obra_social, tipo_cobro,
           moplex_consulta_id, moplex_plantilla_id, moplex_plantilla_rectif, moplex_rectif_monto, solicita_plantillas,
           personas ( id, nombre )
         )
@@ -885,12 +911,14 @@ function vistaNueva(ctx){
     }
   }
   // MASOTERAPIA: liquida por PAGO (no entra en la cascada de sesiones)
+  const profMasoNv = mapaProfPorTratamiento(MT.sesAll);
   for (const p of pagos){
     const pc = String((p.tratamientos || {}).practica_codigo || '');
     if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
     const imp = Number(p.importe) || 0; if (imp <= 0.5) continue;
-    const prof = normProf(p.profesional) || 'Vero';
-    const mProf = ['Bruno','Male','Vero'].includes(prof) ? Math.round(imp * 0.65) : 0;
+    const prof = profDeMaso(p, profMasoNv);
+    const cobraPct = ['Bruno','Male','Vero'].includes(prof);
+    const mProf = !cobraPct ? 0 : (esBonifCentro(p) ? imp : Math.round(imp * 0.65));
     const mCentro = imp - mProf;
     const r = needP(prof);
     r.ses++; r.abonado += imp; r.prof += mProf; r.centro += mCentro;
@@ -1255,14 +1283,15 @@ function render(pagos, sesiones, filtroProf){
   // MASOTERAPIA: el área es de Vero sola → el pack/masaje se liquida ENTERO en el momento
   // en que se ABONA (no hay que esperar sesiones para atribuirlo, no se comparte con nadie).
   // Los regalos (MASAJES_R) siguen en su módulo aparte; los de junio ya se liquidaron en junio.
+  const profMaso = mapaProfPorTratamiento(MT.sesAll);
   for (const p of pagos){
     const pc = String((p.tratamientos || {}).practica_codigo || '');
     if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
     const imp = Number(p.importe) || 0;
     if (imp <= 0.5) continue;
-    const prof = normProf(p.profesional) || 'Vero';
+    const prof = profDeMaso(p, profMaso);
     const esVar = ['Bruno','Male','Vero'].includes(prof);
-    const mProf = esVar ? Math.round(imp * 0.65) : 0;
+    const mProf = !esVar ? 0 : (esBonifCentro(p) ? imp : Math.round(imp * 0.65));
     const mCentro = imp - mProf;
     const esVista = !esModoMoplex && (!filtroProf || prof === filtroProf) && (!filtroArea || filtroArea === 'Masoterapia');
     if (!esVista) continue;
