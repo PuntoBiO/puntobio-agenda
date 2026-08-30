@@ -1343,6 +1343,10 @@ function render(pagos, sesiones, filtroProf){
     if (set && set.size > 1) return 'varios';
     return profDeTrat(tid);
   };
+  // ¿Este tratamiento no tiene NINGUNA sesión cargada? Entonces el cobro está
+  // pero el turno nunca se marcó PRESENTE. No es un error de atribución: es
+  // trabajo sin registrar. Se marca para que se vea y se pueda corregir.
+  const sinSesiones = tid => !profPorTrat[tid] || profPorTrat[tid].size === 0;
 
   // Plata física del mes: quién la recibió y por qué medio (incluye MOPLEX: es plata real)
   const recibidoDet = {};   // quién recibió → lista de pagos (para mostrar qué compone el "en mano")
@@ -1355,7 +1359,9 @@ function render(pagos, sesiones, filtroProf){
       fecha: p.fecha, importe: imp,
       paciente: ((tD.personas || {}).nombre) || '—',
       codigo: tD.codigo_id || '—', practica: tD.practica_codigo || '',
-      prof: profDePago(p.tratamiento_id, p.fecha)
+      prof: profDePago(p.tratamiento_id, p.fecha),
+      sinSesion: sinSesiones(p.tratamiento_id),
+      profRespaldo: normProf(p.profesional) || ''
     });
     if (!porMedio[quien]) porMedio[quien] = {debito:0, efectivo:0, transferencia:0};
     const medio = String(p.medio_pago || '').toUpperCase();
@@ -1618,9 +1624,19 @@ function render(pagos, sesiones, filtroProf){
           html += `<div style="margin-top:10px;"><b>${badge(q)}</b> — recibió ${fmt(tot)}</div>
             <table style="margin-top:6px;"><thead><tr><th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Corresponde a</th><th class="num">Importe</th></tr></thead><tbody>`;
           for (const x of lista){
-            html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td>${x.prof ? badge(x.prof) : '—'}</td><td class="num">${fmt(x.importe)}</td></tr>`;
+            html += `<tr><td>${x.fecha}</td><td>${x.paciente}</td><td>${x.codigo}</td><td>${practicaLabel(x.practica)}</td><td>${x.prof ? badge(x.prof)
+              : (x.sinSesion
+                  ? (x.profRespaldo ? badge(x.profRespaldo) : '') + `<span title="El cobro está cargado pero el turno nunca se marcó PRESENTE, así que el tratamiento no tiene ninguna sesión. Marcá el turno en la agenda." style="margin-left:4px;padding:1px 6px;border-radius:4px;background:#fef3c7;color:#92400e;font-size:10px;font-weight:700;white-space:nowrap;">⚠ SIN SESIÓN</span>`
+                  : '—')}</td><td class="num">${fmt(x.importe)}</td></tr>`;
           }
           html += `</tbody></table>`;
+          const sinSes = lista.filter(x => x.sinSesion);
+          if (sinSes.length){
+            html += `<div style="margin:6px 0 2px;font-size:12.5px;color:#92400e;background:#fef3c7;border-radius:8px;padding:8px 10px;">` +
+              `⚠ <b>${sinSes.length} cobro(s) sin ninguna sesión cargada:</b> ` +
+              sinSes.map(x => `${x.paciente} (${x.fecha})`).join(' · ') +
+              ` <span style="color:#78716c;">— el turno nunca se marcó PRESENTE. La plata está bien, pero el trabajo no queda registrado.</span></div>`;
+          }
           // Si PuntoBiO recibió plata que corresponde a un profesional (Bruno/Male/Vero), resumirla
           if (q === 'PuntoBiO'){
             const porProfPB = {};
