@@ -177,6 +177,8 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .paciente-selected-clear{background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:0 4px}
 .inline-form{background:var(--bg-elev-2);border:1px solid var(--border-light);border-radius:6px;padding:14px;margin-top:8px}
 .inline-form-title{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:var(--accent);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px}
+.ct-cobro-previa{margin-top:6px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.45;border:1px solid var(--border,#e2e8f0);background:var(--bg-soft,#f8fafc);color:var(--text-dim,#64748b)}
+.ct-cobro-previa.is-aviso{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
 .inline-form .form-row{margin-bottom:8px}
 .inline-form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
 .form-alert{background:#fde6e6;border:1px solid var(--s-ausente);color:#8a2020;padding:10px 12px;border-radius:5px;font-size:12px;margin-bottom:12px;white-space:pre-line}
@@ -401,6 +403,17 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
             </select>
           </div>
           <div><label class="form-label">Obra Social (si aplica)</label><input type="text" class="form-input" id="ct_obra_social" placeholder="—"></div>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Tipo de cobro</label>
+          <select class="form-select" id="ct_tipo_cobro">
+            <option value="NORMAL">Normal (aplica tarifario)</option>
+            <option value="MANUAL">Manual (monto libre)</option>
+            <option value="SOLO_COSEGURO">Solo coseguro</option>
+            <option value="BONIF_CENTRO">Bonificación del centro</option>
+            <option value="CORTESIA">Cortesía</option>
+          </select>
+          <div id="ct_cobro_previa" class="ct-cobro-previa" style="display:none"></div>
         </div>
         <div id="ctAlert"></div>
         <div class="inline-form-actions">
@@ -1384,6 +1397,9 @@ function initNuevoForm() {
   const recalcPrecio = async () => {
     const practica = document.getElementById('fNT_practica').value;
     if (!practica) return;
+    // Manual y cortesía: el valor lo carga la persona a mano, no lo pisa el tarifario
+    const tc = document.getElementById('ct_tipo_cobro')?.value;
+    if (tc === 'MANUAL' || tc === 'CORTESIA') return;
     const modalidad = document.getElementById('ct_modalidad').value;
     const obraSocial = document.getElementById('ct_obra_social').value.trim();
     const precio = await buscarPrecioTarifario(practica, modalidad, obraSocial);
@@ -1393,9 +1409,15 @@ function initNuevoForm() {
   };
   document.getElementById('ct_modalidad').addEventListener('change', recalcPrecio);
   document.getElementById('ct_obra_social').addEventListener('blur', recalcPrecio);
+  document.getElementById('ct_tipo_cobro').addEventListener('change', () => {
+    actualizarPreviaCobro();
+    recalcPrecio();
+  });
   document.getElementById('ct_tipo_masaje').addEventListener('change', async () => {
     const practica = document.getElementById('fNT_practica').value;
     if (practica !== 'MASAJES') return;
+    const tc = document.getElementById('ct_tipo_cobro')?.value;
+    if (tc === 'MANUAL' || tc === 'CORTESIA') { actualizarVisibilidadBeneficiario(); return; }
     const precio = await buscarPrecioTarifario('MASAJES', 'PARTICULAR', '');
     if (precio !== null && precio !== undefined) {
       document.getElementById('ct_valor_sesion').value = precio;
@@ -1403,6 +1425,27 @@ function initNuevoForm() {
     actualizarVisibilidadBeneficiario();
   });
   document.getElementById('fNT_tratamiento').addEventListener('change', actualizarVisibilidadBeneficiario);
+}
+
+// Explica en criollo qué hace cada tipo de cobro, para que nadie tenga que adivinar.
+// Lo que se elija acá viaja al tratamiento y es lo que después mira el trigger al
+// marcar PRESENTE para estampar el reparto de la sesión.
+const COBRO_PREVIA = {
+  NORMAL:        { aviso:false, txt:'Se reparte según el tarifario (el masaje va 65% Vero / 35% centro).' },
+  MANUAL:        { aviso:true,  txt:'✏️ <b>Monto libre:</b> cargás vos el valor por sesión y el reparto se calcula sobre ese monto.' },
+  SOLO_COSEGURO: { aviso:true,  txt:'🏥 <b>Solo coseguro:</b> lo que paga el paciente queda entero para el centro.' },
+  BONIF_CENTRO:  { aviso:true,  txt:'🎗️ <b>Bonificación del centro:</b> PuntoBiO regala su parte. El paciente paga solo lo del profesional y la sesión va 100% al profesional. Cargá en “Valor por sesión” lo que realmente abona el paciente.' },
+  CORTESIA:      { aviso:true,  txt:'🎁 <b>Cortesía:</b> no se cobra nada. La sesión queda en $0 para todos.' }
+};
+function actualizarPreviaCobro() {
+  const sel = document.getElementById('ct_tipo_cobro');
+  const box = document.getElementById('ct_cobro_previa');
+  if (!sel || !box) return;
+  const info = COBRO_PREVIA[sel.value];
+  if (!info) { box.style.display = 'none'; return; }
+  box.innerHTML = info.txt;
+  box.classList.toggle('is-aviso', !!info.aviso);
+  box.style.display = '';
 }
 
 // Maso: el campo Beneficiario solo aparece para Packs y Regalos (los tipos que pueden compartirse/regalarse).
@@ -1451,6 +1494,8 @@ function resetForm() {
   document.getElementById('ct_valor_sesion').value = '';
   document.getElementById('ct_modalidad').value = 'PARTICULAR';
   document.getElementById('ct_obra_social').value = '';
+  const tcSel = document.getElementById('ct_tipo_cobro');
+  if (tcSel) { tcSel.value = 'NORMAL'; actualizarPreviaCobro(); }
   document.getElementById('ctAlert').innerHTML = '';
   tratamientosPersona = [];
 }
@@ -1610,6 +1655,7 @@ async function onCrearTratamiento() {
   const valor = parseFloat(document.getElementById('ct_valor_sesion').value || '0');
   const modalidad = document.getElementById('ct_modalidad').value;
   const obraSocial = document.getElementById('ct_obra_social').value.trim();
+  const tipoCobro = document.getElementById('ct_tipo_cobro')?.value || 'NORMAL';
   if (!totalSes || totalSes < 1) { document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Total de sesiones inválido.</div>`; return; }
   // Maso: el practica_codigo guardado debe ser el subtipo (MASAJES_EYC/CC/PAK/R/CERO), NO 'MASAJES'.
   // El FK tratamientos_practica_codigo_fkey referencia los códigos reales del tarifario.
@@ -1631,6 +1677,7 @@ async function onCrearTratamiento() {
       total_sesiones: totalSes,
       valor_sesion: valor,
       modalidad,
+      tipo_cobro: tipoCobro,
       estado: 'Pendiente'  // valores válidos en PuntoBiO: Pendiente / Parcial / Saldado / No aplica
     };
     if (obraSocial) payload.obra_social = obraSocial;
