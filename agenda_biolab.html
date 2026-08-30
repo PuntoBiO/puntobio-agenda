@@ -478,6 +478,38 @@
             <option value="">— Elegí paciente y práctica —</option>
           </select>
           <div id="tto-hint" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
+          <button type="button" id="btn-nuevo-tto" style="display:none; margin-top:6px; padding:6px 12px; font-size:12px; border-radius:8px; border:1px solid #bbf7d0; background:#f0fdf4; color:#166534; font-weight:600; cursor:pointer;">+ Crear tratamiento acá</button>
+        </div>
+      </div>
+
+      <!-- Alta rápida de tratamiento, para no tener que salir a la pantalla Tratamientos -->
+      <div id="nuevo-tto-box" style="display:none; background:var(--bg-soft,#f8fafc); border:1px solid var(--border,#e2e8f0); border-radius:10px; padding:12px; margin-bottom:12px;">
+        <div style="font-weight:700; margin-bottom:8px; font-size:12px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted);">+ Tratamiento nuevo</div>
+        <div class="form-row-2">
+          <div class="form-row">
+            <label>Total sesiones</label>
+            <input type="number" id="nt-total-sesiones" min="1" value="1">
+          </div>
+          <div class="form-row">
+            <label>Valor por sesión ($)</label>
+            <input type="number" id="nt-valor-sesion" min="0" placeholder="0">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Tipo de cobro</label>
+          <select id="nt-tipo-cobro">
+            <option value="NORMAL">Normal (aplica tarifario)</option>
+            <option value="MANUAL">Manual (monto libre)</option>
+            <option value="SOLO_COSEGURO">Solo coseguro</option>
+            <option value="BONIF_CENTRO">Bonificación del centro</option>
+            <option value="CORTESIA">Cortesía</option>
+          </select>
+          <div id="nt-cobro-previa" style="display:none; margin-top:6px; padding:8px 10px; border-radius:8px; font-size:12px; line-height:1.45; border:1px solid var(--border,#e2e8f0); background:#fff; color:var(--muted);"></div>
+        </div>
+        <div id="nt-alert" style="font-size:12px; color:#dc2626; margin-top:6px;"></div>
+        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
+          <button type="button" id="nt-cancel" style="padding:7px 14px; border-radius:8px; border:1px solid var(--border,#e2e8f0); background:#fff; cursor:pointer;">Cancelar</button>
+          <button type="button" id="nt-create" style="padding:7px 14px; border-radius:8px; border:none; background:var(--accent,#0ea5e9); color:#fff; font-weight:600; cursor:pointer;">Crear y usar</button>
         </div>
       </div>
 
@@ -1314,6 +1346,7 @@ function abrirNuevoDesdeSlot(fecha, horaCero, dateObj, diaNum, aperturaProf, pre
     `📅 <b>${dateObj.getDate()} ${meses[dateObj.getMonth()]}</b> · 🕐 <b>${horaCero}</b> – ${horaCero.slice(0,2)*1+1}:00${tituloAp}`;
   document.getElementById('alerta-nuevo').innerHTML = '';
   ['busc-paciente','inp-tto','inp-obs'].forEach(id => {document.getElementById(id).value=''; document.getElementById(id).dataset.personaId='';});
+  ntCerrar(); ntActualizarBoton();
   document.getElementById('sel-obra').value = 'PARTICULAR';
   document.getElementById('sel-hora-exacta').innerHTML = '<option value="">—</option>';
   document.getElementById('sel-practica').value = '';
@@ -1396,6 +1429,7 @@ function actualizarHorasExactas(){
     document.getElementById('inp-tto').innerHTML = '<option value="">— Elegí paciente y práctica —</option>';
     const h = document.getElementById('tto-hint'); if(h) h.textContent = '';
   }
+  ntActualizarBoton();
   if(!prof || !practica) return;
   const dur = duracionMin(practica, prof);
   if(!dur) return;
@@ -1463,7 +1497,8 @@ async function cargarTratamientosExistentes(practica){
     sel.innerHTML = '<option value="">— Sin tratamiento activo —</option>';
     if(hint){
       hint.style.color = '#dc2626';
-      hint.textContent = '⚠ Este paciente no tiene un tratamiento ' + cfg.prefix + ' activo. Creálo primero en Tratamientos y después reservá el turno.';
+      hint.innerHTML = '⚠ Este paciente no tiene un tratamiento ' + cfg.prefix + ' activo.' +
+        (NT_PERMITE.includes(practica) ? ' Podés crearlo acá mismo con el botón de abajo.' : ' Creálo primero en Tratamientos y después reservá el turno.');
     }
     return;
   }
@@ -1524,8 +1559,127 @@ async function cargarTratamientosExistentes(practica){
   }
 }
 
+/* ════════════════════════════════════════════════════════════════
+   ALTA RÁPIDA DE TRATAMIENTO DESDE LA AGENDA
+   Antes había que salir a la pantalla Tratamientos y volver. Acá se crea
+   con lo mínimo (sesiones, valor y tipo de cobro) y queda seleccionado.
+   MOPLEX queda afuera a propósito: su tratamiento lleva consulta,
+   plantilla y franquicia, y eso se arma en su propio circuito.
+   ════════════════════════════════════════════════════════════════ */
+const NT_PERMITE = ['EVALUACION_INGRESO','EVALUACION_DEPORTISTA','SARKMED'];
+
+// Explica qué hace cada tipo de cobro. Lo que se elija acá viaja al tratamiento
+// y es lo que mira el trigger al marcar PRESENTE para estampar el reparto.
+const NT_COBRO_PREVIA = {
+  NORMAL:        { aviso:false, txt:'Se reparte según el tarifario (la evaluación va 50/50 profesional/centro; si la hacés vos o Jime, 100% centro).' },
+  MANUAL:        { aviso:true,  txt:'✏️ <b>Monto libre:</b> cargás vos el valor por sesión y el reparto se calcula sobre ese monto.' },
+  SOLO_COSEGURO: { aviso:true,  txt:'🏥 <b>Solo coseguro:</b> lo que paga el paciente queda entero para el centro.' },
+  BONIF_CENTRO:  { aviso:true,  txt:'🎗️ <b>Bonificación del centro:</b> PuntoBiO regala su parte. El paciente paga solo lo del profesional y la sesión va 100% al profesional. Cargá en “Valor por sesión” lo que realmente abona el paciente.' },
+  CORTESIA:      { aviso:true,  txt:'🎁 <b>Cortesía:</b> no se cobra nada. La sesión queda en $0 para todos.' }
+};
+
+function ntActualizarPrevia(){
+  const sel = document.getElementById('nt-tipo-cobro');
+  const box = document.getElementById('nt-cobro-previa');
+  if(!sel || !box) return;
+  const info = NT_COBRO_PREVIA[sel.value];
+  if(!info){ box.style.display = 'none'; return; }
+  box.innerHTML = info.txt;
+  box.style.background = info.aviso ? '#f0fdf4' : '#fff';
+  box.style.borderColor = info.aviso ? '#bbf7d0' : 'var(--border,#e2e8f0)';
+  box.style.color = info.aviso ? '#166534' : 'var(--muted)';
+  box.style.display = '';
+}
+
+// Precio del día para esa práctica (misma fuente que el resto del ecosistema)
+async function ntBuscarPrecio(practicaCodigo){
+  try{
+    const { data, error } = await sb.from('tarifario_precios_vigente')
+      .select('valor_vigente')
+      .eq('practica_codigo', practicaCodigo)
+      .eq('modalidad', 'Particular');
+    if(error || !data || data.length === 0) return null;
+    return data[0].valor_vigente;
+  }catch(e){ return null; }
+}
+
+// Muestra u oculta el botón "+ Crear tratamiento acá" según la práctica elegida
+function ntActualizarBoton(){
+  const btn = document.getElementById('btn-nuevo-tto');
+  if(!btn) return;
+  const practica = document.getElementById('sel-practica').value;
+  const personaId = document.getElementById('busc-paciente').dataset.personaId;
+  btn.style.display = (personaId && NT_PERMITE.includes(practica)) ? '' : 'none';
+  if(!personaId || !NT_PERMITE.includes(practica)) ntCerrar();
+}
+
+function ntCerrar(){
+  const box = document.getElementById('nuevo-tto-box');
+  if(box) box.style.display = 'none';
+}
+
+async function ntAbrir(){
+  const practica = document.getElementById('sel-practica').value;
+  const cfg = PREFIJOS_TTO[practica];
+  if(!cfg) return;
+  document.getElementById('nt-alert').textContent = '';
+  document.getElementById('nt-total-sesiones').value = '1';
+  document.getElementById('nt-tipo-cobro').value = 'NORMAL';
+  ntActualizarPrevia();
+  const precio = await ntBuscarPrecio(cfg.prefix);
+  document.getElementById('nt-valor-sesion').value = (precio != null) ? precio : '';
+  document.getElementById('nuevo-tto-box').style.display = 'block';
+}
+
+async function ntCrear(){
+  const practica = document.getElementById('sel-practica').value;
+  const cfg = PREFIJOS_TTO[practica];
+  const personaId = document.getElementById('busc-paciente').dataset.personaId;
+  const alerta = document.getElementById('nt-alert');
+  alerta.textContent = '';
+  if(!cfg || !personaId){ alerta.textContent = 'Elegí primero el paciente y la práctica.'; return; }
+
+  const totalSes = parseInt(document.getElementById('nt-total-sesiones').value, 10);
+  const valor = parseFloat(document.getElementById('nt-valor-sesion').value || '0');
+  const tipoCobro = document.getElementById('nt-tipo-cobro').value || 'NORMAL';
+  if(!totalSes || totalSes < 1){ alerta.textContent = 'Total de sesiones inválido.'; return; }
+
+  const btn = document.getElementById('nt-create');
+  btn.disabled = true; btn.textContent = 'Creando…';
+  try{
+    const z = n => String(n).padStart(2, '0');
+    const ts = new Date();
+    const codigoId = `${cfg.prefix}${ts.getFullYear()}${z(ts.getMonth()+1)}${z(ts.getDate())}${z(ts.getHours())}${z(ts.getMinutes())}`;
+    const payload = {
+      persona_id: Number(personaId),
+      practica_codigo: cfg.prefix,
+      codigo_id: codigoId,
+      fecha_alta: new Date().toISOString().split('T')[0],
+      total_sesiones: totalSes,
+      valor_sesion: valor,
+      modalidad: 'PARTICULAR',
+      tipo_cobro: tipoCobro,
+      estado: 'Pendiente'
+    };
+    const { error } = await sb.from('tratamientos').insert([payload]).select().single();
+    if(error) throw error;
+    ntCerrar();
+    await cargarTratamientosExistentes(practica);   // recarga la lista
+    document.getElementById('inp-tto').value = codigoId;  // y lo deja elegido
+  }catch(e){
+    alerta.textContent = 'Error: ' + (e.message || e);
+    console.error(e);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Crear y usar';
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   cargarRolUsuario();
+  document.getElementById('btn-nuevo-tto').addEventListener('click', ntAbrir);
+  document.getElementById('nt-cancel').addEventListener('click', ntCerrar);
+  document.getElementById('nt-create').addEventListener('click', ntCrear);
+  document.getElementById('nt-tipo-cobro').addEventListener('change', ntActualizarPrevia);
   document.getElementById('sel-profesional').addEventListener('change', actualizarPracticasYHoras);
   document.getElementById('sel-practica').addEventListener('change', actualizarHorasExactas);
   document.getElementById('inp-tto').addEventListener('change', onTratamientoMoplexElegido);
@@ -1578,6 +1732,7 @@ async function buscarPacientes(q){
 function seleccionarPaciente(id, nombre){
   document.getElementById('busc-paciente').value = nombre;
   document.getElementById('busc-paciente').dataset.personaId = id;
+  ntActualizarBoton();
   document.getElementById('paciente-results').classList.remove('activo');
   // Si ya hay una práctica elegida, refresco la lista de tratamientos de este paciente
   const pr = document.getElementById('sel-practica').value;
