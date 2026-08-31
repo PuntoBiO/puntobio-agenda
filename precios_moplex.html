@@ -290,9 +290,15 @@ $('btnGuardar').addEventListener('click', async () => {
 
   for (const c of cambios){
     try{
-      // 1) Fila nueva: copia exacta del ítem, con los precios nuevos y su vigencia.
-      //    Se copian TODAS las columnas menos las que no se heredan, así no se
-      //    pierde nada si el catálogo tiene campos que esta pantalla no muestra.
+      // 1) Archivar la vieja PRIMERO. Bajarle "activo" libera el índice único
+      //    parcial (categoria, nombre) WHERE activo, para que la nueva pueda entrar.
+      const { error: eUpd } = await sb.from('moplex_catalogo')
+        .update({ activo: false, vigente_hasta: desde })
+        .eq('id', c.item.id)
+      if (eUpd) throw eUpd
+
+      // 2) Crear la fila nueva: copia exacta del ítem, con los precios nuevos y su
+      //    vigencia. Se copian TODAS las columnas menos las que no se heredan.
       const fila = Object.assign({}, c.item)
       delete fila.id; delete fila.created_at; delete fila.updated_at
       fila.precio_paciente = c.precio
@@ -302,14 +308,14 @@ $('btnGuardar').addEventListener('click', async () => {
       fila.vigente_hasta   = null
 
       const { error: eIns } = await sb.from('moplex_catalogo').insert(fila)
-      if (eIns) throw eIns
-
-      // 2) Archivar la vieja. Se hace DESPUÉS de que la nueva entró: si el insert
-      //    falla, el ítem sigue vigente con su precio viejo y no queda un hueco.
-      const { error: eUpd } = await sb.from('moplex_catalogo')
-        .update({ activo: false, vigente_hasta: desde })
-        .eq('id', c.item.id)
-      if (eUpd) throw eUpd
+      if (eIns){
+        // Deshacer: si no se pudo crear la nueva, reactivamos la vieja para que
+        //           el ítem no quede sin precio activo (sin hueco).
+        await sb.from('moplex_catalogo')
+          .update({ activo: true, vigente_hasta: null })
+          .eq('id', c.item.id)
+        throw eIns
+      }
 
       hechos.push(c.item.nombre)
     } catch(e){
