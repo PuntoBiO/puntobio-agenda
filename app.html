@@ -4269,7 +4269,16 @@ async function cargarCalculadorBonos(mesVer) {
   const mesTrabajadoTxt = fmtMesAnio(mesVer)
   const mesSueldoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() - 1, 1))
   const mesPagoTxt = fmtMesAnio(new Date(mesVer.getFullYear(), mesVer.getMonth() + 1, 1))
+  const mesPrevD = new Date(mesVer.getFullYear(), mesVer.getMonth() - 1, 1)
+  const mesPrevStr = mesPrevD.getFullYear() + '-' + String(mesPrevD.getMonth() + 1).padStart(2, '0')
+  const mesPrevCorto = mesPrevD.toLocaleDateString('es-AR', { month: 'long' })
   try {
+    // 🌟 ESTRELLA AUTOMÁTICA: primero calculamos el MES ANTERIOR (una sola vez por sesión,
+    // queda cacheado en ALXH_HIST) para tener contra qué comparar los promedios. Después
+    // el mes que se está viendo, así BONO_DATOS_MES y EQUIPO_DETALLE quedan con ESE mes.
+    if (!(window.ALXH_HIST && window.ALXH_HIST[mesPrevStr])) {
+      try { await cargarEquipoDesempeno(mesPrevD) } catch (e) { /* sin mes anterior: la estrella queda sin comparación */ }
+    }
     // Reconstruimos siempre para reflejar coberturas/faltas recién cargadas en el tablero
     await cargarEquipoDesempeno(mesVer)
     const datos = (window.BONO_DATOS_MES && window.BONO_DATOS_MES.mesStr === mesStr) ? window.BONO_DATOS_MES.lista : []
@@ -4286,6 +4295,53 @@ async function cargarCalculadorBonos(mesVer) {
     })
     const datoDe = nombre => datos.find(d => (d.nombre || '').toLowerCase() === nombre.toLowerCase()
       || (nombre === 'Lautaro' && (d.nombre || '').toLowerCase() === 'lauti'))
+
+    // =========================================================================
+    // 🌟 ESTRELLA DEL MES — LA DECIDE EL SISTEMA, NO LA DUEÑA.
+    // Reglamento punto 3: la gana el que MÁS MEJORÓ su promedio de alumnos/hora
+    // contra el mes anterior. Requisitos para competir:
+    //   1) tener mes anterior con horas (el que recién entra no compite),
+    //   2) no tener el bono caído por falta (punto 6: queda fuera de todos los premios),
+    //   3) haber mejorado de verdad (mejora > 0),
+    //   4) el 70% de horas dadas: se mide contra las horas que ese mismo profe dio el
+    //      mes anterior, prorrateado por lo que va del mes si el mes está en curso.
+    // Empate exacto: la ganan los dos (se avisa en pantalla).
+    // ÚNICA excepción manual: si en ese mes ya hay estrellas tildadas a mano de antes,
+    // se respetan tal cual (para no cambiarle el pasado a un mes ya cerrado). El botón
+    // "volver a automático" borra esos tildes y deja que decida el sistema.
+    // =========================================================================
+    const prevHist = (window.ALXH_HIST && window.ALXH_HIST[mesPrevStr]) || null
+    const estrellaManual = Object.keys(CALC_AJUSTES).some(k => k.endsWith('|estrella'))
+    const ESTRELLA = { manual: estrellaManual, mesPrevStr, mesPrevCorto, ganadores: [], detalle: [] }
+    if (!estrellaManual) {
+      profesBonoMes(mesStr).forEach(profe => {
+        const d = datoDe(profe)
+        const fila = { profe, mejora: null, motivo: '', compite: false }
+        if (!d) { fila.motivo = 'sin datos del mes'; ESTRELLA.detalle.push(fila); return }
+        const prev = prevHist ? prevHist[String(d.email || '').toLowerCase()] : null
+        if (!prev || (prev.horas || 0) <= 0) fila.motivo = 'sin mes anterior para comparar'
+        else {
+          const mejora = Math.round(((d.alxh || 0) - (prev.alxh || 0)) * 10) / 10
+          fila.mejora = mejora
+          fila.desde = prev.alxh
+          // Cuánto del mes va corrido (1 = mes cerrado), para no exigir el mes entero el día 5.
+          const avance = (d.horasPrev > 0) ? Math.min(1, (d.horas || 0) / d.horasPrev) : 1
+          const minHoras = 0.7 * (prev.horas || 0) * avance
+          if (d.bonoCaido) fila.motivo = 'bono caído por falta'
+          else if (mejora <= 0) fila.motivo = mejora === 0 ? 'quedó igual' : 'bajó'
+          else if ((d.horas || 0) < minHoras) fila.motivo = 'menos del 70% de sus horas'
+          else fila.compite = true
+        }
+        ESTRELLA.detalle.push(fila)
+      })
+      const compiten = ESTRELLA.detalle.filter(f => f.compite)
+      if (compiten.length) {
+        const top = Math.max.apply(null, compiten.map(f => f.mejora))
+        ESTRELLA.ganadores = compiten.filter(f => f.mejora === top).map(f => f.profe)
+      }
+    }
+    window.CALC_ESTRELLA = ESTRELLA
+
     let filas = ''
     profesBonoMes(mesStr).forEach(profe => {
       const d = datoDe(profe) || { alxh: 0, bonoCaido: false, diasCubiertos: 0, bonoCobertura: 0, cubrioVacaciones: false }
@@ -4308,7 +4364,7 @@ async function cargarCalculadorBonos(mesVer) {
             <th style="padding:9px 7px; text-align:center;">🤒 Cobertura</th>
             <th style="padding:9px 7px; text-align:center;">⏰ Horas<br>extra</th>
             <th style="padding:9px 7px; text-align:center;">🏖 Vacac.<br>20%</th>
-            <th style="padding:9px 7px; text-align:center;">🌟 Estrella<br>10%</th>
+            <th style="padding:9px 7px; text-align:center;">🌟 Estrella<br>10% · automática</th>
             <th style="padding:9px 7px; text-align:right;">TOTAL</th>
           </tr>
         </thead>
@@ -4321,6 +4377,7 @@ async function cargarCalculadorBonos(mesVer) {
         </tfoot>
       </table>
       </div>
+      ${bloqueEstrellaHTML(ESTRELLA, mesStr)}
       <div style="margin-top:16px; padding:14px 16px; background:#fff7ed; border:1px solid #fed7aa; border-radius:12px;">
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:13.5px; color:#9a3412;">
@@ -4354,6 +4411,53 @@ async function cargarCalculadorBonos(mesVer) {
   }
 }
 
+// 🌟 Cartel de la Estrella: quién la ganó y, sobre todo, POR QUÉ. Así no hay que
+// confiar a ciegas: se ve la mejora de cada uno contra el mes anterior.
+function bloqueEstrellaHTML(EST, mesStr) {
+  const sgn = n => (n > 0 ? '+' : '') + String(n).replace('.', ',')
+  if (EST.manual) {
+    const puestas = Object.keys(CALC_AJUSTES).filter(k => k.endsWith('|estrella') && CALC_AJUSTES[k]).map(k => k.split('|')[0])
+    return `
+      <div style="margin-top:14px; padding:12px 16px; background:#faf5ff; border:1px solid #e9d5ff; border-radius:12px; font-size:12.5px; color:#6b21a8; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+        <span>🌟 <b>Estrella fijada a mano</b> en este mes${puestas.length ? ': ' + puestas.join(', ') : ' (nadie tildado)'}. El sistema no la toca para no cambiarle el pasado a un mes ya cerrado.</span>
+        <button onclick="volverEstrellaAuto('${mesStr}')" style="border:1px solid #7e22ce; background:#fff; color:#7e22ce; border-radius:8px; padding:6px 12px; cursor:pointer; font-weight:700; font-size:12px;">↺ Volver a automático</button>
+      </div>`
+  }
+  const det = (EST.detalle || []).slice().sort((a, b) => (b.mejora == null ? -99 : b.mejora) - (a.mejora == null ? -99 : a.mejora))
+  const linea = det.map(f => {
+    const gana = EST.ganadores.includes(f.profe)
+    const txt = f.mejora != null ? sgn(f.mejora) : '—'
+    const por = f.motivo ? ` <span style="color:#a16207;">(${f.motivo})</span>` : ''
+    return gana
+      ? `<b style="color:#b45309;">🌟 ${f.profe} ${txt}</b>`
+      : `<span style="color:#78716c;">${f.profe} ${txt}${por}</span>`
+  }).join(' · ')
+  const titulo = EST.ganadores.length === 0
+    ? '🌟 <b>Estrella del mes: por ahora nadie la gana</b> — nadie mejoró su promedio cumpliendo las condiciones.'
+    : EST.ganadores.length === 1
+      ? `🌟 <b>Estrella del mes: ${EST.ganadores[0]}</b> — es el que más mejoró su promedio contra ${EST.mesPrevCorto}.`
+      : `🌟 <b>Empate: ${EST.ganadores.join(' y ')}</b> mejoraron exactamente lo mismo, así que la cobran los dos.`
+  return `
+    <div style="margin-top:14px; padding:12px 16px; background:#fffbeb; border:1px solid #fde68a; border-radius:12px; font-size:13px; color:#92400e; line-height:1.55;">
+      <div>${titulo}</div>
+      <div style="margin-top:5px; font-size:12px;">Mejora contra ${EST.mesPrevCorto}: ${linea || '—'}</div>
+      <div style="margin-top:5px; font-size:11.5px; color:#a16207;">La marca el sistema solo: gana el que más subió su promedio de alumnos/hora, siempre que no se le haya caído el bono por falta y haya dado al menos el 70% de las horas que dio el mes pasado. Se recalcula sola hasta que cierres el mes.</div>
+    </div>`
+}
+
+// Borra los tildes manuales de estrella de un mes y deja que decida el sistema.
+window.volverEstrellaAuto = async function(mesStr) {
+  if (!confirm('¿Volver la estrella de este mes a automático? Se borran los tildes puestos a mano y la decide el sistema.')) return
+  try {
+    const { error } = await supabase.from('bonos_ajustes_tf').delete().eq('mes', mesStr).eq('tipo', 'estrella')
+    if (error) throw error
+    notifCalc('🌟 Estrella en automático')
+    renderCalculadorBonos()
+  } catch (e) {
+    notifCalc('⚠️ No se pudo: ' + (e.message || ''), true)
+  }
+}
+
 function _escInfo(pct) {
   return pct >= 30 ? { label: '🏆 Excelencia', color: '#16a34a' }
     : pct >= 20 ? { label: '🚀 Crecimiento', color: '#0c7bb8' }
@@ -4377,7 +4481,20 @@ function filaCalc(profe, d, sueldo, mesStr) {
   const vacKey = profe + '|vacaciones', estKey = profe + '|estrella'
   const vacAuto = !!d.cubrioVacaciones
   const vacOn = (vacKey in CALC_AJUSTES) ? CALC_AJUSTES[vacKey] : vacAuto
-  const estOn = (estKey in CALC_AJUSTES) ? CALC_AJUSTES[estKey] : false
+  // 🌟 ESTRELLA: la decide el sistema (ver el bloque de cálculo en cargarCalculadorBonos).
+  // Solo se respeta lo manual en meses donde ya había tildes puestos a mano.
+  const EST = window.CALC_ESTRELLA || { manual: true, ganadores: [], detalle: [], mesPrevCorto: 'el mes anterior' }
+  const estOn = EST.manual ? ((estKey in CALC_AJUSTES) ? CALC_AJUSTES[estKey] : false) : EST.ganadores.includes(profe)
+  const estFila = (EST.detalle || []).find(f => f.profe === profe) || {}
+  const _sgn = n => (n > 0 ? '+' : '') + String(n).replace('.', ',')
+  const estCell = EST.manual
+    ? `<div style="font-weight:800; color:${estOn ? '#b45309' : '#94a3b8'};">${estOn ? '🌟 +10%' : '—'}</div>
+       <div style="font-size:9px; color:#9333ea;">fijado a mano</div>`
+    : estOn
+      ? `<div style="font-weight:800; color:#b45309;">🌟 +10%</div>
+         <div style="font-size:9px; color:#b45309;">${estFila.mejora != null ? _sgn(estFila.mejora) + ' vs ' + EST.mesPrevCorto : 'la más alta'}</div>`
+      : `<div style="color:#94a3b8;">—</div>
+         <div style="font-size:9px; color:#94a3b8;">${estFila.mejora != null ? _sgn(estFila.mejora) + (estFila.motivo ? ' · ' + estFila.motivo : '') : (estFila.motivo || '')}</div>`
   const escCell = caido
     ? '<span style="color:#dc2626; font-weight:700;">🤒 Caído</span>'
     : `<select onchange="setEscalon('${profe}','${mesStr}', this.value, this)" style="font-size:11.5px; padding:3px 6px; border:1px solid #cbd5e1; border-radius:6px; max-width:155px; cursor:pointer;">
@@ -4389,7 +4506,7 @@ function filaCalc(profe, d, sueldo, mesStr) {
        </select>
        <div class="esc-label" style="margin-top:3px; font-weight:700; color:${info.color};">${info.label} · ${pctEf}%${manualTag}</div>`
   return `
-    <tr data-profe="${profe}" data-pct="${pctEf}" data-pctauto="${autoPct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" data-faltas="${d.faltasSala || 0}" data-sueldo="${sueldo || 0}" data-extra="${d.montoExtra || 0}" data-hsextra="${d.hsExtra || 0}" style="border-bottom:1px solid #eef0f3;">
+    <tr data-profe="${profe}" data-pct="${pctEf}" data-pctauto="${autoPct}" data-pctcob="${pctCob}" data-caido="${caido ? 1 : 0}" data-est="${estOn ? 1 : 0}" data-faltas="${d.faltasSala || 0}" data-sueldo="${sueldo || 0}" data-extra="${d.montoExtra || 0}" data-hsextra="${d.hsExtra || 0}" style="border-bottom:1px solid #eef0f3;">
       <td style="padding:9px 7px; font-weight:700;">${profe}</td>
       <td style="padding:9px 7px; font-weight:700; color:${info.color};">${alxh}</td>
       <td style="padding:9px 7px; font-size:12px;">${escCell}</td>
@@ -4407,9 +4524,7 @@ function filaCalc(profe, d, sueldo, mesStr) {
         <input type="checkbox" class="chk-vac" ${vacOn ? 'checked' : ''} onchange="toggleAjuste('${profe}','vacaciones','${mesStr}',this.checked); recalcularFila(this.closest('tr'))" style="width:16px; height:16px; cursor:pointer;" title="${vacAuto ? 'El sistema detectó que cubrió vacaciones' : ''}">
         ${vacAuto ? '<div style="font-size:9px; color:#16a34a;">detectado</div>' : ''}
       </td>
-      <td style="padding:9px 7px; text-align:center;">
-        <input type="checkbox" class="chk-est" ${estOn ? 'checked' : ''} onchange="toggleAjuste('${profe}','estrella','${mesStr}',this.checked); recalcularFila(this.closest('tr'))" style="width:16px; height:16px; cursor:pointer;">
-      </td>
+      <td style="padding:9px 7px; text-align:center; font-size:12px;">${estCell}</td>
       <td style="padding:9px 7px; text-align:right; font-weight:800; font-size:14px;" class="calc-total">$0</td>
     </tr>`
 }
@@ -4446,7 +4561,7 @@ window.recalcularFila = function(tr) {
   const pctCob = Number(tr.dataset.pctcob) || 0
   const caido = tr.dataset.caido === '1'
   const vac = tr.querySelector('.chk-vac').checked ? 20 : 0
-  const est = tr.querySelector('.chk-est').checked ? 10 : 0
+  const est = tr.dataset.est === '1' ? 10 : 0   // 🌟 la estrella la decide el sistema, no un tilde
   // Si el bono base está caído por falta, no cobra base ni premios de desempeño;
   // pero la cobertura por haber cubierto a otro sí se respeta (se la ganó trabajando).
   const base = caido ? 0 : sueldo * (pct + vac + est) / 100
@@ -4465,7 +4580,7 @@ function recalcularTotalGeneral() {
     const pctCob = Number(tr.dataset.pctcob) || 0
     const caido = tr.dataset.caido === '1'
     const vac = tr.querySelector('.chk-vac').checked ? 20 : 0
-    const est = tr.querySelector('.chk-est').checked ? 10 : 0
+    const est = tr.dataset.est === '1' ? 10 : 0
     total += (caido ? 0 : sueldo * (pct + vac + est) / 100) + sueldo * pctCob / 100 + (Number(tr.dataset.extra) || 0)
   })
   const el = document.getElementById('calc-total-general')
@@ -4485,6 +4600,8 @@ function recalcularTotalGeneral() {
   const enCarrera = PROFES_SALA.filter(p => (faltasDeProfe[p] || 0) <= 2)
   let sala = 0, salaCadaUno = 0
   if (salaOk && enCarrera.length > 0) { sala = 150000; salaCadaUno = Math.round(150000 / enCarrera.length) }
+  // Queda a mano para el cierre y para los mensajes individuales de WhatsApp.
+  window.CALC_SALA = { salaOk, profes: PROFES_SALA, enCarrera, cadaUno: salaCadaUno, faltas: faltasDeProfe }
   const det = document.getElementById('calc-sala-detalle')
   if (det) {
     if (!salaOk) { det.style.display = 'none' }
@@ -5641,10 +5758,22 @@ async function cargarEquipoDesempeno(mesVer) {
     }
     window.BONO_DATOS_MES = { mesStr, lista: bonoLista.map(p => ({
       nombre: p.nombre, email: p.email, alxh: p.alxh,
+      horas: p.horas || 0, horasPrev: p.horasPrev || 0,
       bonoCaido: !!p.bonoCaido, faltasSala: p.faltasSala || 0, diasCubiertos: p.diasCubiertos || 0, bonoCobertura: p.bonoCobertura || 0, diasExtraFija: p.diasExtraFija || 0,
       hsExtra: _extraDeEmail(p.email).h, montoExtra: _extraDeEmail(p.email).m,
       cubrioVacaciones: cubrioVacasSet.has(p.email)
     })) }
+
+    // 🌟 HISTORIAL DE PROMEDIOS POR MES — lo llena solo cada vez que se calcula un mes.
+    // Es lo que le permite al Calculador saber la Estrella SIN que nadie la tilde: se
+    // compara el promedio del mes contra el del mes anterior (reglamento, punto 3).
+    window.ALXH_HIST = window.ALXH_HIST || {}
+    window.ALXH_HIST[mesStr] = {}
+    window.BONO_DATOS_MES.lista.forEach(p => {
+      window.ALXH_HIST[mesStr][String(p.email || '').toLowerCase()] = {
+        alxh: p.alxh, horas: p.horas, horasPrev: p.horasPrev
+      }
+    })
 
     // AUDITORÍA (solo admin): evoluciones del mes sin presente registrado ese día.
     // No acusa: marca casos para revisar (puede ser asistencia sin marcar o evolución de día equivocado).
@@ -6491,7 +6620,7 @@ function recopilarCierreBonos() {
     const caido = tr.dataset.caido === '1'
     const sueldo = Number(tr.dataset.sueldo) || 0
     const vacOn = tr.querySelector('.chk-vac').checked
-    const estOn = tr.querySelector('.chk-est').checked
+    const estOn = tr.dataset.est === '1'
     const base = caido ? 0 : sueldo * (pct + (vacOn ? 20 : 0) + (estOn ? 10 : 0)) / 100
     const cob = sueldo * pctCob / 100
     const extra = Number(tr.dataset.extra) || 0
@@ -6503,7 +6632,19 @@ function recopilarCierreBonos() {
       : pct >= 20 ? 'Crecimiento (20%)'
       : pct >= 10 ? 'Compromiso (10%)'
       : 'Sin bono (0%)'
-    profes.push({ profe, prom, pct, pctCob, caido, sueldo, vacOn, estOn, extra, hsExtra, total, escLabel })
+    // Desglose para el mensaje individual: qué es BONO y qué es HORAS EXTRA.
+    const S = window.CALC_SALA || { salaOk: false, profes: [], enCarrera: [], cadaUno: 0, faltas: {} }
+    const enSala = S.profes.includes(profe)
+    const salaProfe = (S.salaOk && enSala && S.enCarrera.includes(profe)) ? S.cadaUno : 0
+    profes.push({
+      profe, prom, pct, pctCob, caido, sueldo, vacOn, estOn, extra, hsExtra, total, escLabel,
+      montoBase: caido ? 0 : sueldo * pct / 100,
+      montoVac: (!caido && vacOn) ? sueldo * 20 / 100 : 0,
+      montoEst: (!caido && estOn) ? sueldo * 10 / 100 : 0,
+      montoCob: cob,
+      montoBono: base + cob,
+      enSala, sala: salaProfe, faltas: (S.faltas && S.faltas[profe]) || 0
+    })
   })
   const salaChk = document.getElementById('calc-sala-ok')
   const salaOk = !!(salaChk && salaChk.checked)
@@ -6538,10 +6679,164 @@ function textoWhatsappCierre(c) {
   return L.join('\n')
 }
 
+// =============================================
+// 📲 MENSAJE INDIVIDUAL POR PROFE (WhatsApp uno por uno)
+// Cada uno recibe SOLO lo suyo, con las tres cosas separadas y en criollo:
+// qué es BONO, qué son HORAS EXTRA, y si ganó o no el BONO DE ORDEN DE SALA.
+// =============================================
+function _mesSiguienteTxt(mesStr) {
+  const [y, m] = String(mesStr || '').split('-').map(Number)
+  if (!y) return 'el mes que viene'
+  const t = new Date(y, m, 1).toLocaleDateString('es-AR', { month: 'long' })
+  return t.charAt(0).toUpperCase() + t.slice(1)
+}
+
+function textoWhatsappProfe(c, p) {
+  const L = []
+  L.push(`🧮 *BONOS TF · ${_tituloMesCierre(c.mesStr)}*`)
+  L.push(`Hola ${p.profe}! Este es tu detalle del mes 👇`)
+  L.push('')
+  // 1) BONO (porcentajes sobre el sueldo)
+  L.push(`💰 *BONO* — ${_fmt$(p.montoBono)}`)
+  if (p.caido) {
+    L.push('   🤒 Este mes el bono base no aplica: hubo una falta sin cobertura.')
+  } else {
+    L.push(`   • Promedio ${p.prom} alumnos/hora → ${p.escLabel} = ${_fmt$(p.montoBase)}`)
+    if (p.montoVac > 0) L.push(`   • 🏖 Cobertura de vacaciones +20% = ${_fmt$(p.montoVac)}`)
+    if (p.montoEst > 0) L.push(`   • 🌟 Estrella (sos el que más mejoró) +10% = ${_fmt$(p.montoEst)}`)
+  }
+  if (p.montoCob > 0) L.push(`   • 🤝 Cobertura de faltas +${p.pctCob}% = ${_fmt$(p.montoCob)}`)
+  L.push(`   Se calcula sobre tu sueldo de bolsillo (${_fmt$(p.sueldo)}).`)
+  L.push('')
+  // 2) HORAS EXTRA (en $, aparte del bono)
+  if (p.hsExtra > 0) {
+    L.push(`⏰ *HORAS EXTRA* — ${String(p.hsExtra).replace('.', ',')} h = ${_fmt$(p.extra)}`)
+    L.push('   Son horas trabajadas de más: se pagan por hora, aparte del bono.')
+  } else {
+    L.push('⏰ *HORAS EXTRA* — este mes no hiciste')
+  }
+  L.push('')
+  // 3) BONO DE ORDEN DE SALA (ganó / no ganó)
+  if (!p.enSala) {
+    L.push('🤝 *BONO DE ORDEN DE SALA* — no entra en tu puesto')
+  } else if (!c.salaOk) {
+    L.push('🤝 *BONO DE ORDEN DE SALA* — ❌ NO se ganó este mes')
+    L.push('   La sala no quedó impecable todos los días: se cae para todo el equipo.')
+  } else if (p.sala > 0) {
+    L.push(`🤝 *BONO DE ORDEN DE SALA* — ✅ SÍ lo ganaste: ${_fmt$(p.sala)}`)
+    L.push('   La sala estuvo impecable el mes entero. 👏')
+  } else {
+    L.push('🤝 *BONO DE ORDEN DE SALA* — ❌ quedaste afuera')
+    L.push(`   La sala estuvo bien, pero tenés ${p.faltas} faltas en el mes (con más de 2 se pierde la parte).`)
+  }
+  L.push('')
+  L.push('━━━━━━━━━━━━')
+  L.push(`💵 *TOTAL A COBRAR: ${_fmt$(p.total + p.sala)}*`)
+  L.push(`Se paga aparte del sueldo, a mediados de ${_mesSiguienteTxt(c.mesStr)}.`)
+  L.push('')
+  L.push('Cualquier duda, escribime. 💛')
+  return L.join('\n')
+}
+
+// Número para wa.me: solo dígitos, con 549 adelante (Argentina, celular).
+function _telWa(raw) {
+  let t = String(raw || '').replace(/\D/g, '')
+  if (!t) return ''
+  if (t.startsWith('00')) t = t.slice(2)
+  if (t.startsWith('54')) {
+    let r = t.slice(2)
+    if (r.startsWith('0')) r = r.slice(1)
+    if (!r.startsWith('9')) r = '9' + r
+    return '54' + r
+  }
+  if (t.startsWith('0')) t = t.slice(1)
+  t = t.replace(/^(\d{2,4})15(\d{6,8})$/, '$1$2')   // 351 15 1234567 → 3511234567
+  return '549' + t
+}
+// El número que guardaste vos manda; si no hay, el que encontró el sistema en el padrón.
+window.telProfeCierre = function(profe) {
+  let guardado = ''
+  try { guardado = localStorage.getItem('pbTelProfe:' + profe) || '' } catch (e) { }
+  if (guardado) return guardado
+  return (window._TELS_EQUIPO && window._TELS_EQUIPO[profe]) || ''
+}
+// Busca los celulares del equipo en el padrón (es_equipo) y los machea por nombre.
+// Si un nombre matchea con más de uno, no adivina: lo deja vacío y lo cargás a mano.
+async function buscarTelsEquipo(nombres) {
+  window._TELS_EQUIPO = window._TELS_EQUIPO || {}
+  try {
+    const { data } = await supabase.from('personas').select('nombre, celular, telefono').eq('es_equipo', true)
+    const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    nombres.forEach(profe => {
+      const r = ROSTER_TF.find(x => x.calc === profe) || {}
+      const claves = [profe, r.corto, r.tarifa].filter(Boolean).map(norm)
+      const matches = (data || []).filter(p => claves.some(k => norm(p.nombre).split(/\s+/).includes(k)))
+      if (matches.length === 1) {
+        const t = _telWa(matches[0].celular || matches[0].telefono || '')
+        if (t) window._TELS_EQUIPO[profe] = t
+      }
+    })
+  } catch (e) { /* sin padrón: se manda eligiendo el contacto a mano */ }
+}
+
+window.verTextoProfe = function(i) {
+  const box = document.getElementById('wa-box-' + i)
+  if (box) box.style.display = (box.style.display === 'none') ? '' : 'none'
+}
+window.copiarTextoProfe = async function(i, btn) {
+  const ta = document.getElementById('wa-txt-' + i)
+  if (!ta) return
+  try {
+    await navigator.clipboard.writeText(ta.value)
+    const o = btn.textContent; btn.textContent = '✓ Copiado'
+    setTimeout(() => { btn.textContent = o }, 1500)
+  } catch (e) { ta.style.display = ''; ta.focus(); ta.select() }
+}
+window.enviarWaProfe = function(i) {
+  const ta = document.getElementById('wa-txt-' + i)
+  const p = (window._CIERRE_ACTUAL && window._CIERRE_ACTUAL.profes[i]) || null
+  if (!ta || !p) return
+  const tel = window.telProfeCierre(p.profe)
+  window.open('https://wa.me/' + tel + '?text=' + encodeURIComponent(ta.value), '_blank')
+}
+window.editarTelProfe = function(i, profe) {
+  const actual = window.telProfeCierre(profe)
+  const v = prompt('Número de WhatsApp de ' + profe + ' (con código de área, ej: 351 555 1234):', actual)
+  if (v === null) return
+  const t = _telWa(v)
+  try { localStorage.setItem('pbTelProfe:' + profe, t) } catch (e) { }
+  const el = document.getElementById('wa-tel-' + i)
+  if (el) el.textContent = t ? '📱 ' + t : '📱 sin número'
+}
+
 window.abrirCierreBonos = async function() {
   const c = recopilarCierreBonos()
   const texto = textoWhatsappCierre(c)
+  // Un mensaje propio para cada uno + los celulares del padrón (si se pueden identificar)
+  c.profes.forEach(p => { p.texto = textoWhatsappProfe(c, p) })
+  await buscarTelsEquipo(c.profes.map(p => p.profe))
   window._CIERRE_ACTUAL = Object.assign({}, c, { texto })
+  const filasIndiv = c.profes.map((p, i) => {
+    const tel = window.telProfeCierre(p.profe)
+    const txtEsc = (p.texto || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    return `
+    <div style="border:1px solid #e2e8f0; border-radius:10px; padding:10px 12px; margin-bottom:8px; background:#fff;">
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <span style="flex:1; min-width:150px; font-size:13px;">👤 <b>${p.profe}</b> · <b style="color:#16a34a;">${_fmt$(p.total + p.sala)}</b>
+          <span style="font-size:11px; color:var(--text-dim);">(bono ${_fmt$(p.montoBono)}${p.hsExtra > 0 ? ' · ⏰ ' + _fmt$(p.extra) : ''}${p.sala > 0 ? ' · 🤝 ' + _fmt$(p.sala) : ''})</span>
+          <span id="wa-tel-${i}" style="font-size:11px; color:${tel ? '#16a34a' : '#b45309'}; margin-left:4px;">${tel ? '📱 ' + tel : '📱 sin número'}</span>
+        </span>
+        <button onclick="verTextoProfe(${i})" style="border:1px solid #cbd5e1; background:#fff; border-radius:7px; padding:4px 10px; cursor:pointer; font-size:12px;">👁 Ver</button>
+        <button onclick="copiarTextoProfe(${i}, this)" style="border:1px solid #16a34a; color:#16a34a; background:#fff; border-radius:7px; padding:4px 10px; cursor:pointer; font-size:12px;">📋 Copiar</button>
+        <button onclick="enviarWaProfe(${i})" style="border:none; background:#25D366; color:#fff; border-radius:7px; padding:5px 12px; cursor:pointer; font-weight:700; font-size:12px;">💬 Enviar</button>
+        <button onclick="editarTelProfe(${i}, '${p.profe}')" title="Cargar o corregir el número" style="border:1px solid #cbd5e1; background:#fff; border-radius:7px; padding:4px 8px; cursor:pointer; font-size:12px;">✏️</button>
+      </div>
+      <div id="wa-box-${i}" style="display:none; margin-top:8px;">
+        <textarea id="wa-txt-${i}" style="width:100%; height:230px; font-size:12px; padding:9px; border:1px solid #cbd5e1; border-radius:9px; font-family:inherit; resize:vertical;">${txtEsc}</textarea>
+        <div style="font-size:11px; color:var(--text-dim); margin-top:3px;">Podés editarlo antes de mandarlo: se envía lo que quede acá.</div>
+      </div>
+    </div>`
+  }).join('')
   const filas = c.profes.map(p => `
     <tr style="border-bottom:1px solid #eef0f3;">
       <td style="padding:7px 6px; font-weight:700;">${p.profe}</td>
@@ -6581,6 +6876,11 @@ window.abrirCierreBonos = async function() {
             <button onclick="guardarCierreBonos()" id="cierre-guardar-btn" style="border:none; background:#1e9fe0; color:#fff; border-radius:8px; padding:9px 16px; cursor:pointer; font-weight:800; font-size:13px;">🔒 Cerrar mes y guardar en histórico</button>
           </div>
           <div id="cierre-status" style="font-size:12px; margin-top:8px;"></div>
+        </div>
+        <div style="margin-top:18px; padding-top:14px; border-top:1px solid #eef0f3;">
+          <div style="font-size:13px; font-weight:700; margin-bottom:4px;">📲 Mandarle a cada uno lo suyo</div>
+          <div style="font-size:11.5px; color:var(--text-dim); margin-bottom:10px;">Cada mensaje trae solo los números de esa persona, con el bono, las horas extra y el bono de sala separados. La primera vez cargá el número con ✏️ (queda guardado en esta compu); si no hay número, WhatsApp te va a pedir el contacto.</div>
+          ${filasIndiv}
         </div>
         <div style="margin-top:18px; padding-top:14px; border-top:1px solid #eef0f3;">
           <div style="font-size:13px; font-weight:700; margin-bottom:8px;">🗂 Cierres guardados</div>
@@ -6765,7 +7065,7 @@ window.abrirReglasBono = function() {
           ${fila('4,5 a 4,9 /h', '🚀 CRECIMIENTO · 20% del sueldo', '#0c7bb8')}
           ${fila('5,0 /h o más', '🏆 EXCELENCIA · 30% del sueldo', '#16a34a')}
         </table>
-        <p style="margin:0 0 10px;"><b>3 · 🌟 Bono Estrella:</b> el profe que <b>más mejoró su promedio</b> respecto al mes anterior suma un <b>10% extra</b>. No es para el que mejor está, es para el que más se esforzó — el que más remó desde donde venía. Le da chance a todos, sin importar el punto de partida. <b>Junio es el mes base</b> (no se compara con nada todavía); la primera estrella se mide en <b>julio comparando contra junio</b>, y se cobra en <b>agosto</b>. Condición: 70% de horas dadas.</p>
+        <p style="margin:0 0 10px;"><b>3 · 🌟 Bono Estrella:</b> el profe que <b>más mejoró su promedio</b> respecto al mes anterior suma un <b>10% extra</b>. No es para el que mejor está, es para el que más se esforzó — el que más remó desde donde venía. Le da chance a todos, sin importar el punto de partida. <b>La marca el sistema solo</b> al comparar los dos meses: no la decide nadie a dedo. <b>Junio es el mes base</b> (no se compara con nada todavía); la primera estrella se mide en <b>julio comparando contra junio</b>, y se cobra en <b>agosto</b>. Condición: 70% de horas dadas.</p>
         <p style="margin:0 0 10px;"><b>4 · Feriados:</b> no cuentan, el sistema los descuenta solo.</p>
         <p style="margin:0 0 10px;"><b>5 · Coberturas, cambios y faltas:</b> se cargan en el módulo <b>Coberturas y faltas</b>. En clases normales (nadie falta) <b>cada alumno es 100% de quien lo evolucionó</b> — no se reparte nada. El reparto o la atribución especial <b>solo aplica</b> cuando hay falta, cambio o cobertura, según los casos de acá abajo 👇</p>
         <p style="margin:0 0 10px; background:#ecfdf5; border:1px solid #6ee7b7; border-radius:8px; padding:10px 12px;"><b>🔑 Cuándo paga bono el centro:</b> el centro paga bono de cobertura <b>SOLO</b> cuando <b>NO se devuelven las horas</b> (una falta cubierta) o en <b>vacaciones</b>. Si <b>se devuelven las horas</b> (cambio / favor entre ellos), <b>no se paga ningún bono</b> — es un arreglo entre los profes, no lo paga el centro.</p>
