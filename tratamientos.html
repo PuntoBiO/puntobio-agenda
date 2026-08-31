@@ -2069,17 +2069,23 @@ function toggleObraSocial(modalidadSelId, fieldId) {
 // directo con la tabla, así que el match es directo.
 async function buscarPrecioTarifario(practicaCodigo, modalidad, obraSocial) {
   try {
-    let q = sb.from('tarifario_precios_vigente').select('valor_vigente')
+    let q = sb.from('tarifario_precios_vigente')
+      .select('valor_vigente, vigente_desde, vigente_hasta')
       .eq('practica_codigo', practicaCodigo)
     if (modalidad === 'OBRA_SOCIAL' && obraSocial) {
       q = q.eq('modalidad', 'O.S').eq('obra_social', obraSocial)
     } else {
       q = q.eq('modalidad', 'Particular')
     }
-    const { data, error } = await q
+    // Si hay varias filas para la misma combinación (históricos con fecha de
+    // baja), sin ORDER BY la base puede devolver cualquiera. Se pide la más
+    // reciente y se descartan las que ya vencieron — igual que en las agendas.
+    const { data, error } = await q.order('vigente_desde', { ascending: false })
     if (error) { console.warn('No se pudo buscar tarifario:', error.message); return null }
     if (!data || data.length === 0) return null
-    return data[0].valor_vigente   // precio que va hoy (fuente única en la base)
+    const hoy = new Date().toISOString().slice(0, 10)
+    const vigente = data.find(r => !r.vigente_hasta || r.vigente_hasta >= hoy) || data[0]
+    return vigente.valor_vigente   // precio que va hoy (fuente única en la base)
   } catch (e) {
     console.warn('Error buscando tarifario:', e)
     return null
