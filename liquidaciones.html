@@ -322,6 +322,13 @@ function mapaProfPorTratamiento(sesAll){
 // BONIF_CENTRO = el centro regala SU parte: el paciente paga solo lo del
 // profesional, asi que TODO lo cobrado es del profesional y el centro se lleva $0.
 // (solo aplica a los que cobran porcentaje; para Lu/Jime no tiene sentido)
+// Regalo del modelo nuevo: el masaje real con tipo de cobro de regalo.
+// No lo paga el paciente, así que no entra por los pagos: va al bloque de regalos.
+function esRegaloNuevo(p){
+  const t = p.tratamientos || {};
+  return ['REGALO_CUMPLE','REGALO_CENTRO'].includes(String(t.tipo_cobro || '').toUpperCase());
+}
+
 function esBonifCentro(p){
   const t = p.tratamientos || {};
   return String(t.tipo_cobro || p.tipo_cobro || '').toUpperCase() === 'BONIF_CENTRO';
@@ -643,11 +650,15 @@ async function cargar(){
   // PB le debe al profesional.
   let regalosMes = [];
   try {
+    // Los regalos se reconocen por DOS caminos, porque conviven dos modelos:
+    //  · viejo: eran una PRÁCTICA (MASAJES_R)
+    //  · nuevo (30/08/26): son una forma de COBRAR (REGALO_CUMPLE / REGALO_CENTRO)
+    //    sobre el masaje real, así no se pierde qué masaje se hizo.
     let qR = sb.from('sesiones')
-      .select('fecha, profesional, monto_profesional, tratamiento_id, tratamientos!inner(codigo_id, practica_codigo, personas(nombre))')
+      .select('fecha, profesional, monto_profesional, tratamiento_id, tratamientos!inner(codigo_id, practica_codigo, tipo_cobro, personas(nombre))')
       .gte('fecha', desde)
       .lte('fecha', hasta)
-      .eq('tratamientos.practica_codigo', 'MASAJES_R')
+      .or('practica_codigo.eq.MASAJES_R,tipo_cobro.in.(REGALO_CUMPLE,REGALO_CENTRO)', { foreignTable: 'tratamientos' })
       .order('fecha');
     if (filtroProf && window._soloLoMioLiq) qR = qR.ilike('profesional', '%' + filtroProf + '%');
     const { data: regData } = await qR;
@@ -655,6 +666,14 @@ async function cargar(){
   } catch (e) {
     console.warn('No se pudieron cargar los masajes de regalo:', e.message);
   }
+  // Un REGALO, por definición, no tiene pago del paciente. Si aparece uno con plata
+  // cobrada, es que está mal clasificado: se estaría contando dos veces (el profesional
+  // se queda con lo que cobró Y además PuntoBiO le debe lo mismo otra vez).
+  // No se descuenta solo: se marca para que se corrija el tratamiento.
+  const tratConPago = new Set((dataCruda || [])
+    .filter(p => (Number(p.importe) || 0) > 0.5)
+    .map(p => p.tratamiento_id).filter(x => x != null));
+  regalosMes = (regalosMes || []).map(s => ({ ...s, tienePago: tratConPago.has(s.tratamiento_id) }));
   window._regalosMes = regalosMes;
 
   // ===== MOTOR "TRABAJADO Y ABONADO" =====
@@ -915,6 +934,7 @@ function vistaNueva(ctx){
   for (const p of pagos){
     const pc = String((p.tratamientos || {}).practica_codigo || '');
     if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
+    if (esRegaloNuevo(p)) continue;   // regalo: no lo paga el paciente, va en su bloque
     const imp = Number(p.importe) || 0; if (imp <= 0.5) continue;
     const prof = profDeMaso(p, profMasoNv);
     const cobraPct = ['Bruno','Male','Vero'].includes(prof);
@@ -1287,6 +1307,7 @@ function render(pagos, sesiones, filtroProf){
   for (const p of pagos){
     const pc = String((p.tratamientos || {}).practica_codigo || '');
     if (!pc.startsWith('MASAJES') || pc === 'MASAJES_R' || pc === 'MASAJES_CERO') continue;
+    if (esRegaloNuevo(p)) continue;   // regalo: no lo paga el paciente, va en su bloque
     const imp = Number(p.importe) || 0;
     if (imp <= 0.5) continue;
     const prof = profDeMaso(p, profMaso);
@@ -1863,12 +1884,14 @@ function render(pagos, sesiones, filtroProf){
   const regalosVista = (window._regalosMes || []).filter(s => !filtroProf || normProf(s.profesional) === filtroProf);
   const regPorProf = {}; const regCantProf = {}; let totalRegalos = 0;
   for (const s of regalosVista){
+    if (s.tienePago) continue;   // mal clasificado: no se suma dos veces
     const pr = normProf(s.profesional) || 'Vero';
     const m = Number(s.monto_profesional) || 0;
     regPorProf[pr] = (regPorProf[pr] || 0) + m;
     regCantProf[pr] = (regCantProf[pr] || 0) + 1;
     totalRegalos += m;
   }
+  const regalosConPago = regalosVista.filter(s => s.tienePago);
   const hayRegalos = totalRegalos > 0.5;
 
   // ===== DESGLOSE DE LO RECIBIDO EN MANO: ¿de quien es esa plata? =====
@@ -1999,15 +2022,29 @@ function render(pagos, sesiones, filtroProf){
     html += `<h2 class="bloque-tit">🎁 Masajes de regalo (cumpleaños)</h2>
       <p style="color:#666;font-size:13px;margin:-6px 0 12px;">El paciente no pagó nada (cortesía del centro), así que estos montos <b>no figuran en los pagos de arriba</b>: PuntoBiO se los paga al profesional aparte. Ya están sumados en "Cobros a devolver".</p>`;
     html += `<table style="margin-bottom:8px;"><thead><tr>
-        <th>Fecha</th><th>Paciente</th><th>Cupón</th><th>Profesional</th><th class="num">Para el profesional</th>
+        <th>Fecha</th><th>Paciente</th><th>Cupón</th><th>Masaje</th><th>Profesional</th><th class="num">Para el profesional</th>
       </tr></thead><tbody>`;
     for (const s of regalosVista){
       const t = s.tratamientos || {};
       const nom = (t.personas && t.personas.nombre) || '—';
-      html += `<tr><td>${s.fecha}</td><td>${nom}</td><td style="font-family:monospace;">${t.codigo_id || '—'}</td><td>${badge(normProf(s.profesional) || 'Vero')}</td><td class="num">${fmt(Number(s.monto_profesional)||0)}</td></tr>`;
+      const chip = s.tienePago
+        ? ` <span title="Este tratamiento está cargado como masaje de regalo, pero el paciente pagó. Un regalo no lleva pago: hay que corregir el tratamiento." style="padding:1px 6px;border-radius:4px;background:#fee2e2;color:#991b1b;font-size:10px;font-weight:700;white-space:nowrap;">⚠ TIENE PAGO</span>`
+        : '';
+      const gris = s.tienePago ? ' style="opacity:.55;text-decoration:line-through;"' : '';
+      const cual = String(t.tipo_cobro || '').toUpperCase() === 'REGALO_CUMPLE' ? '🎂 cumpleaños'
+                 : String(t.tipo_cobro || '').toUpperCase() === 'REGALO_CENTRO' ? '🎁 del centro' : '';
+      const queMasaje = practicaLabel(t.practica_codigo || '');
+      html += `<tr><td>${s.fecha}</td><td>${nom}${chip}</td><td style="font-family:monospace;">${t.codigo_id || '—'}</td><td>${queMasaje}${cual ? ` <span style="color:var(--text-dim,#78716c);font-size:11px;">· ${cual}</span>` : ''}</td><td>${badge(normProf(s.profesional) || 'Vero')}</td><td class="num"${gris}>${fmt(Number(s.monto_profesional)||0)}</td></tr>`;
     }
-    html += `<tr style="font-weight:700;background:#fce7f3;color:#9d174d;"><td colspan="4">TOTAL regalos (lo asume PuntoBiO)</td><td class="num">${fmt(totalRegalos)}</td></tr>`;
+    html += `<tr style="font-weight:700;background:#fce7f3;color:#9d174d;"><td colspan="5">TOTAL regalos (lo asume PuntoBiO)</td><td class="num">${fmt(totalRegalos)}</td></tr>`;
     html += `</tbody></table>`;
+    if (regalosConPago.length){
+      html += `<div style="margin:-2px 0 14px;font-size:12.5px;color:#991b1b;background:#fee2e2;border-radius:8px;padding:10px 12px;">` +
+        `⚠ <b>${regalosConPago.length} de estos NO son regalos: el paciente pagó.</b> ` +
+        regalosConPago.map(s => { const t = s.tratamientos || {}; return `${(t.personas && t.personas.nombre) || '—'} (${s.fecha})`; }).join(' · ') +
+        `<br>Un regalo no lleva pago del paciente. Quedaron tachados y <b>fuera del total</b>, porque si no se contarían dos veces: el profesional se queda con lo que cobró y encima PuntoBiO le debería lo mismo otra vez. ` +
+        `Si lo que se quiso hacer es que el paciente pague solo la parte del profesional, el tratamiento va como masaje normal con tipo de cobro <b>Bonificación del centro</b>.</div>`;
+    }
   }
 
   // ===== SALIDA (23/08/2026): la liquidación de siempre es la pantalla, sin plegar =====
