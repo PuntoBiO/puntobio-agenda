@@ -1709,6 +1709,18 @@ function renderHCDetail(hc, persona) {
         ${field('DNI', txt(hc.dni))}
         ${field('Celular', txt(persona?.celular))}
         ${field('Mail', txt(persona?.mail))}
+        ${field('Profesión', txt(persona?.profesion))}
+      </div>
+    </div>
+
+    <!-- MEDIDAS -->
+    <div class="hc-section">
+      <div class="hc-section-header">📏 Medidas</div>
+      <div class="hc-section-body">
+        ${field('Peso', hc.peso ? `<span class="hc-field-value">${hc.peso} kg</span>` : '<span class="hc-field-value empty">—</span>')}
+        ${field('Altura', hc.altura ? `<span class="hc-field-value">${hc.altura} ${Number(hc.altura) < 3 ? 'm' : 'cm'}</span>` : '<span class="hc-field-value empty">—</span>')}
+        ${field('Número de calzado', txt(hc.numero_calzado))}
+        ${field('% de grasa corporal', hc.grasa_corporal ? `<span class="hc-field-value">${hc.grasa_corporal} %</span>` : '<span class="hc-field-value empty">—</span>')}
       </div>
     </div>
 
@@ -2705,7 +2717,8 @@ function abrirFormularioPaciente() {
 
     <div class="hc-section"><div class="hc-section-header">👤 Datos del paciente</div><div class="hc-section-body">
       ${campo('Fecha de nacimiento', `<input type="date" id="f_fecha_nacimiento" class="form-input" value="${persona && persona.fecha_nacimiento ? String(persona.fecha_nacimiento).slice(0,10) : ''}">`)}
-      <div style="font-size:12px; color:var(--gris-texto); margin-top:-6px;">Corregila acá si el paciente la cargó mal. Se guarda en la ficha de la persona.</div>
+      ${campo('Profesión / ocupación', txtIn('f_profesion', persona?.profesion, 'Ej: docente, albañil, administrativa…'))}
+      <div style="font-size:12px; color:var(--gris-texto); margin-top:-6px;">Se guardan en la ficha de la persona, no en esta historia clínica.</div>
     </div></div>
 
     <div class="hc-section"><div class="hc-section-header">🎯 Motivo de consulta</div><div class="hc-section-body">
@@ -2780,6 +2793,7 @@ function abrirFormularioPaciente() {
     <div class="hc-section"><div class="hc-section-header">📏 Medidas (Anamnesis nutricional)</div><div class="hc-section-body">
       ${campo('Peso (kg)', txtIn('f_peso', hc.peso, 'Ej: 72,5'))}
       ${campo('Altura (cm)', txtIn('f_altura', hc.altura, 'Ej: 168'))}
+      ${campo('Número de calzado', txtIn('f_numero_calzado', hc.numero_calzado, 'Ej: 39 · 40/41 · 8,5 US'))}
       ${campo('% de grasa corporal (lo mide el centro)', txtIn('f_grasa_corporal', hc.grasa_corporal, 'Ej: 28,5'))}
     </div></div>
 
@@ -2896,6 +2910,7 @@ async function guardarFormularioPaciente() {
       objetivo_funcional: txtVal('f_objetivo_funcional'),
       peso: numFlex('f_peso'),
       altura: numFlex('f_altura'),
+      numero_calzado: txtVal('f_numero_calzado'),
       grasa_corporal: numFlex('f_grasa_corporal'),
       consentimiento_atencion: radioVal('f_consent_atencion'),
       consentimiento_atencion_nombre: txtVal('f_consent_atencion_nombre'),
@@ -2908,15 +2923,19 @@ async function guardarFormularioPaciente() {
     const { error } = await sb.from('historias_clinicas').update(datos).eq('id', currentHCId);
     if (error) throw error;
 
-    // La fecha de nacimiento vive en la tabla de personas: la guardamos aparte.
-    // Solo si se cargó un valor (para no borrar por accidente la que ya estaba).
+    // La fecha de nacimiento y la profesión viven en la tabla de personas: las guardamos aparte.
+    // Solo si se cargó un valor (para no borrar por accidente lo que ya estaba).
     const fNac = (document.getElementById('f_fecha_nacimiento')?.value || '').trim() || null;
+    const prof = (document.getElementById('f_profesion')?.value || '').trim() || null;
     const hcRow = allHCs.find(h => h.id === currentHCId);
-    if (fNac && hcRow && hcRow.persona_id) {
-      const { error: ePer } = await sb.from('personas').update({ fecha_nacimiento: fNac }).eq('id', hcRow.persona_id);
+    if ((fNac || prof) && hcRow && hcRow.persona_id) {
+      const datosPersona = {};
+      if (fNac) datosPersona.fecha_nacimiento = fNac;
+      if (prof) datosPersona.profesion = prof;
+      const { error: ePer } = await sb.from('personas').update(datosPersona).eq('id', hcRow.persona_id);
       if (ePer) throw ePer;
       const pidx = allPersonas.findIndex(p => p.id === hcRow.persona_id);
-      if (pidx >= 0) allPersonas[pidx].fecha_nacimiento = fNac;
+      if (pidx >= 0) Object.assign(allPersonas[pidx], datosPersona);
     }
 
     // Actualizar el estado local
@@ -3438,6 +3457,11 @@ async function generarPDF(conWhatsApp = false) {
     persona?.mail ? `Mail: ${persona.mail}` : null
   ].filter(Boolean).join('   ·   ');
   if (datosLinea) { doc.text(datosLinea, MARGIN, y); y += 14; }
+  const datosLinea2 = [
+    persona?.profesion ? `Profesión: ${persona.profesion}` : null,
+    hc.numero_calzado ? `N° de calzado: ${hc.numero_calzado}` : null
+  ].filter(Boolean).join('   ·   ');
+  if (datosLinea2) { doc.text(datosLinea2, MARGIN, y); y += 14; }
   doc.text(`Historia cargada el ${formatDate(hc.completado_en)}`, MARGIN, y);
   y += 24;
 
