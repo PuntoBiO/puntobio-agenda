@@ -413,6 +413,14 @@ tbody tr:last-child td { border-bottom: 0; }
         <select id="nuevo-practica" class="form-select"></select>
       </div>
 
+      <div class="form-field" id="nuevo-formato-field" style="display:none;">
+        <label class="form-label">Formato</label>
+        <select id="nuevo-formato" class="form-select">
+          <option value="INDIVIDUAL">Sesión individual</option>
+          <option value="PACK">Pack de 4 sesiones</option>
+        </select>
+      </div>
+
       <div class="form-field span-2" id="nuevo-eval-moplex-field" style="display:none;">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;">
           <input type="checkbox" id="chk-eval-con-moplex" onchange="toggleEvalConMoplex()" style="width:15px;height:15px;cursor:pointer;">
@@ -467,6 +475,8 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="MANUAL">Manual (monto libre)</option>
           <option value="SOLO_COSEGURO">Solo coseguro</option>
           <option value="BONIF_CENTRO">Bonificación del centro</option>
+          <option value="REGALO_CUMPLE">Regalo de cumpleaños</option>
+          <option value="REGALO_CENTRO">Regalo del centro (otros)</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
         <div id="nuevo-cobro-previa" class="cobro-previa"></div>
@@ -589,6 +599,8 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="MANUAL">Manual (monto libre)</option>
           <option value="SOLO_COSEGURO">Solo coseguro</option>
           <option value="BONIF_CENTRO">Bonificación del centro</option>
+          <option value="REGALO_CUMPLE">Regalo de cumpleaños</option>
+          <option value="REGALO_CENTRO">Regalo del centro (otros)</option>
           <option value="CORTESIA">Cortesía</option>
         </select>
         <div id="ed-cobro-previa" class="cobro-previa"></div>
@@ -661,9 +673,14 @@ const PRACTICAS = [
   { codigo: 'MASAJES_C',     label: 'Masaje Clásico',              area: 'masoterapia', obsoleto: true },
   { codigo: 'MASAJES_CC',    label: 'Masaje Cuerpo Completo',      area: 'masoterapia' },
   { codigo: 'MASAJES_EYC',   label: 'Masaje E y C',                area: 'masoterapia' },
-  { codigo: 'MASAJES_PAK',   label: 'Masaje Paquete',              area: 'masoterapia' },
-  { codigo: 'MASAJES_R',     label: 'Masaje Regalo',               area: 'masoterapia' },
-  { codigo: 'MASAJES_CERO',  label: 'Masaje Cortesía',             area: 'masoterapia' },
+  // Estas tres dejaron de ser PRÁCTICAS (30/08/26). Una práctica es qué masaje se
+  // hizo (EyC o Cuerpo Completo); el pack es un FORMATO y el regalo/cortesía son
+  // formas de COBRAR. Siguen acá para que los tratamientos viejos se vean bien,
+  // y MASAJES_PAK se sigue guardando por debajo cuando el formato es Pack (así el
+  // tarifario, el trigger y Liquidaciones no cambian).
+  { codigo: 'MASAJES_PAK',   label: 'Masaje E y C · Pack de 4',    area: 'masoterapia', obsoleto: true },
+  { codigo: 'MASAJES_R',     label: 'Masaje Regalo',               area: 'masoterapia', obsoleto: true },
+  { codigo: 'MASAJES_CERO',  label: 'Masaje Cortesía',             area: 'masoterapia', obsoleto: true },
   { codigo: 'EVAL',          label: 'Evaluación de Ingreso',       area: 'biolab' },
   { codigo: 'EVALDEP',       label: 'Evaluación Deportiva',        area: 'biolab' },
   { codigo: 'MOPLEX',        label: 'MOPLEX',                      area: 'biolab' },
@@ -1730,6 +1747,40 @@ window.elegirPaciente = function(id, nombre) {
   renderPickerPaciente()
 }
 
+// El FORMATO (individual o pack) solo tiene sentido en masajes, y el pack es
+// siempre Espalda y Cuello. Por debajo el pack se sigue guardando como la
+// práctica MASAJES_PAK: así el tarifario, el trigger y Liquidaciones no cambian.
+function esMasajeIndividual(cod){ return cod === 'MASAJES_EYC' || cod === 'MASAJES_CC' }
+
+function toggleFormatoMaso(){
+  const cod = $('nuevo-practica')?.value
+  const box = $('nuevo-formato-field')
+  if (!box) return
+  const aplica = cod === 'MASAJES_EYC'
+  box.style.display = aplica ? '' : 'none'
+  if (!aplica && $('nuevo-formato')) $('nuevo-formato').value = 'INDIVIDUAL'
+  sincronizarSesionesFormato()
+}
+
+// El pack son 4 sesiones; la individual, 1.
+function sincronizarSesionesFormato(){
+  const cod = $('nuevo-practica')?.value
+  const fmt = $('nuevo-formato')?.value
+  const inp = $('nuevo-sesiones')
+  if (!inp) return
+  if (cod === 'MASAJES_EYC' && fmt === 'PACK') inp.value = 4
+  else if (esMasajeIndividual(cod)) inp.value = 1
+  recalcularTotal()
+}
+
+// La práctica que se GUARDA: si el formato es pack, va MASAJES_PAK.
+function practicaAGuardar(){
+  const cod = $('nuevo-practica')?.value
+  const fmt = $('nuevo-formato')?.value
+  if (cod === 'MASAJES_EYC' && fmt === 'PACK') return 'MASAJES_PAK'
+  return cod
+}
+
 function poblarPracticasSelect() {
   const area = $('nuevo-area').value
   const select = $('nuevo-practica')
@@ -1740,6 +1791,7 @@ function poblarPracticasSelect() {
     `<option value="${p.codigo}">${p.label}</option>`
   ).join('')
   toggleMoplexConsulta()
+  toggleFormatoMaso()
 }
 
 // ===== MOPLEX: sub-selector de tipo de baropodometría (fija el valor del eval) =====
@@ -1851,7 +1903,7 @@ window.crearTratamiento = async function() {
   const modalidad   = $('nuevo-modalidad').value
   // Solo guardamos obra social si la modalidad es Obra Social
   const obraSocial  = (modalidad === 'OBRA_SOCIAL') ? ($('nuevo-obra').value || null) : null
-  const practicaCod = $('nuevo-practica').value
+  const practicaCod = practicaAGuardar()   // el pack se guarda como MASAJES_PAK
 
   // Generar codigo_id: PREFIJO + AÑO MES DÍA HORA MIN (ej: FISIO202605200133)
   const pad = (n) => String(n).padStart(2, '0')
@@ -2025,10 +2077,43 @@ async function buscarPrecioTarifario(practicaCodigo, modalidad, obraSocial) {
 }
 
 // Auto-completa el valor por sesión del formulario de ALTA
+// Qué se lleva el profesional de un masaje, según cómo se cobre.
+// Los números salen SIEMPRE del tarifario, nunca escritos acá: el día que
+// cambien los precios los toca Pau desde Precios y esto sigue andando.
+const PCT_PROF_MASO = 0.65
+
+async function precioMasoSegunCobro(codPractica, tipoCobro){
+  // El regalo de CUMPLEAÑOS tiene un valor fijo propio, que no depende del masaje
+  if (tipoCobro === 'REGALO_CUMPLE'){
+    return await buscarPrecioTarifario('MASAJES_R', 'PARTICULAR', '')
+  }
+  const lista = await buscarPrecioTarifario(codPractica, 'PARTICULAR', '')
+  if (lista === null || lista === undefined) return null
+  // Bonificación y regalo del centro: el profesional se lleva su 65% del masaje
+  if (tipoCobro === 'BONIF_CENTRO' || tipoCobro === 'REGALO_CENTRO'){
+    return Math.round(lista * PCT_PROF_MASO)
+  }
+  return lista
+}
+
 async function autocompletarPrecioNuevo() {
   const tipoCobro = $('nuevo-tipo-cobro')?.value
   // Si es manual o cortesía, no pisar el valor (el usuario lo carga a mano)
   if (tipoCobro === 'MANUAL' || tipoCobro === 'CORTESIA') return
+  // MASAJES: el valor sale de la práctica + el formato + cómo se cobra
+  const practicaM = practicaAGuardar()
+  if (String(practicaM || '').startsWith('MASAJES')) {
+    const val = await precioMasoSegunCobro(practicaM, tipoCobro)
+    if (val !== null && val !== undefined) {
+      // En el pack, el precio del tarifario es el TOTAL de las 4 sesiones:
+      // cada sesión vale la cuarta parte, para que se estampe bien.
+      const ses = Number($('nuevo-sesiones')?.value) || 1
+      const esPack = practicaM === 'MASAJES_PAK'
+      $('nuevo-valor-sesion').value = esPack && ses > 1 ? Math.round(val / ses) : val
+      recalcularTotal()
+    }
+    return
+  }
   // Bonificación del centro: en biolab (reparto 50/50) el valor a cobrar es la
   // MITAD del precio de lista; en otras áreas el reparto varía → se carga a mano.
   if (tipoCobro === 'BONIF_CENTRO') {
@@ -2042,6 +2127,8 @@ async function autocompletarPrecioNuevo() {
     }
     return
   }
+  // Los regalos fuera de masajes no autocompletan: se carga el valor a mano
+  if (tipoCobro === 'REGALO_CUMPLE' || tipoCobro === 'REGALO_CENTRO') return
   // MOPLEX: el valor del eval sale del sub-selector (catálogo), no del tarifario
   if (esMoplexNuevo()) { onMoplexConsultaChange(); return }
   const practica = $('nuevo-practica')?.value
@@ -2104,7 +2191,15 @@ const PREVIA_COBRO = {
   },
   BONIF_CENTRO: {
     cls: 'is-cortesia',
-    html: '🎗️ <b>Bonificación del centro:</b> PuntoBiO bonifica SU parte. Se cobra solo la parte del profesional y el 100% de lo cobrado es del profesional (Centro $0). En BioLab (50/50) el valor se autocompleta a la mitad del tarifario; en otras áreas cargá el valor a mano. Ojo: al marcar la sesión, ajustar los montos desde Sesiones con el botón 🎗️ si la agenda la estampó repartida.'
+    html: '🎗️ <b>Bonificación del centro:</b> PuntoBiO bonifica SU parte. El paciente paga solo la parte del profesional y el 100% de lo cobrado es del profesional (Centro $0). El valor se autocompleta solo; el cobro se carga en la caja normal, por lo que abonó.'
+  },
+  REGALO_CUMPLE: {
+    cls: 'is-cortesia',
+    html: '🎂 <b>Regalo de cumpleaños:</b> el paciente NO paga nada y <b>no se carga ningún cobro en la caja</b>. El profesional igual cobra: lo pone PuntoBiO, con el valor fijo del regalo (sale del tarifario, no depende de qué masaje se hizo).'
+  },
+  REGALO_CENTRO: {
+    cls: 'is-cortesia',
+    html: '🎁 <b>Regalo del centro (otros):</b> el paciente NO paga nada y <b>no se carga ningún cobro en la caja</b>. El profesional cobra su 65% del masaje que se hizo, y lo pone PuntoBiO.'
   },
   MANUAL: {
     cls: 'is-manual',
@@ -2123,7 +2218,8 @@ function actualizarPreviaCobro(tipoCobroSelId, previaId) {
 
 $('nuevo-modalidad').addEventListener('change', () => { toggleObraSocial('nuevo-modalidad', 'nuevo-obra-field'); autocompletarPrecioNuevo() })
 $('ed-modalidad').addEventListener('change', () => { toggleObraSocial('ed-modalidad', 'ed-obra-field'); autocompletarPrecioEd() })
-$('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); toggleEvalConMoplexField(); autocompletarPrecioNuevo() })
+$('nuevo-practica').addEventListener('change', () => { toggleMoplexConsulta(); toggleEvalConMoplexField(); toggleFormatoMaso(); autocompletarPrecioNuevo() })
+$('nuevo-formato').addEventListener('change', () => { sincronizarSesionesFormato(); autocompletarPrecioNuevo() })
 $('nuevo-obra').addEventListener('change', autocompletarPrecioNuevo)
 $('ed-obra').addEventListener('change', autocompletarPrecioEd)
 const elTipoCobroN = $('nuevo-tipo-cobro'); if (elTipoCobroN) elTipoCobroN.addEventListener('change', () => { autocompletarPrecioNuevo(); actualizarPreviaCobro('nuevo-tipo-cobro', 'nuevo-cobro-previa') })
