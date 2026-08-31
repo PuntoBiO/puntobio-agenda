@@ -563,7 +563,12 @@ body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9f
               <option value="OBRA_SOCIAL">Obra Social</option>
             </select>
           </div>
-          <div><label class="form-label">Obra Social (si aplica)</label><input type="text" class="form-input" id="ct_obra_social" placeholder="—"></div>
+          <div>
+            <label class="form-label">Obra Social (si aplica)</label>
+            <select class="form-select" id="ct_obra_social_sel"><option value="">— Elegí la obra social —</option></select>
+            <input type="text" class="form-input" id="ct_obra_social" placeholder="Escribí el nombre" style="display:none;margin-top:6px;">
+            <div id="ct_os_hint" style="font-size:11px;color:var(--muted);margin-top:4px;"></div>
+          </div>
         </div>
         <div class="form-row">
           <label class="form-label">Tipo de cobro</label>
@@ -1481,6 +1486,57 @@ async function loadPersonas() {
   personas = data || [];
 }
 
+// Las obras sociales del desplegable salen del tarifario: así lo que se elige
+// siempre coincide exacto con lo que después se busca (antes se escribía a mano
+// y cualquier diferencia de mayúsculas dejaba el precio sin encontrar).
+async function cargarObrasSocialesDelTarifario(practica) {
+  const sel = document.getElementById('ct_obra_social_sel');
+  const hint = document.getElementById('ct_os_hint');
+  if (!sel) return;
+  const codigo = MAP_PRACTICA_TARIFARIO[practica] || practica;
+  sel.innerHTML = '<option value="">— Elegí la obra social —</option>';
+  try {
+    const { data, error } = await supa.from('tarifario_precios_vigente')
+      .select('obra_social, valor_vigente')
+      .eq('practica_codigo', codigo)
+      .eq('modalidad', 'O.S');
+    if (error) throw error;
+    const vistas = new Map();
+    for (const r of (data || [])) {
+      if (r.obra_social && !vistas.has(r.obra_social)) vistas.set(r.obra_social, r.valor_vigente);
+    }
+    const nombres = [...vistas.keys()].sort((a, b) => a.localeCompare(b, 'es'));
+    for (const n of nombres) {
+      sel.insertAdjacentHTML('beforeend', `<option value="${n}">${n} — $${Number(vistas.get(n) || 0).toLocaleString('es-AR')}</option>`);
+    }
+    sel.insertAdjacentHTML('beforeend', '<option value="__OTRA__">Otra (escribirla a mano)</option>');
+    if (hint) hint.textContent = nombres.length
+      ? ''
+      : 'No hay obras sociales con precio cargado para esta práctica. Elegí "Otra" y poné el valor a mano.';
+  } catch (e) {
+    console.warn('No se pudieron cargar las obras sociales:', e);
+    sel.insertAdjacentHTML('beforeend', '<option value="__OTRA__">Otra (escribirla a mano)</option>');
+  }
+}
+
+function toggleOtraObraSocial() {
+  const sel = document.getElementById('ct_obra_social_sel');
+  const inp = document.getElementById('ct_obra_social');
+  if (!sel || !inp) return;
+  const otra = sel.value === '__OTRA__';
+  inp.style.display = otra ? '' : 'none';
+  if (!otra) inp.value = '';
+}
+
+// Lo que se guarda: lo elegido en el desplegable, o lo escrito si es "Otra".
+function obraSocialElegida() {
+  const sel = document.getElementById('ct_obra_social_sel');
+  const inp = document.getElementById('ct_obra_social');
+  if (!sel) return (inp?.value || '').trim();
+  if (sel.value === '__OTRA__') return (inp?.value || '').trim();
+  return sel.value;
+}
+
 async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
   // Devuelve el valor más reciente vigente. Si falla la tabla, devuelve null sin romper.
   try {
@@ -1491,7 +1547,13 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
     } else {
       codigoTarifario = MAP_PRACTICA_TARIFARIO[practica] || practica;
     }
-    let q = supa.from('tarifario_precios').select('valor, vigente_desde, vigente_hasta').eq('practica_codigo', codigoTarifario);
+    // OJO: hay que leer la VISTA tarifario_precios_vigente, no la tabla cruda.
+    // La tabla guarda el valor viejo en `valor` y el aumento programado en
+    // `valor_nuevo` + `aumento_desde`; la vista resuelve cuál rige hoy. Leyendo
+    // la tabla se cobra el precio anterior aunque el aumento ya haya entrado.
+    let q = supa.from('tarifario_precios_vigente')
+      .select('valor_vigente, vigente_desde, vigente_hasta')
+      .eq('practica_codigo', codigoTarifario);
     if (modalidad === 'OBRA_SOCIAL' && obraSocial) {
       q = q.eq('modalidad', 'O.S').eq('obra_social', obraSocial);
     } else {
@@ -1502,7 +1564,7 @@ async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
     if (!data || data.length === 0) return null;
     const hoy = toISODate(new Date());   // fecha LOCAL (evita elegir tarifa vieja cerca de medianoche por UTC)
     const vigente = data.find(r => !r.vigente_hasta || r.vigente_hasta >= hoy) || data[0];
-    return vigente.valor;
+    return vigente.valor_vigente;
   } catch (e) {
     console.warn('Error buscando tarifario:', e);
     return null;
@@ -2226,13 +2288,32 @@ function initNuevoForm() {
     const tc = document.getElementById('ct_tipo_cobro')?.value;
     if (tc === 'MANUAL' || tc === 'CORTESIA') return;
     const modalidad = document.getElementById('ct_modalidad').value;
-    const obraSocial = document.getElementById('ct_obra_social').value.trim();
+    const obraSocial = obraSocialElegida();
+    const hint = document.getElementById('ct_os_hint');
+    if (modalidad === 'OBRA_SOCIAL' && !obraSocial) {
+      if (hint) hint.textContent = 'Elegí la obra social para traer el coseguro.';
+      return;
+    }
     const precio = await buscarPrecioTarifario(practica, modalidad, obraSocial);
     if (precio !== null && precio !== undefined) {
       document.getElementById('ct_valor_sesion').value = precio;
+      if (hint) hint.textContent = '';
+    } else {
+      // Nunca dejar el precio anterior: parece válido y es de otra cosa.
+      document.getElementById('ct_valor_sesion').value = '';
+      if (hint) hint.textContent = '⚠ No hay precio cargado para esa combinación. Poné el valor a mano o pedí que lo den de alta en Precios.';
     }
   };
-  document.getElementById('ct_modalidad').addEventListener('change', recalcPrecio);
+  document.getElementById('ct_modalidad').addEventListener('change', async () => {
+    await cargarObrasSocialesDelTarifario(document.getElementById('fNT_practica').value);
+    toggleOtraObraSocial();
+    recalcPrecio();
+  });
+  // Antes era 'blur': si no salías del campo, el precio no se recalculaba nunca.
+  document.getElementById('ct_obra_social_sel').addEventListener('change', () => {
+    toggleOtraObraSocial();
+    recalcPrecio();
+  });
   document.getElementById('ct_obra_social').addEventListener('blur', recalcPrecio);
   document.getElementById('ct_tipo_cobro').addEventListener('change', () => {
     actualizarPreviaCobro();
@@ -2293,6 +2374,10 @@ function resetForm() {
   document.getElementById('ct_valor_sesion').value = '';
   document.getElementById('ct_modalidad').value = 'PARTICULAR';
   document.getElementById('ct_obra_social').value = '';
+  const osSel = document.getElementById('ct_obra_social_sel');
+  if (osSel) { osSel.value = ''; toggleOtraObraSocial(); }
+  const ctHint = document.getElementById('ct_os_hint');
+  if (ctHint) ctHint.textContent = '';
   const tcSel = document.getElementById('ct_tipo_cobro');
   if (tcSel) { tcSel.value = 'NORMAL'; actualizarPreviaCobro(); }
   document.getElementById('ctAlert').innerHTML = '';
@@ -2388,7 +2473,15 @@ async function refrescarTratamientos(personaId, practica) {
         document.getElementById('ct_modalidad_wrap').style.display = '';
         if (obraSocial && obraSocial.trim() && obraSocial.toUpperCase() !== 'PARTICULAR') {
           document.getElementById('ct_modalidad').value = 'OBRA_SOCIAL';
-          document.getElementById('ct_obra_social').value = obraSocial;
+          await cargarObrasSocialesDelTarifario(practica);
+          const selOS = document.getElementById('ct_obra_social_sel');
+          if (selOS) {
+            // Buscamos la OS de la persona en la lista, sin importar mayúsculas
+            const match = [...selOS.options].find(o => o.value && o.value.toLowerCase() === obraSocial.toLowerCase());
+            if (match) { selOS.value = match.value; }
+            else { selOS.value = '__OTRA__'; document.getElementById('ct_obra_social').value = obraSocial; }
+            toggleOtraObraSocial();
+          }
         } else {
           document.getElementById('ct_modalidad').value = 'PARTICULAR';
           document.getElementById('ct_obra_social').value = '';
@@ -2485,7 +2578,7 @@ async function onCrearTratamiento() {
   const totalSes = parseInt(document.getElementById('ct_total_sesiones').value, 10);
   const valor = parseFloat(document.getElementById('ct_valor_sesion').value || '0');
   const modalidad = document.getElementById('ct_modalidad').value;
-  const obraSocial = document.getElementById('ct_obra_social').value.trim();
+  const obraSocial = obraSocialElegida();
   const tipoCobro = document.getElementById('ct_tipo_cobro')?.value || 'NORMAL';
   if (!totalSes || totalSes < 1) { document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Total de sesiones inválido.</div>`; return; }
   const btn = document.getElementById('ctCreate');
