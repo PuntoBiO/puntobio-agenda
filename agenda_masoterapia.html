@@ -385,9 +385,6 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
           <select class="form-select" id="ct_tipo_masaje">
             <option value="MASAJES_EYC">Espalda y Cuello (EyC)</option>
             <option value="MASAJES_CC">Cuerpo Completo (CC)</option>
-            <option value="MASAJES_PAK">Pack 4 masajes (Pak)</option>
-            <option value="MASAJES_R">Regalo (R)</option>
-            <option value="MASAJES_CERO">Sin cargo (C)</option>
           </select>
         </div>
         <div class="form-row row-flex">
@@ -404,6 +401,13 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
           </div>
           <div><label class="form-label">Obra Social (si aplica)</label><input type="text" class="form-input" id="ct_obra_social" placeholder="—"></div>
         </div>
+        <div class="form-row" id="ct_formato_wrap" style="display:none">
+          <label class="form-label">Formato</label>
+          <select class="form-select" id="ct_formato">
+            <option value="INDIVIDUAL">Sesión individual</option>
+            <option value="PACK">Pack de 4 sesiones</option>
+          </select>
+        </div>
         <div class="form-row">
           <label class="form-label">Tipo de cobro</label>
           <select class="form-select" id="ct_tipo_cobro">
@@ -411,6 +415,8 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
             <option value="MANUAL">Manual (monto libre)</option>
             <option value="SOLO_COSEGURO">Solo coseguro</option>
             <option value="BONIF_CENTRO">Bonificación del centro</option>
+            <option value="REGALO_CUMPLE">Regalo de cumpleaños</option>
+            <option value="REGALO_CENTRO">Regalo del centro (otros)</option>
             <option value="CORTESIA">Cortesía</option>
           </select>
           <div id="ct_cobro_previa" class="ct-cobro-previa" style="display:none"></div>
@@ -928,13 +934,21 @@ async function loadPersonas() {
   personas = data || [];
 }
 
+// Igual que buscarPrecioTarifario pero pidiendo el código exacto,
+// sin que lo pise el selector del formulario.
+async function buscarPrecioTarifarioCod(codigo) {
+  return await buscarPrecioTarifario(codigo, 'PARTICULAR', '');
+}
+
 async function buscarPrecioTarifario(practica, modalidad, obraSocial) {
   // Devuelve el valor más reciente vigente. Si falla la tabla, devuelve null sin romper.
   try {
     // Si es masaje, usar el tipo elegido en el form (default EyC)
     let codigoTarifario;
     if (practica === 'MASAJES') {
-      codigoTarifario = document.getElementById('ct_tipo_masaje')?.value || 'MASAJES_EYC';
+      codigoTarifario = practicaMasoAGuardar();
+    } else if (String(practica || '').startsWith('MASAJES_')) {
+      codigoTarifario = practica;   // ya vino el código exacto
     } else {
       codigoTarifario = MAP_PRACTICA_TARIFARIO[practica] || practica;
     }
@@ -1409,22 +1423,68 @@ function initNuevoForm() {
   };
   document.getElementById('ct_modalidad').addEventListener('change', recalcPrecio);
   document.getElementById('ct_obra_social').addEventListener('blur', recalcPrecio);
-  document.getElementById('ct_tipo_cobro').addEventListener('change', () => {
+  document.getElementById('ct_tipo_cobro').addEventListener('change', async () => {
     actualizarPreviaCobro();
+    if (document.getElementById('fNT_practica').value === 'MASAJES') { await aplicarPrecioMaso(); return; }
     recalcPrecio();
   });
   document.getElementById('ct_tipo_masaje').addEventListener('change', async () => {
-    const practica = document.getElementById('fNT_practica').value;
-    if (practica !== 'MASAJES') return;
-    const tc = document.getElementById('ct_tipo_cobro')?.value;
-    if (tc === 'MANUAL' || tc === 'CORTESIA') { actualizarVisibilidadBeneficiario(); return; }
-    const precio = await buscarPrecioTarifario('MASAJES', 'PARTICULAR', '');
-    if (precio !== null && precio !== undefined) {
-      document.getElementById('ct_valor_sesion').value = precio;
-    }
+    if (document.getElementById('fNT_practica').value !== 'MASAJES') return;
+    toggleFormatoMaso();
+    await aplicarPrecioMaso();
+    actualizarVisibilidadBeneficiario();
+  });
+  document.getElementById('ct_formato').addEventListener('change', async () => {
+    toggleFormatoMaso();
+    await aplicarPrecioMaso();
     actualizarVisibilidadBeneficiario();
   });
   document.getElementById('fNT_tratamiento').addEventListener('change', actualizarVisibilidadBeneficiario);
+}
+
+// El PACK es un formato, no un masaje: por debajo se sigue guardando como
+// MASAJES_PAK, así el tarifario, el trigger y Liquidaciones no cambian.
+function practicaMasoAGuardar(){
+  const cod = document.getElementById('ct_tipo_masaje')?.value || 'MASAJES_EYC';
+  const fmt = document.getElementById('ct_formato')?.value;
+  return (cod === 'MASAJES_EYC' && fmt === 'PACK') ? 'MASAJES_PAK' : cod;
+}
+
+function toggleFormatoMaso(){
+  const wrap = document.getElementById('ct_formato_wrap');
+  if (!wrap) return;
+  const cod = document.getElementById('ct_tipo_masaje')?.value;
+  const aplica = cod === 'MASAJES_EYC';
+  wrap.style.display = aplica ? '' : 'none';
+  if (!aplica && document.getElementById('ct_formato')) document.getElementById('ct_formato').value = 'INDIVIDUAL';
+  const inp = document.getElementById('ct_total_sesiones');
+  if (inp) inp.value = (practicaMasoAGuardar() === 'MASAJES_PAK') ? 4 : 1;
+}
+
+// Cuánto vale la sesión según práctica + formato + cómo se cobra.
+// Todo sale del tarifario: ningún número escrito acá.
+const PCT_PROF_MASO = 0.65;
+async function precioMasoSegunCobro(){
+  const cod = practicaMasoAGuardar();
+  const tc  = document.getElementById('ct_tipo_cobro')?.value || 'NORMAL';
+  if (tc === 'CORTESIA') return 0;
+  if (tc === 'REGALO_CUMPLE'){
+    return await buscarPrecioTarifario('MASAJES_R', 'PARTICULAR', '');
+  }
+  const lista = await buscarPrecioTarifarioCod(cod);
+  if (lista === null || lista === undefined) return null;
+  let val = (tc === 'BONIF_CENTRO' || tc === 'REGALO_CENTRO') ? Math.round(lista * PCT_PROF_MASO) : lista;
+  // En el pack, el precio del tarifario es el TOTAL de las 4 sesiones
+  const ses = Number(document.getElementById('ct_total_sesiones')?.value) || 1;
+  if (cod === 'MASAJES_PAK' && ses > 1) val = Math.round(val / ses);
+  return val;
+}
+
+async function aplicarPrecioMaso(){
+  const tc = document.getElementById('ct_tipo_cobro')?.value;
+  if (tc === 'MANUAL') return;   // monto libre: lo carga la persona
+  const val = await precioMasoSegunCobro();
+  if (val !== null && val !== undefined) document.getElementById('ct_valor_sesion').value = val;
 }
 
 // Explica en criollo qué hace cada tipo de cobro, para que nadie tenga que adivinar.
@@ -1434,7 +1494,9 @@ const COBRO_PREVIA = {
   NORMAL:        { aviso:false, txt:'Se reparte según el tarifario (el masaje va 65% Vero / 35% centro).' },
   MANUAL:        { aviso:true,  txt:'✏️ <b>Monto libre:</b> cargás vos el valor por sesión y el reparto se calcula sobre ese monto.' },
   SOLO_COSEGURO: { aviso:true,  txt:'🏥 <b>Solo coseguro:</b> lo que paga el paciente queda entero para el centro.' },
-  BONIF_CENTRO:  { aviso:true,  txt:'🎗️ <b>Bonificación del centro:</b> PuntoBiO regala su parte. El paciente paga solo lo del profesional y la sesión va 100% al profesional. Cargá en “Valor por sesión” lo que realmente abona el paciente.' },
+  BONIF_CENTRO:  { aviso:true,  txt:'🎗️ <b>Bonificación del centro:</b> PuntoBiO regala su parte. El paciente paga solo lo del profesional y la sesión va 100% al profesional. El valor se completa solo; el cobro se carga en la caja por lo que abonó.' },
+  REGALO_CUMPLE: { aviso:true,  txt:'🎂 <b>Regalo de cumpleaños:</b> el paciente NO paga y <b>no se carga cobro en la caja</b>. El profesional cobra igual, con el valor fijo del regalo, y lo pone PuntoBiO.' },
+  REGALO_CENTRO: { aviso:true,  txt:'🎁 <b>Regalo del centro (otros):</b> el paciente NO paga y <b>no se carga cobro en la caja</b>. El profesional cobra su 65% del masaje que se hizo, y lo pone PuntoBiO.' },
   CORTESIA:      { aviso:true,  txt:'🎁 <b>Cortesía:</b> no se cobra nada. La sesión queda en $0 para todos.' }
 };
 function actualizarPreviaCobro() {
@@ -1463,7 +1525,11 @@ function actualizarVisibilidadBeneficiario() {
   if (!codigo) {
     codigo = document.getElementById('ct_tipo_masaje')?.value || null;
   }
-  const aplica = codigo === 'MASAJES_PAK' || codigo === 'MASAJES_R';
+  // El beneficiario se pide en los packs (lo puede usar otra persona) y en los
+  // regalos, sean del modelo viejo (práctica Regalo) o del nuevo (tipo de cobro).
+  const tcBen = document.getElementById('ct_tipo_cobro')?.value || '';
+  const esRegalo = codigo === 'MASAJES_R' || ['REGALO_CUMPLE','REGALO_CENTRO'].includes(tcBen);
+  const aplica = codigo === 'MASAJES_PAK' || esRegalo || practicaMasoAGuardar() === 'MASAJES_PAK';
   wrap.style.display = aplica ? '' : 'none';
   if (!aplica) {
     document.getElementById('fNT_beneficiario').value = '';
@@ -1496,6 +1562,9 @@ function resetForm() {
   document.getElementById('ct_obra_social').value = '';
   const tcSel = document.getElementById('ct_tipo_cobro');
   if (tcSel) { tcSel.value = 'NORMAL'; actualizarPreviaCobro(); }
+  const fmtSel = document.getElementById('ct_formato');
+  if (fmtSel) { fmtSel.value = 'INDIVIDUAL'; }
+  if (document.getElementById('ct_tipo_masaje')) toggleFormatoMaso();
   document.getElementById('ctAlert').innerHTML = '';
   tratamientosPersona = [];
 }
@@ -1661,7 +1730,7 @@ async function onCrearTratamiento() {
   // El FK tratamientos_practica_codigo_fkey referencia los códigos reales del tarifario.
   let practicaCodigoBD = practica;
   if (practica === 'MASAJES') {
-    practicaCodigoBD = document.getElementById('ct_tipo_masaje')?.value || 'MASAJES_EYC';
+    practicaCodigoBD = practicaMasoAGuardar();   // el pack se guarda como MASAJES_PAK
   }
   const btn = document.getElementById('ctCreate');
   btn.disabled = true; btn.textContent = 'Creando…';
