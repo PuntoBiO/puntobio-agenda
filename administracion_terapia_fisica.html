@@ -2240,7 +2240,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
     const hoy = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
     const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes] = await Promise.all([
       sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
-      sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado').eq('persona_id', p.id).neq('estado', 'cancelado'),
+      sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado,observaciones,creado_en').eq('persona_id', p.id).neq('estado', 'cancelado'),
       // FUENTE ÚNICA (Fase 1b horarios, 17/7/26): fn_turnos_fijos reemplaza la
       // lectura directa de turno_alumnos. Trae vigentes, programados y terminados
       // (con ventana sana): cierres/feriados se evalúan contra su fecha, no contra hoy.
@@ -2372,6 +2372,38 @@ async function abrirBitacoraAlumno(ventana = 60) {
     // SOLO PARA EL EQUIPO: el alumno no ve este recuadro ni en Mi Espacio ni en
     // el resumen de WhatsApp. Está para que el mostrador sepa qué contestar
     // cuando el alumno pregunta por una falta que "tenía para recuperar".
+    // ===== CLASES EXCEPCIONALES (01/09/2026) =====
+    // SOLO LECTURA. Estas clases NO salen de fn_estado_recuperatorios (la madre
+    // no conoce el tipo 'excepcion' y no se toco): se leen directo de
+    // recuperatorios_tf. Se muestran para que el mostrador sepa que existen y
+    // desde cuando, pero NO se pueden agendar desde aca: el alumno se las tiene
+    // que cargar el mismo desde Mi Espacio. Es a proposito.
+    const _hoyExc = hoy;
+    const excepciones = (recupRes.data || [])
+      .filter(r => String(r.tipo || '').toLowerCase() === 'excepcion' && r.estado === 'pendiente')
+      .map(r => {
+        const base = String(r.creado_en || r.fecha_ausencia || '').slice(0, 10);
+        const transcurridos = Math.round((new Date(_hoyExc + 'T00:00:00') - new Date(base + 'T00:00:00')) / 86400000);
+        return { fecha: r.fecha_ausencia, dias: 60 - transcurridos, usada: !!r.fecha_recupero, obs: r.observaciones || '' };
+      })
+      .sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+
+    const boxExcep = excepciones.length
+      ? `<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:11px 12px;margin-bottom:14px">
+           <div style="font-size:13px;font-weight:800;color:#3730a3;margin-bottom:8px">✳️ Clases excepcionales otorgadas (${excepciones.length})</div>
+           ${excepciones.map(x => {
+             const venc = x.dias <= 0 ? `<span style="color:#dc2626;font-weight:700">vencida</span>`
+                        : x.dias <= 7 ? `<span style="color:#dc2626;font-weight:700">vence en ${x.dias} día${x.dias !== 1 ? 's' : ''}</span>`
+                        : `quedan ${x.dias} días`;
+             return `<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 10px;background:#fff;border:1px solid #c7d2fe;border-radius:8px;margin-bottom:5px">
+               <div style="min-width:0"><div style="font-size:12.5px;font-weight:700;color:#3730a3">Clase del ${fmtF(x.fecha)}${x.usada ? ' · ya agendada' : ''}</div>${x.obs ? `<div style="font-size:11px;color:var(--text-dim)">${x.obs}</div>` : ''}</div>
+               <div style="white-space:nowrap;font-size:11.5px;color:var(--text-dim);text-align:right">${venc}</div>
+             </div>`;
+           }).join('')}
+           <div style="font-size:11px;color:#3730a3;margin-top:8px;line-height:1.4">ℹ️ Clases reconocidas a mano por el centro, fuera de los 60 días. <b>No se agendan desde acá:</b> el alumno se las carga solo desde Mi Espacio. No gastan cupo del ciclo.</div>
+         </div>`
+      : '';
+
     const boxPerdidas = perdidasPlan.length
       ? `<div style="background:#f9fafb;border:1px dashed #cbd5e1;border-radius:10px;padding:11px 12px;margin-bottom:14px">
            <div style="font-size:13px;font-weight:800;color:#475569;margin-bottom:8px">🚫 Faltas que ya no se pueden recuperar (${perdidasPlan.length})</div>
@@ -2453,7 +2485,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
         ${OPC_VENTANA.map(([d, lbl]) => `<button onclick="bitacoraSetVentana(${d})" style="flex:1;min-width:88px;padding:7px 8px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${ventana === d ? '#1e9fe0' : '#d1d5db'};background:${ventana === d ? '#1e9fe0' : '#fff'};color:${ventana === d ? '#fff' : '#374151'}">${lbl}</button>`).join('')}
       </div>
     </div>`;
-    $('#bitacoraBody').innerHTML = selector + boxPend + boxPerdidas + resumen + filas;
+    $('#bitacoraBody').innerHTML = selector + boxPend + boxExcep + boxPerdidas + resumen + filas;
   } catch (e) {
     $('#bitacoraBody').innerHTML = `<div style="padding:24px;color:var(--rojo);font-size:13px">No se pudo cargar la bitácora: ${e.message}</div>`;
   }

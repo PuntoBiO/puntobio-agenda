@@ -938,6 +938,28 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON, { auth: { lock: (n
 
 const DIAS_PARA_RECUPERAR = 60; // faltas con aviso (ausente justificado): 60 días corridos
 const DIAS_PARA_RECUPERAR_FERIADO = 30; // feriados: 30 días corridos (regla del centro)
+const DIAS_PARA_RECUPERAR_EXCEP = 60; // excepciones otorgadas a mano: 60 días desde que se cargaron
+
+// ============================================================
+//  CREDITOS DE EXCEPCION (01/09/2026)
+//  Filas de recuperatorios_tf con tipo='excepcion': clases que el centro le
+//  reconoce a mano a un alumno puntual por faltas VIEJAS, ya fuera de los 60
+//  dias. Como la falta original vencio, el reloj NO se cuenta desde
+//  fecha_ausencia sino desde creado_en (el dia que se otorgo el credito).
+//  fn_estado_recuperatorios NO conoce este tipo y no se toca: por eso estas
+//  clases viven solo en Mi Espacio y no aparecen ni en la Agenda ni en
+//  Administracion, que es justo lo que se pidio. Todo lo de abajo esta
+//  condicionado a tipo==='excepcion', asi que para el resto de los alumnos
+//  (que no tienen ninguna fila de ese tipo) el sistema queda igual que antes.
+// ============================================================
+function pbEsExcepcion(r){ return String((r && r.tipo) || '').toLowerCase() === 'excepcion'; }
+function pbDiasExcep(r){
+  if (!r) return 0;
+  const base = String(r.creado_en || r.fecha_ausencia || '').slice(0,10);
+  if (!base) return 0;
+  return DIAS_PARA_RECUPERAR_EXCEP - diasEntre(base, hoyISO());
+}
+function pbExcepVigente(r){ return pbEsExcepcion(r) && pbDiasExcep(r) > 0; }
 const DIAS_HABILES_VISTA  = 10; // cuántos días hábiles muestra el panel "Agenda" hacia adelante
 
 // ============================================================
@@ -1788,6 +1810,9 @@ async function cargarEspacio(per){
     recuperatoriosPendientes: (recus.data || []).filter(r => {
       if (r.estado !== 'pendiente') return false;
       if (r.fecha_recupero) return false; // ya programado desde el centro
+      // EXCEPCION: no se mide contra la fecha de la falta (ya vencio) sino
+      // contra el dia en que el centro cargo el credito.
+      if (pbEsExcepcion(r)) return pbExcepVigente(r);
 
       const f = r.fecha_ausencia;
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
@@ -2289,6 +2314,7 @@ window.refrescarDatosAgenda = async function(){
     data.recuperatoriosPendientes = (recus.data || []).filter(r => {
       if (r.estado !== 'pendiente') return false;
       if (r.fecha_recupero) return false;
+      if (pbEsExcepcion(r)) return pbExcepVigente(r);   // espejo de la carga inicial
       const hace60 = new Date(); hace60.setDate(hace60.getDate() - 60);
       return new Date(r.fecha_ausencia) >= hace60;
     // Espejo de la carga inicial: la más vieja primero.
@@ -3341,6 +3367,13 @@ function bloqueRecuperatorios(recus){
       feriadosPend.push({ fecha: r.fecha_ausencia });
     }
   });
+  // EXCEPCIONES (01/09/2026): no salen de la funcion madre —que no las conoce—
+  // sino de las filas crudas de recuperatorios_tf que llegan en `recus`.
+  const excepciones = (recus || [])
+    .filter(r => pbEsExcepcion(r) && r.estado === 'pendiente' && !r.fecha_recupero && pbExcepVigente(r))
+    .map(r => ({ fecha: r.fecha_ausencia, dias: pbDiasExcep(r), obs: r.observaciones || '' }))
+    .sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
+
   disponibles.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
   noRecuperables.sort((a,b)=> a.fecha < b.fecha ? 1 : -1);   // más recientes primero
   cierres.sort((a,b)=> a.fecha < b.fecha ? -1 : 1);
@@ -3404,6 +3437,24 @@ function bloqueRecuperatorios(recus){
     </div>`;
   });
 
+  // Tarjetas de CLASES EXCEPCIONALES otorgadas por el centro (01/09/2026).
+  let excRows='';
+  excepciones.forEach(x=>{
+    const diasE = x.dias;
+    let clsE='ok'; if(diasE<=10) clsE='urge'; else if(diasE<=25) clsE='warn';
+    const lblE = diasE===1?'día':'días';
+    excRows += `<div class="recu">
+      <div class="info">
+        <div class="fa">Clase del ${fmtFecha(x.fecha)} <span class="badge-fer">Excepción</span></div>
+        <div class="sub">Clase reconocida por el centro de forma excepcional. La recuperás eligiendo una clase de tu área en la agenda.</div>
+      </div>
+      <div class="cuenta ${clsE}">
+        <div class="d">${diasE}</div>
+        <div class="l">${lblE}</div>
+      </div>
+    </div>`;
+  });
+
   // Tarjetas de faltas NO recuperables.
   // NUEVO 19/08/2026: el texto ya no es fijo. Antes decía SIEMPRE "avisaste con
   // menos de 2 horas", que era mentira cuando el motivo real era otro (no avisó,
@@ -3432,12 +3483,12 @@ function bloqueRecuperatorios(recus){
     </div>`;
   });
 
-  const totalDisp = disponibles.length + feriadosPend.length + cierres.length;
+  const totalDisp = disponibles.length + feriadosPend.length + cierres.length + excepciones.length;
   let rows='';
   if(totalDisp===0 && noRecuperables.length===0){
     rows = `<p class="empty">No tenés clases pendientes de recuperar. ¡Al día! 🎉</p>`;
   } else {
-    rows = ferRows + cieRows + dispRows;
+    rows = ferRows + cieRows + excRows + dispRows;
     if(noRecuperables.length){
       rows += `<div style="margin:12px 0 6px;font-size:11.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--texto-tenue)">No recuperables</div>` + noRows;
     }
@@ -6078,14 +6129,20 @@ function _pbRecupesUsables() {
   const vivas = new Set(est
     .filter(r => r && r.tipo === 'falta' && r.recuperable)
     .map(r => String(r.fecha_ausencia)));
-  return lista.filter(r => vivas.has(String(r.fecha_ausencia)));
+  // Las EXCEPCIONES no las conoce la funcion madre (no se toco a proposito), asi
+  // que pasan derecho: su vigencia ya se valido en pbExcepVigente al armar la lista.
+  return lista.filter(r => pbEsExcepcion(r) || vivas.has(String(r.fecha_ausencia)));
 }
 
 // Chip "· vence en X días" para cada opción del modal. Mismo cálculo que la
 // tarjeta de recuperatorios (la regla de los 60 días vive en la base).
-window.pbChipVence = function(fechaAusencia) {
-  if (!fechaAusencia) return '';
-  const d = DIAS_PARA_RECUPERAR - diasEntre(String(fechaAusencia), hoyISO());
+window.pbChipVence = function(fechaAusencia, fila) {
+  if (!fechaAusencia && !fila) return '';
+  // EXCEPCION: su reloj arranca el dia que se cargo el credito, no el dia de la
+  // falta. Sin esto el chip diria "vencida" en una clase que si esta disponible.
+  const d = pbEsExcepcion(fila)
+    ? pbDiasExcep(fila)
+    : DIAS_PARA_RECUPERAR - diasEntre(String(fechaAusencia), hoyISO());
   let color = '#16a34a';
   if (d <= 7) color = '#dc2626'; else if (d <= 15) color = '#d97706';
   const txt = d <= 0 ? 'vencida' : ('vence en ' + d + (d === 1 ? ' día' : ' días'));
@@ -6169,9 +6226,10 @@ window.pbAbrirRecuperar = function(turnoDestinoId, fechaISO) {
   });
   recupes.forEach(r => {
     const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
+    const _ex = pbEsExcepcion(r);
     opciones += `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
-      Falta del <b>${esc(fAus)}</b>
-      <div style="font-size:11.5px;color:#64748b;margin-top:2px">Tipo: ${esc(r.tipo||'')}${pbChipVence(r.fecha_ausencia)}</div>
+      ${_ex ? '✳️ <b>Clase excepcional</b> · falta del ' + esc(fAus) : 'Falta del <b>' + esc(fAus) + '</b>'}
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">${_ex ? 'Otorgada por el centro' : 'Tipo: ' + esc(r.tipo||'')}${pbChipVence(r.fecha_ausencia, r)}</div>
     </button>`;
   });
   const _hint = total > 4
@@ -6333,9 +6391,10 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
   });
   recupes.forEach(r => {
     const fAus = (r.fecha_ausencia||'').split('-').reverse().join('/');
+    const _ex2 = pbEsExcepcion(r);
     opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarRecupero(${r.id}, ${destino.id}, '${fechaISO}')">
-      🎯 <b>Usar recuperatorio</b> de la falta del ${esc(fAus)}
-      <div style="font-size:11.5px;color:#64748b;margin-top:2px">No suma al cupo de sueltas${pbChipVence(r.fecha_ausencia)}</div>
+      ${_ex2 ? '✳️ <b>Usar clase excepcional</b> · falta del ' + esc(fAus) : '🎯 <b>Usar recuperatorio</b> de la falta del ' + esc(fAus)}
+      <div style="font-size:11.5px;color:#64748b;margin-top:2px">No suma al cupo de sueltas${pbChipVence(r.fecha_ausencia, r)}</div>
     </button>`;
   });
   opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarClaseSuelta(${destino.id}, '${fechaISO}')">
