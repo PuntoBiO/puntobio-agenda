@@ -1616,6 +1616,23 @@ async function supabaseInsertReturn(tabla, data) {
   if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
   return res.json();
 }
+// Borrar filas DEVOLVIENDO lo borrado.
+// GOTCHA del Ecosistema: con `Prefer: return=minimal` PostgREST contesta 204
+// aunque RLS haya bloqueado y no se haya tocado ninguna fila. Para las
+// operaciones donde importa saber si realmente pasó, se pide representation
+// y se verifica que vuelva al menos una fila.
+async function supabaseDeleteReturn(tabla, filtro) {
+  const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
+    method: 'DELETE',
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    }
+  });
+  if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+  return res.json();
+}
 // Borrar filas según filtro (ej: "id=eq.5")
 async function supabaseDelete(tabla, filtro) {
   const res = await fetchSupabase(`${SUPABASE_URL}/rest/v1/${tabla}?${filtro}`, {
@@ -1869,6 +1886,7 @@ async function cargarDatos(silencioso) {
     });
     await cargarAgregadosSemana();
     await cargarClasesCerradas();
+    await cargarClasesBloqueadas();
     await cargarEvosPorTurno();
     await cargarFeriados();
     await cargarAsistenciaSemana();
@@ -2686,6 +2704,13 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
         : (ev.completa
           ? `<span class="evo-badge eb-ok" title="Todos los presentes evolucionados">✅ EVOLUCIONADO</span>`
           : `<span class="evo-badge eb-falta" title="Falta evolución (${ev.evolucionados}/${ev.presentes} presentes)">⚠️ FALTA EVOLUCIÓN</span>`)));
+  // INSCRIPCIONES CERRADAS: candadito propio. Es independiente del cierre de la
+  // clase (una clase puede estar abierta, dándose, y con la puerta cerrada).
+  const _inscCerrada = inscripcionCerrada(t.id, fechaIso);
+  const _motInsc = _inscCerrada ? motivoInscripcionCerrada(t.id, fechaIso) : null;
+  const badgeInscripcion = (_inscCerrada && !motivoFeriado && !motivoCierreCentro)
+    ? `<span class="cierre-badge cb-ok" style="background:#fee2e2;color:#991b1b;border-color:#fca5a5" title="${_motInsc ? String(_motInsc).replace(/"/g,'&quot;') : 'Nadie se puede anotar en esta clase'}">🔒 SIN INSCRIPCIÓN</span>`
+    : '';
   const claseCard = (motivoFeriado || motivoCierreCentro) ? ' card-feriado' : (cerrada?' card-cerrada':'');
   // Clase de fondo según servicio (naranja para Entrenamiento, violeta para Kinefilaxia)
   const claseServicio = (motivoFeriado || motivoCierreCentro) ? '' : (t.servicio === 'Entrenamiento' ? ' es-entrenamiento' : ' es-kinefilaxia');
@@ -2706,6 +2731,7 @@ function cardTurnoHTML(t, fechaIso, motivoFeriado) {
         <span class="turno-hora">${t.hora}</span>
         <span class="turno-head-right">
           ${badgeEvo}
+          ${badgeInscripcion}
           ${badgeCierre}
           <span class="turno-tipo ${tipoClass}">${iconoServicio} ${t.servicio}</span>
         </span>
@@ -2989,6 +3015,19 @@ function puedeAutorizarSobrecupo() {
   const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
   return EMAILS_SOBRECUPO.includes(e);
 }
+// ¿Quién puede CERRAR / ABRIR las inscripciones de una clase puntual?
+// (las dos admin generales: Lu y Jime)
+function puedeCerrarInscripcion() {
+  const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
+  return EMAILS_ADMIN.includes(e);
+}
+// ¿Quién puede AGREGAR un alumno a una clase con las inscripciones CERRADAS?
+// SOLO Lu (misma lista que el sobrecupo). Es el sentido de cerrar la clase:
+// nadie se anota solo, ni el alumno desde Mi Espacio ni el equipo desde acá.
+function puedeAgregarEnClaseCerrada() {
+  const e = (USUARIO_ACTUAL?.email || '').toLowerCase();
+  return EMAILS_SOBRECUPO.includes(e);
+}
 // ¿Quién puede BORRAR/SACAR un alumno del turno? (solo las dos admin generales)
 // Los profes solo marcan presente/ausente, no borran.
 function puedeBorrarAlumno() {
@@ -3064,6 +3103,12 @@ let EVO_RECIENTES = [];  // últimas anotaciones cargadas (para reusar)
 let evoSeleccion = new Set(); // persona_id seleccionados para aplicar en lote
 let evoTurnoActual = null;    // el turno abierto
 let CLASES_CERRADAS = new Map();  // "turnoId-fecha" -> { tipo, motivo }
+// INSCRIPCIONES CERRADAS (tabla `clases_bloqueadas`): "turnoId-fecha" -> { motivo }
+// OJO: NO es lo mismo que "Cerrar clase". La clase se da normal y se toma
+// asistencia igual; lo único que se cierra es la PUERTA DE ENTRADA: nadie se
+// puede anotar, ni el alumno desde Mi Espacio ni el equipo desde la agenda.
+// Solo Lu puede meter a alguien igual, a mano y con confirmación.
+let CLASES_BLOQUEADAS = new Map();
 //   tipo: 'finalizada' (cierre normal de fin de día) | 'auto' (cierre nocturno)
 //         | 'centro' (cancelada por el centro: da recuperatorio SIN gastar cupo)
 let DOLOR_RECIENTE = new Set();   // persona_id que tuvieron dolor en las últimas 2 semanas
@@ -3605,6 +3650,100 @@ function motivoCierreCentroDe(turnoId, fecha) {
   if (!c) return null;
   return (c.motivo || 'Cierre del centro').replace(/\s*\[bloqueo#\d+\]/, '');
 }
+
+// ¿Esta clase tiene las INSCRIPCIONES CERRADAS en esa fecha?
+function inscripcionCerrada(turnoId, fecha) {
+  return CLASES_BLOQUEADAS.has(`${turnoId}-${fecha}`);
+}
+// Motivo del cierre de inscripciones (string vacío si no se cargó ninguno), o null.
+function motivoInscripcionCerrada(turnoId, fecha) {
+  const b = CLASES_BLOQUEADAS.get(`${turnoId}-${fecha}`);
+  return b ? (b.motivo || '') : null;
+}
+// Carga la lista de clases con inscripción cerrada.
+// Tolerante: si la tabla todavía no existe (SQL sin correr), la agenda sigue
+// andando exactamente como antes — el Map queda vacío y no bloquea nada.
+async function cargarClasesBloqueadas() {
+  try {
+    // Paginado por regla de la casa: es una tabla que crece con el uso.
+    const filas = await supabaseQueryAll('clases_bloqueadas',
+      `?select=turno_id,fecha,motivo`, 'turno_id.asc');
+    CLASES_BLOQUEADAS = new Map((filas || []).map(f => [
+      `${f.turno_id}-${String(f.fecha).slice(0,10)}`,
+      { motivo: f.motivo || '' }
+    ]));
+  } catch (e) {
+    CLASES_BLOQUEADAS = new Map();
+    console.warn('No se pudieron cargar las clases con inscripción cerrada', e);
+  }
+}
+
+// Cierra o abre las inscripciones de UNA clase puntual (turno + fecha).
+window.toggleInscripcionClase = async (dia, hora, servicio) => {
+  const t = HORARIOS.find(x => x.dia === dia && x.hora === hora && x.servicio === servicio);
+  if (!t) return;
+  if (!puedeCerrarInscripcion()) {
+    toast('Solo Lu o Jime pueden cerrar las inscripciones de una clase', 'error');
+    return;
+  }
+  const fecha = fechaDelDia(dia);
+  const yaCerrada = inscripcionCerrada(t.id, fecha);
+  try {
+    if (yaCerrada) {
+      // REABRIR
+      if (!confirm(`¿Volver a abrir las inscripciones de ${servicio} · ${hora} · ${dia}?\n\nLos alumnos van a poder anotarse de nuevo desde Mi Espacio.`)) return;
+      const borradas = await supabaseDeleteReturn('clases_bloqueadas',
+        `turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+      // Un DELETE que no borró NADA con RLS puesto vuelve 204 igual: por eso
+      // pedimos representation y verificamos que haya vuelto al menos una fila.
+      if (!borradas || !borradas.length) {
+        toast('No se pudo abrir la clase (¿sesión vencida?)', 'error');
+        return;
+      }
+      CLASES_BLOQUEADAS.delete(`${t.id}-${fecha}`);
+      toast('🔓 Inscripciones abiertas');
+    } else {
+      // CERRAR
+      const motivo = prompt(
+        `🔒 CERRAR INSCRIPCIONES\n\n${servicio} · ${hora} · ${dia}\n\n` +
+        `La clase se da igual y se toma asistencia como siempre.\n` +
+        `Lo único que se cierra es la puerta: nadie se puede anotar (ni desde Mi Espacio ni desde la agenda).\n` +
+        `Solo Lu puede agregar a alguien a mano.\n\n` +
+        `Motivo (opcional, lo ve solo el equipo):`, '');
+      if (motivo === null) return;   // cancelado
+      const filas = await supabaseInsertReturn('clases_bloqueadas', {
+        turno_id: t.id,
+        fecha,
+        motivo: motivo ? motivo.trim() : null,
+        creado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+        creado_por_email: USUARIO_ACTUAL?.email || null
+      });
+      if (!filas || !filas.length) {
+        toast('No se pudo cerrar la clase (¿sesión vencida?)', 'error');
+        return;
+      }
+      CLASES_BLOQUEADAS.set(`${t.id}-${fecha}`, { motivo: motivo ? motivo.trim() : '' });
+      toast('🔒 Nadie se puede anotar en esta clase');
+    }
+    renderModalBody(dia, hora, servicio);
+    renderTurnos();
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    // Si ya estaba cerrada en la base (unique turno_id+fecha), no es un error.
+    if (msg.includes('23505') || /duplicate key/i.test(msg)) {
+      CLASES_BLOQUEADAS.set(`${t.id}-${fecha}`, { motivo: '' });
+      toast('✓ Esta clase ya tenía las inscripciones cerradas');
+      renderModalBody(dia, hora, servicio);
+      renderTurnos();
+      return;
+    }
+    if (/relation .*clases_bloqueadas.* does not exist|42P01/i.test(msg)) {
+      toast('Falta correr el SQL de "clases_bloqueadas" en Supabase', 'error');
+      return;
+    }
+    toast('No se pudo cambiar: ' + msg, 'error');
+  }
+};
 
 // =============================================
 // FERIADOS (tabla `feriados`: fecha, motivo)
@@ -5489,6 +5628,36 @@ window.confirmarRecupero = async (fechaAusencia, tipoRecup) => {
 let SOBRECUPO_AUTORIZADO = false;
 function chequearCupo(t, accionTexto, esPuntual, fecha) {
   SOBRECUPO_AUTORIZADO = false;           // arranca siempre en false
+  // ── PUERTA CERRADA ──────────────────────────────────────────────────────
+  // Si la clase tiene las INSCRIPCIONES CERRADAS, no se anota nadie, haya o no
+  // lugar. Es una decisión del centro, no un tema de cupo. Solo Lu puede pasar,
+  // a mano y confirmando. Este chequeo va ANTES que el de capacidad porque
+  // manda sobre él (una clase cerrada con 5 lugares libres sigue cerrada).
+  {
+    const _fPuerta = fecha || fechaDelDia(t.dia);
+    if (inscripcionCerrada(t.id, _fPuerta)) {
+      const _mot = motivoInscripcionCerrada(t.id, _fPuerta);
+      if (!puedeAgregarEnClaseCerrada()) {
+        alert(
+          `🔒 CLASE CERRADA PARA ANOTARSE\n\n` +
+          `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+          (_mot ? `Motivo: ${_mot}\n` : '') + `\n` +
+          `Esta clase está cerrada a nuevas inscripciones.\n` +
+          `Si hace falta agregar a alguien igual, lo tiene que hacer Lu.`
+        );
+        return false;
+      }
+      const _okPuerta = confirm(
+        `🔒 ESTA CLASE ESTÁ CERRADA PARA ANOTARSE\n\n` +
+        `${t.servicio} · ${t.hora} · ${t.dia}\n` +
+        (_mot ? `Motivo: ${_mot}\n` : '') + `\n` +
+        `Vos la cerraste para que no se anote nadie.\n` +
+        `¿Querés agregarlo igual, a mano?`
+      );
+      if (!_okPuerta) return false;
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────
   // ARREGLO 25/08/2026: se le pasa la FECHA. Antes getAlumnos usaba el día que
   // se estaba mirando en pantalla, así que al anotar a alguien en una clase de
   // otra semana contaba la lista equivocada.
@@ -6364,6 +6533,18 @@ function renderModalBody(dia, hora, servicio) {
     </div>`}
 
     ${(() => {
+      // BANNER · inscripciones cerradas (la clase se da, pero nadie se anota)
+      if (!inscripcionCerrada(t.id, fechaModalIso)) return '';
+      const _m = motivoInscripcionCerrada(t.id, fechaModalIso);
+      return `<div style="background:#fef2f2;border:1.5px solid #fca5a5;border-radius:10px;padding:10px 12px;margin:10px 0;color:#991b1b;line-height:1.45">
+        <div style="font-size:13px;font-weight:800">🔒 Clase cerrada para anotarse</div>
+        <div style="font-size:12px;font-weight:500;color:#b91c1c;margin-top:3px">
+          Nadie se puede anotar: ni el alumno desde Mi Espacio ni el equipo desde acá. La clase se da igual y la asistencia se marca normal.${_m ? `<br><b>Motivo:</b> ${String(_m).replace(/</g,'&lt;')}` : ''}
+        </div>
+      </div>`;
+    })()}
+
+    ${(() => {
       // Banner de mensajes pendientes de alumnos de este turno para el profe logueado
       const pidsConMensaje = Object.keys(MENSAJES_PENDIENTES_TURNO || {});
       if (!pidsConMensaje.length) return '';
@@ -6389,11 +6570,20 @@ function renderModalBody(dia, hora, servicio) {
       </div>`;
     })()}
 
-    <div class="alumnos-titulo" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+    <div class="alumnos-titulo" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
       <span>Lista de alumnos — marcá asistencia</span>
-      <button onclick="abrirAgregarAlumno('${dia}','${hora}','${servicio}')"
-        style="background:#1e9fe0;color:white;border:none;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
-        title="Agregar un alumno a este turno">➕ Agregar alumno</button>
+      <span style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        ${puedeCerrarInscripcion() ? (inscripcionCerrada(t.id, fechaModalIso)
+          ? `<button onclick="toggleInscripcionClase('${dia}','${hora}','${servicio}')"
+               style="background:#fff;color:#15803d;border:1.5px solid #86efac;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap"
+               title="Volver a permitir que se anoten">🔓 Abrir inscripciones</button>`
+          : `<button onclick="toggleInscripcionClase('${dia}','${hora}','${servicio}')"
+               style="background:#fff;color:#b91c1c;border:1.5px solid #fca5a5;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap"
+               title="Que no se pueda anotar nadie en esta clase (ni desde Mi Espacio ni desde la agenda)">🔒 Cerrar inscripciones</button>`) : ''}
+        <button onclick="abrirAgregarAlumno('${dia}','${hora}','${servicio}')"
+          style="background:#1e9fe0;color:white;border:none;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap"
+          title="Agregar un alumno a este turno">➕ Agregar alumno</button>
+      </span>
     </div>
     ${alumnos.length ? '<div class="sala-resumen" id="sala-resumen"></div>' : ''}
     ${alumnos.length===0
@@ -7185,6 +7375,9 @@ async function iniciarRealtime() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_agregados' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turno_alumnos' }, recargarPorRealtime)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clases_cerradas' }, recargarPorRealtime)
+      // Puerta de inscripciones: si Lu cierra una clase, las agendas ya abiertas
+      // (recepción, profes) tienen que enterarse sin refrescar a mano.
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clases_bloqueadas' }, recargarPorRealtime)
       // CAPACIDAD: sin estas dos, un cambio de cupo hecho desde Gestión de Cupos
       // no llegaba nunca a una agenda ya abierta.
       .on('postgres_changes', { event: '*', schema: 'public', table: 'turnos' }, recargarPorRealtime)

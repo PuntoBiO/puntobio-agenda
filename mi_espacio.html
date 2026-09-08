@@ -1873,6 +1873,21 @@ async function cargarEspacio(per){
     window._agendaData.cierresCentro = [];   // si el RPC todavía no existe, no rompe nada
   }
 
+  // CLASES CERRADAS PARA ANOTARSE (tabla `clases_bloqueadas`).
+  // El centro decidió que en esa clase puntual no se anote nadie, aunque quede
+  // lugar físico. No es un cierre de clase (la clase se da igual): es la PUERTA.
+  // La tabla no tiene datos personales — solo turno, fecha y motivo — así que se
+  // lee derecho. Si todavía no existe, queda vacío y la pantalla anda como antes.
+  try {
+    const { data: cb } = await sb.from('clases_bloqueadas')
+      .select('turno_id, fecha, motivo')
+      .gte('fecha', _desdeISO).lte('fecha', _hastaISO);
+    window._agendaData.inscripcionCerrada = new Map((cb || []).map(r =>
+      [r.turno_id + '|' + String(r.fecha).slice(0,10), r.motivo || '']));
+  } catch (e) {
+    window._agendaData.inscripcionCerrada = new Map();
+  }
+
   // Aplanar agregados puntuales propios (sueltos/recuperatorios)
   // Mapa rápido turno_id -> {dia, hora, servicio} usando los turnos ya cargados
   const _turnosById = {};
@@ -2335,6 +2350,17 @@ window.refrescarDatosAgenda = async function(){
     data.capacidadesPorClave = cupos.capacidades || null;
     data.agregadosPorClave = cupos.agregados || {};
     data.ausentesPorClave  = cupos.ausentes  || {};
+
+    // Puerta de inscripciones: espejo de la carga inicial. Si Lu cierra una
+    // clase mientras el alumno tiene Mi Espacio abierto, al primer refresco
+    // el botón desaparece.
+    try {
+      const { data: cb } = await sb.from('clases_bloqueadas')
+        .select('turno_id, fecha, motivo')
+        .gte('fecha', _desdeISO).lte('fecha', _hastaISO);
+      data.inscripcionCerrada = new Map((cb || []).map(r =>
+        [r.turno_id + '|' + String(r.fecha).slice(0,10), r.motivo || '']));
+    } catch (e) { /* si falla, se conserva lo que ya había */ }
 
     // Mis anotaciones (cambio_area / suelta / recuperatorio)
     data.misAnotaciones = new Map((agregR.data || []).map(r => [r.turno_id + '|' + r.fecha, r.tipo]));
@@ -2972,6 +2998,15 @@ function ocupadosEn(data, turnoId, fechaISO){
   return Math.max(0, fijos + agreg - aus);
 }
 
+// ¿Esa clase, ese día, está CERRADA PARA ANOTARSE?
+// Es una decisión del centro y manda sobre el cupo: aunque sobren lugares, el
+// alumno no se puede anotar solo. Solo Lu puede meterlo a mano desde la agenda.
+function inscripcionCerradaEn(data, turnoId, fechaISO){
+  const m = (data && data.inscripcionCerrada) || null;
+  if (!m || !m.has) return false;
+  return m.has(turnoId + '|' + fechaISO);
+}
+
 // Capacidad vigente de un turno en una fecha.
 function capacidadEn(data, turno, fechaISO){
   const porClave = (data && data.capacidadesPorClave) || null;
@@ -3128,6 +3163,13 @@ function renderAgendaDia(fechaISO){
           bloqCls = 'style="opacity:0.55"';
         }
       }
+      // CERRADA PARA ANOTARSE · la clase se da igual (si es tu fija, seguís
+      // yendo), pero nadie nuevo se puede anotar. Se marca con candado y se
+      // apaga el botón "Programar acá" aunque queden lugares.
+      const _inscCerrada = inscripcionCerradaEn(data, t.id, fechaISO);
+      if (!estaBloqueado && _inscCerrada) {
+        bloqMark = `<span style="display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;margin-left:6px">🔒 CERRADA</span>`;
+      }
 
       // SELF-SERVICE · botones condicionales
       let botonesHtml = '';
@@ -3171,6 +3213,8 @@ function renderAgendaDia(fechaISO){
           if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
           // tiene cupo
           if (capacidadEn(data, otro, fechaISO) <= ocupadosEn(data, otro.id, fechaISO)) return false;
+          // cerrada para anotarse: no se ofrece como alternativa
+          if (inscripcionCerradaEn(data, otro.id, fechaISO)) return false;
           // no bloqueado
           if (window.Bloqueos) {
             const hi = (otro.hora||'').slice(0,5);
@@ -3233,7 +3277,7 @@ function renderAgendaDia(fechaISO){
       const tengoFijoEstaHora = misHorasFijasHoy.has((t.hora||'').slice(0,5));
       const puedeRecuperarAca = tieneRecupes && actividadOK && dentro15 && (data.puedeUsarRecupe !== false);
       const puedeSueltaAca = puedeSuelta && actividadOK && dentro10Hab && dentroSemanaRot;
-      if (!esMiTurnoFijo && !yaAnotadaEnTurno && !tengoFijoEstaHora && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && haceFalta10m) {
+      if (!esMiTurnoFijo && !yaAnotadaEnTurno && !tengoFijoEstaHora && (puedeRecuperarAca || puedeSueltaAca) && hayCupo && !estaBloqueado && !_inscCerrada && haceFalta10m) {
         botonesHtml += `<button class="ag-btn ag-btn-verde" onclick="pbAbrirProgramar(${t.id}, '${fechaISO}', ${puedeRecuperarAca}, ${puedeSueltaAca})">📅 Programar acá</button>`;
       }
 
@@ -3267,7 +3311,11 @@ function renderAgendaDia(fechaISO){
 
       // Texto del chip en lenguaje claro: "3 lugares", "1 lugar", "Sin lugar"
       let textoCupo;
-      if (!cap) {
+      if (_inscCerrada) {
+        // No mostramos lugares libres en una clase donde no te podés anotar:
+        // decir "3 lugares" y no dejar entrar es lo que confundía antes.
+        textoCupo = 'Cerrada';
+      } else if (!cap) {
         textoCupo = `${efectivos} / ?`;
       } else {
         const libres = cap - efectivos;
@@ -3276,6 +3324,9 @@ function renderAgendaDia(fechaISO){
         else textoCupo = `${libres} lugares`;
       }
 
+      // En una clase cerrada el chip va en rojo (no hay lugar para vos, aunque
+      // físicamente sobren): coherente con el texto "Cerrada".
+      const nivChip = _inscCerrada ? { cls:'lleno', pct:100 } : niv;
       const _filaStyle = (!estaBloqueado && miAusenciaFija) ? 'style="opacity:0.55"' : bloqCls;
       filas += `<div class="ag-turno" ${_filaStyle}>
         <div class="ag-turno-info">
@@ -3286,8 +3337,8 @@ function renderAgendaDia(fechaISO){
           </div>
         </div>
         <div class="ag-turno-right">
-          <div class="ag-cupo-num ${niv.cls}">${textoCupo}</div>
-          <div class="ag-bar"><div class="ag-bar-fill ${niv.cls}" style="width:${niv.pct}%"></div></div>
+          <div class="ag-cupo-num ${nivChip.cls}">${textoCupo}</div>
+          <div class="ag-bar"><div class="ag-bar-fill ${nivChip.cls}" style="width:${nivChip.pct}%"></div></div>
         </div>
         ${botonesHtml ? `<div class="ag-acciones">${botonesHtml}</div>` : ''}
       </div>
@@ -6056,6 +6107,7 @@ window.pbAbrirCambioArea = function(turnoOrigenId, fechaISO) {
     if (_dn[(otro.dia||'').toLowerCase()] !== fechaD.getDay()) return false;
     if (!turnoCoincideConActividad(otro.servicio, data.actividadAlumno, data.esBonificado)) return false;
     if (capacidadEn(data, otro, fechaISO) <= ocupadosEn(data, otro.id, fechaISO)) return false;
+    if (inscripcionCerradaEn(data, otro.id, fechaISO)) return false;
     if (window.Bloqueos) {
       const hi = (otro.hora||'').slice(0,5);
       const hf = hi ? String(parseInt(hi.slice(0,2),10)+1).padStart(2,'0')+':00' : null;
