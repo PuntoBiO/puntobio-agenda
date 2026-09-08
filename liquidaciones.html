@@ -2067,9 +2067,16 @@ function render(pagos, sesiones, filtroProf){
       // Cuánto vale UNA sesión de ese tratamiento (= el coseguro por sesión):
       // sale de lo que la agenda estampó en la sesión (parte del profesional + parte del centro).
       const valSesOS = {};
+      // Quién ATENDIÓ cada tratamiento (puede ser más de uno). Es lo que manda para el
+      // filtro de profesional: quien cobró el pago NO es dueño de esa plata.
+      const profsTratOS = {};
       for (const s of (MT.sesAll || [])){
         const v = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
         if (s.tratamiento_id != null && v > 0.5) valSesOS[s.tratamiento_id] = v;
+        const pr = normProf(s.profesional);
+        if (s.tratamiento_id != null && pr){
+          (profsTratOS[s.tratamiento_id] = profsTratOS[s.tratamiento_id] || {})[pr] = 1;
+        }
       }
       const porOS = {}; const filasOS = []; let totCoseguro = 0;
       for (const p of pagos){
@@ -2078,6 +2085,13 @@ function render(pagos, sesiones, filtroProf){
         if (filtroArea && practicaArea(t.practica_codigo) !== filtroArea) continue;
         const imp = Number(p.importe) || 0;
         if (imp <= 0.5) continue;
+        // Profesionales del tratamiento (los que atendieron). Si no hay sesiones cargadas,
+        // se cae al profesional del pago para no perder la fila.
+        let profsT = Object.keys(profsTratOS[t.id] || {});
+        if (!profsT.length){ const pp = normProf(p.profesional); if (pp) profsT = [pp]; }
+        // Con un profesional elegido, solo sus tratamientos. Con "Todos", sale todo.
+        if (filtroProf && !profsT.includes(filtroProf)) continue;
+        const profTxt = profsT.length === 0 ? '—' : (profsT.length === 1 ? profsT[0] : 'varios');
         const os = String(t.obra_social || '').trim() || 'Sin especificar';
         const r = (porOS[os] = porOS[os] || { cobrado:0, pagos:0, trats:{}, vals:{} });
         r.cobrado += imp; r.pagos++;
@@ -2090,7 +2104,7 @@ function render(pagos, sesiones, filtroProf){
           pac: ((t.personas || {}).nombre) || '—',
           cod: t.codigo_id || '—',
           prac: practicaLabel(t.practica_codigo),
-          os, vs, imp,
+          os, vs, imp, profTxt,
           quien: normProf(p.quien_cobro) || normProf(p.profesional) || '—'
         });
       }
@@ -2103,7 +2117,7 @@ function render(pagos, sesiones, filtroProf){
           return { val: Number(ks[0]), varios: ks.length > 1 };
         };
         html += `<h2 class="bloque-tit">🏥 Coseguros de obra social — lo que pagó el paciente</h2>
-          <p style="color:#666;font-size:13px;margin:-6px 0 12px;">De los pagos del mes, estos son los de tratamientos que <b>no son particulares</b>: en ellos todo lo que el paciente pone en la caja <b>es el coseguro</b>. Lo que paga la obra social va aparte (bloque "Pagos de obras sociales"). <b>Informativo</b>: no cambia ningún número de la liquidación, y no se achica al elegir un profesional (el coseguro es del centro).</p>`;
+          <p style="color:#666;font-size:13px;margin:-6px 0 12px;">De los pagos del mes, estos son los de tratamientos que <b>no son particulares</b>: en ellos todo lo que el paciente pone en la caja <b>es el coseguro</b>. Lo que paga la obra social va aparte (bloque "Pagos de obras sociales"). <b>Informativo</b>: no cambia ningún número de la liquidación. Con un profesional elegido salen solo <b>sus</b> pacientes (por quién los atendió, no por quién cobró); con <b>Todos</b>, sale todo.</p>`;
         html += `<table style="margin-bottom:8px;"><thead><tr>
             <th>Obra social</th><th class="num">Tratamientos</th><th class="num">Pagos</th><th class="num">Coseguro por sesión</th><th class="num">Cobrado en el mes</th>
           </tr></thead><tbody>`;
@@ -2118,12 +2132,12 @@ function render(pagos, sesiones, filtroProf){
         html += `</tbody></table>`;
         html += `<details style="margin-bottom:18px;"><summary style="cursor:pointer;color:#1e9fe0;font-size:13px;font-weight:600;">Ver el detalle pago por pago (${filasOS.length})</summary>`;
         html += `<table style="margin-top:8px;"><thead><tr>
-            <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Obra social</th><th>Cobró</th><th class="num">Coseguro x sesión</th><th class="num">Importe</th>
+            <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Obra social</th><th>Atendió</th><th>Cobró</th><th class="num">Coseguro x sesión</th><th class="num">Importe</th>
           </tr></thead><tbody>`;
         for (const f of filasOS.slice().sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)))){
-          html += `<tr><td>${f.fecha}</td><td>${f.pac}</td><td style="font-family:monospace;">${f.cod}</td><td>${f.prac}</td><td>${f.os}</td><td>${f.quien}</td><td class="num">${f.vs ? fmt(f.vs) : '—'}</td><td class="num">${fmt(f.imp)}</td></tr>`;
+          html += `<tr><td>${f.fecha}</td><td>${f.pac}</td><td style="font-family:monospace;">${f.cod}</td><td>${f.prac}</td><td>${f.os}</td><td>${f.profTxt}</td><td>${f.quien}</td><td class="num">${f.vs ? fmt(f.vs) : '—'}</td><td class="num">${fmt(f.imp)}</td></tr>`;
         }
-        html += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="7">TOTAL</td><td class="num">${fmt(totCoseguro)}</td></tr>`;
+        html += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="8">TOTAL</td><td class="num">${fmt(totCoseguro)}</td></tr>`;
         html += `</tbody></table></details>`;
       }
     }
