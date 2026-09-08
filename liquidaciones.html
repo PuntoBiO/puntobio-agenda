@@ -704,7 +704,7 @@ async function cargar(){
   for (let i = 0; i < tratIds.length; i += 150){
     const lote = tratIds.slice(i, i + 150);
     const { data: sesData } = await sbLeerTodo(() => sb.from('sesiones')
-      .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, personas(nombre))')
+      .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, modalidad, obra_social, personas(nombre))')
       .in('tratamiento_id', lote).order('fecha').order('id'));
     if (sesData) sesAll.push(...sesData);
     const { data: pagData } = await sbLeerTodo(() => sb.from('pagos_consultorio')
@@ -2053,10 +2053,15 @@ function render(pagos, sesiones, filtroProf){
   // caja ES el coseguro (lo que paga la obra social entra por otro lado y ya tiene su
   // bloque informativo más arriba: "Pagos de obras sociales recibidos este mes").
   // 100% INFORMATIVO: no toca ni un cálculo de la liquidación, solo lee lo ya cargado.
+  //
+  // DOS MIRADAS, porque la pregunta cambia según el filtro:
+  //  · TODOS  -> por PAGO: la plata de coseguro que entró al centro este mes.
+  //  · UN PROF -> por SESIÓN: el coseguro de las sesiones que atendió ÉL este mes.
+  // No se puede filtrar pagos por profesional: un pago es del tratamiento entero y puede
+  // estar cubriendo sesiones de dos profesionales (por eso salía "varios"). La sesión, en
+  // cambio, tiene un dueño único: el que la atendió.
   try {
     if (!esModoMoplex){
-      // ¿El tratamiento es de obra social? Se acepta lo que diga `modalidad`, y si viene
-      // vacía se cae en el nombre de la obra social cargada en el tratamiento.
       const esOS = (t) => {
         const mod = String(t.modalidad || '').toUpperCase().replace(/[^A-Z]/g, '');
         if (mod === 'PART' || mod === 'PARTICULAR') return false;
@@ -2064,81 +2069,77 @@ function render(pagos, sesiones, filtroProf){
         const os = String(t.obra_social || '').trim();
         return !!os && !/^(particular|ninguna|sin obra social|sin|no|-|n\/a)$/i.test(os);
       };
-      // Cuánto vale UNA sesión de ese tratamiento (= el coseguro por sesión):
-      // sale de lo que la agenda estampó en la sesión (parte del profesional + parte del centro).
-      const valSesOS = {};
-      // Quién ATENDIÓ cada tratamiento (puede ser más de uno). Es lo que manda para el
-      // filtro de profesional: quien cobró el pago NO es dueño de esa plata.
-      const profsTratOS = {};
+      const nomOS = (t) => String(t.obra_social || '').trim() || 'Sin especificar';
+      // Valor de UNA sesión de cada tratamiento (= el coseguro por sesión) y quién atendió
+      const valSesOS = {}, profsTratOS = {};
       for (const s of (MT.sesAll || [])){
         const v = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
         if (s.tratamiento_id != null && v > 0.5) valSesOS[s.tratamiento_id] = v;
         const pr = normProf(s.profesional);
-        if (s.tratamiento_id != null && pr){
-          (profsTratOS[s.tratamiento_id] = profsTratOS[s.tratamiento_id] || {})[pr] = 1;
-        }
+        if (s.tratamiento_id != null && pr) (profsTratOS[s.tratamiento_id] = profsTratOS[s.tratamiento_id] || {})[pr] = 1;
       }
-      const porOS = {}; const filasOS = []; let totCoseguro = 0;
+      // (a) Filas por PAGO — la mirada general
+      const filasOS = [];
       for (const p of pagos){
         const t = p.tratamientos || {};
         if (!esOS(t)) continue;
         if (filtroArea && practicaArea(t.practica_codigo) !== filtroArea) continue;
         const imp = Number(p.importe) || 0;
         if (imp <= 0.5) continue;
-        // Profesionales del tratamiento (los que atendieron). Si no hay sesiones cargadas,
-        // se cae al profesional del pago para no perder la fila.
         let profsT = Object.keys(profsTratOS[t.id] || {});
         if (!profsT.length){ const pp = normProf(p.profesional); if (pp) profsT = [pp]; }
-        // Con un profesional elegido, solo sus tratamientos. Con "Todos", sale todo.
-        if (filtroProf && !profsT.includes(filtroProf)) continue;
-        const profTxt = profsT.length === 0 ? '—' : (profsT.length === 1 ? profsT[0] : 'varios');
-        const os = String(t.obra_social || '').trim() || 'Sin especificar';
-        const r = (porOS[os] = porOS[os] || { cobrado:0, pagos:0, trats:{}, vals:{} });
-        r.cobrado += imp; r.pagos++;
-        if (t.id != null) r.trats[t.id] = 1;
-        const vs = valSesOS[t.id] || 0;
-        if (vs) r.vals[vs] = (r.vals[vs] || 0) + 1;
-        totCoseguro += imp;
         filasOS.push({
           fecha: p.fecha,
           pac: ((t.personas || {}).nombre) || '—',
           cod: t.codigo_id || '—',
           prac: practicaLabel(t.practica_codigo),
-          os, vs, imp, profTxt,
+          os: nomOS(t), vs: valSesOS[t.id] || 0, imp, profs: profsT,
           quien: normProf(p.quien_cobro) || normProf(p.profesional) || '—'
         });
       }
-      if (filasOS.length){
-        // Coseguro por sesión "típico" de cada obra social: el valor que más se repite.
-        const tipico = (vals) => {
-          const ks = Object.keys(vals);
-          if (!ks.length) return null;
-          ks.sort((a,b)=> vals[b]-vals[a] || Number(a)-Number(b));
-          return { val: Number(ks[0]), varios: ks.length > 1 };
-        };
+      // (b) Filas por SESIÓN del mes — la mirada por profesional
+      const sesOS = [];
+      for (const s of (MT.sesAll || [])){
+        if (!s.fecha || s.fecha < MT.desde || s.fecha > hasta) continue;
+        const t = s.tratamientos || {};
+        if (!esOS(t)) continue;
+        if (filtroArea && practicaArea(t.practica_codigo) !== filtroArea) continue;
+        const val = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
+        if (val <= 0.5) continue;
+        const pr = normProf(s.profesional);
+        if (!pr) continue;
+        sesOS.push({
+          fecha: s.fecha,
+          pac: ((t.personas || {}).nombre) || '—',
+          cod: t.codigo_id || '—',
+          prac: practicaLabel(t.practica_codigo),
+          os: nomOS(t), val, prof: pr,
+          delProf: Number(s.monto_profesional) || 0,
+          delCentro: Number(s.monto_centro) || 0
+        });
+      }
+      if (filasOS.length || sesOS.length){
+        window._cosOS = { filas: filasOS, ses: sesOS };
+        const ordCos = ['Bruno','Male','Vero','Jime','Lu'];
+        const setP = {};
+        sesOS.forEach(f => { setP[f.prof] = 1; });
+        filasOS.forEach(f => (f.profs || []).forEach(x => { setP[x] = 1; }));
+        const profsDisp = Object.keys(setP).sort((a,b)=>{
+          const ia = ordCos.indexOf(a), ib = ordCos.indexOf(b);
+          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        });
+        window._cosProfIni = (filtroProf && profsDisp.includes(filtroProf)) ? filtroProf : '';
+        const selHtml = soloLoMio ? '' :
+          `<div style="margin:0 0 10px;font-size:13px;color:#334155;">Profesional:
+             <select id="cosProf" onchange="pintarCoseguros(this.value)" style="padding:4px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;">
+               <option value="">Todos (lo que entró al centro)</option>
+               ${profsDisp.map(x => `<option value="${x}"${x === window._cosProfIni ? ' selected' : ''}>${x}</option>`).join('')}
+             </select>
+             <span style="color:#94a3b8;font-size:12px;margin-left:6px;">filtra solo este cuadro, no toca el resto de la pantalla</span>
+           </div>`;
         html += `<h2 class="bloque-tit">🏥 Coseguros de obra social — lo que pagó el paciente</h2>
-          <p style="color:#666;font-size:13px;margin:-6px 0 12px;">De los pagos del mes, estos son los de tratamientos que <b>no son particulares</b>: en ellos todo lo que el paciente pone en la caja <b>es el coseguro</b>. Lo que paga la obra social va aparte (bloque "Pagos de obras sociales"). <b>Informativo</b>: no cambia ningún número de la liquidación. Con un profesional elegido salen solo <b>sus</b> pacientes (por quién los atendió, no por quién cobró); con <b>Todos</b>, sale todo.</p>`;
-        html += `<table style="margin-bottom:8px;"><thead><tr>
-            <th>Obra social</th><th class="num">Tratamientos</th><th class="num">Pagos</th><th class="num">Coseguro por sesión</th><th class="num">Cobrado en el mes</th>
-          </tr></thead><tbody>`;
-        const osOrden = Object.keys(porOS).sort((a,b)=> porOS[b].cobrado - porOS[a].cobrado);
-        for (const os of osOrden){
-          const r = porOS[os];
-          const tp = tipico(r.vals);
-          const cel = tp ? (fmt(tp.val) + (tp.varios ? ' <span style="color:#92400e;font-size:11px;">· hay otros valores</span>' : '')) : '—';
-          html += `<tr><td>${os}</td><td class="num">${Object.keys(r.trats).length}</td><td class="num">${r.pagos}</td><td class="num">${cel}</td><td class="num">${fmt(r.cobrado)}</td></tr>`;
-        }
-        html += `<tr style="font-weight:700;background:#dbeafe;color:#1e40af;"><td>TOTAL coseguros del mes</td><td class="num">${osOrden.reduce((a,os)=> a + Object.keys(porOS[os].trats).length, 0)}</td><td class="num">${filasOS.length}</td><td class="num">—</td><td class="num">${fmt(totCoseguro)}</td></tr>`;
-        html += `</tbody></table>`;
-        html += `<details style="margin-bottom:18px;"><summary style="cursor:pointer;color:#1e9fe0;font-size:13px;font-weight:600;">Ver el detalle pago por pago (${filasOS.length})</summary>`;
-        html += `<table style="margin-top:8px;"><thead><tr>
-            <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Obra social</th><th>Atendió</th><th>Cobró</th><th class="num">Coseguro x sesión</th><th class="num">Importe</th>
-          </tr></thead><tbody>`;
-        for (const f of filasOS.slice().sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)))){
-          html += `<tr><td>${f.fecha}</td><td>${f.pac}</td><td style="font-family:monospace;">${f.cod}</td><td>${f.prac}</td><td>${f.os}</td><td>${f.profTxt}</td><td>${f.quien}</td><td class="num">${f.vs ? fmt(f.vs) : '—'}</td><td class="num">${fmt(f.imp)}</td></tr>`;
-        }
-        html += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="8">TOTAL</td><td class="num">${fmt(totCoseguro)}</td></tr>`;
-        html += `</tbody></table></details>`;
+          <p style="color:#666;font-size:13px;margin:-6px 0 10px;">Tratamientos que <b>no son particulares</b>: todo lo que el paciente pone en la caja <b>es el coseguro</b> (lo que paga la obra social va aparte, bloque "Pagos de obras sociales"). <b>Informativo</b>: no cambia ningún número de la liquidación.</p>
+          ${selHtml}<div id="cos-os"></div>`;
       }
     }
   } catch(e){ console.warn('Bloque coseguros de obra social:', e); }
@@ -2156,9 +2157,106 @@ function render(pagos, sesiones, filtroProf){
        Se muestran <b>para consulta e histórico</b>. Antes de mayo de 2026 los datos todavía no son confiables.</div>`
     : '';
   document.getElementById('resultado').innerHTML = _avisoMesViejo + html + _htmlExtra;
+  try { pintarCoseguros(window._cosProfIni || ''); } catch(e){ console.warn('pintarCoseguros:', e); }
   window._grupos = resumen;
   // Guardar todo lo calculado para el PDF
   window._liq = { resumen, porMedio, crucesBrutos: crucesVista, netosFinales: netosFinalesVista, deudasCentro: deudasCentroVista, detalle, totalBruto, totalProf, totalCentro, totalMoplex: totalMoplexV, profs, ordenarProfs, cant: cantVista, moplex: MPX, moplexFranq: franqVista, regalos: { lista: regalosVista, porProf: regPorProf, total: totalRegalos } };
+}
+
+// ===== COSEGUROS DE OBRA SOCIAL: pinta el cuadro con su propio filtro (08/09/2026) =====
+// Dibuja sobre los datos que ya quedaron guardados en window._cosOS por render().
+// No recalcula nada de la liquidación: filtra filas y suma.
+//  · Sin profesional -> por PAGO (la plata de coseguro que entró al centro este mes).
+//  · Con profesional -> por SESIÓN (el coseguro de las sesiones que atendió él este mes).
+function pintarCoseguros(prof){
+  try {
+    const cont = document.getElementById('cos-os');
+    if (!cont) return;
+    prof = prof || '';
+    const D = window._cosOS || { filas: [], ses: [] };
+    const sel = document.getElementById('cosProf');
+    if (sel && sel.value !== prof) sel.value = prof;
+
+    const tipico = (vals) => {
+      const ks = Object.keys(vals);
+      if (!ks.length) return null;
+      ks.sort((a,b)=> vals[b]-vals[a] || Number(a)-Number(b));
+      return { val: Number(ks[0]), varios: ks.length > 1 };
+    };
+    const celValor = (r) => {
+      const tp = tipico(r.vals);
+      return tp ? (fmt(tp.val) + (tp.varios ? ' <span style="color:#92400e;font-size:11px;">· hay otros valores</span>' : '')) : '—';
+    };
+    const vacio = (txt) => `<div style="padding:12px;color:#666;font-size:13px;background:#f8fafc;border-radius:8px;margin-bottom:18px;">${txt}</div>`;
+
+    // ---------- CON PROFESIONAL: sus sesiones del mes ----------
+    if (prof){
+      const filas = (D.ses || []).filter(f => f.prof === prof);
+      if (!filas.length){ cont.innerHTML = vacio('Sin sesiones de obra social de ' + prof + ' en este mes.'); return; }
+      const porOS = {}; let tot = 0, totProf = 0, totCentro = 0;
+      for (const f of filas){
+        const r = (porOS[f.os] = porOS[f.os] || { total:0, ses:0, pac:{}, vals:{} });
+        r.total += f.val; r.ses++; r.pac[f.cod] = 1; r.vals[f.val] = (r.vals[f.val] || 0) + 1;
+        tot += f.val; totProf += f.delProf; totCentro += f.delCentro;
+      }
+      let h = `<p style="color:#334155;font-size:13px;margin:0 0 8px;background:#eff6ff;border-left:3px solid #1e9fe0;padding:8px 10px;border-radius:6px;">Coseguro de las <b>sesiones que atendió ${prof}</b> este mes. Se cuenta por sesión y no por pago: un pago es del tratamiento entero y puede estar cubriendo sesiones de dos profesionales, mientras que cada sesión tiene un solo dueño.</p>`;
+      h += `<table style="margin-bottom:8px;"><thead><tr>
+          <th>Obra social</th><th class="num">Tratamientos</th><th class="num">Sesiones</th><th class="num">Coseguro por sesión</th><th class="num">Total del mes</th>
+        </tr></thead><tbody>`;
+      const osOrden = Object.keys(porOS).sort((a,b)=> porOS[b].total - porOS[a].total);
+      let nTrat = 0;
+      for (const os of osOrden){
+        const r = porOS[os]; const nt = Object.keys(r.pac).length; nTrat += nt;
+        h += `<tr><td>${os}</td><td class="num">${nt}</td><td class="num">${r.ses}</td><td class="num">${celValor(r)}</td><td class="num">${fmt(r.total)}</td></tr>`;
+      }
+      h += `<tr style="font-weight:700;background:#dbeafe;color:#1e40af;"><td>TOTAL coseguros · ${prof}</td><td class="num">${nTrat}</td><td class="num">${filas.length}</td><td class="num">—</td><td class="num">${fmt(tot)}</td></tr>`;
+      h += `</tbody></table>`;
+      h += `<p style="color:#666;font-size:12px;margin:0 0 10px;">De esos ${fmt(tot)}: <b>${fmt(totProf)}</b> es la parte de ${prof} y <b>${fmt(totCentro)}</b> la del centro (esté ya cobrado o no).</p>`;
+      h += `<details style="margin-bottom:18px;"><summary style="cursor:pointer;color:#1e9fe0;font-size:13px;font-weight:600;">Ver sesión por sesión (${filas.length})</summary>`;
+      h += `<table style="margin-top:8px;"><thead><tr>
+          <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Obra social</th><th class="num">Coseguro</th><th class="num">Del profe</th><th class="num">Del centro</th>
+        </tr></thead><tbody>`;
+      for (const f of filas.slice().sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)))){
+        h += `<tr><td>${f.fecha}</td><td>${f.pac}</td><td style="font-family:monospace;">${f.cod}</td><td>${f.prac}</td><td>${f.os}</td><td class="num">${fmt(f.val)}</td><td class="num">${fmt(f.delProf)}</td><td class="num">${fmt(f.delCentro)}</td></tr>`;
+      }
+      h += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="5">TOTAL</td><td class="num">${fmt(tot)}</td><td class="num">${fmt(totProf)}</td><td class="num">${fmt(totCentro)}</td></tr>`;
+      h += `</tbody></table></details>`;
+      cont.innerHTML = h;
+      return;
+    }
+
+    // ---------- TODOS: la plata de coseguro que entró al centro ----------
+    const filas = D.filas || [];
+    if (!filas.length){ cont.innerHTML = vacio('Sin coseguros de obra social en este mes.'); return; }
+    const porOS = {}; let tot = 0, nTrat = 0;
+    for (const f of filas){
+      const r = (porOS[f.os] = porOS[f.os] || { cobrado:0, pagos:0, trats:{}, vals:{} });
+      r.cobrado += f.imp; r.pagos++; r.trats[f.cod] = 1;
+      if (f.vs) r.vals[f.vs] = (r.vals[f.vs] || 0) + 1;
+      tot += f.imp;
+    }
+    let h = `<table style="margin-bottom:8px;"><thead><tr>
+        <th>Obra social</th><th class="num">Tratamientos</th><th class="num">Pagos</th><th class="num">Coseguro por sesión</th><th class="num">Cobrado en el mes</th>
+      </tr></thead><tbody>`;
+    const osOrden = Object.keys(porOS).sort((a,b)=> porOS[b].cobrado - porOS[a].cobrado);
+    for (const os of osOrden){
+      const r = porOS[os]; const nt = Object.keys(r.trats).length; nTrat += nt;
+      h += `<tr><td>${os}</td><td class="num">${nt}</td><td class="num">${r.pagos}</td><td class="num">${celValor(r)}</td><td class="num">${fmt(r.cobrado)}</td></tr>`;
+    }
+    h += `<tr style="font-weight:700;background:#dbeafe;color:#1e40af;"><td>TOTAL coseguros del mes</td><td class="num">${nTrat}</td><td class="num">${filas.length}</td><td class="num">—</td><td class="num">${fmt(tot)}</td></tr>`;
+    h += `</tbody></table>`;
+    h += `<details style="margin-bottom:18px;"><summary style="cursor:pointer;color:#1e9fe0;font-size:13px;font-weight:600;">Ver el detalle pago por pago (${filas.length})</summary>`;
+    h += `<table style="margin-top:8px;"><thead><tr>
+        <th>Fecha</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Obra social</th><th>Atendió</th><th>Cobró</th><th class="num">Coseguro x sesión</th><th class="num">Importe</th>
+      </tr></thead><tbody>`;
+    for (const f of filas.slice().sort((a,b)=> String(a.fecha).localeCompare(String(b.fecha)))){
+      const at = (f.profs && f.profs.length) ? f.profs.join(' + ') : '—';
+      h += `<tr><td>${f.fecha}</td><td>${f.pac}</td><td style="font-family:monospace;">${f.cod}</td><td>${f.prac}</td><td>${f.os}</td><td>${at}</td><td>${f.quien}</td><td class="num">${f.vs ? fmt(f.vs) : '—'}</td><td class="num">${fmt(f.imp)}</td></tr>`;
+    }
+    h += `<tr style="font-weight:700;background:#f8fafc;color:#334155;"><td colspan="8">TOTAL</td><td class="num">${fmt(tot)}</td></tr>`;
+    h += `</tbody></table></details>`;
+    cont.innerHTML = h;
+  } catch(e){ console.warn('pintarCoseguros:', e); }
 }
 
 function toggleDetalle(prof){
