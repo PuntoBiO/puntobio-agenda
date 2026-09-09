@@ -760,7 +760,9 @@ function _precioConsultaMoplex(ev, t){
   // así que este tratamiento no le cobra nada. Lo que va a MOPLEX lo pone el centro.
   if (t.moplex_consulta_incluida_eval) return 0
   if (t.moplex_consulta_cortesia_pb){
-    // Cortesía PuntoBiO: paga solo el 20% de MOPLEX (vigente desde agosto 2026)
+    // Cortesía PuntoBiO: paga solo lo de MOPLEX. Sept 2026: monto fijo (costo_moplex);
+    // antes: 20% de la consulta (vigente desde agosto 2026).
+    if ((Number(ev.precio_lista)||0) > 0) return Number(ev.costo_moplex)||0
     const cobra = String(t.fecha_alta || '').slice(0,7) >= _MOPLEX_PCT_DESDE
     return cobra ? Math.round(precio * _MOPLEX_PCT_CONSULTA) : 0
   }
@@ -806,8 +808,9 @@ function _precioPlantillaMoplex(p, t){
   const custom = (Number(t.moplex_plantilla_monto) > 0)
   const precio = custom ? Number(t.moplex_plantilla_monto) : precioDef
   if (t.moplex_plantilla_cortesia_pb){
-    // Cortesía: paga solo el costo MOPLEX (escalado si hay convenio)
+    // Cortesía: paga solo el costo MOPLEX. Sept 2026: monto fijo; antes: escalado por convenio.
     const moplexBase = Number(p.costo_moplex)||0
+    if ((Number(p.precio_lista)||0) > 0) return moplexBase + urg
     return ((custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase) + urg
   }
   return precio + urg
@@ -1800,7 +1803,7 @@ let MOPLEX_CONSULTAS = []   // baropodometrías del catálogo (Nuevo / Control /
 async function cargarMoplexConsultasCat() {
   try {
     const { data } = await sb.from('moplex_catalogo')
-      .select('id, categoria, nombre, precio_paciente, costo_moplex, pct_profesional, es_garantia, activo, orden, vigente_desde, vigente_hasta').order('orden')
+      .select('id, categoria, nombre, precio_paciente, precio_lista, costo_moplex, pct_profesional, es_garantia, activo, orden, vigente_desde, vigente_hasta').order('orden')
     const cat = data || []
     // Mapa completo (consultas + plantillas) para recalcular el total real de los MOPLEX.
     estado.moplexCatById = {}
@@ -1824,7 +1827,7 @@ function poblarMoplexConsultas() {
   const normales = MOPLEX_CONSULTAS.map(c => `<option value="${c.id}">${c.nombre} — $${Number(c.precio_paciente||0).toLocaleString('es-AR')}</option>`).join('')
   const cortesias = MOPLEX_CONSULTAS
     .filter(c => (Number(c.precio_paciente)||0) > 0 && !c.es_garantia)
-    .map(c => `<option value="${c.id}|CPB">🎁 ${c.nombre} · Cortesía PuntoBiO — $${Math.round((Number(c.precio_paciente)||0)*0.20).toLocaleString('es-AR')} (paga solo MOPLEX)</option>`).join('')
+    .map(c => `<option value="${c.id}|CPB">🎁 ${c.nombre} · Cortesía PuntoBiO — $${((Number(c.precio_lista)||0)>0 ? (Number(c.costo_moplex)||0) : Math.round((Number(c.precio_paciente)||0)*0.20)).toLocaleString('es-AR')} (paga solo MOPLEX)</option>`).join('')
   sel.innerHTML = `<option value="">— elegí tipo —</option>` + normales + cortesias
 }
 function esMoplexNuevo() {
@@ -1850,7 +1853,7 @@ function toggleEvalConMoplexField() {
     const sel = $('sel-eval-moplex-consulta')
     if (sel) sel.innerHTML = '<option value="">— tipo de baropodometría —</option>' +
       MOPLEX_CONSULTAS.filter(c => (Number(c.precio_paciente)||0) > 0 && !c.es_garantia)
-        .map(c => `<option value="${c.id}">${c.nombre} — MOPLEX cobra $${Math.round((Number(c.precio_paciente)||0)*0.20).toLocaleString('es-AR')}</option>`).join('')
+        .map(c => `<option value="${c.id}">${c.nombre} — MOPLEX cobra $${((Number(c.precio_lista)||0)>0 ? (Number(c.costo_moplex)||0) : Math.round((Number(c.precio_paciente)||0)*0.20)).toLocaleString('es-AR')}</option>`).join('')
   } else {
     field.style.display = 'none'
     if ($('chk-eval-con-moplex')) $('chk-eval-con-moplex').checked = false
@@ -1873,8 +1876,9 @@ window.onMoplexConsultaChange = function() {
   const cortesia = (flag === 'CPB')
   const c = MOPLEX_CONSULTAS.find(x => String(x.id) === idStr)
   let precio = c ? Number(c.precio_paciente || 0) : 0
-  // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX (el 20% de la evaluación)
-  if (cortesia) precio = Math.round(precio * 0.20)
+  // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX. Sept 2026: monto fijo
+  // (costo_moplex); antes: 20% de la evaluación.
+  if (cortesia) precio = (c && (Number(c.precio_lista)||0) > 0) ? (Number(c.costo_moplex)||0) : Math.round(precio * 0.20)
   $('nuevo-sesiones').value = 1
   $('nuevo-valor-sesion').value = precio
   $('nuevo-total').value = precio
