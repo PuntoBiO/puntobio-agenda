@@ -110,33 +110,43 @@ function calcConsulta(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   const tieneMonto = (montoCustom !== null && montoCustom !== undefined && montoCustom !== '' && !isNaN(Number(montoCustom)))
   const precio = tieneMonto ? Number(montoCustom) : precioDef
   const custom = tieneMonto && Number(montoCustom) !== precioDef
-  const cobraMoplex = ((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE
-  let moplex
-  if (cobraMoplex){
-    // 20% del precio (proporcional: si el precio está corregido, el 20% se corrige con él)
-    moplex = Math.round(precio * MOPLEX_PCT_CONSULTA)
+  // MODELO SEPTIEMBRE 2026: los ítems nuevos traen "precio de lista" (precio_lista).
+  // Si está cargado → MOPLEX cobra su MONTO FIJO (costo_moplex) y el profesional cobra
+  // su % sobre el precio de LISTA (no sobre lo cobrado): lo que cobramos de más queda
+  // para el centro. Si NO hay precio de lista, sigue la regla vieja (agosto: 20%).
+  const lista = Number(c.precio_lista)||0
+  const modeloSept = lista > 0
+  let moplex, prof
+  if (modeloSept){
+    moplex = Number(c.costo_moplex)||0
+    prof   = Math.round(lista * (Number(c.pct_profesional)||0)/100)
   } else {
-    // Regla vieja: costo fijo del catálogo (hoy $0 para consultas), escalado si hay convenio
-    const moplexBase = Number(c.costo_moplex)||0
-    moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+    const cobraMoplex = ((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE
+    if (cobraMoplex){
+      // 20% del precio (proporcional: si el precio está corregido, el 20% se corrige con él)
+      moplex = Math.round(precio * MOPLEX_PCT_CONSULTA)
+    } else {
+      // Regla vieja: costo fijo del catálogo (hoy $0 para consultas), escalado si hay convenio
+      const moplexBase = Number(c.costo_moplex)||0
+      moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+    }
+    prof = Math.round(precio * (Number(c.pct_profesional)||0)/100)
   }
-  // INCLUIDA EN UNA EVALUACIÓN (26/8): la baropodometría se hizo dentro de una
-  // evaluación de ingreso/deportista que el paciente ya pagó. Acá el paciente NO
-  // paga nada por la consulta, pero MOPLEX cobra igual su 20% — y eso lo pone el
-  // centro de su bolsillo, así que su parte queda NEGATIVA. Ojo: no es lo mismo
-  // que la cortesía de abajo, donde el paciente sí paga la parte de MOPLEX.
+  // INCLUIDA EN UNA EVALUACIÓN (26/8): el paciente no paga la consulta (ya pagó la eval),
+  // pero MOPLEX cobra igual su parte y la absorbe el centro (queda negativa).
   if (incluidaEval && moplex > 0){
     return { precio: 0, moplex, prof: 0, centro: -moplex, custom: false, sinCargo: false, cortesiaPB: false, incluidaEval: true }
   }
-  // CORTESÍA PUNTOBIO (12/8, "ej para una amiga mía"): el paciente paga SOLO lo de
-  // MOPLEX (esa plata es de la franquicia, no se puede regalar) y PB regala el resto:
-  // profesional $0 y centro $0. El monto a cobrar es exactamente el que va a MOPLEX.
+  // CORTESÍA PUNTOBIO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
   if (cortesiaPB && moplex > 0){
     return { precio: moplex, moplex, prof: 0, centro: 0, custom: false, sinCargo: false, cortesiaPB: true }
   }
-  const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100)
+  // Consulta sin cargo (0 explícito): no cobra nadie — ni MOPLEX ni prof ni centro.
+  if (tieneMonto && precio === 0){
+    return { precio: 0, moplex: 0, prof: 0, centro: 0, custom, sinCargo: true, cortesiaPB: false }
+  }
   const centro = precio - moplex - prof
-  return { precio, moplex, prof, centro, custom, sinCargo: tieneMonto && precio === 0, cortesiaPB: false }
+  return { precio, moplex, prof, centro, custom, sinCargo: false, cortesiaPB: false }
 }
 // URGENTE (26/8/26): hay pedidos de plantillas que se piden de forma urgente y MOPLEX
 // cobra un extra FIJO por la fabricación express. $22.000 → $18.700 MOPLEX (85%) ·
@@ -207,19 +217,27 @@ function _calcPlantillaBase(p, rectif, montoCustom, montoPlantilla, cortesiaPB){
     }
     return { precio, moplex, prof, centro, rectif:true, sinCargo: tieneMonto && precio === 0 }
   }
-  // Nueva: precio editable (convenios MOPLEX). Por defecto el del catálogo; si Lu lo cambió, ese.
+  // Nueva: precio editable. Por defecto el del catálogo; si Lu lo cambió, ese.
   const precioDef = Number(p.precio_paciente)||0
   const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef
   const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef
-  // Con convenio el descuento se reparte proporcional entre los tres:
-  // MOPLEX baja en la misma proporción que el precio; prof ya es % del precio; centro = resto.
-  const moplexBase = Number(p.costo_moplex)||0
-  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+  // MODELO SEPTIEMBRE 2026 (precio_lista cargado): MOPLEX monto fijo · prof 10% del
+  // precio de LISTA · centro = resto. Sin precio de lista, sigue la regla vieja.
+  const lista = Number(p.precio_lista)||0
+  const modeloSept = lista > 0
+  let moplex, prof
+  if (modeloSept){
+    moplex = Number(p.costo_moplex)||0
+    prof   = Math.round(lista * (Number(p.pct_profesional)||0)/100)
+  } else {
+    const moplexBase = Number(p.costo_moplex)||0
+    moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase
+    prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100)
+  }
   // Cortesía PuntoBiO en la plantilla nueva: el paciente paga SOLO el costo MOPLEX
   if (cortesiaPB && moplex > 0){
     return { precio: moplex, moplex, prof: 0, centro: 0, rectif:false, custom:false, cortesiaPB:true }
   }
-  const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100)
   const centro = precio - moplex - prof
   return { precio, moplex, prof, centro, rectif:false, custom }
 }

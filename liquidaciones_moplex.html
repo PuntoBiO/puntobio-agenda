@@ -141,31 +141,41 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   const tieneMonto = (montoCustom !== null && montoCustom !== undefined && montoCustom !== '' && !isNaN(Number(montoCustom)));
   const precio = tieneMonto ? Number(montoCustom) : precioDef;
   const custom = tieneMonto && Number(montoCustom) !== precioDef;
-  // DOBLE CONDICIÓN (fix 5/8 noche, careo contra julio): el 20% aplica solo si
-  // la CONSULTA es de agosto en adelante Y el MES QUE SE LIQUIDA es agosto en
-  // adelante. Sin la segunda pata, consultas de agosto PAGADAS en julio (Arias,
-  // Costa) le metían el 20% a la liquidación de julio ($84.862 → $95.062) — y
-  // julio es intocable.
-  const mesVista = String(window._moplexDesde || '').slice(0,7);
-  const cobraMoplex = (((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE)
-                   && (!mesVista || mesVista >= MOPLEX_PCT_CONSULTA_DESDE);
-  let moplex;
-  if (cobraMoplex){
-    moplex = Math.round(precio * MOPLEX_PCT_CONSULTA);
+  // MODELO SEPTIEMBRE 2026 (precio_lista cargado): MOPLEX monto fijo (costo_moplex) ·
+  // prof 40% del precio de LISTA · centro = resto. Sin precio de lista, regla vieja.
+  const lista = Number(c.precio_lista)||0;
+  const modeloSept = lista > 0;
+  let moplex, prof;
+  if (modeloSept){
+    moplex = Number(c.costo_moplex)||0;
+    prof   = Math.round(lista * (Number(c.pct_profesional)||0)/100);
   } else {
-    const moplexBase = Number(c.costo_moplex)||0;
-    moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+    // DOBLE CONDICIÓN (fix 5/8): el 20% aplica solo si la consulta es de agosto+ Y el
+    // mes que se liquida es agosto+ (julio es intocable).
+    const mesVista = String(window._moplexDesde || '').slice(0,7);
+    const cobraMoplex = (((fechaC || '').slice(0,7)) >= MOPLEX_PCT_CONSULTA_DESDE)
+                     && (!mesVista || mesVista >= MOPLEX_PCT_CONSULTA_DESDE);
+    if (cobraMoplex){
+      moplex = Math.round(precio * MOPLEX_PCT_CONSULTA);
+    } else {
+      const moplexBase = Number(c.costo_moplex)||0;
+      moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+    }
+    prof = Math.round(precio*0.40);
   }
-  // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
-  // INCLUIDA EN UNA EVALUACIÓN (26/8): el paciente no paga nada (ya pagó la eval),
-  // MOPLEX cobra igual su 20% y el centro lo absorbe → su parte queda negativa.
+  // INCLUIDA EN UNA EVALUACIÓN: el paciente no paga (ya pagó la eval), MOPLEX cobra
+  // igual su parte y el centro la absorbe → su parte queda negativa.
   if (incluidaEval && moplex > 0){
     return { precio: 0, moplex, prof: 0, centro: -moplex, incluidaEval: true };
   }
+  // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
   if (cortesiaPB && moplex > 0){
     return { precio: moplex, moplex, prof: 0, centro: 0 };
   }
-  const prof   = Math.round(precio*0.40);
+  // Consulta sin cargo (0 explícito): no cobra nadie.
+  if (tieneMonto && precio === 0){
+    return { precio: 0, moplex: 0, prof: 0, centro: 0 };
+  }
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro };
 }
@@ -233,11 +243,21 @@ function _calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortes
   const precioDef = Number(p.precio_paciente)||0;
   const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
   const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
-  const moplexBase = Number(p.costo_moplex)||0;
-  const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+  // MODELO SEPTIEMBRE 2026 (precio_lista cargado): MOPLEX monto fijo · prof 10% del
+  // precio de LISTA · centro = resto. Sin precio de lista, regla vieja.
+  const lista = Number(p.precio_lista)||0;
+  const modeloSept = lista > 0;
+  let moplex, prof;
+  if (modeloSept){
+    moplex = Number(p.costo_moplex)||0;
+    prof   = Math.round(lista * (Number(p.pct_profesional)||0)/100);
+  } else {
+    const moplexBase = Number(p.costo_moplex)||0;
+    moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+    prof   = Math.round(precio*0.10);
+  }
   // Cortesía PuntoBiO en la plantilla nueva: el paciente paga SOLO el costo MOPLEX
   if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:false };
-  const prof   = Math.round(precio*0.10);
   const centro = precio - moplex - prof;
   return { precio, moplex, prof, centro, rectif:false };
 }
