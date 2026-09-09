@@ -655,15 +655,25 @@
     const tiene = _tieneValMoplex(montoCustom);
     const precio = tiene ? Number(montoCustom) : precioDef;      // 0 explícito = sin cargo
     const custom = tiene && Number(montoCustom) !== precioDef;
-    const cobra = String(fechaC||'').slice(0,7) >= MOPLEX_PCT_CONSULTA_DESDE;
-    let moplex;
-    if (cobra){ moplex = Math.round(precio * MOPLEX_PCT_CONSULTA); }
-    else { const b = Number(c.costo_moplex)||0; moplex = (custom && precioDef > 0) ? Math.round(b * precio / precioDef) : b; }
-    // Incluida en una evaluación (26/8): el paciente no paga nada acá — ya lo pagó
-    // en la evaluación. MOPLEX cobra igual y el centro lo absorbe.
+    // MODELO SEPTIEMBRE 2026 (precio_lista cargado): MOPLEX monto fijo (costo_moplex) ·
+    // prof % del precio de LISTA · centro = resto. Sin precio de lista, regla vieja (agosto: 20%).
+    const lista = Number(c.precio_lista)||0;
+    const modeloSept = lista > 0;
+    let moplex, prof;
+    if (modeloSept){
+      moplex = Number(c.costo_moplex)||0;
+      prof   = Math.round(lista * (Number(c.pct_profesional)||0)/100);
+    } else {
+      const cobra = String(fechaC||'').slice(0,7) >= MOPLEX_PCT_CONSULTA_DESDE;
+      if (cobra){ moplex = Math.round(precio * MOPLEX_PCT_CONSULTA); }
+      else { const b = Number(c.costo_moplex)||0; moplex = (custom && precioDef > 0) ? Math.round(b * precio / precioDef) : b; }
+      prof = Math.round(precio * (Number(c.pct_profesional)||0)/100);
+    }
+    // Incluida en una evaluación: el paciente no paga acá; MOPLEX cobra y el centro absorbe.
     if (incluidaEval && moplex > 0) return { precio: 0, moplex, prof:0, centro:-moplex, incluidaEval:true };
     if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0 };
-    const prof   = Math.round(precio * (Number(c.pct_profesional)||0)/100);
+    // Sin cargo (0 explícito): no cobra nadie.
+    if (tiene && precio === 0) return { precio: 0, moplex: 0, prof: 0, centro: 0 };
     return { precio, moplex, prof, centro: precio - moplex - prof };
   }
   // URGENTE (26/8/26): extra fijo de MOPLEX por fabricación express.
@@ -713,14 +723,22 @@
       if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0, rectif:true };
       return { precio, moplex, prof:0, centro: precio - moplex, rectif:true };
     }
-    // Nueva: precio editable (convenios MOPLEX). El descuento se reparte proporcional.
+    // Nueva: precio editable. MODELO SEPTIEMBRE (precio_lista cargado): MOPLEX monto fijo ·
+    // prof 10% del precio de LISTA · centro = resto. Sin precio de lista, regla vieja.
     const precioDef = Number(p.precio_paciente)||0;
     const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
     const custom = (Number(montoPlantilla) > 0) && Number(montoPlantilla) !== precioDef;
-    const moplexBase = Number(p.costo_moplex)||0;
-    const moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+    const lista = Number(p.precio_lista)||0;
+    let moplex, prof;
+    if (lista > 0){
+      moplex = Number(p.costo_moplex)||0;
+      prof   = Math.round(lista * (Number(p.pct_profesional)||0)/100);
+    } else {
+      const moplexBase = Number(p.costo_moplex)||0;
+      moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
+      prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);
+    }
     if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof:0, centro:0, rectif:false };
-    const prof   = Math.round(precio * (Number(p.pct_profesional)||0)/100);
     return { precio, moplex, prof, centro: precio - moplex - prof, rectif:false };
   }
   function splitPortionMoplex(rep, portion, fact){
