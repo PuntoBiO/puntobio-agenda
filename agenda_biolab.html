@@ -506,6 +506,20 @@
           </select>
           <div id="nt-cobro-previa" style="display:none; margin-top:6px; padding:8px 10px; border-radius:8px; font-size:12px; line-height:1.45; border:1px solid var(--border,#e2e8f0); background:#fff; color:var(--muted);"></div>
         </div>
+        <!-- Evaluación que va con baropodometría MOPLEX: al crear la evaluación se crea
+             también el tratamiento MOPLEX enlazado (moplex_eval_origen), y el turno de 15'
+             sale solo al reservar la evaluación. Solo para EVAL (no SARKMED). -->
+        <div class="form-row" id="nt-eval-moplex-field" style="display:none;">
+          <label style="display:flex; align-items:center; gap:7px; font-size:13px; cursor:pointer; font-weight:600; color:var(--text); text-transform:none; letter-spacing:0;">
+            <input type="checkbox" id="nt-chk-eval-moplex" onchange="ntToggleEvalMoplex()" style="width:auto;"> 🦶 Va con baropodometría MOPLEX
+          </label>
+          <div id="nt-eval-moplex-box" style="display:none; margin-top:8px;">
+            <select id="nt-sel-eval-moplex-consulta" style="width:100%;"><option value="">— tipo de baropodometría —</option></select>
+            <div style="font-size:11.5px; color:var(--muted); margin-top:6px; line-height:1.5;">
+              El paciente no paga nada extra: ya paga la evaluación. MOPLEX cobra igual su parte y la absorbe PuntoBiO (el profesional no cobra por esta consulta). El turno de 15' se agrega solo al reservar la evaluación.
+            </div>
+          </div>
+        </div>
         <div id="nt-alert" style="font-size:12px; color:#dc2626; margin-top:6px;"></div>
         <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
           <button type="button" id="nt-cancel" style="padding:7px 14px; border-radius:8px; border:1px solid var(--border,#e2e8f0); background:#fff; cursor:pointer;">Cancelar</button>
@@ -1605,6 +1619,27 @@ async function ntBuscarPrecio(practicaCodigo){
   }catch(e){ return null; }
 }
 
+// Evaluación que va con baropodometría MOPLEX (mismo circuito que la pantalla
+// Tratamientos): pobla el sub-selector con las baropodometrías vigentes y muestra
+// cuánto cobra MOPLEX. Solo aplica a EVAL de ingreso / deportista.
+const NT_EVAL_CON_MOPLEX = ['EVALUACION_INGRESO','EVALUACION_DEPORTISTA'];
+function ntPoblarEvalMoplex(){
+  const sel = document.getElementById('nt-sel-eval-moplex-consulta');
+  if(!sel) return;
+  const opts = (moplexCat.consultas || [])
+    .filter(c => (Number(c.precio_paciente)||0) > 0 && !c.es_garantia && String(c.nombre||'').toLowerCase().startsWith('baropod'))
+    .map(c => {
+      const cobra = (Number(c.precio_lista)||0) > 0 ? (Number(c.costo_moplex)||0) : Math.round((Number(c.precio_paciente)||0)*0.20);
+      return `<option value="${c.id}">${c.nombre} — MOPLEX cobra $${cobra.toLocaleString('es-AR')}</option>`;
+    }).join('');
+  sel.innerHTML = '<option value="">— tipo de baropodometría —</option>' + opts;
+}
+function ntToggleEvalMoplex(){
+  const on = document.getElementById('nt-chk-eval-moplex')?.checked;
+  const box = document.getElementById('nt-eval-moplex-box');
+  if(box) box.style.display = on ? '' : 'none';
+}
+
 // Muestra u oculta el botón "+ Crear tratamiento acá" según la práctica elegida
 function ntActualizarBoton(){
   const btn = document.getElementById('btn-nuevo-tto');
@@ -1630,6 +1665,15 @@ async function ntAbrir(){
   ntActualizarPrevia();
   const precio = await ntBuscarPrecio(cfg.prefix);
   document.getElementById('nt-valor-sesion').value = (precio != null) ? precio : '';
+  // Baropodometría MOPLEX: solo se ofrece en evaluaciones (no en SARKMED)
+  const aplicaMoplex = NT_EVAL_CON_MOPLEX.includes(practica);
+  const emField = document.getElementById('nt-eval-moplex-field');
+  const emChk   = document.getElementById('nt-chk-eval-moplex');
+  const emBox   = document.getElementById('nt-eval-moplex-box');
+  if(emChk) emChk.checked = false;
+  if(emBox) emBox.style.display = 'none';
+  if(emField) emField.style.display = aplicaMoplex ? '' : 'none';
+  if(aplicaMoplex) ntPoblarEvalMoplex();
   document.getElementById('nuevo-tto-box').style.display = 'block';
 }
 
@@ -1645,6 +1689,13 @@ async function ntCrear(){
   const valor = parseFloat(document.getElementById('nt-valor-sesion').value || '0');
   const tipoCobro = document.getElementById('nt-tipo-cobro').value || 'NORMAL';
   if(!totalSes || totalSes < 1){ alerta.textContent = 'Total de sesiones inválido.'; return; }
+
+  // ¿La evaluación va con baropodometría MOPLEX? Se valida ACÁ (antes de crear nada),
+  // así no queda la evaluación suelta si falta elegir el tipo de baropodometría.
+  const conMoplex = !!document.getElementById('nt-chk-eval-moplex')?.checked
+    && NT_EVAL_CON_MOPLEX.includes(practica);
+  const baropodId = conMoplex ? Number(document.getElementById('nt-sel-eval-moplex-consulta')?.value || 0) : 0;
+  if(conMoplex && !baropodId){ alerta.textContent = 'Elegí el tipo de baropodometría MOPLEX.'; return; }
 
   const btn = document.getElementById('nt-create');
   btn.disabled = true; btn.textContent = 'Creando…';
@@ -1665,6 +1716,41 @@ async function ntCrear(){
     };
     const { error } = await sb.from('tratamientos').insert([payload]).select().single();
     if(error) throw error;
+
+    // El tratamiento MOPLEX que acompaña a la evaluación. Nace atado por
+    // moplex_eval_origen (la Agenda BioLab genera el turno de 15' al reservar la
+    // evaluación). El paciente ya pagó la evaluación: este va en $0, MOPLEX cobra
+    // igual su parte y la absorbe el centro (moplex_consulta_incluida_eval). Mismo
+    // alta que la pantalla Tratamientos: NO se manda total_pagar (columna generada)
+    // ni un tipo_cobro inventado (la marca que vale es moplex_consulta_incluida_eval).
+    if(conMoplex){
+      try{
+        const codigoMoplex = `MOPLEX${ts.getFullYear()}${z(ts.getMonth()+1)}${z(ts.getDate())}${z(ts.getHours())}${z(ts.getMinutes())}`;
+        const { error: eM } = await sb.from('tratamientos').insert({
+          persona_id: Number(personaId),
+          codigo_id: codigoMoplex,
+          practica_codigo: 'MOPLEX',
+          modalidad: 'PARTICULAR',
+          total_sesiones: 1,
+          valor_sesion: 0,
+          total_abonado: 0,
+          descuento_monto: 0,
+          estado: 'Pendiente',
+          fecha_alta: payload.fecha_alta,
+          moplex_consulta_id: baropodId,
+          moplex_consulta_incluida_eval: true,
+          moplex_eval_origen: codigoId,
+          solicita_plantillas: false
+        });
+        if(eM) throw eM;
+        toast(`✓ Evaluación ${codigoId} + MOPLEX creados`, 'ok');
+      }catch(eM){
+        // La evaluación YA quedó creada: se avisa fuerte para cargar el MOPLEX a mano.
+        console.error('Error creando el MOPLEX de la evaluación:', eM);
+        toast(`⚠️ La evaluación ${codigoId} se creó, pero el MOPLEX no: ${eM.message || eM}. Cargalo en Tratamientos.`, 'err');
+      }
+    }
+
     ntCerrar();
     await cargarTratamientosExistentes(practica);   // recarga la lista
     document.getElementById('inp-tto').value = codigoId;  // y lo deja elegido
