@@ -533,20 +533,13 @@
           <label>Tipo de consulta</label>
           <select id="sel-moplex-consulta" onchange="actualizarMoplexMontos()"><option value="">— elegir —</option></select>
         </div>
-        <label style="display:flex; align-items:center; gap:7px; font-size:13px; margin:10px 0;"><input type="checkbox" id="chk-moplex-plantilla" onchange="toggleMoplexPlantilla()"> Pide plantilla</label>
-        <div id="moplex-plantilla-box" style="display:none;">
-          <div class="form-row-2">
-            <div class="form-row">
-              <label>Tipo de plantilla</label>
-              <select id="sel-moplex-plantilla" onchange="actualizarMoplexMontos()"><option value="">— tipo —</option></select>
-            </div>
-            <div class="form-row">
-              <label>Nueva / Rectificación</label>
-              <select id="sel-moplex-rectif" onchange="actualizarMoplexMontos()"><option value="0">Nueva</option><option value="1">Rectificación</option></select>
-            </div>
-          </div>
-        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:6px;">Las plantillas se piden aparte, en Consultas MOPLEX.</div>
         <div id="moplex-montos" style="font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.6;"></div>
+        <!-- Crear el tratamiento MOPLEX (solo la consulta / baropodometría) sin salir a
+             Tratamientos. Los pedidos de plantilla NO van acá: se piden aparte en
+             Consultas MOPLEX, así que el tratamiento nace con solicita_plantillas en false. -->
+        <button type="button" id="btn-crear-moplex" style="display:none; margin-top:10px; padding:7px 14px; border-radius:8px; border:none; background:var(--moplex); color:#fff; font-weight:600; cursor:pointer;">+ Crear tratamiento MOPLEX (consulta)</button>
+        <div id="btn-crear-moplex-hint" style="display:none; font-size:11px; color:var(--muted); margin-top:5px;">Crea el tratamiento con el tipo de consulta elegido. La plantilla, si el paciente la pide, se agrega aparte en Consultas MOPLEX.</div>
       </div>
 
       <div class="form-row">
@@ -1119,9 +1112,7 @@ async function cargarMoplexCatalogo(){
     });
     const sc = document.getElementById('sel-moplex-consulta');
     if(sc) sc.innerHTML = '<option value="">— elegir —</option>' + moplexCat.consultas.map(c=>`<option value="${c.id}">${c.nombre}</option>`).join('');
-    const sp = document.getElementById('sel-moplex-plantilla');
-    if(sp) sp.innerHTML = '<option value="">— tipo —</option>' + moplexCat.plantillas.map(p=>`<option value="${p.id}">${p.nombre}</option>`).join('');
-  }catch(e){ /* sin catálogo, los selects quedan vacíos */ }
+  }catch(e){ /* sin catálogo, el select queda vacío */ }
 }
 function tipoCortoMoplex(c){
   if(!c) return null;
@@ -1152,51 +1143,32 @@ function lineaMontosMoplex(titulo, m){
   if(!m) return '';
   return `<div><b>${titulo}</b> · Paciente ${fmtMoplex(m.precio)} · Centro ${fmtMoplex(m.centro)} · Prof ${fmtMoplex(m.prof)} · MOPLEX ${fmtMoplex(m.moplex)}</div>`;
 }
-function toggleMoplexPlantilla(){
-  const on = document.getElementById('chk-moplex-plantilla').checked;
-  document.getElementById('moplex-plantilla-box').style.display = on ? 'block' : 'none';
-  actualizarMoplexMontos();
-}
 function resetMoplexBox(){
   const c = document.getElementById('sel-moplex-consulta'); if(c) c.value = '';
-  const k = document.getElementById('chk-moplex-plantilla'); if(k) k.checked = false;
-  const p = document.getElementById('sel-moplex-plantilla'); if(p) p.value = '';
-  const r = document.getElementById('sel-moplex-rectif'); if(r) r.value = '0';
-  const pb = document.getElementById('moplex-plantilla-box'); if(pb) pb.style.display = 'none';
   const mb = document.getElementById('moplex-montos'); if(mb) mb.innerHTML = '';
 }
 function actualizarMoplexMontos(){
   const box = document.getElementById('moplex-montos');
   if(!box) return;
-  let html = '';
   const cId = document.getElementById('sel-moplex-consulta').value;
-  html += lineaMontosMoplex('Consulta', calcConsultaMoplex(cId ? moplexCat.byId[cId] : null));
-  if(document.getElementById('chk-moplex-plantilla').checked){
-    const pId = document.getElementById('sel-moplex-plantilla').value;
-    const rectif = document.getElementById('sel-moplex-rectif').value === '1';
-    html += lineaMontosMoplex('Plantilla', calcPlantillaMoplex(pId ? moplexCat.byId[pId] : null, rectif));
-  }
-  box.innerHTML = html;
+  box.innerHTML = lineaMontosMoplex('Consulta', calcConsultaMoplex(cId ? moplexCat.byId[cId] : null));
 }
-// Al elegir un tratamiento MOPLEX existente, precargo lo que ya tenga guardado.
+// Al elegir un tratamiento MOPLEX existente, precargo el tipo de consulta guardado.
+// La plantilla no se toca acá: se pide en Consultas MOPLEX.
 async function onTratamientoMoplexElegido(){
   if(document.getElementById('sel-practica').value !== 'MOPLEX') return;
   const idTto = document.getElementById('inp-tto').value.trim();
-  const setVals = (cId, pide, pId, rectif) => {
+  const setConsulta = (cId) => {
     document.getElementById('sel-moplex-consulta').value = cId || '';
-    document.getElementById('chk-moplex-plantilla').checked = !!pide;
-    document.getElementById('sel-moplex-plantilla').value = pId || '';
-    document.getElementById('sel-moplex-rectif').value = rectif ? '1' : '0';
-    toggleMoplexPlantilla();
+    actualizarMoplexMontos();
   };
-  if(!idTto){ setVals('', false, '', false); return; }
+  if(!idTto){ setConsulta(''); return; }
   try{
     const { data } = await sb.from('tratamientos')
-      .select('moplex_consulta_id, solicita_plantillas, moplex_plantilla_id, moplex_plantilla_rectif')
+      .select('moplex_consulta_id')
       .eq('codigo_id', idTto).maybeSingle();
-    if(data) setVals(data.moplex_consulta_id || '', data.solicita_plantillas, data.moplex_plantilla_id || '', data.moplex_plantilla_rectif);
-    else setVals('', false, '', false);
-  }catch(e){ setVals('', false, '', false); }
+    setConsulta(data ? (data.moplex_consulta_id || '') : '');
+  }catch(e){ setConsulta(''); }
 }
 
 function crearChipTurno(t){
@@ -1648,6 +1620,12 @@ function ntActualizarBoton(){
   const personaId = document.getElementById('busc-paciente').dataset.personaId;
   btn.style.display = (personaId && NT_PERMITE.includes(practica)) ? '' : 'none';
   if(!personaId || !NT_PERMITE.includes(practica)) ntCerrar();
+  // MOPLEX se crea con su propio botón dentro de "Datos MOPLEX" (solo la consulta)
+  const cm = document.getElementById('btn-crear-moplex');
+  const cmh = document.getElementById('btn-crear-moplex-hint');
+  const verMoplex = !!personaId && practica === 'MOPLEX';
+  if(cm) cm.style.display = verMoplex ? '' : 'none';
+  if(cmh) cmh.style.display = verMoplex ? '' : 'none';
 }
 
 function ntCerrar(){
@@ -1762,11 +1740,58 @@ async function ntCrear(){
   }
 }
 
+/* ════════════════════════════════════════════════════════════════
+   ALTA RÁPIDA DE TRATAMIENTO MOPLEX (solo la consulta) DESDE LA AGENDA
+   Antes había que salir a Tratamientos para crear el tratamiento MOPLEX y
+   volver. Acá se crea con lo mínimo: el tipo de consulta (baropodometría) que
+   ya está elegido en "Datos MOPLEX". Los pedidos de PLANTILLA no van acá — se
+   piden aparte en Consultas MOPLEX — así que nace con solicita_plantillas=false.
+   ════════════════════════════════════════════════════════════════ */
+async function ntCrearMoplex(){
+  const personaId = document.getElementById('busc-paciente').dataset.personaId;
+  if(!personaId){ toast('Elegí primero el paciente','err'); return; }
+  const cId = document.getElementById('sel-moplex-consulta').value;
+  if(!cId){ toast('Elegí el tipo de consulta (baropodometría) primero','err'); return; }
+  const cat = moplexCat.byId[cId];
+  const valor = Number(cat && cat.precio_paciente) || 0;   // el paciente paga la consulta
+  const btn = document.getElementById('btn-crear-moplex');
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = 'Creando…';
+  try{
+    const z = n => String(n).padStart(2, '0');
+    const ts = new Date();
+    const codigoId = `MOPLEX${ts.getFullYear()}${z(ts.getMonth()+1)}${z(ts.getDate())}${z(ts.getHours())}${z(ts.getMinutes())}`;
+    const { error } = await sb.from('tratamientos').insert([{
+      persona_id: Number(personaId),
+      practica_codigo: 'MOPLEX',
+      codigo_id: codigoId,
+      fecha_alta: new Date().toISOString().split('T')[0],
+      total_sesiones: 1,
+      valor_sesion: valor,
+      modalidad: 'PARTICULAR',
+      estado: 'Pendiente',
+      moplex_consulta_id: Number(cId),
+      solicita_plantillas: false
+    }]).select().single();
+    if(error) throw error;
+    await cargarTratamientosExistentes('MOPLEX');            // recarga la lista de ttos
+    document.getElementById('inp-tto').value = codigoId;     // y lo deja elegido
+    document.getElementById('sel-moplex-consulta').value = cId;  // mantiene la consulta para el reserve
+    actualizarMoplexMontos();
+    toast('✓ Tratamiento MOPLEX creado','ok');
+  }catch(e){
+    toast('Error: ' + (e.message || e),'err');
+    console.error('Error creando MOPLEX desde la agenda:', e);
+  }finally{
+    btn.disabled = false; btn.textContent = prev;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   cargarRolUsuario();
   document.getElementById('btn-nuevo-tto').addEventListener('click', ntAbrir);
   document.getElementById('nt-cancel').addEventListener('click', ntCerrar);
   document.getElementById('nt-create').addEventListener('click', ntCrear);
+  document.getElementById('btn-crear-moplex').addEventListener('click', ntCrearMoplex);
   document.getElementById('nt-tipo-cobro').addEventListener('change', ntActualizarPrevia);
   document.getElementById('sel-profesional').addEventListener('change', actualizarPracticasYHoras);
   document.getElementById('sel-practica').addEventListener('change', actualizarHorasExactas);
@@ -1992,23 +2017,14 @@ async function guardarTurnoNuevo(){
     }
   }
 
-  // MOPLEX: guardar en el tratamiento el tipo de consulta, la plantilla y el
-  // profesional que hizo el estudio (para que el apartado MOPLEX lo muestre).
+  // MOPLEX: guardar en el tratamiento el tipo de consulta y el profesional que hizo
+  // el estudio (para que el apartado MOPLEX lo muestre). Las plantillas NO se tocan
+  // acá: se piden en Consultas MOPLEX, así que la agenda nunca pisa ese dato.
   if(practica === 'MOPLEX' && idTto){
     try{
       const upd = { profesional: (CODE_TO_NOMBRE[profesional] || profesional) };
       const cId = document.getElementById('sel-moplex-consulta').value;
-      upd.moplex_consulta_id = cId ? Number(cId) : null;
-      const pide = document.getElementById('chk-moplex-plantilla').checked;
-      upd.solicita_plantillas = pide;
-      if(pide){
-        const pId = document.getElementById('sel-moplex-plantilla').value;
-        upd.moplex_plantilla_id = pId ? Number(pId) : null;
-        upd.moplex_plantilla_rectif = (document.getElementById('sel-moplex-rectif').value === '1');
-      } else {
-        upd.moplex_plantilla_id = null;
-        upd.moplex_plantilla_rectif = false;
-      }
+      if(cId) upd.moplex_consulta_id = Number(cId);   // solo si hay consulta elegida; nunca la borra
       await sb.from('tratamientos').update(upd).eq('codigo_id', idTto);
     }catch(e){ /* el turno ya quedó guardado; esto no lo bloquea */ }
   }
