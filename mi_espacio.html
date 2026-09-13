@@ -963,6 +963,37 @@ function pbExcepVigente(r){ return pbEsExcepcion(r) && pbDiasExcep(r) > 0; }
 const DIAS_HABILES_VISTA  = 10; // cuántos días hábiles muestra el panel "Agenda" hacia adelante
 
 // ============================================================
+//  CUPO DE SUELTAS POR FECHA (13/09/2026)
+// ------------------------------------------------------------
+//  Una suelta se descuenta del ciclo al que pertenece LA FECHA
+//  ELEGIDA, no del ciclo en el que estamos hoy. Cerca del
+//  vencimiento la agenda muestra días del ciclo siguiente: si se
+//  los validaba contra el cupo viejo, el alumno que ya lo había
+//  gastado no podía anotarse a nada del mes que viene aunque
+//  tuviera el cupo nuevo entero. La RPC alumno_info_cupo_sueltas
+//  devuelve ahora también ciclo_prox_hasta / disponibles_prox.
+//  Si la RPC todavía es la vieja (sin esas claves), cae de nuevo
+//  a 'disponibles' y se comporta igual que antes.
+// ============================================================
+function pbSueltasDispEn(cupoS, fechaISO){
+  if (!cupoS || !cupoS.puede_sueltas) return 0;
+  if (fechaISO && cupoS.ciclo_hasta && fechaISO > cupoS.ciclo_hasta
+      && cupoS.disponibles_prox != null) {
+    return Number(cupoS.disponibles_prox) || 0;
+  }
+  return Number(cupoS.disponibles) || 0;
+}
+// Usadas/tope del ciclo que le corresponde a esa fecha (solo para el texto del modal)
+function pbCicloSueltasEn(cupoS, fechaISO){
+  if (!cupoS) return { usadas: 0, tope: 0 };
+  if (fechaISO && cupoS.ciclo_hasta && fechaISO > cupoS.ciclo_hasta
+      && cupoS.tope_prox != null) {
+    return { usadas: Number(cupoS.usadas_prox) || 0, tope: Number(cupoS.tope_prox) || 0, prox: true };
+  }
+  return { usadas: Number(cupoS.usadas) || 0, tope: Number(cupoS.tope) || 0, prox: false };
+}
+
+// ============================================================
 //  RECORDATORIO HISTORIA CLÍNICA (molesto pero salteable)
 // ============================================================
 // Si el alumno NO tiene su historia clínica cargada, le aparece un cartel
@@ -3251,7 +3282,7 @@ function renderAgendaDia(fechaISO){
       // BOTÓN PROGRAMAR ACÁ · unifica recuperatorio + clase suelta
       const tieneRecupes = (data.recuperatoriosPendientes||[]).length > 0 || (data.feriadosPendientes||[]).length > 0 || ((typeof pbCierresPendientes === 'function') && pbCierresPendientes().length > 0);
       const cupoS = data.cupoSueltas;
-      const puedeSuelta = cupoS && cupoS.puede_sueltas && cupoS.disponibles > 0;
+      const puedeSuelta = pbSueltasDispEn(cupoS, fechaISO) > 0;
       const actividadOK = turnoCoincideConActividad(t.servicio, data.actividadAlumno, data.esBonificado);
       const dentro15 = diasFaltan >= 0 && diasFaltan <= 15;
       // 10 días hábiles vista (solo para sueltas)
@@ -6418,11 +6449,12 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
 
   // Caso B: solo puede suelta → confirmación directa de suelta
   if (!puedeRecupe && puedeSuelta) {
-    const disp = cupoS.disponibles;
+    const disp = pbSueltasDispEn(cupoS, fechaISO);
+    const _ci  = pbCicloSueltasEn(cupoS, fechaISO);
     pbAbrirModal({
       titulo: '📅 Anotarme suelta',
       subtitulo: `Vas a anotarte a <b>${esc(nombreServicio(destino.servicio))}</b> del <b>${fechaTxt}</b> a las <b>${esc(destino.hora)}</b> como <b>clase suelta</b>.`,
-      infoBox: `✅ Te quedan <b>${disp}</b> sueltas en este ciclo (${cupoS.usadas}/${cupoS.tope} usadas).<br>✅ No consume recuperatorio.`,
+      infoBox: `✅ Te quedan <b>${disp}</b> sueltas en ${_ci.prox ? 'el ciclo que arranca con tu próxima cuota' : 'este ciclo'} (${_ci.usadas}/${_ci.tope} usadas).<br>✅ No consume recuperatorio.`,
       cuerpoHTML: '',
       botones: [
         { label: 'Cancelar', cls: 'cancel', onclick: 'pbCerrarModal()' },
@@ -6458,7 +6490,7 @@ window.pbAbrirProgramar = function(turnoDestinoId, fechaISO, puedeRecupe, puedeS
   });
   opcionesHtml += `<button class="pb-modal-opcion" onclick="pbConfirmarClaseSuelta(${destino.id}, '${fechaISO}')">
     📅 <b>Anotarme suelta</b>
-    <div style="font-size:11.5px;color:#64748b;margin-top:2px">Te quedan ${cupoS.disponibles} sueltas en el ciclo</div>
+    <div style="font-size:11.5px;color:#64748b;margin-top:2px">Te quedan ${pbSueltasDispEn(cupoS, fechaISO)} sueltas en ${pbCicloSueltasEn(cupoS, fechaISO).prox ? 'el ciclo que arranca con tu próxima cuota' : 'el ciclo'}</div>
   </button>`;
 
   pbAbrirModal({
