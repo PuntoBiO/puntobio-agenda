@@ -265,7 +265,7 @@
             clases: g.clases.map(c => {
               const r = respPorClase.get(m.id + '|' + (c.link || ''));
               return {
-                titulo: c.titulo, link: c.link, msjId: m.id, pid, gk: g.gk, nombreAlumno: nombre,
+                titulo: c.titulo, link: c.link, consigna: c.consigna, msjId: m.id, pid, gk: g.gk, nombreAlumno: nombre,
                 resp: r || null, estado: r ? 'hecha' : (vio ? 'vista' : 'sinver')
               };
             })
@@ -357,18 +357,24 @@
       const sinVer = c.clases.filter(x => x.c.estado === 'sinver').length;
       const abierta = ecCarpAbiertas.has(String(c.pid));
       const orden = c.clases.slice().sort((a,b) => String(b.g.creado_en).localeCompare(String(a.g.creado_en)));
+      const yaDesplegado = new Set();   // el mail se muestra una sola vez, no debajo de cada clase
       const cuerpo = !abierta ? '' : `<div class="ec-carp-b">` + orden.map(({ g, c: cl }) => {
         const k = 'C:' + cl.msjId + '|' + cl.link;
         const sel = ecSel.has(k);
+        let det = '';
+        if (ecAbiertos.has(g.gk) && !yaDesplegado.has(g.gk)){ yaDesplegado.add(g.gk); det = ecDetalle(g); }
         return `<div class="ec-clase">
           <input type="checkbox" class="ec-chk" ${sel?'checked':''} onchange="ecToggleSel('${attr(k)}')">
-          <b style="flex:1;min-width:150px">${esc(cl.titulo)}</b>
+          <div style="flex:1;min-width:170px">
+            <b>${esc(cl.titulo)}</b>
+            ${cl.consigna ? `<div class="hint" style="margin:1px 0 0">${esc(cl.consigna)}</div>` : ''}
+          </div>
           ${ecBadgeClase(cl)}
           <span class="hint" style="margin:0">${esc(ecFechaCorta(g.creado_en))}</span>
           ${cl.link ? `<a class="ec-link" href="${attr(cl.link)}" target="_blank" rel="noopener">🔗 abrir</a>` : ''}
           <button class="ec-ver" title="Ver el mail completo" onclick="ecVerEnvio('${g.gk}')">👁️ El envío</button>
           <button class="ec-del" title="Sacarle esta clase a ${attr(cl.nombreAlumno)}" onclick="ecBorrarClase(${cl.msjId}, '${attr(cl.link)}', this)">🗑️</button>
-        </div>${ecAbiertos.has(g.gk) ? ecDetalle(g) : ''}`;
+        </div>${det}`;
       }).join('') + `</div>`;
       return `<div class="ec-carp">
         <div class="ec-carp-h" onclick="ecToggleCarpeta('${c.pid}')">
@@ -444,7 +450,10 @@
         return r && (r.dolor || (r.dolor_nivel||0) > 0);
       }).length;
       return `<div class="ec-clase">
-        <b style="flex:1;min-width:150px">${esc(c.titulo)}</b>
+        <div style="flex:1;min-width:170px">
+          <b>${esc(c.titulo)}</b>
+          ${c.consigna ? `<div class="hint" style="margin:1px 0 0">${esc(c.consigna)}</div>` : ''}
+        </div>
         <span style="font-size:12.5px;color:#166534;font-weight:700">la hicieron ${hechas.length}/${total}</span>
         ${prom !== null ? `<span class="hint" style="margin:0">dificultad promedio ${prom}</span>` : ''}
         ${conDolor ? `<span class="ec-badge" style="background:#fef2f2;color:#b91c1c">${conDolor} con dolor ⚠️</span>` : ''}
@@ -510,12 +519,12 @@
   function ecContenidoSinClases(contenido, links){
     const clases = ecClasesDe(contenido);
     const quedan = clases.filter(c => !links.includes(c.link));
-    const ltQuedan = new Set(quedan.map(c => c.lt).filter(x => x >= 0));
+    const seQuedan = new Set();
+    quedan.forEach(c => (c.owned || []).forEach(i => seQuedan.add(i)));
     const fuera = new Set();
     clases.forEach(c => {
       if (!links.includes(c.link)) return;
-      if (c.li >= 0) fuera.add(c.li);
-      if (c.lt >= 0 && !ltQuedan.has(c.lt)) fuera.add(c.lt);
+      (c.owned || []).forEach(i => { if (!seQuedan.has(i)) fuera.add(i); });
     });
     const nuevo = String(contenido || '').split('\n')
       .filter((_, i) => !fuera.has(i)).join('\n')
@@ -656,9 +665,17 @@
   };
 
   // ══════════════════════════════════════════════════════════════
-  // Un envío trae VARIAS clases: un link = una clase. Mismo criterio
-  // que Mi Espacio, para que los números coincidan de los dos lados.
-  // (li = línea del link · lt = línea del título, para poder sacarla)
+  // Un envío trae VARIAS clases: UN LINK = UNA CLASE.
+  //
+  // El nombre de la clase sale de la línea PEGADA arriba del link
+  // (o de la misma línea). Si arriba hay un renglón en blanco, esa
+  // línea NO es el título: es la consigna de la clase anterior, que
+  // va escrita DEBAJO de su link. Sin esta regla, "ejercicio 7/8/9…"
+  // se colaba como nombre de la clase siguiente.
+  //
+  // Cada clase se queda con sus propias líneas (`owned`): el título,
+  // el link y la consigna de abajo. Eso es lo que se saca del mail
+  // cuando se borra la clase.
   // ══════════════════════════════════════════════════════════════
   function ecClasesDe(contenido){
     const lineas = String(contenido || '').split('\n');
@@ -666,26 +683,44 @@
       .replace('🏠 ENTRENAMIENTO EN CASA — ', '')
       .replace('🏠 ENTRENAMIENTO EN CASA', '').trim() || 'Entrenamiento en casa';
     const RX = /(https?:\/\/[^\s]+)/;
-    const clases = [];
-    for (let i = 0; i < lineas.length; i++){
-      const hit = lineas[i].match(RX);
-      if (!hit) continue;
-      const link = hit[1];
+
+    const idx = [];
+    lineas.forEach((l, i) => { if (RX.test(l)) idx.push(i); });
+    if (!idx.length) return [{ titulo: tituloEnvio, link: '', li: -1, lt: -1, consigna: '', owned: [] }];
+
+    // Línea del título de cada link: solo si está PEGADA arriba y no es el encabezado
+    const lts = idx.map(i => {
+      const resto = lineas[i].replace(lineas[i].match(RX)[1], '').trim();
+      if (resto) return -1;                       // el título va en la misma línea del link
+      const j = i - 1;
+      if (j <= 0) return -1;                      // la línea 0 es el encabezado del mail
+      const prev = (lineas[j] || '').trim();
+      if (!prev || RX.test(prev)) return -1;      // renglón en blanco u otro link: no hay título propio
+      return j;
+    });
+    const ltSet = new Set(lts.filter(x => x >= 0));
+
+    return idx.map((i, n) => {
+      const link = lineas[i].match(RX)[1];
       let tit = lineas[i].replace(link, '').trim();
-      let lt = -1;
-      if (!tit){
-        for (let j = i - 1; j > 0; j--){
-          const prev = (lineas[j] || '').trim();
-          if (!prev) continue;
-          if (RX.test(prev)) break;
-          tit = prev; lt = j; break;
-        }
-      }
+      if (!tit && lts[n] >= 0) tit = (lineas[lts[n]] || '').trim();
       tit = tit.replace(/^\d+\s*[-.\)·:]\s*/, '').trim();
-      clases.push({ titulo: tit || tituloEnvio, link, li: i, lt });
-    }
-    if (!clases.length) clases.push({ titulo: tituloEnvio, link: '', li: -1, lt: -1 });
-    return clases;
+
+      // Consigna: lo que va debajo del link, hasta el próximo link
+      const fin = (n + 1 < idx.length) ? idx[n + 1] : lineas.length;
+      const consLineas = [], owned = [];
+      if (lts[n] >= 0) owned.push(lts[n]);
+      owned.push(i);
+      for (let k = i + 1; k < fin; k++){
+        if (ltSet.has(k)) continue;               // esa línea es el título del próximo link
+        owned.push(k);
+        if ((lineas[k] || '').trim()) consLineas.push(lineas[k].trim());
+      }
+      return {
+        titulo: tit || (idx.length > 1 ? `${tituloEnvio} · clase ${n + 1}` : tituloEnvio),
+        link, li: i, lt: lts[n], consigna: consLineas.join(' · '), owned
+      };
+    });
   }
 
   function ecLinkify(txtEscapado){
