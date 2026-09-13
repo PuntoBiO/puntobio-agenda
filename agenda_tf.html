@@ -2091,7 +2091,7 @@ async function cargarAgregadosSemana() {
         id: String(p.id),
         nombre: p.nombre,
         foto: p.foto_perfil || null,
-        tipo: a.tipo,            // 'recuperatorio' | 'suelto'
+        tipo: a.tipo,            // 'recuperatorio' | 'suelta' | 'extra' | 'suelto' (histórico) | 'cambio_area'
         agregadoId: a.id,
         agregadoPor: a.agregado_por || null
       });
@@ -5354,6 +5354,26 @@ window.elegirPersonaAgregar = (personaId) => {
   }
 
   agregarPersonaSel = { id: p.id, nombre: p.nombre };
+  // ============================================================
+  // 13/09/2026 · SUELTA vs CLASE FORZADA
+  // Solo los planes ROT y BONIFICADO tienen derecho a clases sueltas, y esas
+  // SÍ le descuentan cupo del plan (las cuenta alumno_info_cupo_sueltas /
+  // alumno_clase_suelta con tipo = 'suelta'). A un plan regular no se le puede
+  // cargar una suelta: lo que se le da cuando no hay recuperatorio disponible
+  // es una CLASE FORZADA (tipo = 'extra'), que no toca ningún cupo.
+  // El valor viejo 'suelto' ya no se escribe; las filas históricas quedan como están.
+  // ============================================================
+  const _esRotBon = /ROT|BON/i.test(String(p.planTF || ''));
+  const _planTxt  = String(p.planTF || '');
+  const _btnPuntual = _esRotBon
+    ? `<button onclick="confirmarAgregar('suelta')" style="width:100%;text-align:left;background:#eef2ff;border:1.5px solid #c7d2fe;border-radius:11px;padding:12px 14px;margin-bottom:4px;cursor:pointer">
+        <div style="font-weight:700;font-size:14px;color:#3730a3">➕ Clase suelta</div>
+        <div style="font-size:12px;color:#4338ca;margin-top:2px">Solo este día — le descuenta una clase del cupo de su plan (${_planTxt})</div>
+      </button>`
+    : `<button onclick="confirmarAgregar('extra')" style="width:100%;text-align:left;background:#fff1f2;border:1.5px solid #fecdd3;border-radius:11px;padding:12px 14px;margin-bottom:4px;cursor:pointer">
+        <div style="font-weight:700;font-size:14px;color:#9f1239">➕ Clase forzada</div>
+        <div style="font-size:12px;color:#be123c;margin-top:2px">Solo este día — su plan (${_planTxt}) no tiene sueltas: NO descuenta cupo</div>
+      </button>`;
   // Paso 2: elegir tipo
   document.getElementById('agregar-resultados').innerHTML = `
     <div style="padding:6px 4px 14px">
@@ -5368,10 +5388,7 @@ window.elegirPersonaAgregar = (personaId) => {
         <div style="font-weight:700;font-size:14px;color:#92400e">🔁 Recuperatorio</div>
         <div style="font-size:12px;color:#a16207;margin-top:2px">Solo este día — recupera una clase que faltó</div>
       </button>
-      <button onclick="confirmarAgregar('suelto')" style="width:100%;text-align:left;background:#eef2ff;border:1.5px solid #c7d2fe;border-radius:11px;padding:12px 14px;margin-bottom:4px;cursor:pointer">
-        <div style="font-weight:700;font-size:14px;color:#3730a3">➕ Suelto</div>
-        <div style="font-size:12px;color:#4338ca;margin-top:2px">Solo este día — agregado puntual</div>
-      </button>
+      ${_btnPuntual}
       <button onclick="buscarPersonaAgregar(document.getElementById('agregar-buscar').value)" style="background:none;border:none;color:var(--texto-suave);font-size:12px;margin-top:10px;cursor:pointer;text-decoration:underline">← Volver a la búsqueda</button>
     </div>`;
 };
@@ -6164,10 +6181,14 @@ window.confirmarAgregar = async (tipo) => {
   const pid = parseInt(agregarPersonaSel.id);
   const nombre = agregarPersonaSel.nombre;
   const quien = USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null;
+  // Etiqueta legible de cada tipo puntual (13/09/2026)
+  const _LBL_TIPO = { recuperatorio:'recuperatorio', suelta:'clase suelta', extra:'clase forzada', suelto:'suelto' };
   // CONTROL DE CUPO: si el turno está lleno, no agrega salvo autorización explícita
-  const accion = tipo === 'permanente' ? 'lo agregás de forma permanente' : 'lo agregás como suelto';
+  const accion = tipo === 'permanente'
+    ? 'lo agregás de forma permanente'
+    : 'lo agregás como ' + (_LBL_TIPO[tipo] || 'agregado puntual');
   // 'permanente' = fijo → cupo estricto (ausentes NO liberan lugar).
-  // 'suelto' = puntual del día → los ausentes del día liberan su lugar.
+  // puntual (recuperatorio / suelta / extra) → los ausentes del día liberan su lugar.
   const esPuntual = (tipo !== 'permanente');
   if (!chequearCupo(t, accion, esPuntual, fechaDelDia(t.dia))) {
     cont.innerHTML = '<div style="color:var(--texto-suave);font-size:13px;padding:12px 4px">Cancelado — el turno está completo.</div>';
@@ -6205,7 +6226,7 @@ window.confirmarAgregar = async (tipo) => {
       const key = `${t.id}-${fecha}`;
       if (!AGREGADOS_POR_TURNO[key]) AGREGADOS_POR_TURNO[key] = [];
       AGREGADOS_POR_TURNO[key].push({ id: String(pid), nombre, tipo, agregadoId: agId });
-      toast(`${nombre} agregado como ${tipo==='recuperatorio'?'recuperatorio':'suelto'}`, 'ok');
+      toast(`${nombre} agregado como ${_LBL_TIPO[tipo] || tipo}`, 'ok');
     }
     cerrarAgregar();
     renderModalBody(t.dia, t.hora, t.servicio);
@@ -6659,10 +6680,22 @@ function renderModalBody(dia, hora, servicio) {
           const etiquetaPendienteFijo = a.pendiente_fijo
             ? `<span title="Clase nueva por suba de plan · se vuelve fija en el vencimiento" style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;background:#fef9c3;color:#854d0e">⏳ suelta (pendiente de fijo)</span>`
             : '';
+          // Etiqueta del agregado puntual. 13/09/2026: se distinguen 'suelta'
+          // (descuenta cupo, solo ROT/BON) y 'extra' (clase forzada, no descuenta).
+          // 'suelto' es el valor histórico y se sigue mostrando como siempre.
+          const _ETQ_AG = {
+            recuperatorio: ['RECUPERATORIO', 'background:#fef3c7;color:#92400e'],
+            suelta:        ['SUELTA',        'background:#e0e7ff;color:#3730a3'],
+            suelto:        ['SUELTO',        'background:#e0e7ff;color:#3730a3'],
+            extra:         ['CLASE FORZADA', 'background:#ffe4e6;color:#9f1239'],
+          };
           const etiquetaAgregado = a.tipoAgregado
             ? (a.tipoAgregado === 'cambio_area'
                 ? `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;background:#cffafe;color:#155e75">🔄 CAMBIO DE ÁREA</span>`
-                : `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;${a.tipoAgregado==='recuperatorio'?'background:#fef3c7;color:#92400e':'background:#e0e7ff;color:#3730a3'}">${a.tipoAgregado==='recuperatorio'?'RECUPERATORIO':'SUELTO'}</span>`)
+                : (() => {
+                    const _e = _ETQ_AG[a.tipoAgregado] || [String(a.tipoAgregado).toUpperCase(), 'background:#e0e7ff;color:#3730a3'];
+                    return `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;${_e[1]}">${_e[0]}</span>`;
+                  })())
             : '';
           const etiquetaOrigenME = (a.agregadoPor === 'Alumno desde Mi Espacio')
             ? `<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:6px;margin-top:3px;margin-left:4px;background:#dcfce7;color:#166534">📲 desde Mi Espacio</span>`
