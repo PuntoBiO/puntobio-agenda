@@ -2296,6 +2296,10 @@ function initNuevoForm() {
     const obraSocial = obraSocialElegida();
     const hint = document.getElementById('ct_os_hint');
     if (modalidad === 'OBRA_SOCIAL' && !obraSocial) {
+      // FIX 13/09/2026: antes se salía dejando el valor anterior en pantalla (típico:
+      // el precio Particular, o el de la obra social que habías elegido antes). Parecía
+      // un precio válido y era de otra cosa. Ahora se vacía hasta que elijas la OS.
+      document.getElementById('ct_valor_sesion').value = '';
       if (hint) hint.textContent = 'Elegí la obra social para traer el coseguro.';
       return;
     }
@@ -2471,7 +2475,9 @@ async function refrescarTratamientos(personaId, practica) {
         const tcSel0 = document.getElementById('ct_tipo_cobro')?.value;
         if (tcSel0 !== 'MANUAL' && tcSel0 !== 'CORTESIA') {
           const precio = await buscarPrecioTarifario(practica, 'PARTICULAR', '');
-          if (precio !== null && precio !== undefined) document.getElementById('ct_valor_sesion').value = precio;
+          // FIX 13/09/2026: si no hay precio, vaciar. Antes quedaba el del paciente anterior.
+          document.getElementById('ct_valor_sesion').value =
+            (precio !== null && precio !== undefined) ? precio : '';
         }
       } else {
         // FISIO o FISIO_PQ: mostrar modalidad/OS y pre-completar según paciente
@@ -2492,8 +2498,19 @@ async function refrescarTratamientos(personaId, practica) {
           document.getElementById('ct_obra_social').value = '';
         }
         const modalidadActual = document.getElementById('ct_modalidad').value;
-        const precio = await buscarPrecioTarifario(practica, modalidadActual, obraSocial);
-        if (precio !== null && precio !== undefined) document.getElementById('ct_valor_sesion').value = precio;
+        // OJO: acá se busca con la OS que tiene cargada la PERSONA, no con la del
+        // desplegable. Si no coincide exacto con el tarifario no hay precio.
+        const precio = await buscarPrecioTarifario(practica, modalidadActual, obraSocialElegida() || obraSocial);
+        // FIX 13/09/2026: si no hay precio, vaciar y avisar. Antes quedaba el valor
+        // del paciente anterior y se creaba el tratamiento con el precio equivocado.
+        const hintOS = document.getElementById('ct_os_hint');
+        if (precio !== null && precio !== undefined) {
+          document.getElementById('ct_valor_sesion').value = precio;
+          if (hintOS) hintOS.textContent = '';
+        } else {
+          document.getElementById('ct_valor_sesion').value = '';
+          if (hintOS) hintOS.textContent = '⚠ No hay precio cargado para esa combinación. Poné el valor a mano o pedí que lo den de alta en Precios.';
+        }
       }
       document.getElementById('inlineCrearTratamiento').style.display = '';
     } else {
@@ -2586,6 +2603,12 @@ async function onCrearTratamiento() {
   const obraSocial = obraSocialElegida();
   const tipoCobro = document.getElementById('ct_tipo_cobro')?.value || 'NORMAL';
   if (!totalSes || totalSes < 1) { document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Total de sesiones inválido.</div>`; return; }
+  // FIX 13/09/2026: se podía crear un tratamiento marcado como Obra Social pero sin
+  // obra social, y encima con el valor por sesión de otra. Ahora no deja.
+  if (modalidad === 'OBRA_SOCIAL' && !obraSocial) {
+    document.getElementById('ctAlert').innerHTML = `<div class="form-alert">Elegí la obra social (o pasá la modalidad a Particular).</div>`;
+    return;
+  }
   const btn = document.getElementById('ctCreate');
   btn.disabled = true; btn.textContent = 'Creando…';
   try {
