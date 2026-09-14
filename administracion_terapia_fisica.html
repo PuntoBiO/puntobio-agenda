@@ -2238,7 +2238,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
   $('#bitacoraBody').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">⟳ Cargando bitácora…</div>';
   try {
     const hoy = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
-    const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes] = await Promise.all([
+    const [asisRes, recupRes, misTurnosRes, turnosRes, cerradasRes, ferRes, agregRes] = await Promise.all([
       sb.from('asistencia').select('fecha,estado,turno_id').eq('persona_id', p.id),
       sb.from('recuperatorios_tf').select('fecha_ausencia,fecha_recupero,turno_recupero_id,tipo,estado,observaciones,creado_en').eq('persona_id', p.id).neq('estado', 'cancelado'),
       // FUENTE ÚNICA (Fase 1b horarios, 17/7/26): fn_turnos_fijos reemplaza la
@@ -2248,7 +2248,13 @@ async function abrirBitacoraAlumno(ventana = 60) {
       fichaTurnosSistema.length ? { data: fichaTurnosSistema } : sb.from('turnos').select('id,dia,hora,servicio,capacidad'),
       sbLeerTodo(() => sb.from('clases_cerradas').select('turno_id,fecha,tipo,motivo')
         .eq('tipo', 'centro').order('id', { ascending: true })),
-      sb.from('feriados').select('fecha,motivo')
+      sb.from('feriados').select('fecha,motivo'),
+      // NUEVO 13/09/2026 · Clases puntuales YA AGENDADAS que todavía no pasaron
+      // (sueltas, clases forzadas y cambios de área). Viven sólo en turno_agregados,
+      // así que hasta ahora la bitácora no las veía: recién aparecían el día que
+      // se les marcaba asistencia. Se piden sólo de hoy en adelante — las pasadas
+      // ya se muestran como Presente/Ausente y si no quedarían duplicadas.
+      sb.from('turno_agregados').select('turno_id,fecha,tipo').eq('persona_id', p.id).gte('fecha', hoy)
     ]);
     if (turnosRes.data) fichaTurnosSistema = turnosRes.data;
     const turnoMap = {};
@@ -2299,6 +2305,29 @@ async function abrirBitacoraAlumno(ventana = 60) {
         sub: `${nombreTurno(r.turno_recupero_id)} · por ${origen} del ${fmtF(r.fecha_ausencia)}${sinCupo ? ' (sin gastar cupo)' : ''}`
       });
     });
+    // NUEVO 13/09/2026 · CLASES PUNTUALES YA AGENDADAS (todavía no pasaron)
+    // Una suelta / clase forzada / cambio de área sólo existe en turno_agregados:
+    // no genera fila en recuperatorios_tf ni en asistencia hasta que se toma.
+    // Los recuperatorios ya vienen de recups, así que se saltean para no duplicar.
+    const _ETQ_AGREG = {
+      suelta:      ['📅 Clase suelta programada',   '#3730a3', '#e0e7ff'],
+      suelto:      ['📅 Clase suelta programada',   '#3730a3', '#e0e7ff'],
+      extra:       ['📅 Clase forzada programada',  '#9f1239', '#ffe4e6'],
+      cambio_area: ['🔄 Cambio de área programado', '#155e75', '#cffafe'],
+    };
+    (agregRes && agregRes.data ? agregRes.data : []).forEach(ag => {
+      const _t = String(ag.tipo || '').toLowerCase();
+      if (_t === 'recuperatorio') return;                          // ya lo trae recups
+      if (claveRecup.has(`${ag.turno_id}-${ag.fecha}`)) return;    // idem, por las dudas
+      const _e = _ETQ_AGREG[_t] || ['📅 Clase programada', '#3730a3', '#e0e7ff'];
+      eventos.push({
+        fecha: ag.fecha, tipo: 'agregado_prog',
+        icono: _e[0].slice(0, 2), color: _e[1], bg: _e[2],
+        titulo: _e[0].slice(2).trim(),
+        sub: nombreTurno(ag.turno_id)
+      });
+    });
+
     (cerradasRes.data || []).forEach(c => {
       if (!eraFijoEn(c.turno_id, c.fecha)) return;   // no era su turno fijo ESE día
       eventos.push({ fecha: c.fecha, tipo: 'cancelada', icono: '🚫', color: '#b91c1c', bg: '#fef2f2', titulo: 'Clase cancelada por el centro', sub: `${nombreTurno(c.turno_id)}${c.motivo ? ' · ' + c.motivo.replace(/\s*\[bloqueo#\d+\]/, '') : ''}` });
@@ -2463,6 +2492,7 @@ async function abrirBitacoraAlumno(ventana = 60) {
         <span style="background:#ffedd5;color:#9a3412;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🟠 ${cuenta('ausente_just')} c/aviso</span>
         <span style="background:#fee2e2;color:#b91c1c;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">❌ ${cuenta('ausente')} s/aviso</span>
         <span style="background:#dbeafe;color:#1e3a8a;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🗓️ ${cuenta('recu_prog')} program.</span>
+        <span style="background:#ede9fe;color:#5b21b6;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">📅 ${cuenta('agregado_prog')} otras program.</span>
         <span style="background:#e0e7ff;color:#3730a3;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">♻️ ${cuenta('recu_hecho')} recuperadas</span>
         <span style="background:#fef2f2;color:#b91c1c;border-radius:8px;padding:4px 10px;font-size:12px;font-weight:700">🚫 ${cuenta('cancelada')} canceladas</span>
       </div>`;
