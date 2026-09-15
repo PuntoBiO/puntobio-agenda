@@ -1282,6 +1282,49 @@ function render(pagos, sesiones, filtroProf){
     }
   }
 
+  // ===== DESCRUCE DENTRO DEL MISMO TRATAMIENTO (15/09/2026, pedido de Lu) =====
+  // Caso Gimena Zurita: sesión 7/9 con Male (le pagó a Male) y 9/9 con Bruno (le pagó a
+  // Bruno). La cascada va por tramos acumulados y a veces cruza las etiquetas: la plata de
+  // Bruno queda "tapando" la sesión de Male y la de Male la de Bruno → aparece un cruce ida
+  // y vuelta que no existe. Si dentro de un tratamiento X tiene plata de una sesión de Y
+  // mientras Y tiene plata de una sesión de X, se intercambian las etiquetas (quién/medio).
+  // NO cambia montos, fechas ni mes de liquidación: cada persona sigue teniendo lo mismo,
+  // solo se le asigna a SU propia sesión.
+  try {
+    const porTratDx = {};
+    for (const f of liquidables) if (f.tenedores && f.tenedores.length) (porTratDx[f.tratId] = porTratDx[f.tratId] || []).push(f);
+    for (const tid of Object.keys(porTratDx)){
+      const filas = porTratDx[tid];
+      if (filas.length < 2) continue;
+      let vueltas = 0, huboCambio = true;
+      while (huboCambio && vueltas++ < 100){
+        huboCambio = false;
+        buscar:
+        for (const A of filas){
+          for (let i = 0; i < A.tenedores.length; i++){
+            const ta = A.tenedores[i];
+            const quienA = normProf(ta.quien);
+            if (quienA === A.prof || !(ta.monto > 0.5)) continue;
+            for (const B of filas){
+              if (B === A || B.prof !== quienA) continue;
+              for (let j = 0; j < B.tenedores.length; j++){
+                const tb = B.tenedores[j];
+                if (normProf(tb.quien) !== A.prof || !(tb.monto > 0.5)) continue;
+                const m = Math.min(ta.monto, tb.monto);
+                const nuevoA = { quien: tb.quien, monto: m, medio: tb.medio };
+                const nuevoB = { quien: ta.quien, monto: m, medio: ta.medio };
+                A.tenedores.splice(i, 1, ...(ta.monto - m > 0.5 ? [nuevoA, { quien: ta.quien, monto: ta.monto - m, medio: ta.medio }] : [nuevoA]));
+                B.tenedores.splice(j, 1, ...(tb.monto - m > 0.5 ? [nuevoB, { quien: tb.quien, monto: tb.monto - m, medio: tb.medio }] : [nuevoB]));
+                huboCambio = true;
+                break buscar;
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (e) { console.warn('Descruce por tratamiento:', e && e.message); }
+
   // Resumen / detalle / áreas desde las sesiones LIQUIDABLES de este mes
   for (const s of liquidables){
     const prof = s.prof;
