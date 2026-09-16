@@ -1572,7 +1572,7 @@ async function traerEvaluacionVALD(forzarProfileId) {
     }
 
     const { data: normas, error } = await sb.from('biolab_normas')
-      .select('test_id,bloque,sexo,corte_verde,corte_amarillo,corte_rojo');
+      .select('test_id,bloque,test,metrica,sexo,edad_min,edad_max,corte_verde,corte_amarillo,corte_rojo,rango_max,fuente_norma,activo');
     if (error) throw error;
 
     try {
@@ -1676,6 +1676,38 @@ function ladoClinico(sent, L, R) {
   }
   if (sent.tipo === 'rom') return ` · lado con MENOR valor: ${L < R ? 'IZQUIERDO' : 'DERECHO'}`;
   return '';
+}
+
+// ── NORMAS HUMANTRAK por edad y sexo (tabla biolab_normas, bloque HUMANTRAK) ──
+// test = regex sobre el nombre de la prueba · metrica = regex sobre la métrica.
+// corte_rojo = límite "muy por debajo" · corte_verde = inicio de lo normal · rango_max = fin de lo normal.
+function normaHT(normas, prueba, metrica) {
+  if (!pacienteSel) return null;
+  const sx = (document.getElementById('f_sexo') && document.getElementById('f_sexo').value) || '';
+  const edad = calcEdad(pacienteSel.fecha_nacimiento);
+  if (!sx || edad == null) return null;   // sin sexo o edad no se puede elegir la banda
+  for (const n of (normas || [])) {
+    if (n.bloque !== 'HUMANTRAK' || n.activo === false) continue;
+    if (n.sexo && n.sexo !== sx) continue;
+    if (n.edad_min != null && edad < n.edad_min) continue;
+    if (n.edad_max != null && edad > n.edad_max) continue;
+    try {
+      if (new RegExp(n.test, 'i').test(prueba || '') && new RegExp(n.metrica, 'i').test(metrica || '')) return n;
+    } catch (_) { /* regex mal cargada: se ignora esa fila */ }
+  }
+  return null;
+}
+function clasifNormaHT(n, v) {
+  if (!n || v == null) return null;
+  const a = Math.abs(v);
+  if (n.corte_rojo != null && a <= Number(n.corte_rojo)) return { em: '🔴', txt: 'muy por debajo' };
+  if (n.corte_verde != null && a < Number(n.corte_verde)) return { em: '🟡', txt: 'levemente por debajo' };
+  if (n.rango_max != null && a > Number(n.rango_max)) return { em: '🟢', txt: 'por encima de lo normal' };
+  return { em: '🟢', txt: 'dentro de lo normal' };
+}
+const PESO_EM = { '🔴': 3, '🟡': 2, '🟢': 1, '⚪': 0 };
+function textoNormaHT(n) {
+  return `norma ${n.sexo || ''} ${n.edad_min ?? ''}-${n.edad_max ?? ''} años: muy bajo ≤${n.corte_rojo}°, levemente bajo hasta ${n.corte_verde}°, normal ${n.corte_verde}–${n.rango_max}° (${n.fuente_norma || 'VALD'})`;
 }
 
 function pintarEvaluacion(datos, normas) {
@@ -1817,6 +1849,12 @@ function pintarEvaluacion(datos, normas) {
         continue;
       }
       const sent = sentidoMetrica(p.prueba, m.metrica, m.unidad);
+      const nHT = (sent.tipo === 'rom') ? normaHT(normas, p.prueba, m.metrica) : null;
+      if (m.asimetria_pct == null && nHT && m.valor != null) {
+        const k = clasifNormaHT(nHT, m.valor); cnt(k.em);
+        movilidad.push({ em: k.em, nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor} ${sent.unidad} · ${k.txt.toUpperCase()} según ${textoNormaHT(nHT)}`, fuente: nHT.fuente_norma || 'norma VALD', valor: m.valor, unidad: sent.unidad, cat: 'Movilidad' });
+        continue;
+      }
       if (m.asimetria_pct == null) {
         // Sin asimetría ni norma cargada: NO se puede afirmar que es normal → informativo (⚪), con su unidad real.
         cnt('⚪'); conteo.vigilar++;
@@ -1824,11 +1862,19 @@ function pintarEvaluacion(datos, normas) {
         movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor} ${sent.unidad}${notaSigno} · sin norma cargada en el sistema: NO afirmar que es normal`, fuente: fte, valor: m.valor, unidad: sent.unidad, cat: 'Movilidad' });
         continue;
       }
-      const c = colorAsim(m.asimetria_pct); cnt(c);
+      let c = colorAsim(m.asimetria_pct);
+      let txtNorma = '';
+      if (nHT && m.izquierda != null && m.derecha != null) {
+        const kL = clasifNormaHT(nHT, m.izquierda), kR = clasifNormaHT(nHT, m.derecha);
+        const peorNorma = PESO_EM[kL.em] >= PESO_EM[kR.em] ? kL.em : kR.em;
+        if (PESO_EM[peorNorma] > PESO_EM[c]) c = peorNorma;   // manda lo peor entre asimetría y norma
+        txtNorma = ` · IZQUIERDO ${kL.txt.toUpperCase()} / DERECHO ${kR.txt.toUpperCase()} según ${textoNormaHT(nHT)}`;
+      }
+      cnt(c);
       // El lado se resuelve EN CÓDIGO según el sentido de la métrica (nunca lo deduce la IA):
       // ROM → menor = restringido · equilibrio → MAYOR = peor control · flexión negativa = extensión.
       const sufLado = ladoClinico(sent, m.izquierda, m.derecha);
-      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}`, fuente: fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}${txtNorma}`, fuente: nHT ? (nHT.fuente_norma || fteLSI) : fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
     }
   }
 
@@ -2258,6 +2304,12 @@ function controlNumeros(informe, nota) {
     const ok = [n, Math.round(n), Math.round(n * 10) / 10, Math.round(n * 100) / 100].some(v => permitidos.has(String(v)));
     if (!ok && !sospechosos.includes(t)) sospechosos.push(t);
   }
+  // Frases que atribuyen CAUSA a un antecedente o entre hallazgos: se marcan para revisar.
+  const RE_CAUSA = /(debido a|secundari[oa] a|a causa de|por (su|la|el) (hernia|artrodesis|cirug[ií]a|operaci[oó]n|lesi[oó]n|antecedente)|compatible con (su|la|el|las|los)|coherente con su (historia|antecedente|cirug)|frecuente tras|explica(n)? (la|el|las|los)|se retroalimentan|consecuencia (adaptativa )?de|sobrecarga (el|la) (segmento|columna) (artrodesad|operad))/gi;
+  const causales = [];
+  for (const mm of ([informe || '', nota || ''].join('\n').match(RE_CAUSA) || [])) {
+    const k = mm.toLowerCase(); if (!causales.includes(k)) causales.push(k);
+  }
   let box = document.getElementById('valdControlNumeros');
   if (!box) { box = document.createElement('div'); box.id = 'valdControlNumeros'; cont.prepend(box); }
   box.style.cssText = 'margin-bottom:10px; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.5;';
@@ -2267,6 +2319,10 @@ function controlNumeros(informe, nota) {
   } else {
     box.style.background = '#fef3c7'; box.style.color = '#92400e';
     box.textContent = '⚠️ Verificar antes de firmar — estos números NO están en los datos enviados a la IA: ' + sospechosos.join(' · ');
+  }
+  if (causales.length) {
+    box.style.background = '#fef3c7'; box.style.color = '#92400e';
+    box.textContent += '  ·  ⚠️ Frases que atribuyen causa (revisar objetividad): «' + causales.join('» · «') + '»';
   }
 }
 
