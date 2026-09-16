@@ -2484,6 +2484,10 @@ async function generar() {
 async function copiarTexto(id) {
   const ta = document.getElementById(id);
   if (!ta) return;
+  if (id === 'valdInformeTxt') {
+    const f = await firmaDelUsuario();
+    if (f) { ta.value = firmarTexto(ta.value, f); mostrarFirmaPreview(f); }
+  }
   try {
     await navigator.clipboard.writeText(ta.value || '');
     toast('Copiado. Pegalo en la solapa BiOLAB de la HC de SARKMED.');
@@ -2574,6 +2578,45 @@ function controlNumeros(informe, nota) {
   }
 }
 
+// ── FIRMA PROFESIONAL ── (tabla biolab_firmas + bucket privado "firmas"; nada escrito en el HTML)
+let firmaCache = undefined;   // undefined = no buscada · null = no hay firma para este usuario
+async function firmaDelUsuario() {
+  if (firmaCache !== undefined) return firmaCache;
+  if (!usuarioActual) await detectarUsuario();
+  const mail = usuarioActual && usuarioActual.email ? String(usuarioActual.email).toLowerCase() : '';
+  if (!mail) { firmaCache = null; return null; }
+  try {
+    const { data, error } = await sb.from('biolab_firmas').select('email,nombre,matricula,especialidad,imagen_path')
+      .ilike('email', mail).eq('activo', true).limit(1);
+    if (error) throw error;
+    firmaCache = (data && data[0]) || null;
+  } catch (_) { firmaCache = null; }
+  return firmaCache;
+}
+function textoFirma(f) {
+  return ['', '', '________________________________', f.nombre, f.matricula, f.especialidad].filter(x => x !== null && x !== undefined).join('\n').trimEnd();
+}
+// Saca la leyenda "generado automáticamente… requiere firma" y agrega el bloque de firma (una sola vez).
+function firmarTexto(texto, f) {
+  let t = String(texto || '').replace(/\n*—\s*(Informe|Borrador) generado automáticamente[^\n]*/g, '').trimEnd();
+  if (f && f.nombre && !t.includes(f.nombre)) t += textoFirma(f);
+  return t;
+}
+async function mostrarFirmaPreview(f) {
+  const cont = document.getElementById('valdBorrador');
+  if (!cont || !f) return;
+  let url = '';
+  if (f.imagen_path) {
+    try { const { data } = await sb.storage.from('firmas').createSignedUrl(f.imagen_path, 600); url = data && data.signedUrl; } catch (_) {}
+  }
+  let box = document.getElementById('valdFirmaPreview');
+  if (!box) { box = document.createElement('div'); box.id = 'valdFirmaPreview'; cont.appendChild(box); }
+  box.style.cssText = 'margin-top:12px; padding:12px; border:1px dashed var(--border); border-radius:10px; text-align:center; font-size:13px; line-height:1.45;';
+  box.innerHTML = (url ? '<img src="' + url + '" alt="Firma" style="height:70px; display:block; margin:0 auto 4px;">' : '<div class="hint">⚠️ No se encontró la imagen de la firma en el bucket</div>') +
+    '<div style="border-top:1px solid #334155; width:220px; margin:0 auto 4px;"></div>' +
+    '<b>' + escapeHtml(f.nombre || '') + '</b><br>' + escapeHtml(f.matricula || '') + '<br>' + escapeHtml(f.especialidad || '');
+}
+
 async function guardarInformeYNota() {
   if (!pacienteSel) { toast('Seleccioná un paciente.'); return; }
   if (esSark()) { toast('Paciente de SARKMED: esto se guarda en su HC de SARKMED, no acá.'); return; }
@@ -2584,6 +2627,8 @@ async function guardarInformeYNota() {
   if (!informe && !nota) { toast('No hay nada para guardar.'); return; }
   if (!usuarioActual) await detectarUsuario();
   if (!usuarioActual) { toast('No detectamos tu usuario. Iniciá sesión para guardar.'); return; }
+  const firma = await firmaDelUsuario();
+  if (!firma && !window.confirm('No hay firma cargada para ' + (usuarioActual.email || 'tu usuario') + ' en biolab_firmas. ¿Guardar el informe sin firma?')) return;
   const btn = document.getElementById('btnGuardarHC');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
@@ -2607,13 +2652,19 @@ async function guardarInformeYNota() {
     };
     const filas = [];
     // El informe ya trae su propio encabezado (INFORME BIOMECÁNICO FUNCIONAL…): se guarda tal cual.
-    if (informe) filas.push({ ...base, tipo: 'observacion', texto: informe });
+    const informeFirmado = firma ? firmarTexto(informe, firma) : informe;
+    if (informe) filas.push({ ...base, tipo: 'observacion', texto: informeFirmado, ...(firma ? { firmado_por_email: firma.email } : {}) });
     if (nota) {
       const encabezado = '🔬 BiOLAB — Consideraciones para el Profesor (evaluación VALD ' + fecha + ')\n\n';
       filas.push({ ...base, tipo: 'nota', texto: encabezado + nota });
     }
-    const { error: e2 } = await sb.from('hc_observaciones').insert(filas);
+    let { error: e2 } = await sb.from('hc_observaciones').insert(filas);
+    if (e2 && /firmado_por_email/i.test(e2.message || '')) {   // columna todavía no creada: guarda igual
+      filas.forEach(f => delete f.firmado_por_email);
+      ({ error: e2 } = await sb.from('hc_observaciones').insert(filas));
+    }
     if (e2) throw e2;
+    if (firma && taInf) { taInf.value = informeFirmado; mostrarFirmaPreview(firma); }
     // Snapshot de evolución (no bloquea ni rompe si la tabla no existe todavía)
     try {
       if (ultimaGeneracion && ultimaGeneracion.persona_id === String(pacienteSel.id)) {
