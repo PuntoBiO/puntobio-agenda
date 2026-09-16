@@ -584,6 +584,8 @@ let pdfsHC = [];          // [{nombre, path, fecha, bytes, tipo:'MOPLEX'|'ESTUDI
 let pdfSel = new Set();   // paths elegidos para los estudios
 let moplexSel = true;     // tilde de la pisada MOPLEX
 const MAX_PDF_IA = 6;
+const MAX_BYTES_PDF = 10 * 1024 * 1024;    // por PDF
+const MAX_BYTES_TOTAL = 20 * 1024 * 1024;  // entre todos los que se mandan
 const RE_MOPLEX = /moplex|dinamic|din[aá]mico|estatic|est[aá]tico|baropodo|pisada|freestep/i;
 const RE_VIDEO = /videograf/i;
 const RE_VALD = /vald|hub|humantrak|forcedeck|dynamo|evaluaci[oó]n[_\s-]/i;
@@ -596,13 +598,30 @@ async function cargarPdfsHC() {
   pdfsHC = []; pdfSel = new Set(); moplexSel = true; hubSel = true;
   if (!cont) return;
   cont.innerHTML = '';
-  if (!pacienteSel || esSark()) return;
+  if (!pacienteSel) return;
   try {
-    const { data: adjs, error } = await sb.from('hc_adjuntos')
-      .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
-      .eq('persona_id', pacienteSel.id)
-      .order('creado_en', { ascending: false });
-    if (error) throw error;
+    let adjs = [];
+    if (esSark()) {
+      // SARKMED: los PDF viven en la HC propia (hc_sarkmed_adjuntos, bucket sarkmed-hc), en cualquier solapa.
+      const { data: hcs, error: eH } = await sb.from('hc_sarkmed').select('id').eq('paciente_id', pacienteSel.id);
+      if (eH) throw eH;
+      const ids = (hcs || []).map(h => h.id);
+      if (ids.length) {
+        const { data: ad, error: eA } = await sb.from('hc_sarkmed_adjuntos')
+          .select('nombre, path, tipo, tamano, subido_en, solapa')
+          .in('hc_id', ids).order('subido_en', { ascending: false });
+        if (eA) throw eA;
+        adjs = (ad || []).map(a => ({ nombre_original: a.nombre, storage_path: a.path, tipo_mime: a.tipo,
+          tamano_bytes: a.tamano, creado_en: a.subido_en, bucket: 'sarkmed-hc' }));
+      }
+    } else {
+      const { data: ad, error } = await sb.from('hc_adjuntos')
+        .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
+        .eq('persona_id', pacienteSel.id)
+        .order('creado_en', { ascending: false });
+      if (error) throw error;
+      adjs = (ad || []).map(a => ({ ...a, bucket: 'hc-adjuntos' }));
+    }
     const pdfs = (adjs || []).filter(a => ((a.tipo_mime || '').toLowerCase().includes('pdf')) || /\.pdf$/i.test(a.nombre_original || ''));
     for (const a of pdfs) {
       const n = (a.nombre_original || '') + ' ' + (a.storage_path || '');
@@ -611,7 +630,7 @@ async function cargarPdfsHC() {
       const esHub = !esMoplex && RE_HUB.test(n);
       if (!esMoplex && !esHub && RE_VALD.test(n)) continue;   // otros PDF de VALD: los datos ya vienen por API
       pdfsHC.push({ nombre: a.nombre_original || a.storage_path, path: a.storage_path,
-        fecha: (a.creado_en || '').slice(0, 10), bytes: a.tamano_bytes || 0, tipo: esMoplex ? 'MOPLEX' : (esHub ? 'VALD_HUB' : 'ESTUDIO') });
+        fecha: (a.creado_en || '').slice(0, 10), bytes: a.tamano_bytes || 0, bucket: a.bucket, tipo: esMoplex ? 'MOPLEX' : (esHub ? 'VALD_HUB' : 'ESTUDIO') });
     }
     // MOPLEX: solo la toma más reciente va con el tilde
     const fechasMop = pdfsHC.filter(p => p.tipo === 'MOPLEX').map(p => p.fecha).sort();
@@ -668,11 +687,14 @@ function pintarPdfsHC() {
 }
 
 // CANDADO: no se genera el informe sin el reporte VALD Hub de ESTA toma cargado en la HC y tildado.
-// Es la única fuente de percentiles y bandas por edad y sexo. SARKMED queda afuera (su HC vive en hc_sarkmed).
+// Es la única fuente de percentiles y bandas por edad y sexo. Vale igual para SARKMED (lee su HC propia).
 function motivoSinHub() {
-  if (!pacienteSel || esSark()) return null;
+  if (!pacienteSel) return null;
   const hub = pdfsHC.filter(p => p.ultimoHub);
-  if (!hub.length) return 'Falta el reporte VALD Hub: bajalo del Hub, cargalo en la HC del paciente y tocá ↻ Actualizar PDF.';
+  const dondeCargar = esSark() ? 'en la solapa BiOLAB de su HC de SARKMED' : 'en la HC del paciente';
+  if (!hub.length) return 'Falta el reporte VALD Hub: bajalo del Hub, cargalo ' + dondeCargar + ' y tocá ↻ Actualizar PDF.';
+  if (!hub.some(p => !p.bytes || p.bytes <= MAX_BYTES_PDF))
+    return 'El reporte VALD Hub pesa más de ' + (MAX_BYTES_PDF / 1048576) + ' MB y la IA no lo puede leer. Cargá el PDF liviano del Hub (Profile Overview).';
   const fechaToma = (ultimaEvaluacion && ultimaEvaluacion.datos && ultimaEvaluacion.datos.fechaEvaluacion) || '';
   if (fechaToma && hub[0].fecha && hub[0].fecha < fechaToma)
     return 'El reporte VALD Hub cargado es del ' + hub[0].fecha + ', anterior a esta toma (' + fechaToma + '). Cargá el de esta evaluación y tocá ↻ Actualizar PDF.';
@@ -686,7 +708,7 @@ function togglePdfIdx(i, marcado) {
   if (marcado) {
     const mop = (moplexSel ? pdfsHC.filter(x => x.ultimaMoplex).length : 0) + (hubSel ? pdfsHC.filter(x => x.ultimoHub).length : 0);
     if (mop + pdfSel.size >= MAX_PDF_IA) { toast('Máximo ' + MAX_PDF_IA + ' PDF por informe.'); pintarPdfsHC(); return; }
-    if (p.bytes > 6 * 1024 * 1024) { toast('Ese PDF pesa más de 6 MB, la IA no lo puede leer.'); pintarPdfsHC(); return; }
+    if (p.bytes > MAX_BYTES_PDF) { toast('Ese PDF pesa más de ' + (MAX_BYTES_PDF / 1048576) + ' MB, la IA no lo puede leer.'); pintarPdfsHC(); return; }
     pdfSel.add(p.path);
   } else pdfSel.delete(p.path);
   pintarPdfsHC();
@@ -1604,7 +1626,7 @@ async function traerEvaluacionVALD(forzarProfileId) {
     }
 
     const { data: normas, error } = await sb.from('biolab_normas')
-      .select('test_id,bloque,test,metrica,sexo,edad_min,edad_max,corte_verde,corte_amarillo,corte_rojo,rango_max,fuente_norma,activo');
+      .select('test_id,bloque,test,metrica,poblacion,sexo,edad_min,edad_max,corte_verde,corte_amarillo,corte_rojo,rango_min,rango_max,unidad,fuente_norma,activo');
     if (error) throw error;
 
     try {
@@ -1740,6 +1762,41 @@ function clasifNormaHT(n, v) {
   return { em: '🟢', txt: 'dentro de lo normal' };
 }
 const PESO_EM = { '🔴': 3, '🟡': 2, '🟢': 1, '⚪': 0 };
+
+// ── NORMAS FORCEDECKS DE PERFORMANCE (bloque FD_ELITE) ──
+// Percentiles de atletas de élite (WSL mujeres 20-40 / Premier League hombres 19-40), in-season.
+// Se aplican SOLO si la población clasificada es A (performance): compararle esto a un paciente de salud o readaptación no corresponde.
+// Columnas: corte_rojo = p5 · corte_verde = p25 · rango_min = mediana · corte_amarillo = p75 · rango_max = p95.
+function poblacionEsPerformance() {
+  const pob = String((ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || '').toUpperCase();
+  return pob === 'A' || pob.includes('PERFORMANCE');
+}
+function normaFD(normas, prueba, metrica) {
+  if (!pacienteSel || !poblacionEsPerformance()) return null;
+  const sx = (document.getElementById('f_sexo') && document.getElementById('f_sexo').value) || '';
+  const edad = calcEdad(pacienteSel.fecha_nacimiento);
+  if (!sx || edad == null) return null;
+  for (const n of (normas || [])) {
+    if (n.bloque !== 'FD_ELITE' || n.activo === false) continue;
+    if (n.sexo && n.sexo !== sx) continue;
+    if (n.edad_min != null && edad < n.edad_min) continue;
+    if (n.edad_max != null && edad > n.edad_max) continue;
+    try {
+      if (new RegExp(n.test, 'i').test(prueba || '') && new RegExp(n.metrica, 'i').test(metrica || '')) return n;
+    } catch (_) { /* regex mal cargada */ }
+  }
+  return null;
+}
+function clasifPercentilFD(n, v) {
+  const a = Math.abs(v);
+  const p5 = Number(n.corte_rojo), p25 = Number(n.corte_verde), p50 = Number(n.rango_min), p75 = Number(n.corte_amarillo), p95 = Number(n.rango_max);
+  if (a < p5)  return { em: '🔴', txt: 'por debajo del percentil 5' };
+  if (a < p25) return { em: '🟡', txt: 'entre el percentil 5 y 25' };
+  if (a < p50) return { em: '🟢', txt: 'entre el percentil 25 y la mediana' };
+  if (a < p75) return { em: '🟢', txt: 'entre la mediana y el percentil 75' };
+  if (a < p95) return { em: '🟢', txt: 'entre el percentil 75 y 95' };
+  return { em: '🟢', txt: 'por encima del percentil 95' };
+}
 function textoNormaHT(n) {
   return `norma ${n.sexo || ''} ${n.edad_min ?? ''}-${n.edad_max ?? ''} años: muy bajo ≤${n.corte_rojo}°, levemente bajo hasta ${n.corte_verde}°, normal ${n.corte_verde}–${n.rango_max}° (${n.fuente_norma || 'VALD'})`;
 }
@@ -1813,6 +1870,20 @@ function pintarEvaluacion(datos, normas) {
       const star = fdStar(nombre);
       const uni = (Trial != null) ? Trial : (Both != null ? Both : null);
       const u = r.unidad || '';
+      // Norma de performance (solo población A): fila aparte, no toca la lectura de asimetría.
+      {
+        const nFD = normaFD(normas, t.prueba, nombre);
+        if (nFD) {
+          const unilateral = /single leg|^sl|slj|sldj|slht/i.test(t.prueba || '');
+          let v = uni, detV = '';
+          if (unilateral && L != null && R != null) { v = Math.min(Math.abs(L), Math.abs(R)); detV = ` (L ${L} / R ${R}, se compara el lado más bajo)`; }
+          else if (v == null && L != null && R != null) { v = L + R; detV = ` (suma L ${L} + R ${R})`; }
+          if (v != null) {
+            const k = clasifPercentilFD(nFD, v); cnt(k.em);
+            forceDecks.push({ em: k.em, nom: `${t.prueba} · ${nombre} · vs norma de élite`, det: `${v} ${nFD.unidad || u}${detV} · ${k.txt.toUpperCase()} (p5 ${nFD.corte_rojo} · p25 ${nFD.corte_verde} · mediana ${nFD.rango_min} · p75 ${nFD.corte_amarillo} · p95 ${nFD.rango_max}) · referencia: ${nFD.fuente_norma}`, fuente: nFD.fuente_norma || 'norma élite', cat: 'ForceDecks' });
+          }
+        }
+      }
       // CoP Range: oscilación (un valor, mm). No es izquierda/derecha.
       if (/^CoP Range/.test(nombre)) {
         conteo.vigilar++;
@@ -2181,7 +2252,7 @@ async function generar() {
     // Documentos del paciente: SOLO los que se tildaron en "PDF de la HC que lee la IA".
     // Cada uno viaja con su tipo (MOPLEX = pisada / ESTUDIO = estudio médico) para que la IA sepa cómo usarlo.
     let documentos = [];
-    if (!esSark()) try {
+    try {
       const blobABase64 = (blob) => new Promise((res) => {
         const r = new FileReader();
         r.onload = () => { const s = String(r.result || ''); const i = s.indexOf(','); res(i >= 0 ? s.slice(i + 1) : ''); };
@@ -2189,16 +2260,22 @@ async function generar() {
         r.readAsDataURL(blob);
       });
       const elegidos = pdfsHC.filter(p => (p.ultimaMoplex && moplexSel) || (p.ultimoHub && hubSel) || (p.tipo === 'ESTUDIO' && pdfSel.has(p.path)))
-        .filter(p => !p.bytes || p.bytes <= 6 * 1024 * 1024)
+        .filter(p => !p.bytes || p.bytes <= MAX_BYTES_PDF)
+        // primero el Hub y la pisada (son los que alimentan normas y correlación), después los estudios
+        .sort((a, b) => (a.tipo === 'ESTUDIO') - (b.tipo === 'ESTUDIO'))
         .slice(0, MAX_PDF_IA);
+      let pesoAcum = 0; const salteados = [];
       for (const p of elegidos) {
+        if (p.bytes && pesoAcum + p.bytes > MAX_BYTES_TOTAL) { salteados.push(p.nombre); continue; }
+        pesoAcum += (p.bytes || 0);
         try {
-          const { data: blob } = await sb.storage.from('hc-adjuntos').download(p.path);
+          const { data: blob } = await sb.storage.from(p.bucket || 'hc-adjuntos').download(p.path);
           if (!blob) continue;
           const b64 = await blobABase64(blob);
           if (b64) documentos.push({ nombre: p.nombre, tipo: p.tipo, base64: b64 });
         } catch (_) { /* un PDF que falla no frena el resto */ }
       }
+      if (salteados.length) toast('⚠️ No entraron por peso (más de 20 MB juntos): ' + salteados.join(', '));
       if (documentos.length) toast('📎 Se envían ' + documentos.length + ' PDF a la IA.');
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
     // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
