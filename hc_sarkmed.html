@@ -610,6 +610,41 @@ function renderFicha(){
   `;
   if(solapa === 'nutricion') calcularIMC();
   if(solapa === 'biolab')    calcularBiolab();
+  pintarFirmasSark();
+}
+
+/* ── FIRMA PROFESIONAL (tabla biolab_firmas + bucket privado "firmas") ──
+   En el HTML solo se deja un lugar marcado con el mail de quien firmó; los datos y la imagen salen de la base. */
+const _firmasSark = {};
+function lugarFirma(email){
+  return email ? `<div class="firma-prof" data-firma-email="${esc(String(email).toLowerCase())}"></div>` : '';
+}
+async function traerFirmaSark(email){
+  if(_firmasSark[email] !== undefined) return _firmasSark[email];
+  try{
+    const { data } = await sb.from('biolab_firmas').select('*').ilike('email', email).eq('activo', true).limit(1);
+    const fila = data && data[0];
+    if(!fila){ _firmasSark[email] = null; return null; }
+    let url = '';
+    if(fila.imagen_path){
+      const { data: u } = await sb.storage.from('firmas').createSignedUrl(fila.imagen_path, 3600);
+      url = (u && u.signedUrl) || '';
+    }
+    _firmasSark[email] = { fila, url };
+  }catch(e){ _firmasSark[email] = null; }
+  return _firmasSark[email];
+}
+async function pintarFirmasSark(){
+  for(const el of Array.from(document.querySelectorAll('.firma-prof[data-firma-email]'))){
+    const f = await traerFirmaSark(el.dataset.firmaEmail);
+    if(!f){ el.innerHTML = ''; continue; }
+    const fl = f.fila;
+    el.innerHTML = `<div style="margin-top:14px;text-align:center;font-size:12px;line-height:1.4">
+      ${f.url ? `<img src="${f.url}" alt="Firma" style="height:64px;display:block;margin:0 auto 2px">` : ''}
+      <div style="border-top:1px solid #334155;width:220px;margin:0 auto 4px"></div>
+      <b>${esc(fl.nombre || '')}</b><br>${[fl.matricula, fl.titulo, fl.especialidad].filter(Boolean).map(esc).join('<br>')}
+    </div>`;
+  }
 }
 
 function solapaMedica(f, ro){
@@ -756,7 +791,7 @@ function solapaMedica(f, ro){
         ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
                        border-radius:6px;font-size:12px;font-weight:600">
              ✓ Informe final firmado por ${esc(f.informe_final_firmado_por || '')} el ${fechaLinda((f.informe_final_firmado_en || '').slice(0,10))}
-           </div>`
+           </div>${lugarFirma(f.informe_final_firmado_por)}`
         : (ro ? '' : `<button class="btn btn-azul" onclick="firmarInformeFinal()">✍ Firmar informe final</button>
                       <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Guardá antes de firmar.</span>`)}
     </div>
@@ -1084,10 +1119,14 @@ function solapaSuelo(s, ro){
     <div class="bloque-body">
       <div class="campo">
         <textarea id="diagnostico" style="min-height:150px" ${ro}>${esc(s.diagnostico || '')}</textarea>
-        <div style="font-size:11.5px;color:var(--muted);margin-top:5px">
-          Queda firmado con la matrícula de quien lo carga cuando se arme el PDF del paciente.
-        </div>
       </div>
+      ${s.firmado_en
+        ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
+                       border-radius:6px;font-size:12px;font-weight:600">
+             ✓ Suelo pélvico firmado por ${esc(s.firmado_por || '')} el ${fechaLinda((s.firmado_en || '').slice(0,10))}
+           </div>${lugarFirma(s.firmado_por)}`
+        : (ro ? '' : `<button class="btn btn-azul" onclick="firmarSuelo()">✍ Firmar suelo pélvico</button>
+                      <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Se guarda la ficha y queda firmada con tu matrícula.</span>`)}
     </div>
   </div>
 
@@ -1117,6 +1156,20 @@ const CAMPOS_SUELO_TEXTO = ['embarazos_partos','cirugias_previas','cirugias_abdo
 function levantarSuelo(){
   if(solapa !== 'suelo_pelvico') return;
   CAMPOS_SUELO_TEXTO.forEach(c => { if(document.getElementById(c)) suelo[c] = txt(c); });
+}
+
+async function firmarSuelo(){
+  levantarSuelo();
+  if(!(suelo.diagnostico || '').trim()){ toast('Cargá el diagnóstico antes de firmar', 'err'); return; }
+  if(!confirm('Al firmar, la solapa de Suelo pélvico queda firmada con tu nombre, matrícula y la fecha. ¿Firmar?')) return;
+  await guardarSuelo();
+  const { error } = await sb.from('hc_sarkmed_suelo_pelvico')
+    .update({ firmado_por: miEmail, firmado_en: new Date().toISOString() })
+    .eq('hc_id', fichaActual.id);
+  if(error){ toast('No se pudo firmar: ' + error.message, 'err'); return; }
+  toast('Suelo pélvico firmado', 'ok');
+  await cargarSuelo(fichaActual.id);
+  renderFicha();
 }
 
 async function guardarSuelo(){
@@ -1594,7 +1647,7 @@ function solapaBiolab(b, ro){
         ? `<div style="background:var(--verde-soft);border:1px solid #bbf7d0;color:#15803d;padding:9px 12px;
                        border-radius:6px;font-size:12px;font-weight:600">
              ✓ Finalizado por ${esc(b.firmado_por || '')} el ${fechaLinda((b.firmado_en || '').slice(0,10))} · ya está disponible en la solapa Médica
-           </div>`
+           </div>${lugarFirma(b.firmado_por)}`
         : (ro ? '' : `<button class="btn btn-azul" onclick="firmarInforme()">✍ Firmar informe</button>
                       <span style="font-size:11.5px;color:var(--muted);margin-left:10px">Guardá antes de firmar.</span>`)}
     </div>
