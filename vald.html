@@ -332,6 +332,7 @@
           <button type="button" id="btnEvalReeval" onclick="setTipoEval('reeval')" style="font-size:13px; padding:5px 14px; border-radius:8px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#475569;">Reevaluación</button>
           <span id="evalTipoHint" class="hint" style="margin:0;"></span>
         </div>
+        <div id="valdPdfs" style="margin:4px 0 10px;"></div>
         <button class="btn ghost" id="btnFinalizarEval" onclick="finalizarEvaluacion()" style="display:none; margin-right:8px;">✅ Finalizar evaluación</button>
         <button class="btn" id="btnGenIA" onclick="generar()" disabled>📋 Crear informe</button>
         <div id="valdBorrador" style="margin-top:10px;"></div>
@@ -576,6 +577,89 @@ function escapeHtml(s) {
 let resultadosBusqueda = [];
 
 // ¿El paciente seleccionado viene del padrón de SARKMED (tabla aparte)?
+// ── PDF DE LA HC PARA LA IA ─────────────────────────────────────────
+// Quien evalúa elige qué PDF lee la IA. La pisada MOPLEX va con un solo tilde
+// (dinámico + estático de la última toma); la videografía queda afuera (son fotos).
+let pdfsHC = [];          // [{nombre, path, fecha, bytes, tipo:'MOPLEX'|'ESTUDIO', ultimaMoplex}]
+let pdfSel = new Set();   // paths elegidos para los estudios
+let moplexSel = true;     // tilde de la pisada MOPLEX
+const MAX_PDF_IA = 6;
+const RE_MOPLEX = /moplex|dinamic|din[aá]mico|estatic|est[aá]tico|baropodo|pisada|freestep/i;
+const RE_VIDEO = /videograf/i;
+const RE_VALD = /vald|hub|humantrak|forcedeck|dynamo|evaluaci[oó]n[_\s-]/i;
+
+async function cargarPdfsHC() {
+  const cont = document.getElementById('valdPdfs');
+  pdfsHC = []; pdfSel = new Set(); moplexSel = true;
+  if (!cont) return;
+  cont.innerHTML = '';
+  if (!pacienteSel || esSark()) return;
+  try {
+    const { data: adjs, error } = await sb.from('hc_adjuntos')
+      .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
+      .eq('persona_id', pacienteSel.id)
+      .order('creado_en', { ascending: false });
+    if (error) throw error;
+    const pdfs = (adjs || []).filter(a => ((a.tipo_mime || '').toLowerCase().includes('pdf')) || /\.pdf$/i.test(a.nombre_original || ''));
+    for (const a of pdfs) {
+      const n = (a.nombre_original || '') + ' ' + (a.storage_path || '');
+      if (RE_VIDEO.test(n)) continue;                 // fotos de la videografía: no aportan
+      const esMoplex = RE_MOPLEX.test(n);
+      if (!esMoplex && RE_VALD.test(n)) continue;     // lo de VALD ya viene por API
+      pdfsHC.push({ nombre: a.nombre_original || a.storage_path, path: a.storage_path,
+        fecha: (a.creado_en || '').slice(0, 10), bytes: a.tamano_bytes || 0, tipo: esMoplex ? 'MOPLEX' : 'ESTUDIO' });
+    }
+    // MOPLEX: solo la toma más reciente va con el tilde
+    const fechasMop = pdfsHC.filter(p => p.tipo === 'MOPLEX').map(p => p.fecha).sort();
+    const ultMop = fechasMop.length ? fechasMop[fechasMop.length - 1] : null;
+    pdfsHC.forEach(p => { p.ultimaMoplex = (p.tipo === 'MOPLEX' && p.fecha === ultMop); });
+  } catch (e) {
+    cont.innerHTML = '<div class="hint">No pude leer los PDF de la HC: ' + escapeHtml(String(e.message || e)) + '</div>';
+    return;
+  }
+  pintarPdfsHC();
+}
+
+function pintarPdfsHC() {
+  const cont = document.getElementById('valdPdfs');
+  if (!cont) return;
+  const mop = pdfsHC.filter(p => p.ultimaMoplex);
+  const est = pdfsHC.filter(p => p.tipo === 'ESTUDIO');
+  if (!mop.length && !est.length) {
+    cont.innerHTML = '<div class="hint" style="margin:0;">📎 El paciente no tiene PDF cargados en la HC para sumar al informe.</div>';
+    return;
+  }
+  const kb = b => b ? (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB') : '';
+  let h = '<div style="border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:13px;">' +
+    '<div style="font-weight:600; margin-bottom:6px;">📎 PDF de la HC que lee la IA</div>';
+  if (mop.length) {
+    h += '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:6px; cursor:pointer;">' +
+      '<input type="checkbox" ' + (moplexSel ? 'checked' : '') + ' onchange="moplexSel=this.checked; pintarPdfsHC();">' +
+      '<span>🦶 <b>Pisada MOPLEX</b> del ' + escapeHtml(mop[0].fecha) + ' <span class="hint" style="margin:0;">(' +
+      mop.map(p => escapeHtml(p.nombre)).join(' · ') + ')</span></span></label>';
+  }
+  est.forEach((p, i) => {
+    h += '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:4px; cursor:pointer;">' +
+      '<input type="checkbox" ' + (pdfSel.has(p.path) ? 'checked' : '') + ' onchange="togglePdfIdx(' + i + ', this.checked)">' +
+      '<span>📄 ' + escapeHtml(p.nombre) + ' <span class="hint" style="margin:0;">' + escapeHtml(p.fecha) + ' · ' + kb(p.bytes) + '</span></span></label>';
+  });
+  const total = (moplexSel ? mop.length : 0) + pdfSel.size;
+  h += '<div class="hint" style="margin:6px 0 0;">Seleccionados: ' + total + ' de ' + MAX_PDF_IA + ' como máximo. Los estudios se leen como contexto: la IA no los usa para explicar lo que medimos.</div></div>';
+  cont.innerHTML = h;
+}
+
+function togglePdfIdx(i, marcado) {
+  const p = pdfsHC.filter(x => x.tipo === 'ESTUDIO')[i];
+  if (!p) return;
+  if (marcado) {
+    const mop = moplexSel ? pdfsHC.filter(x => x.ultimaMoplex).length : 0;
+    if (mop + pdfSel.size >= MAX_PDF_IA) { toast('Máximo ' + MAX_PDF_IA + ' PDF por informe.'); pintarPdfsHC(); return; }
+    if (p.bytes > 6 * 1024 * 1024) { toast('Ese PDF pesa más de 6 MB, la IA no lo puede leer.'); pintarPdfsHC(); return; }
+    pdfSel.add(p.path);
+  } else pdfSel.delete(p.path);
+  pintarPdfsHC();
+}
+
 function esSark() { return !!(pacienteSel && pacienteSel.origen === 'sarkmed'); }
 
 async function buscar() {
@@ -661,6 +745,7 @@ function seleccionar(p) {
   document.getElementById('results').innerHTML = '';
   document.getElementById('q').value = '';
   resetEvaluacion();
+  cargarPdfsHC();
 
   // Autocompletar edad y resetear la clasificación de población
   document.getElementById('f_edad').value = (edad != null ? edad : '');
@@ -2011,39 +2096,28 @@ async function generar() {
         .filter(o => !/^\s*INFORME BIOMEC[ÁA]NICO FUNCIONAL/i.test(o.texto || ''))
         .map(o => ({ fecha: (o.creado_en || '').slice(0, 10), autor: o.autor_nombre || '', texto: (o.texto || '').trim() }));
     } catch (_) { /* sin acceso: sigue sin observaciones */ }
-    // Documentos médicos del paciente (estudios, indicaciones, aptos) para que la IA los lea como contexto clínico.
-    // FIX: antes se filtraba por 'categoria', pero esa columna nunca se completa → no llegaba ningún PDF.
-    // Ahora: se toman los PDF del paciente EXCLUYENDO los generados por VALD/el sistema (esos datos ya vienen por API).
+    // Documentos del paciente: SOLO los que se tildaron en "PDF de la HC que lee la IA".
+    // Cada uno viaja con su tipo (MOPLEX = pisada / ESTUDIO = estudio médico) para que la IA sepa cómo usarlo.
     let documentos = [];
     if (!esSark()) try {
-      const { data: adjs } = await sb.from('hc_adjuntos')
-        .select('nombre_original, storage_path, tipo_mime, tamano_bytes, creado_en')
-        .eq('persona_id', pacienteSel.id)
-        .order('creado_en', { ascending: false });
-      const esDeVald = (a) => {
-        const n = ((a.nombre_original || '') + ' ' + (a.storage_path || '')).toLowerCase();
-        return /vald|hub|humantrak|forcedeck|dynamo|evaluaci[oó]n[_\s-]/.test(n);
-      };
       const blobABase64 = (blob) => new Promise((res) => {
         const r = new FileReader();
         r.onload = () => { const s = String(r.result || ''); const i = s.indexOf(','); res(i >= 0 ? s.slice(i + 1) : ''); };
         r.onerror = () => res('');
         r.readAsDataURL(blob);
       });
-      const candidatos = (adjs || [])
-        .filter(a => ((a.tipo_mime || '').toLowerCase().includes('pdf')) || /\.pdf$/i.test(a.nombre_original || ''))
-        .filter(a => !esDeVald(a))
-        .filter(a => !a.tamano_bytes || a.tamano_bytes <= 6 * 1024 * 1024)
-        .slice(0, 3);
-      for (const a of candidatos) {
+      const elegidos = pdfsHC.filter(p => (p.ultimaMoplex && moplexSel) || (p.tipo === 'ESTUDIO' && pdfSel.has(p.path)))
+        .filter(p => !p.bytes || p.bytes <= 6 * 1024 * 1024)
+        .slice(0, MAX_PDF_IA);
+      for (const p of elegidos) {
         try {
-          const { data: blob } = await sb.storage.from('hc-adjuntos').download(a.storage_path);
+          const { data: blob } = await sb.storage.from('hc-adjuntos').download(p.path);
           if (!blob) continue;
           const b64 = await blobABase64(blob);
-          if (b64) documentos.push({ nombre: a.nombre_original, base64: b64 });
+          if (b64) documentos.push({ nombre: p.nombre, tipo: p.tipo, base64: b64 });
         } catch (_) { /* un PDF que falla no frena el resto */ }
       }
-      if (documentos.length) toast('📎 Se envían ' + documentos.length + ' documento(s) del paciente a la IA.');
+      if (documentos.length) toast('📎 Se envían ' + documentos.length + ' PDF a la IA.');
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
     // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
     let contexto = null;
