@@ -330,11 +330,11 @@
     <!-- 3 · PROTOCOLO A REALIZAR (según población) -->
     <div class="card" id="cardProtocolo" style="display:none">
       <p class="card-title">4 · Protocolo a realizar (según población)</p>
-      <div class="hint" style="margin-top:0">Acá aparece el protocolo según la población que clasificaste. Andá tildando cada test a medida que se lo hacés al paciente, así no te olvidás de ninguno. Cuando termines de tomarlo, apretá <b>"Evaluación realizada"</b>.</div>
+      <div class="hint" style="margin-top:0">Guía de los tests según la población. <b>No hace falta tildar nada:</b> al traer la evaluación de VALD (paso 5) el sistema marca solo lo que se hizo. Si un test <b>no se pudo hacer</b>, elegí el motivo. Los tests manuales (SARC-F, TUG, etc.) se completan acá. El protocolo se guarda solo al crear el informe.</div>
       <div id="protocoloPanel" style="margin:10px 0;"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn ghost" id="btnGuardarBorrador" onclick="guardarBorrador()">💾 Guardar borrador</button>
-        <button class="btn" id="btnEvalRealizada" onclick="guardarProtocolo()">✅ Evaluación realizada — guardar protocolo</button>
+        <button class="btn ghost" id="btnEvalRealizada" onclick="guardarProtocolo()" style="display:none;">✅ Guardar protocolo</button>
       </div>
       <div id="protocoloGuardado" class="hint" style="margin-top:8px;"></div>
     </div>
@@ -865,6 +865,10 @@ function seleccionar(p) {
 let ultimaEvaluacion = null;
 let protocoloItems = [];   // ítems del protocolo de la población activa
 let tildados = {};         // id -> 'auto' | 'manual'
+let noRealizado = {};      // id -> { motivo, detalle }  (tests del protocolo que no se pudieron hacer)
+let protocoloAutoGuardado = false;   // el protocolo se guarda solo al crear el informe
+const MOTIVOS_NO_REALIZADO = ['Dolor', 'Incapacidad / limitación física', 'Contraindicación médica', 'No aplica a este paciente',
+  'El paciente no quiso', 'Falta de tiempo', 'Se hará en otra sesión', 'Falla del equipo', 'Otro'];
 let valoresManual = {};    // id -> valor escrito a mano (tests manuales)
 let calcData = {};         // id -> datos estructurados de calculadoras (SARC-F, etc.)
 let normasFunc = null;     // cache de biolab_normas_funcionales (2-Min Step, etc.)
@@ -876,7 +880,7 @@ function resetEvaluacion() {
     if (pq) { pq.checked = false; ['f_qx_tipo','f_qx_detalle','f_qx_lado','f_qx_fecha'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; }); togglePostqx(); }
   } catch (_) {}
   ultimaEvaluacion = null;
-  protocoloItems = []; tildados = {}; valoresManual = {}; calcData = {};
+  protocoloItems = []; tildados = {}; noRealizado = {}; protocoloAutoGuardado = false; valoresManual = {}; calcData = {};
   const pp = document.getElementById('protocoloPanel');
   if (pp) { pp.style.display = 'none'; pp.innerHTML = ''; }
   const cardProt = document.getElementById('cardProtocolo');
@@ -1137,9 +1141,28 @@ async function cargarNormasFunc() {
 function autoTilde(datos) {
   if (!protocoloItems.length) return;
   for (const it of protocoloItems) {
-    if (!it.manual && !tildados[it.id] && itemPresente(it, datos)) tildados[it.id] = 'auto';
+    if (!it.manual && !tildados[it.id] && itemPresente(it, datos)) { tildados[it.id] = 'auto'; delete noRealizado[it.id]; }
+  }
+  // Tests que VALD trae y no estaban en el protocolo: se suman solos como "hechos fuera del protocolo".
+  const yaEsta = (t) => protocoloItems.some(it => it.sistema === t.sistema && (
+    String(it.label).toLowerCase() === String(t.label).toLowerCase() ||
+    (tildados[it.id] === 'auto' && JSON.stringify(it.match || []) === JSON.stringify(t.match || []))));
+  for (const sis of ['HumanTrak', 'ForceDecks', 'DynaMo']) {
+    (CATALOGO_VALD[sis] || []).forEach(t0 => {
+      const t = { ...t0, sistema: sis };
+      if (t.manual || !itemPresente(t, datos) || yaEsta(t)) return;
+      const id = 'extra_' + (++extraSeq);
+      protocoloItems.push({ id, sistema: sis, label: t.label, match: t.match, exclude: t.exclude, manual: false, extra: true, fueraProtocolo: true });
+      tildados[id] = 'auto';
+    });
   }
   renderChecklist();
+}
+function setNoRealizado(id, campo, valor) {
+  const cur = noRealizado[id] || { motivo: '', detalle: '' };
+  cur[campo] = valor;
+  if (!cur.motivo && !cur.detalle) delete noRealizado[id]; else noRealizado[id] = cur;
+  if (campo === 'motivo') renderChecklist();
 }
 function toggleTilde(id) {
   if (tildados[id]) delete tildados[id];
@@ -1516,10 +1539,15 @@ function renderChecklist() {
   const orden = ['HumanTrak', 'ForceDecks', 'DynaMo', 'Manual'];
   const hechos = protocoloItems.filter(it => tildados[it.id]).length;
   const total = protocoloItems.length;
+  const hayVald = !!(ultimaEvaluacion && ultimaEvaluacion.datos);
+  const sinHacer = protocoloItems.filter(it => !tildados[it.id] && !it.fueraProtocolo);
+  const sinMotivo = sinHacer.filter(it => !(noRealizado[it.id] && noRealizado[it.id].motivo)).length;
   let html = '<div style="border:1px solid var(--border); border-radius:12px; padding:12px;">';
   html += '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">'
     + '<b style="color:var(--azul); font-size:13px;">Protocolo · ' + escapeHtml(NOMBRE_POB[pobActual()] || pobActual() || '') + '</b>'
-    + '<span class="hint" style="margin:0;">' + hechos + '/' + total + ' hechos</span></div>';
+    + '<span class="hint" style="margin:0;">' + (hayVald
+        ? ('✓ ' + hechos + ' realizados · ' + sinHacer.length + ' sin hacer' + (sinHacer.length ? (sinMotivo ? ' (' + sinMotivo + ' sin motivo)' : ' (todos con motivo)') : ''))
+        : 'se completa solo al traer VALD') + '</span></div>';
   for (const sis of orden) {
     const grupo = protocoloItems.filter(it => (it.sistema || 'Manual') === sis);
     if (!grupo.length) continue;
@@ -1558,11 +1586,21 @@ function renderChecklist() {
           + 'onclick="event.stopPropagation()" oninput="setManual(\'' + it.id + '\', this.value)" onchange="renderChecklist()" '
           + 'style="width:160px; padding:5px 8px; border:1px solid var(--border); border-radius:6px; font-size:12px;">';
       } else {
-        trailing = auto ? '<span class="hint" style="margin:0; color:#16a34a;">✓ detectado</span>' : '';
+        trailing = auto ? '<span class="hint" style="margin:0; color:#16a34a;">✓ ' + (it.fueraProtocolo ? 'hecho fuera del protocolo' : 'detectado') + '</span>' : '';
+      }
+      // Sin registro en VALD: en vez de tildar, se elige POR QUÉ no se hizo.
+      if (!on && hayVald && !it.fueraProtocolo) {
+        const nr = noRealizado[it.id] || {};
+        let o = '<option value="">¿Por qué no se hizo?</option>';
+        MOTIVOS_NO_REALIZADO.forEach(m => { o += '<option' + (nr.motivo === m ? ' selected' : '') + '>' + escapeHtml(m) + '</option>'; });
+        trailing += '<select onclick="event.stopPropagation()" onchange="setNoRealizado(\'' + it.id + '\', \'motivo\', this.value)" '
+          + 'style="margin-left:auto; padding:4px 6px; border:1px solid ' + (nr.motivo ? '#cbd5e1' : '#f59e0b') + '; border-radius:6px; font-size:12px; max-width:210px;">' + o + '</select>'
+          + (nr.motivo ? '<input type="text" value="' + escapeHtml(nr.detalle || '') + '" placeholder="detalle (opcional)" onclick="event.stopPropagation()" '
+            + 'oninput="setNoRealizado(\'' + it.id + '\', \'detalle\', this.value)" style="width:150px; padding:4px 6px; border:1px solid var(--border); border-radius:6px; font-size:12px;">' : '');
       }
       html += '<div onclick="toggleTilde(\'' + it.id + '\')" style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:8px; cursor:pointer;' + (on ? 'background:#ecfdf5;' : '') + '">'
         + '<span style="flex:none; width:18px; height:18px; border-radius:5px; border:1px solid ' + (on ? '#16a34a' : '#cbd5e1') + '; background:' + (on ? '#16a34a' : '#fff') + '; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:12px;">' + (on ? '✓' : '') + '</span>'
-        + '<span style="font-size:13px;' + (on ? 'color:#065f46;' : '') + '">' + escapeHtml(it.label) + '</span>'
+        + '<span style="font-size:13px;' + (on ? 'color:#065f46;' : ((hayVald && !on && noRealizado[it.id] && noRealizado[it.id].motivo) ? 'color:#94a3b8; text-decoration:line-through;' : '')) + '">' + escapeHtml(it.label) + '</span>'
         + (it.info ? '<span onclick="event.stopPropagation(); toggleInfo(\'' + it.id + '\')" title="Cómo se hace este test" style="flex:none; width:17px; height:17px; border-radius:50%; border:1px solid ' + (infoAbierto[it.id] ? '#1e9fe0' : '#cbd5e1') + '; background:' + (infoAbierto[it.id] ? '#1e9fe0' : '#fff') + '; color:' + (infoAbierto[it.id] ? '#fff' : '#64748b') + '; display:inline-flex; align-items:center; justify-content:center; font-size:11px; font-style:italic; font-weight:700; cursor:pointer; font-family:Georgia,serif;">i</span>' : '')
         + trailing
         + (it.extra ? '<span onclick="event.stopPropagation(); removeExtra(\'' + it.id + '\')" title="Quitar" style="margin-left:auto; color:#94a3b8; cursor:pointer; font-size:15px;">×</span>' : '')
@@ -2220,6 +2258,13 @@ async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
   const candadoHub = motivoSinHub();
   if (candadoHub) { toast('🔒 ' + candadoHub); pintarPdfsHC(); return; }
+  // El protocolo se guarda solo (una vez por toma), sin botón aparte. SARKMED no tiene biolab_evaluaciones.
+  if (!esSark() && !protocoloAutoGuardado && ultimaClasificacion && protocoloItems.length) {
+    try {
+      const { error: eP } = await sb.from('biolab_evaluaciones').insert(payloadEvaluacion('final'));
+      if (!eP) protocoloAutoGuardado = true;
+    } catch (_) { /* si falla el guardado del protocolo, el informe sale igual */ }
+  }
   const btn = document.getElementById('btnGenIA');
   const cont = document.getElementById('valdBorrador');
   btn.disabled = true; btn.textContent = '📋 Redactando…';
@@ -2348,6 +2393,11 @@ async function generar() {
         poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
         postqx: (() => { const q = leerPostqx(); return (q && (q.tipo || q.fecha)) ? q : null; })(),
+        protocolo: protocoloItems.length ? {
+          realizados: protocoloItems.filter(it => tildados[it.id]).map(it => it.label + (it.fueraProtocolo ? ' (fuera del protocolo)' : '')),
+          no_realizados: protocoloItems.filter(it => !tildados[it.id] && !it.fueraProtocolo)
+            .map(it => ({ test: it.label, motivo: (noRealizado[it.id] && noRealizado[it.id].motivo) || 'sin motivo registrado', detalle: (noRealizado[it.id] && noRealizado[it.id].detalle) || '' })),
+        } : null,
         contexto: contexto,
       },
       hallazgos: sinExcluidos,
@@ -2633,7 +2683,7 @@ function clasificarYMostrar() {
   box.style.display = 'block';
 
   // Paso 3: mostrar el protocolo de la población para ir tildando a mano (todavía sin VALD)
-  protocoloItems = []; tildados = {}; valoresManual = {}; calcData = {};
+  protocoloItems = []; tildados = {}; noRealizado = {}; protocoloAutoGuardado = false; valoresManual = {}; calcData = {};
   const cardProt = document.getElementById('cardProtocolo');
   if (cardProt) cardProt.style.display = 'block';
   const btnEv = document.getElementById('btnEvalRealizada');
@@ -2672,7 +2722,8 @@ async function guardarClasificacion() {
 function payloadEvaluacion(estado) {
   const items = protocoloItems.map(it => ({
     id: it.id, sistema: it.sistema || 'Manual', label: it.label,
-    hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra,
+    hecho: !!tildados[it.id], origen: tildados[it.id] || null, extra: !!it.extra, fuera_protocolo: !!it.fueraProtocolo,
+    no_realizado: (!tildados[it.id] && noRealizado[it.id]) ? noRealizado[it.id] : null,
     manual: !!it.manual, calcTipo: it.calc || null,
     valor: it.manual ? (valoresManual[it.id] || null) : null,
     calc: calcData[it.id] || null
@@ -2783,7 +2834,7 @@ function retomarBorrador() {
     }
   }
   // Restaurar tildes, valores y datos de calculadoras
-  tildados = {}; valoresManual = {}; calcData = {};
+  tildados = {}; noRealizado = {}; protocoloAutoGuardado = false; valoresManual = {}; calcData = {};
   for (const si of saved) {
     if (si.hecho) tildados[si.id] = si.origen || 'manual';
     if (si.valor != null) valoresManual[si.id] = si.valor;
