@@ -264,7 +264,7 @@
       <div style="margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:2px 16px;">
         <label class="pob-check"><input type="checkbox" id="f_banderas"> Banderas rojas (dolor agudo / signos médicos)</label>
         <label class="pob-check"><input type="checkbox" id="f_fragil"> Signos de fragilidad</label>
-        <label class="pob-check"><input type="checkbox" id="f_lesion"> Lesión / cirugía reciente</label>
+        <label class="pob-check"><input type="checkbox" id="f_lesion" onchange="if (!this.checked && this.dataset.autoPostqx) this.dataset.destildadaAMano = '1'"> Lesión / cirugía reciente</label>
         <label class="pob-check"><input type="checkbox" id="f_dolor"> Dolor crónico en recuperación</label>
         <label class="pob-check"><input type="checkbox" id="f_alta"> Tiene alta de fisioterapia</label>
         <label class="pob-check"><input type="checkbox" id="f_compite"> Compite</label>
@@ -877,6 +877,7 @@ let infoAbierto = {};      // id -> true si el instructivo (ⓘ) está desplegad
 function resetEvaluacion() {
   try {   // el postquirúrgico no se arrastra al paciente siguiente
     const pq = document.getElementById('f_postqx');
+    const les = document.getElementById('f_lesion'); if (les) { delete les.dataset.autoPostqx; delete les.dataset.destildadaAMano; }
     if (pq) { pq.checked = false; ['f_qx_tipo','f_qx_detalle','f_qx_lado','f_qx_fecha'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; }); togglePostqx(); }
   } catch (_) {}
   ultimaEvaluacion = null;
@@ -1811,7 +1812,8 @@ function ladoClinico(sent, L, R) {
     const peor = L > R ? 'IZQUIERDO' : 'DERECHO';
     const mn = Math.min(Math.abs(L), Math.abs(R)), mx = Math.max(Math.abs(L), Math.abs(R));
     const veces = mn > 0 ? ` (${(mx / mn).toFixed(1)} veces más)` : '';
-    const pie = / tandem|tandem|t[aá]ndem/i.test(sent.prueba || '') ? ' (en tándem, izquierdo/derecho = pie que queda ADELANTE)' : '';
+    const esTandem = /t[aá]ndem/i.test(sent.prueba || '');
+    const pie = esTandem ? ` (en tándem: "${peor}" = pie ${peor} ADELANTE y pie ${peor === 'IZQUIERDO' ? 'DERECHO' : 'IZQUIERDO'} ATRÁS; no expliques el mecanismo)` : '';
     return ` · en equilibrio MÁS valor = PEOR control · lado con PEOR control: ${peor}${veces}${pie}`;
   }
   if (sent.conSigno && (L < 0 || R < 0)) {
@@ -2283,6 +2285,15 @@ async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
   const candadoHub = motivoSinHub();
   if (candadoHub) { toast('🔒 ' + candadoHub); pintarPdfsHC(); return; }
+  {
+    const q = leerPostqx();
+    const pob = pobActual();
+    if (q && q.dias != null && q.dias >= 0 && q.dias < 365 && pob && pob !== 'B') {
+      const ok = window.confirm('El paciente tiene ' + q.semanas + ' semanas de postquirúrgico pero está clasificado como población ' + pob +
+        '. Si todavía está en recuperación, volvé a clasificar tildando "Lesión / cirugía reciente".\n\n¿Generar el informe igual?');
+      if (!ok) return;
+    }
+  }
   // El protocolo se guarda solo (una vez por toma), sin botón aparte. SARKMED no tiene biolab_evaluaciones.
   if (!esSark() && !protocoloAutoGuardado && ultimaClasificacion && protocoloItems.length) {
     try {
@@ -2532,7 +2543,7 @@ function controlNumeros(informe, nota) {
     if (!ok && !sospechosos.includes(t)) sospechosos.push(t);
   }
   // Frases que atribuyen CAUSA a un antecedente o entre hallazgos: se marcan para revisar.
-  const RE_CAUSA = /(debido a|secundari[oa] a|a causa de|por (su|la|el) (hernia|artrodesis|cirug[ií]a|operaci[oó]n|lesi[oó]n|antecedente)|compatible con (su|la|el|las|los)|coherente con su (historia|antecedente|cirug)|frecuente tras|explica(n)? (la|el|las|los)|se retroalimentan|consecuencia (adaptativa )?de|sobrecarga (el|la) (segmento|columna) (artrodesad|operad)|esperable (despu[eé]s|tras|luego|por)|(despu[eé]s|luego|a ra[ií]z) de (una|la|su) (operaci[oó]n|cirug[ií]a|pr[oó]tesis)|propio de (la|su) (cirug|operaci|pr[oó]tesis)|puede estar relacionad)/gi;
+  const RE_CAUSA = /(debido a|secundari[oa] a|a causa de|por (su|la|el) (hernia|artrodesis|cirug[ií]a|operaci[oó]n|lesi[oó]n|antecedente)|compatible con (su|la|el|las|los)|coherente con su (historia|antecedente|cirug)|frecuente tras|explica(n)? (la|el|las|los)|se retroalimentan|consecuencia (adaptativa )?de|sobrecarga (el|la) (segmento|columna) (artrodesad|operad)|esperable (despu[eé]s|tras|luego|por)|(despu[eé]s|luego|a ra[ií]z) de (una|la|su) (operaci[oó]n|cirug[ií]a|pr[oó]tesis)|propio de (la|su) (cirug|operaci|pr[oó]tesis)|puede estar relacionad|concordantes? con (el|su) contexto|lo que sugiere que)/gi;
   // Promesas de resultado: tampoco van (regla de Lu: serios y objetivos, sin prometer lo que no sabemos).
   const RE_PROMESA = /(pron[oó]stico (es |funcional )?(favorable|alentador|bueno|positivo)|es esperable (una |que )?mejor|altamente modificable|potencial de recuperaci|buena noticia|vas a (poder|mejorar|recuperar|lograr)|se lograr[aá]|garantiz|en palabras simples|se integran de forma l[oó]gica|orientan con claridad|cabe destacar|es importante (destacar|se[nñ]alar)|resulta fundamental)/gi;
   const promesas = [];
@@ -2667,8 +2678,18 @@ function pintarPostqx() {
   if (!q) { out.textContent = ''; return; }
   if (!q.fecha) { out.textContent = 'Cargá la fecha: con ella el sistema calcula el tiempo desde la cirugía.'; return; }
   if (q.dias == null || q.dias < 0) { out.textContent = '⚠️ La fecha de la cirugía es posterior a hoy, revisala.'; return; }
-  out.textContent = '⏱ ' + q.semanas + ' semanas (' + q.meses + ' meses) desde la cirugía · ' + q.etapa +
-    (q.dias < 365 && !chk('f_lesion') ? ' · Si todavía no tiene alta para entrenar, tildá también "Lesión / cirugía reciente".' : '');
+  // Menos de 6 meses: es recuperación activa → se tilda sola "Lesión / cirugía reciente" (así clasifica en B).
+  // Si el profesional la destilda a mano, se respeta.
+  const lesion = document.getElementById('f_lesion');
+  let nota = '';
+  if (q.dias < 183 && lesion && !lesion.checked && !lesion.dataset.destildadaAMano) {
+    lesion.checked = true;
+    lesion.dataset.autoPostqx = '1';
+    nota = ' · Se tildó sola "Lesión / cirugía reciente" (menos de 6 meses). Destildala si ya tiene alta para entrenar.';
+  } else if (q.dias < 365 && lesion && !lesion.checked) {
+    nota = ' · Si todavía no tiene alta para entrenar, tildá también "Lesión / cirugía reciente".';
+  }
+  out.textContent = '⏱ ' + q.semanas + ' semanas (' + q.meses + ' meses) desde la cirugía · ' + q.etapa + nota;
 }
 
 const COLOR_POB = { A: '#16a34a', B: '#d97706', C: '#dc2626', D: '#eab308', DERIVACION_CLINICA: '#64748b' };
