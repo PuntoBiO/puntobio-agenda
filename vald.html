@@ -1104,13 +1104,27 @@ function nombresDe(datos, sistema) {
   if (sistema === 'DynaMo') return (datos.fuerza || []).map(f => f.grupo || '');
   return [];
 }
-function itemPresente(item, datos) {
-  if (item.manual) return false;
-  const nombres = nombresDe(datos, item.sistema).map(s => String(s).toLowerCase());
-  const incs = (item.match || []).map(s => s.toLowerCase());
-  const excs = (item.exclude || []).map(s => s.toLowerCase());
-  return nombres.some(n => incs.some(i => n.includes(i)) && !excs.some(e => n.includes(e)));
+// Normaliza para comparar: minúsculas y SIN tildes ("abducción" = "abduccion").
+function normTxt(x) { return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+// DynaMo a veces llega con el nombre crudo en inglés ("Abduction Supine (Hip)"): se le suma la traducción para que matchee.
+function aliasDynamo(n) {
+  const t = normTxt(n);
+  const reg = /\(hip\)|cadera/.test(t) ? 'cadera hip' : /\(knee\)|rodilla/.test(t) ? 'rodilla knee' : /\(shoulder\)|hombro/.test(t) ? 'hombro shoulder' : /\(ankle\)|tobillo/.test(t) ? 'tobillo ankle' : /\(elbow\)|codo/.test(t) ? 'codo elbow' : '';
+  const mov = /abduction|abduccion/.test(t) ? 'abduccion abduction' : /adduction|aduccion/.test(t) ? 'aduccion adduction' : /flexion/.test(t) ? 'flexion' : /extension/.test(t) ? 'extension' : '';
+  const combo = reg && mov ? ' ' + reg.split(' ').map(r => mov.split(' ').map(m => r === 'hip' || r === 'knee' || r === 'shoulder' || r === 'ankle' || r === 'elbow' ? r + ' ' + m : m + ' de ' + r).join(' ')).join(' ') : '';
+  return t + combo;
 }
+function nombresCubiertos(item, datos) {
+  if (item.manual) return [];
+  let nombres = nombresDe(datos, item.sistema);
+  const incs = (item.match || []).map(normTxt);
+  const excs = (item.exclude || []).map(normTxt);
+  return nombres.filter(n0 => {
+    const n = item.sistema === 'DynaMo' ? aliasDynamo(n0) : normTxt(n0);
+    return incs.some(i => n.includes(i)) && !excs.some(e => n.includes(e));
+  });
+}
+function itemPresente(item, datos) { return nombresCubiertos(item, datos).length > 0; }
 function mostrarChecklist() {
   const panel = document.getElementById('protocoloPanel');
   if (!panel) return;
@@ -1144,9 +1158,10 @@ function autoTilde(datos) {
     if (!it.manual && !tildados[it.id] && itemPresente(it, datos)) { tildados[it.id] = 'auto'; delete noRealizado[it.id]; }
   }
   // Tests que VALD trae y no estaban en el protocolo: se suman solos como "hechos fuera del protocolo".
-  const yaEsta = (t) => protocoloItems.some(it => it.sistema === t.sistema && (
-    String(it.label).toLowerCase() === String(t.label).toLowerCase() ||
-    (tildados[it.id] === 'auto' && JSON.stringify(it.match || []) === JSON.stringify(t.match || []))));
+  const cubiertos = new Set();
+  protocoloItems.forEach(it => { if (tildados[it.id]) nombresCubiertos(it, datos).forEach(n => cubiertos.add(it.sistema + '|' + n)); });
+  const yaEsta = (t) => protocoloItems.some(it => it.sistema === t.sistema && normTxt(it.label) === normTxt(t.label)) ||
+    nombresCubiertos(t, datos).every(n => cubiertos.has(t.sistema + '|' + n));
   for (const sis of ['HumanTrak', 'ForceDecks', 'DynaMo']) {
     (CATALOGO_VALD[sis] || []).forEach(t0 => {
       const t = { ...t0, sistema: sis };
@@ -1154,6 +1169,7 @@ function autoTilde(datos) {
       const id = 'extra_' + (++extraSeq);
       protocoloItems.push({ id, sistema: sis, label: t.label, match: t.match, exclude: t.exclude, manual: false, extra: true, fueraProtocolo: true });
       tildados[id] = 'auto';
+      nombresCubiertos(t, datos).forEach(n => cubiertos.add(sis + '|' + n));
     });
   }
   renderChecklist();
