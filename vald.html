@@ -633,13 +633,18 @@ function pintarPdfsHC() {
   const mop = pdfsHC.filter(p => p.ultimaMoplex);
   const hub = pdfsHC.filter(p => p.ultimoHub);
   const est = pdfsHC.filter(p => p.tipo === 'ESTUDIO');
+  const candado = motivoSinHub();
+  const avisoCandado = candado
+    ? '<div style="margin-top:8px; padding:8px 10px; border-radius:8px; background:#fee2e2; color:#991b1b; font-size:13px;">🔒 ' + escapeHtml(candado) + '</div>'
+    : '';
+  const btnAct = '<button type="button" class="btn ghost" style="font-size:12px; padding:3px 10px; margin-left:8px;" onclick="cargarPdfsHC()">↻ Actualizar PDF</button>';
   if (!mop.length && !hub.length && !est.length) {
-    cont.innerHTML = '<div class="hint" style="margin:0;">📎 El paciente no tiene PDF cargados en la HC para sumar al informe.</div>';
+    cont.innerHTML = '<div style="border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:13px;">📎 El paciente no tiene PDF cargados en la HC.' + btnAct + avisoCandado + '</div>';
     return;
   }
   const kb = b => b ? (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB') : '';
   let h = '<div style="border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:13px;">' +
-    '<div style="font-weight:600; margin-bottom:6px;">📎 PDF de la HC que lee la IA</div>';
+    '<div style="font-weight:600; margin-bottom:6px;">📎 PDF de la HC que lee la IA' + btnAct + '</div>';
   if (mop.length) {
     h += '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:6px; cursor:pointer;">' +
       '<input type="checkbox" ' + (moplexSel ? 'checked' : '') + ' onchange="moplexSel=this.checked; pintarPdfsHC();">' +
@@ -658,8 +663,21 @@ function pintarPdfsHC() {
       '<span>📄 ' + escapeHtml(p.nombre) + ' <span class="hint" style="margin:0;">' + escapeHtml(p.fecha) + ' · ' + kb(p.bytes) + '</span></span></label>';
   });
   const total = (moplexSel ? mop.length : 0) + (hubSel ? hub.length : 0) + pdfSel.size;
-  h += '<div class="hint" style="margin:6px 0 0;">Seleccionados: ' + total + ' de ' + MAX_PDF_IA + ' como máximo. Los estudios se leen como contexto: la IA no los usa para explicar lo que medimos.</div></div>';
+  h += '<div class="hint" style="margin:6px 0 0;">Seleccionados: ' + total + ' de ' + MAX_PDF_IA + ' como máximo. Los estudios se leen como contexto: la IA no los usa para explicar lo que medimos.</div>' + avisoCandado + '</div>';
   cont.innerHTML = h;
+}
+
+// CANDADO: no se genera el informe sin el reporte VALD Hub de ESTA toma cargado en la HC y tildado.
+// Es la única fuente de percentiles y bandas por edad y sexo. SARKMED queda afuera (su HC vive en hc_sarkmed).
+function motivoSinHub() {
+  if (!pacienteSel || esSark()) return null;
+  const hub = pdfsHC.filter(p => p.ultimoHub);
+  if (!hub.length) return 'Falta el reporte VALD Hub: bajalo del Hub, cargalo en la HC del paciente y tocá ↻ Actualizar PDF.';
+  const fechaToma = (ultimaEvaluacion && ultimaEvaluacion.datos && ultimaEvaluacion.datos.fechaEvaluacion) || '';
+  if (fechaToma && hub[0].fecha && hub[0].fecha < fechaToma)
+    return 'El reporte VALD Hub cargado es del ' + hub[0].fecha + ', anterior a esta toma (' + fechaToma + '). Cargá el de esta evaluación y tocá ↻ Actualizar PDF.';
+  if (!hubSel) return 'Tildá el Reporte VALD Hub: sin él la IA no tiene percentiles ni bandas normativas.';
+  return null;
 }
 
 function togglePdfIdx(i, marcado) {
@@ -1596,6 +1614,7 @@ async function traerEvaluacionVALD(forzarProfileId) {
 
     const colored = pintarEvaluacion(datos, normas || []);
     ultimaEvaluacion = { datos, colored };
+    try { pintarPdfsHC(); } catch (_) { /* el recuadro de PDF se repinta con la fecha de la toma */ }
     cont.innerHTML = renderEvaluacion(colored, datos);
     chequearMetricasNuevas(colored);
     const bDiag = document.getElementById('btnDiagNormas'); if (bDiag) bDiag.style.display = '';
@@ -2091,6 +2110,8 @@ function renderEvaluacion(c, datos) {
 
 async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
+  const candadoHub = motivoSinHub();
+  if (candadoHub) { toast('🔒 ' + candadoHub); pintarPdfsHC(); return; }
   const btn = document.getElementById('btnGenIA');
   const cont = document.getElementById('valdBorrador');
   btn.disabled = true; btn.textContent = '📋 Redactando…';
