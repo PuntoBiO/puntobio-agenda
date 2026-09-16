@@ -270,6 +270,39 @@
         <label class="pob-check"><input type="checkbox" id="f_compite"> Compite</label>
         <label class="pob-check"><input type="checkbox" id="f_rend"> Objetivo de rendimiento/marcas</label>
         <label class="pob-check"><input type="checkbox" id="f_grupo" checked> Comparte nivel para grupo</label>
+        <label class="pob-check"><input type="checkbox" id="f_postqx" onchange="togglePostqx()"> Postquirúrgico</label>
+      </div>
+      <div id="boxPostqx" style="display:none; margin-top:8px; padding:10px 12px; border:1px solid var(--border); border-radius:10px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px;">
+          <label style="font-size:12px;">Cirugía
+            <select id="f_qx_tipo" onchange="pintarPostqx()" style="width:100%;">
+              <option value="">— elegir —</option>
+              <option>Reconstrucción de LCA</option>
+              <option>Meniscectomía / sutura de menisco</option>
+              <option>Prótesis de rodilla</option>
+              <option>Prótesis de cadera</option>
+              <option>Artroscopia de cadera</option>
+              <option>Artrodesis / cirugía de columna</option>
+              <option>Hernia de disco (discectomía)</option>
+              <option>Hombro (manguito / estabilización)</option>
+              <option>Tendón de Aquiles</option>
+              <option>Tobillo / pie</option>
+              <option>Otra</option>
+            </select>
+          </label>
+          <label style="font-size:12px;">Detalle (si es "Otra" o querés precisar)
+            <input id="f_qx_detalle" type="text" style="width:100%; box-sizing:border-box;">
+          </label>
+          <label style="font-size:12px;">Lado operado
+            <select id="f_qx_lado" style="width:100%;">
+              <option value="">— elegir —</option><option>Izquierdo</option><option>Derecho</option><option>Bilateral</option><option>No aplica</option>
+            </select>
+          </label>
+          <label style="font-size:12px;">Fecha de la cirugía
+            <input id="f_qx_fecha" type="date" onchange="pintarPostqx()" style="width:100%; box-sizing:border-box;">
+          </label>
+        </div>
+        <div id="postqxTiempo" class="hint" style="margin:6px 0 0;"></div>
       </div>
 
       <div class="pob-legend">
@@ -838,6 +871,10 @@ let normasFunc = null;     // cache de biolab_normas_funcionales (2-Min Step, et
 let infoAbierto = {};      // id -> true si el instructivo (ⓘ) está desplegado
 
 function resetEvaluacion() {
+  try {   // el postquirúrgico no se arrastra al paciente siguiente
+    const pq = document.getElementById('f_postqx');
+    if (pq) { pq.checked = false; ['f_qx_tipo','f_qx_detalle','f_qx_lado','f_qx_fecha'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; }); togglePostqx(); }
+  } catch (_) {}
   ultimaEvaluacion = null;
   protocoloItems = []; tildados = {}; valoresManual = {}; calcData = {};
   const pp = document.getElementById('protocoloPanel');
@@ -2310,6 +2347,7 @@ async function generar() {
         sexo: sexoPac,
         poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
+        postqx: (() => { const q = leerPostqx(); return (q && (q.tipo || q.fecha)) ? q : null; })(),
         contexto: contexto,
       },
       hallazgos: sinExcluidos,
@@ -2506,6 +2544,48 @@ async function guardarInformeYNota() {
 // ---- PASO 1: clasificación de población ----
 function chk(id) { return document.getElementById(id).checked; }
 
+// ── POSTQUIRÚRGICO: el tiempo desde la cirugía se calcula EN CÓDIGO (nunca la IA) ──
+function togglePostqx() {
+  const on = chk('f_postqx');
+  document.getElementById('boxPostqx').style.display = on ? 'block' : 'none';
+  pintarPostqx();
+}
+function leerPostqx() {
+  const el = document.getElementById('f_postqx');
+  if (!el || !el.checked) return null;
+  const tipo = document.getElementById('f_qx_tipo').value || '';
+  const detalle = (document.getElementById('f_qx_detalle').value || '').trim();
+  const lado = document.getElementById('f_qx_lado').value || '';
+  const fecha = document.getElementById('f_qx_fecha').value || '';
+  let dias = null, semanas = null, meses = null, etapa = '';
+  const m = fecha.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const f = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));   // fecha LOCAL, no UTC
+    const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+    dias = Math.round((hoy - f) / 86400000);
+    if (dias >= 0) {
+      semanas = Math.floor(dias / 7);
+      meses = Math.round((dias / 30.44) * 10) / 10;
+      etapa = dias < 42 ? 'postoperatorio temprano (menos de 6 semanas)'
+        : dias < 91 ? 'entre 6 semanas y 3 meses'
+        : dias < 183 ? 'entre 3 y 6 meses'
+        : dias < 365 ? 'entre 6 meses y 1 año'
+        : dias < 730 ? 'entre 1 y 2 años' : 'más de 2 años';
+    }
+  }
+  return { tipo, detalle, lado, fecha, dias, semanas, meses, etapa };
+}
+function pintarPostqx() {
+  const out = document.getElementById('postqxTiempo');
+  if (!out) return;
+  const q = leerPostqx();
+  if (!q) { out.textContent = ''; return; }
+  if (!q.fecha) { out.textContent = 'Cargá la fecha: con ella el sistema calcula el tiempo desde la cirugía.'; return; }
+  if (q.dias == null || q.dias < 0) { out.textContent = '⚠️ La fecha de la cirugía es posterior a hoy, revisala.'; return; }
+  out.textContent = '⏱ ' + q.semanas + ' semanas (' + q.meses + ' meses) desde la cirugía · ' + q.etapa +
+    (q.dias < 365 && !chk('f_lesion') ? ' · Si todavía no tiene alta para entrenar, tildá también "Lesión / cirugía reciente".' : '');
+}
+
 const COLOR_POB = { A: '#16a34a', B: '#d97706', C: '#dc2626', D: '#eab308', DERIVACION_CLINICA: '#64748b' };
 const NOMBRE_POB = {
   A: 'Población A · Performance', B: 'Población B · Readaptación',
@@ -2526,7 +2606,8 @@ function leerIngreso() {
     signos_fragilidad: chk('f_fragil'),
     objetivo: document.getElementById('f_objetivo').value,
     experiencia_entrenamiento: document.getElementById('f_exp').value || undefined,
-    comparten_nivel_grupo: chk('f_grupo')
+    comparten_nivel_grupo: chk('f_grupo'),
+    postquirurgico: leerPostqx()
   };
 }
 
