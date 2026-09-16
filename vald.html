@@ -587,10 +587,13 @@ const MAX_PDF_IA = 6;
 const RE_MOPLEX = /moplex|dinamic|din[aá]mico|estatic|est[aá]tico|baropodo|pisada|freestep/i;
 const RE_VIDEO = /videograf/i;
 const RE_VALD = /vald|hub|humantrak|forcedeck|dynamo|evaluaci[oó]n[_\s-]/i;
+// Reportes del Hub (Profile Overview / HumanTrak): traen percentiles y bandas por edad y sexo que la API NO manda.
+const RE_HUB = /vald[_\s-]*hub|hub[_\s-]*vald|humantrak|profile[_\s-]*overview/i;
+let hubSel = true;        // tilde de los reportes VALD Hub
 
 async function cargarPdfsHC() {
   const cont = document.getElementById('valdPdfs');
-  pdfsHC = []; pdfSel = new Set(); moplexSel = true;
+  pdfsHC = []; pdfSel = new Set(); moplexSel = true; hubSel = true;
   if (!cont) return;
   cont.innerHTML = '';
   if (!pacienteSel || esSark()) return;
@@ -605,14 +608,18 @@ async function cargarPdfsHC() {
       const n = (a.nombre_original || '') + ' ' + (a.storage_path || '');
       if (RE_VIDEO.test(n)) continue;                 // fotos de la videografía: no aportan
       const esMoplex = RE_MOPLEX.test(n);
-      if (!esMoplex && RE_VALD.test(n)) continue;     // lo de VALD ya viene por API
+      const esHub = !esMoplex && RE_HUB.test(n);
+      if (!esMoplex && !esHub && RE_VALD.test(n)) continue;   // otros PDF de VALD: los datos ya vienen por API
       pdfsHC.push({ nombre: a.nombre_original || a.storage_path, path: a.storage_path,
-        fecha: (a.creado_en || '').slice(0, 10), bytes: a.tamano_bytes || 0, tipo: esMoplex ? 'MOPLEX' : 'ESTUDIO' });
+        fecha: (a.creado_en || '').slice(0, 10), bytes: a.tamano_bytes || 0, tipo: esMoplex ? 'MOPLEX' : (esHub ? 'VALD_HUB' : 'ESTUDIO') });
     }
     // MOPLEX: solo la toma más reciente va con el tilde
     const fechasMop = pdfsHC.filter(p => p.tipo === 'MOPLEX').map(p => p.fecha).sort();
     const ultMop = fechasMop.length ? fechasMop[fechasMop.length - 1] : null;
     pdfsHC.forEach(p => { p.ultimaMoplex = (p.tipo === 'MOPLEX' && p.fecha === ultMop); });
+    const fechasHub = pdfsHC.filter(p => p.tipo === 'VALD_HUB').map(p => p.fecha).sort();
+    const ultHub = fechasHub.length ? fechasHub[fechasHub.length - 1] : null;
+    pdfsHC.forEach(p => { p.ultimoHub = (p.tipo === 'VALD_HUB' && p.fecha === ultHub); });
   } catch (e) {
     cont.innerHTML = '<div class="hint">No pude leer los PDF de la HC: ' + escapeHtml(String(e.message || e)) + '</div>';
     return;
@@ -624,8 +631,9 @@ function pintarPdfsHC() {
   const cont = document.getElementById('valdPdfs');
   if (!cont) return;
   const mop = pdfsHC.filter(p => p.ultimaMoplex);
+  const hub = pdfsHC.filter(p => p.ultimoHub);
   const est = pdfsHC.filter(p => p.tipo === 'ESTUDIO');
-  if (!mop.length && !est.length) {
+  if (!mop.length && !hub.length && !est.length) {
     cont.innerHTML = '<div class="hint" style="margin:0;">📎 El paciente no tiene PDF cargados en la HC para sumar al informe.</div>';
     return;
   }
@@ -638,12 +646,18 @@ function pintarPdfsHC() {
       '<span>🦶 <b>Pisada MOPLEX</b> del ' + escapeHtml(mop[0].fecha) + ' <span class="hint" style="margin:0;">(' +
       mop.map(p => escapeHtml(p.nombre)).join(' · ') + ')</span></span></label>';
   }
+  if (hub.length) {
+    h += '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:6px; cursor:pointer;">' +
+      '<input type="checkbox" ' + (hubSel ? 'checked' : '') + ' onchange="hubSel=this.checked; pintarPdfsHC();">' +
+      '<span>📊 <b>Reporte VALD Hub</b> del ' + escapeHtml(hub[0].fecha) + ' — percentiles y bandas por edad y sexo <span class="hint" style="margin:0;">(' +
+      hub.map(p => escapeHtml(p.nombre)).join(' · ') + ')</span></span></label>';
+  }
   est.forEach((p, i) => {
     h += '<label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:4px; cursor:pointer;">' +
       '<input type="checkbox" ' + (pdfSel.has(p.path) ? 'checked' : '') + ' onchange="togglePdfIdx(' + i + ', this.checked)">' +
       '<span>📄 ' + escapeHtml(p.nombre) + ' <span class="hint" style="margin:0;">' + escapeHtml(p.fecha) + ' · ' + kb(p.bytes) + '</span></span></label>';
   });
-  const total = (moplexSel ? mop.length : 0) + pdfSel.size;
+  const total = (moplexSel ? mop.length : 0) + (hubSel ? hub.length : 0) + pdfSel.size;
   h += '<div class="hint" style="margin:6px 0 0;">Seleccionados: ' + total + ' de ' + MAX_PDF_IA + ' como máximo. Los estudios se leen como contexto: la IA no los usa para explicar lo que medimos.</div></div>';
   cont.innerHTML = h;
 }
@@ -652,7 +666,7 @@ function togglePdfIdx(i, marcado) {
   const p = pdfsHC.filter(x => x.tipo === 'ESTUDIO')[i];
   if (!p) return;
   if (marcado) {
-    const mop = moplexSel ? pdfsHC.filter(x => x.ultimaMoplex).length : 0;
+    const mop = (moplexSel ? pdfsHC.filter(x => x.ultimaMoplex).length : 0) + (hubSel ? pdfsHC.filter(x => x.ultimoHub).length : 0);
     if (mop + pdfSel.size >= MAX_PDF_IA) { toast('Máximo ' + MAX_PDF_IA + ' PDF por informe.'); pintarPdfsHC(); return; }
     if (p.bytes > 6 * 1024 * 1024) { toast('Ese PDF pesa más de 6 MB, la IA no lo puede leer.'); pintarPdfsHC(); return; }
     pdfSel.add(p.path);
@@ -1653,7 +1667,7 @@ function sentidoMetrica(prueba, metrica, unidadApi) {
   if (/duration|time\b/.test(m)) return { tipo: 'tiempo', unidad: u('s') };
   if (esBalance || /velocity/.test(m)) {
     const un = /area|ellipse/.test(m) ? 'mm²' : (/velocity/.test(m) ? 'mm/s' : (/excursion/.test(m) ? 'mm' : '°'));
-    return { tipo: 'oscilacion', unidad: u(un) };
+    return { tipo: 'oscilacion', unidad: u(un), prueba: prueba };
   }
   return { tipo: 'rom', unidad: u('°'), conSigno: /flexion/.test(m) };
 }
@@ -1665,7 +1679,8 @@ function ladoClinico(sent, L, R) {
     const peor = L > R ? 'IZQUIERDO' : 'DERECHO';
     const mn = Math.min(Math.abs(L), Math.abs(R)), mx = Math.max(Math.abs(L), Math.abs(R));
     const veces = mn > 0 ? ` (${(mx / mn).toFixed(1)} veces más)` : '';
-    return ` · en equilibrio MÁS valor = PEOR control · lado con PEOR control: ${peor}${veces}`;
+    const pie = / tandem|tandem|t[aá]ndem/i.test(sent.prueba || '') ? ' (en tándem, izquierdo/derecho = pie que queda ADELANTE)' : '';
+    return ` · en equilibrio MÁS valor = PEOR control · lado con PEOR control: ${peor}${veces}${pie}`;
   }
   if (sent.conSigno && (L < 0 || R < 0)) {
     if (L < 0 && R < 0) {
@@ -2152,7 +2167,7 @@ async function generar() {
         r.onerror = () => res('');
         r.readAsDataURL(blob);
       });
-      const elegidos = pdfsHC.filter(p => (p.ultimaMoplex && moplexSel) || (p.tipo === 'ESTUDIO' && pdfSel.has(p.path)))
+      const elegidos = pdfsHC.filter(p => (p.ultimaMoplex && moplexSel) || (p.ultimoHub && hubSel) || (p.tipo === 'ESTUDIO' && pdfSel.has(p.path)))
         .filter(p => !p.bytes || p.bytes <= 6 * 1024 * 1024)
         .slice(0, MAX_PDF_IA);
       for (const p of elegidos) {
@@ -2296,6 +2311,7 @@ function controlNumeros(informe, nota) {
   ['0.5', '0.6', '0.47', '0.8', '16', '18', '65', '100'].forEach(v => permitidos.add(v));
   const texto = [informe || '', nota || ''].join('\n')
     .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, ' ')           // fechas
+    .replace(/percentil(es)?\s*(vald\s*)?[\d\s\/y,]+/gi, ' ')   // percentiles citados del reporte VALD Hub
     .replace(/Borrador generado[^\n]*|Informe generado[^\n]*/g, ' ');
   const sospechosos = [];
   for (const t of (texto.match(/\d+(?:[.,]\d+)?/g) || [])) {
