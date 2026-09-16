@@ -356,6 +356,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
+let ultimoCuerpoIA = '';     // lo que se le mandó a la IA (para el control de números)
 let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
 let tipoEval = 'primera';   // 'primera' | 'reeval' — lo elige el usuario (autodetectado al seleccionar paciente)
 
@@ -1556,6 +1557,42 @@ async function vincularPerfilVALD(profileId, avisar) {
   }
 }
 
+// ── SENTIDO CLÍNICO DE CADA MÉTRICA (se decide EN CÓDIGO, nunca la IA) ──
+// En equilibrio MÁS oscilación = PEOR: el "lado con menor valor" es el MEJOR, no el afectado.
+// Un ángulo de flexión negativo es EXTENSIÓN. Repeticiones y tiempos no son grados.
+function sentidoMetrica(prueba, metrica, unidadApi) {
+  const p = String(prueba || '').toLowerCase(), m = String(metrica || '').toLowerCase();
+  const esBalance = (/stand/.test(p) && !/sit to stand/.test(p)) || /ellipse|excursion|sway/.test(m);
+  const u = (x) => unidadApi || x;
+  if (/\brep/.test(m)) return { tipo: 'conteo', unidad: u('reps') };
+  if (/duration|time\b/.test(m)) return { tipo: 'tiempo', unidad: u('s') };
+  if (esBalance || /velocity/.test(m)) {
+    const un = /area|ellipse/.test(m) ? 'mm²' : (/velocity/.test(m) ? 'mm/s' : (/excursion/.test(m) ? 'mm' : '°'));
+    return { tipo: 'oscilacion', unidad: u(un) };
+  }
+  return { tipo: 'rom', unidad: u('°'), conSigno: /flexion/.test(m) };
+}
+// Devuelve el texto de lateralidad YA resuelto para la IA.
+function ladoClinico(sent, L, R) {
+  if (L == null || R == null) return '';
+  if (L === R) return ' · simétrico';
+  if (sent.tipo === 'oscilacion') {
+    const peor = L > R ? 'IZQUIERDO' : 'DERECHO';
+    const mn = Math.min(Math.abs(L), Math.abs(R)), mx = Math.max(Math.abs(L), Math.abs(R));
+    const veces = mn > 0 ? ` (${(mx / mn).toFixed(1)} veces más)` : '';
+    return ` · en equilibrio MÁS valor = PEOR control · lado con PEOR control: ${peor}${veces}`;
+  }
+  if (sent.conSigno && (L < 0 || R < 0)) {
+    if (L < 0 && R < 0) {
+      const mas = L < R ? 'IZQUIERDO' : 'DERECHO';
+      return ` · valores negativos = EXTENSIÓN de columna (L ${Math.abs(L)}° / R ${Math.abs(R)}° de extensión) · lado con MÁS extensión: ${mas}`;
+    }
+    return ` · un lado en flexión y otro en EXTENSIÓN (negativo = extensión) · no atribuir restricción`;
+  }
+  if (sent.tipo === 'rom') return ` · lado con MENOR valor: ${L < R ? 'IZQUIERDO' : 'DERECHO'}`;
+  return '';
+}
+
 function pintarEvaluacion(datos, normas) {
   const rLSI = (normas || []).find(n => n.test_id === 'R-LSI' && n.bloque === 'GENERICA') || {};
   const vA = rLSI.corte_verde != null ? Number(rLSI.corte_verde) : 10;
@@ -1694,18 +1731,19 @@ function pintarEvaluacion(datos, normas) {
         movilidad.push({ em: '⚠️', nom: `${p.prueba} · ${m.metrica}`, det: `⚠️ medición de UN SOLO LADO (L ${m.izquierda ?? '—'} / R ${m.derecha ?? '—'}°) — posible fallo de equipo, revisar o excluir`, fuente: 'toma incompleta', L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
         continue;
       }
+      const sent = sentidoMetrica(p.prueba, m.metrica, m.unidad);
       if (m.asimetria_pct == null) {
-        cnt('🟢');
-        movilidad.push({ em: '🟢', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor}° (referencia ${fte})`, fuente: fte, valor: m.valor, unidad: '°', cat: 'Movilidad' });
+        // Sin asimetría ni norma cargada: NO se puede afirmar que es normal → informativo (⚪), con su unidad real.
+        cnt('⚪'); conteo.vigilar++;
+        const notaSigno = (sent.conSigno && m.valor < 0) ? ' (negativo = EXTENSIÓN)' : '';
+        movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor} ${sent.unidad}${notaSigno} · sin norma cargada en el sistema: NO afirmar que es normal`, fuente: fte, valor: m.valor, unidad: sent.unidad, cat: 'Movilidad' });
         continue;
       }
       const c = colorAsim(m.asimetria_pct); cnt(c);
-      // El lado afectado se calcula EN CÓDIGO (nunca lo deduce la IA): menor ROM = lado restringido.
-      const ladoMenor = (m.izquierda != null && m.derecha != null)
-        ? (m.izquierda < m.derecha ? 'IZQUIERDO' : (m.derecha < m.izquierda ? 'DERECHO' : 'simétrico'))
-        : null;
-      const sufLado = ladoMenor ? ` · lado con MENOR valor: ${ladoMenor}` : '';
-      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}${sufLado}`, fuente: fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
+      // El lado se resuelve EN CÓDIGO según el sentido de la métrica (nunca lo deduce la IA):
+      // ROM → menor = restringido · equilibrio → MAYOR = peor control · flexión negativa = extensión.
+      const sufLado = ladoClinico(sent, m.izquierda, m.derecha);
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}`, fuente: fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
     }
   }
 
@@ -2069,6 +2107,7 @@ async function generar() {
       edad: body.paciente.edad,
       snapshot: { calculadoras: calculadorasSnap, hallazgos: sinExcluidos },
     };
+    ultimoCuerpoIA = JSON.stringify(body);
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY, 'content-type': 'application/json' },
@@ -2117,6 +2156,44 @@ function mostrarBorradores(informe, nota) {
         '</div>');
   document.getElementById('valdInformeTxt').value = informe || '';
   document.getElementById('valdNotaTxt').value = nota || '';
+  controlNumeros(informe, nota);
+}
+
+// CONTROL DE NÚMEROS: todo número del texto tiene que existir en lo que se le mandó a la IA.
+// No bloquea: marca en amarillo lo que hay que verificar antes de firmar.
+function controlNumeros(informe, nota) {
+  const cont = document.getElementById('valdBorrador');
+  if (!cont || !ultimoCuerpoIA) return;
+  const norm = (x) => String(x).replace(',', '.');
+  const permitidos = new Set();
+  const addNum = (n) => {
+    if (!isFinite(n)) return;
+    const a = Math.abs(n);
+    [a, Math.round(a), Math.round(a * 10) / 10, Math.round(a * 100) / 100].forEach(v => permitidos.add(String(v)));
+  };
+  (ultimoCuerpoIA.match(/-?\d+(?:[.,]\d+)?/g) || []).forEach(t => addNum(Number(norm(t))));
+  // Referencias fijas del informe (no son mediciones)
+  ['0.5', '0.6', '0.47', '0.8', '16', '18', '65', '100'].forEach(v => permitidos.add(v));
+  const texto = [informe || '', nota || ''].join('\n')
+    .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, ' ')           // fechas
+    .replace(/Borrador generado[^\n]*|Informe generado[^\n]*/g, ' ');
+  const sospechosos = [];
+  for (const t of (texto.match(/\d+(?:[.,]\d+)?/g) || [])) {
+    const n = Math.abs(Number(norm(t)));
+    if (!isFinite(n) || n <= 10 && Number.isInteger(n)) continue; // cantidades chicas (1 sesión, 3 series)
+    const ok = [n, Math.round(n), Math.round(n * 10) / 10, Math.round(n * 100) / 100].some(v => permitidos.has(String(v)));
+    if (!ok && !sospechosos.includes(t)) sospechosos.push(t);
+  }
+  let box = document.getElementById('valdControlNumeros');
+  if (!box) { box = document.createElement('div'); box.id = 'valdControlNumeros'; cont.prepend(box); }
+  box.style.cssText = 'margin-bottom:10px; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.5;';
+  if (!sospechosos.length) {
+    box.style.background = '#ecfdf5'; box.style.color = '#065f46';
+    box.textContent = '✅ Control de números: todos los valores del texto están en los datos de la evaluación.';
+  } else {
+    box.style.background = '#fef3c7'; box.style.color = '#92400e';
+    box.textContent = '⚠️ Verificar antes de firmar — estos números NO están en los datos enviados a la IA: ' + sospechosos.join(' · ');
+  }
 }
 
 async function guardarInformeYNota() {

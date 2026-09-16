@@ -2632,6 +2632,41 @@ function aplicarDatosVald(datos, cortes){
     }
   }
 
+// ── SENTIDO CLÍNICO DE CADA MÉTRICA (se decide EN CÓDIGO, nunca la IA) ──
+// En equilibrio MÁS oscilación = PEOR: el "lado con menor valor" es el MEJOR, no el afectado.
+// Un ángulo de flexión negativo es EXTENSIÓN. Repeticiones y tiempos no son grados.
+function sentidoMetrica(prueba, metrica, unidadApi) {
+  const p = String(prueba || '').toLowerCase(), m = String(metrica || '').toLowerCase();
+  const esBalance = (/stand/.test(p) && !/sit to stand/.test(p)) || /ellipse|excursion|sway/.test(m);
+  const u = (x) => unidadApi || x;
+  if (/\brep/.test(m)) return { tipo: 'conteo', unidad: u('reps') };
+  if (/duration|time\b/.test(m)) return { tipo: 'tiempo', unidad: u('s') };
+  if (esBalance || /velocity/.test(m)) {
+    const un = /area|ellipse/.test(m) ? 'mm²' : (/velocity/.test(m) ? 'mm/s' : (/excursion/.test(m) ? 'mm' : '°'));
+    return { tipo: 'oscilacion', unidad: u(un) };
+  }
+  return { tipo: 'rom', unidad: u('°'), conSigno: /flexion/.test(m) };
+}
+// Devuelve el texto de lateralidad YA resuelto para la IA.
+function ladoClinico(sent, L, R) {
+  if (L == null || R == null) return '';
+  if (L === R) return ' · simétrico';
+  if (sent.tipo === 'oscilacion') {
+    const peor = L > R ? 'IZQUIERDO' : 'DERECHO';
+    const mn = Math.min(Math.abs(L), Math.abs(R)), mx = Math.max(Math.abs(L), Math.abs(R));
+    const veces = mn > 0 ? ` (${(mx / mn).toFixed(1)} veces más)` : '';
+    return ` · en equilibrio MÁS valor = PEOR control · lado con PEOR control: ${peor}${veces}`;
+  }
+  if (sent.conSigno && (L < 0 || R < 0)) {
+    if (L < 0 && R < 0) {
+      const mas = L < R ? 'IZQUIERDO' : 'DERECHO';
+      return ` · valores negativos = EXTENSIÓN de columna (L ${Math.abs(L)}° / R ${Math.abs(R)}° de extensión) · lado con MÁS extensión: ${mas}`;
+    }
+    return ` · un lado en flexión y otro en EXTENSIÓN (negativo = extensión) · no atribuir restricción`;
+  }
+  if (sent.tipo === 'rom') return ` · lado con MENOR valor: ${L < R ? 'IZQUIERDO' : 'DERECHO'}`;
+  return '';
+}
   // ── MOVILIDAD (HumanTrak / ROM de DynaMo) ─────────────────────────
   for(const pr of (datos.movilidad || [])){
     const met = pr.metricas || [];
@@ -2645,17 +2680,21 @@ function aplicarDatosVald(datos, cortes){
         IA.movilidad.push({ em:'⚠️', nom:`${nomPrueba} · ${m.metrica}`, det:'se midió un solo lado — repetir', fuente:'HumanTrak' });
         continue;
       }
+      const sent = sentidoMetrica(pr.prueba, m.metrica, m.unidad);
       if(m.asimetria_pct == null){
-        L_movilidad.push(`🟢 ${m.metrica}: ${m.valor}°`);
-        IA.movilidad.push({ em:'🟢', nom:`${nomPrueba} · ${m.metrica}`, det:`${m.valor}°`, fuente:'HumanTrak' });
+        // Sin norma cargada: informativo, no "normal"
+        const notaSigno = (sent.conSigno && m.valor < 0) ? ' (negativo = extensión)' : '';
+        L_movilidad.push(`⚪ ${m.metrica}: ${m.valor} ${sent.unidad}${notaSigno}`);
+        IA.movilidad.push({ em:'⚪', nom:`${nomPrueba} · ${m.metrica}`, det:`${m.valor} ${sent.unidad}${notaSigno} · sin norma cargada: NO afirmar que es normal`, fuente:'HumanTrak' });
         continue;
       }
       const em = colorAsim(m.asimetria_pct);
-      const menor = (m.izquierda < m.derecha) ? 'IZQUIERDO' : (m.derecha < m.izquierda ? 'DERECHO' : 'simétrico');
-      L_movilidad.push(`${em} ${m.metrica}: izq ${m.izquierda}° / der ${m.derecha}° · asimetría ${m.asimetria_pct} % · menor: ${menor}`);
+      const sufLado = ladoClinico(sent, m.izquierda, m.derecha);
+      const corto = sufLado.split(' · ').filter(Boolean).pop() || '';
+      L_movilidad.push(`${em} ${m.metrica}: izq ${m.izquierda} / der ${m.derecha} ${sent.unidad} · asimetría ${m.asimetria_pct} %${corto ? ' · ' + corto : ''}`);
       IA.movilidad.push({ em, nom:`${nomPrueba} · ${m.metrica}`,
-        det:`${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha}° · lado con MENOR valor: ${menor}`, fuente:'HumanTrak / LSI' });
-      if(em !== '🟢') hallazgos.push(`${em} ${nomPrueba} · ${m.metrica}: asimetría ${m.asimetria_pct} % (menor: ${menor})`);
+        det:`${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}`, fuente:'HumanTrak / LSI' });
+      if(em !== '🟢') hallazgos.push(`${em} ${nomPrueba} · ${m.metrica}: asimetría ${m.asimetria_pct} %${corto ? ' (' + corto + ')' : ''}`);
     }
   }
 
