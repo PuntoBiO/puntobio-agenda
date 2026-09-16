@@ -2182,6 +2182,52 @@ function avisoSinLogin() {
   return `<div class="login-warn">⚠️ No detectamos tu usuario. Iniciá sesión en el sistema para poder escribir o subir archivos.</div>`;
 }
 
+// ── FIRMA PROFESIONAL de los informes BiOLAB (tabla biolab_firmas + bucket privado "firmas") ──
+const _firmasCache = {};   // email -> { fila, dataUrl }
+async function traerFirma(email) {
+  const k = String(email || '').toLowerCase();
+  if (!k) return null;
+  if (_firmasCache[k] !== undefined) return _firmasCache[k];
+  try {
+    const { data, error } = await sb.from('biolab_firmas').select('*').ilike('email', k).eq('activo', true).limit(1);
+    if (error || !data || !data[0]) { _firmasCache[k] = null; return null; }
+    const fila = data[0];
+    let dataUrl = null;
+    if (fila.imagen_path) {
+      const { data: blob } = await sb.storage.from('firmas').download(fila.imagen_path);
+      if (blob) dataUrl = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(null); r.readAsDataURL(blob); });
+    }
+    _firmasCache[k] = { fila, dataUrl };
+  } catch (_) { _firmasCache[k] = null; }
+  return _firmasCache[k];
+}
+// El texto guardado ya trae el bloque de firma escrito (línea + nombre + matrícula…): se saca para dibujarlo con la imagen.
+function sinBloqueFirma(texto, fila) {
+  if (!fila || !fila.nombre) return texto || '';
+  const t = String(texto || '');
+  const i = t.lastIndexOf('________________________________');
+  if (i >= 0 && t.indexOf(fila.nombre, i) > i) return t.slice(0, i).trimEnd();
+  return t;
+}
+async function pintarFirmasObs() {
+  for (const o of (obsActual || [])) {
+    if (!o.firmado_por_email) continue;
+    const cont = document.getElementById('obsTexto-' + o.id);
+    if (!cont || cont.dataset.firmado) continue;
+    const f = await traerFirma(o.firmado_por_email);
+    if (!f) continue;
+    cont.dataset.firmado = '1';
+    cont.textContent = sinBloqueFirma(o.texto, f.fila);
+    const fl = f.fila;
+    const box = document.createElement('div');
+    box.style.cssText = 'margin-top:14px; text-align:center; font-size:12px; line-height:1.4; white-space:normal;';
+    box.innerHTML = (f.dataUrl ? '<img src="' + f.dataUrl + '" alt="Firma" style="height:64px; display:block; margin:0 auto 2px;">' : '') +
+      '<div style="border-top:1px solid #334155; width:220px; margin:0 auto 4px;"></div>' +
+      '<b>' + escapeHtml(fl.nombre || '') + '</b><br>' + [fl.matricula, fl.titulo, fl.especialidad].filter(Boolean).map(escapeHtml).join('<br>');
+    cont.appendChild(box);
+  }
+}
+
 function cajaTexto(items, tipo) {
   if (!items.length) {
     return `<div class="obs-empty">${tipo === 'nota' ? 'Sin notas internas todavía.' : 'Sin observaciones todavía.'}</div>`;
@@ -2277,6 +2323,7 @@ function pintarObservaciones(historiaId, personaId) {
   const lista = document.getElementById('obsList');
   if (!lista) return;
   lista.innerHTML = cajaTexto(obsActual.filter(o => o.tipo === 'observacion'), 'observacion');
+  pintarFirmasObs();
 
   const zona = document.getElementById('obsAddZone');
   if (!zona) return;
@@ -3355,6 +3402,10 @@ async function generarPDF(conWhatsApp = false) {
   // DOBLE CANDADO: el PDF SOLO incluye observaciones clínicas (tipo 'observacion').
   // Las notas internas (tipo 'nota') NUNCA van al PDF del paciente, pase lo que pase.
   const obsElegidas = obsActual.filter(o => o.tipo === 'observacion' && obsIds.includes(o.id));
+  const firmasPDF = {};
+  for (const o of obsElegidas) {
+    if (o.firmado_por_email && firmasPDF[o.firmado_por_email] === undefined) firmasPDF[o.firmado_por_email] = await traerFirma(o.firmado_por_email);
+  }
   const adjElegidos = adjActual.filter(a => adjIds.includes(a.id));
 
   // ¿Subir esta evaluación a Mi Espacio del paciente?
@@ -3788,7 +3839,26 @@ async function generarPDF(conWhatsApp = false) {
       y += 14;
       // Cuerpo de la observación: gris oscuro PAREJO en todas las páginas
       // y con el texto pegado ya limpio (sin letras separadas).
-      bloqueTexto(o.texto || '', { size: 10, color: GRIS_OSCURO });
+      const firma = o.firmado_por_email ? firmasPDF[o.firmado_por_email] : null;
+      bloqueTexto(firma ? sinBloqueFirma(o.texto, firma.fila) : (o.texto || ''), { size: 10, color: GRIS_OSCURO });
+      if (firma) {
+        // Bloque de firma: imagen + línea + datos, centrado y sin partirse entre páginas
+        const fl = firma.fila;
+        const lineasF = [fl.matricula, fl.titulo, fl.especialidad].filter(Boolean);
+        const altoImg = 48, anchoImg = 48 * (243 / 318);
+        checkPage(altoImg + 30 + lineasF.length * 12);
+        y += 10;
+        const cx = MARGIN + CONTENT_W / 2;
+        if (firma.dataUrl) { try { doc.addImage(firma.dataUrl, 'PNG', cx - anchoImg / 2, y, anchoImg, altoImg); } catch (_) {} }
+        y += altoImg + 4;
+        doc.setDrawColor(51, 65, 85); doc.setLineWidth(0.6);
+        doc.line(cx - 90, y, cx + 90, y);
+        y += 12;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(30, 41, 59);
+        doc.text(fl.nombre || '', cx, y, { align: 'center' }); y += 12;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(71, 85, 105);
+        lineasF.forEach(l => { doc.text(normalizarTextoPegado(l), cx, y, { align: 'center' }); y += 11; });
+      }
       y += 12; // espacio entre observaciones
     });
   }
