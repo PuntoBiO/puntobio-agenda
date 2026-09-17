@@ -1036,7 +1036,7 @@ let TURNOS_CON_EVO = new Set(); // turno_id que ya tienen evolución cargada (pa
 // Nace de un caso real: Ale no tenía dónde ver si estaba pago, así que cargaba
 // los cobros con fecha del día siguiente para no olvidarse. El dato existía,
 // pero no estaba donde se necesitaba: en el mostrador, al ver el turno.
-let SALDO_POR_TTO = new Map(); // tratamiento_id -> saldo_pendiente (número)
+let PAGO_POR_TTO = new Map(); // tratamiento_id -> { pagas: N }  (hasta qué número de sesión está cubierto)
 async function cargarRolUsuario() {
   try {
     const { data: { session } } = await supa.auth.getSession();
@@ -1467,18 +1467,28 @@ async function loadTurnosDeTratamientos() {
 // Carga el saldo pendiente de los tratamientos que aparecen en la vista actual.
 // Si falla, no rompe nada: simplemente no se muestra la insignia.
 async function loadSaldosDeTratamientos() {
-  SALDO_POR_TTO.clear();
+  PAGO_POR_TTO.clear();
   const ttoIds = [...new Set(turnos.map(t => t.tratamiento_id).filter(Boolean))];
   if (ttoIds.length === 0) return;
   try {
     const { data, error } = await supa
       .from('tratamientos')
-      .select('id, saldo_pendiente')
+      .select('id, valor_sesion, total_abonado, total_sesiones')
       .in('id', ttoIds);
-    if (error) { console.warn('No se pudieron cargar los saldos:', error.message); return; }
-    (data || []).forEach(t => SALDO_POR_TTO.set(t.id, Number(t.saldo_pendiente) || 0));
+    if (error) { console.warn('No se pudieron cargar los pagos:', error.message); return; }
+    (data || []).forEach(t => {
+      const valor = Number(t.valor_sesion) || 0;
+      const abonado = Number(t.total_abonado) || 0;
+      // La plata cubre las sesiones EN ORDEN, igual que el prorrateo de Liquidaciones.
+      // Si la sesión no cuesta nada (obra social sin coseguro, cortesía, tope),
+      // están todas cubiertas: no hay nada que cobrar.
+      const pagas = valor <= 0
+        ? (Number(t.total_sesiones) || 999)
+        : Math.floor(abonado / valor);
+      PAGO_POR_TTO.set(t.id, { pagas });
+    });
   } catch (e) {
-    console.warn('Error cargando saldos:', e);
+    console.warn('Error cargando pagos:', e);
   }
 }
 
@@ -1971,16 +1981,16 @@ function renderTurno(t) {
   const sobreLbl = esRehab ? (esFisioPrac ? 'REHAB' : (PRACTICA_PREFIX[nPrac] || 'SOBRE')) : '';
   // Mini botón 📝 para evolucionar directo (solo si hay paciente y el turno no está cancelado).
   // Si ya tiene evolución cargada, sale en verde sólido; si no, fantasma con hover.
-  // Insignia de pago: verde si está al día, ámbar con el monto si debe.
-  // Solo en turnos con paciente y no cancelados; si no hay dato, no se muestra nada.
+  // Insignia de pago de ESTA sesión. Sin montos: lo único que hace falta saber en
+  // el mostrador es si ya está cobrada, para no cobrarla dos veces cuando el
+  // paciente pagó el día anterior o pagó varias sesiones juntas.
+  // Las sesiones se cubren en orden con lo que el paciente abonó.
   let insigniaPago = '';
-  if (t.tratamiento_id && t.estado !== 'CANCELADO' && SALDO_POR_TTO.has(t.tratamiento_id)) {
-    const saldo = SALDO_POR_TTO.get(t.tratamiento_id);
-    if (saldo > 0) {
-      insigniaPago = `<span class="turno-pago debe" title="Debe $${Number(saldo).toLocaleString('es-AR')} de este tratamiento">$${Number(saldo).toLocaleString('es-AR')}</span>`;
-    } else {
-      insigniaPago = `<span class="turno-pago aldia" title="Al día con los pagos">✓</span>`;
-    }
+  if (t.tratamiento_id && t.estado !== 'CANCELADO' && nroSesion && PAGO_POR_TTO.has(t.tratamiento_id)) {
+    const pagas = PAGO_POR_TTO.get(t.tratamiento_id).pagas;
+    insigniaPago = (nroSesion <= pagas)
+      ? `<span class="turno-pago aldia" title="Esta sesión ya está paga — no cobrar">✓</span>`
+      : `<span class="turno-pago debe" title="Esta sesión NO está paga — hay que cobrarla">$</span>`;
   }
   const tieneEvo = TURNOS_CON_EVO.has(t.id);
   const btnEvo = (t.persona_id && t.estado !== 'CANCELADO')
