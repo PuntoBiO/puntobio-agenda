@@ -378,8 +378,8 @@
         <label for="tipoCobro">Tipo de cobro</label>
         <select id="tipoCobro">
           <option value="NORMAL">Normal — paga precio lista</option>
-          <option value="SOLO_CENTRO">Solo cobra Centro (profesional regala su parte)</option>
-          <option value="SOLO_PROF">Solo cobra Profesional (centro regala su parte)</option>
+          <option value="SOLO_COSEGURO">Solo coseguro (el profesional regala su parte)</option>
+          <option value="BONIF_CENTRO">Bonificación del centro (el centro regala su parte)</option>
           <option value="CORTESIA">Cortesía — costo $0</option>
         </select>
         <div class="help" id="tipoCobroHelp">El paciente paga el precio completo del tarifario.</div>
@@ -850,12 +850,13 @@
     const modalidad = $('modalidad').value;
     const obraSocial = $('obraSocial').value;
     const sesiones = Number($('totalSesiones').value) || 0;
-    const tipoCobro = $('tipoCobro').value;          // NORMAL / SOLO_CENTRO / SOLO_PROF / CORTESIA
+    const tipoCobro = $('tipoCobro').value;          // NORMAL / SOLO_COSEGURO / BONIF_CENTRO / CORTESIA
     const descuento = Math.max(Number($('descuentoValor').value) || 0, 0);
     const obs = $('observaciones').value.trim();
     const profesional = $('profesional').value;
 
     let valorLista = 0;       // valor del tarifario (precio base)
+    let hayTarifa = false;    // ¿existe la fila en el tarifario? (distinto de valer $0)
     let avisoOS = '';
 
     if (practicaVal && modalidad && obraSocial && state.pacienteSel) {
@@ -869,6 +870,7 @@
       );
 
       if (match) {
+        hayTarifa = true;
         valorLista = Number(match.valor_vigente || 0);
         console.log(`🟢 ${practicaCodigo} · ${modalidad} · ${obraSocial} → $${valorLista}`);
       } else {
@@ -892,7 +894,7 @@
     let pctCentro = 0, pctProf = 0;
     let splitDisponible = false;
 
-    // Buscar split de la práctica + profesional (necesario para SOLO_CENTRO / SOLO_PROF)
+    // Buscar split de la práctica + profesional (necesario para SOLO_COSEGURO / BONIF_CENTRO)
     if (practicaCodigo && profesional) {
       const split = state.splits.find(s =>
         s.practica_codigo === practicaCodigo && s.profesional === profesional
@@ -912,18 +914,18 @@
     } else if (tipoCobro === 'CORTESIA') {
       valorPaciente = 0;
       if (tipoCobroHelp) tipoCobroHelp.textContent = 'Cortesía: ni profesional ni centro cobran. El paciente no paga nada.';
-    } else if (tipoCobro === 'SOLO_CENTRO') {
+    } else if (tipoCobro === 'SOLO_COSEGURO') {
       if (splitDisponible) {
         valorPaciente = valorLista * pctCentro;
-        if (tipoCobroHelp) tipoCobroHelp.innerHTML = `Solo cobra el centro (<strong>${(pctCentro*100).toFixed(0)}%</strong> del valor lista). El profesional regala su parte. Esto se registra para los cruces de liquidación.`;
+        if (tipoCobroHelp) tipoCobroHelp.innerHTML = `Solo coseguro: el paciente paga <strong>${(pctCentro*100).toFixed(0)}%</strong> del valor lista y eso queda entero en el centro. El profesional cobra $0. Esto se registra para los cruces de liquidación.`;
       } else {
         valorPaciente = valorLista;
         if (tipoCobroHelp) tipoCobroHelp.innerHTML = `⚠️ No encuentro el split para esta práctica/profesional. Asigná el profesional para calcular el monto correctamente.`;
       }
-    } else if (tipoCobro === 'SOLO_PROF') {
+    } else if (tipoCobro === 'BONIF_CENTRO') {
       if (splitDisponible) {
         valorPaciente = valorLista * pctProf;
-        if (tipoCobroHelp) tipoCobroHelp.innerHTML = `Solo cobra el profesional (<strong>${(pctProf*100).toFixed(0)}%</strong> del valor lista). El centro regala su parte. Esto se registra para los cruces de liquidación.`;
+        if (tipoCobroHelp) tipoCobroHelp.innerHTML = `Bonificación del centro: el paciente paga <strong>${(pctProf*100).toFixed(0)}%</strong> del valor lista y eso queda entero para el profesional. El centro cobra $0. Esto se registra para los cruces de liquidación.`;
       } else {
         valorPaciente = valorLista;
         if (tipoCobroHelp) tipoCobroHelp.innerHTML = `⚠️ No encuentro el split para esta práctica/profesional. Asigná el profesional para calcular el monto correctamente.`;
@@ -958,7 +960,11 @@
     }
 
     const preview = $('preview');
-    const sinTarifa = !!practicaVal && !!modalidad && !!obraSocial && sesiones > 0 && valorLista === 0 && tipoCobro !== 'CORTESIA';
+    // FIX 16/09/2026: antes decía "sin tarifa cargada" cada vez que el precio daba $0.
+    // Desde que las obras sociales dejaron de cobrar coseguro, el cero es un precio
+    // legítimo y cargado a propósito: el aviso salía SIEMPRE y asustaba al que carga.
+    // Ahora avisa solo cuando realmente no hay fila en el tarifario para esa combinación.
+    const sinTarifa = !!practicaVal && !!modalidad && !!obraSocial && sesiones > 0 && !hayTarifa && tipoCobro !== 'CORTESIA';
     preview.classList.toggle('warn', sinTarifa);
 
     // Aviso OS
@@ -1077,7 +1083,10 @@
     };
 
     if (!esVariable && profesional) payload.profesional = profesional;
-    if (valor > 0) payload.valor_sesion = valor;
+    // FIX 16/09/2026: antes solo se mandaba el valor si era mayor a cero, así que un
+    // tratamiento de obra social sin coseguro se creaba SIN valor por sesión cargado.
+    // Ahora se manda siempre, aunque sea 0, que es un valor válido.
+    payload.valor_sesion = Number(valor) || 0;
     if (obs) payload.observaciones = obs;
     if (descuentoMonto > 0) payload.descuento_monto = descuentoMonto;
 
@@ -1156,8 +1165,8 @@
 
   function tipoCobroLabel(tc) {
     if (tc === 'CORTESIA') return 'Cortesía';
-    if (tc === 'SOLO_CENTRO') return 'Solo cobra Centro';
-    if (tc === 'SOLO_PROF') return 'Solo cobra Profesional';
+    if (tc === 'SOLO_COSEGURO') return 'Solo coseguro';
+    if (tc === 'BONIF_CENTRO') return 'Bonificación del centro';
     return 'Normal';
   }
 
