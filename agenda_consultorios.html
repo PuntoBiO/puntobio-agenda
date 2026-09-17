@@ -316,6 +316,10 @@ body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9f
 
 /* ===== Mini-botón "Evolucionar" sobre la card del turno ===== */
 .turno{position:relative}
+/* Insignia de pago en la tarjeta del turno (17/09/2026) */
+.turno-pago { margin-left: 5px; padding: 0 4px; border-radius: 6px; font-size: 9px; font-weight: 700; white-space: nowrap; vertical-align: middle; }
+.turno-pago.debe { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+.turno-pago.aldia { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
 .turno-evo-btn{position:absolute;top:2px;right:3px;width:20px;height:20px;border-radius:4px;border:1px solid transparent;background:rgba(255,255,255,.55);color:var(--c-fisio);font-size:11px;line-height:1;padding:0;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:.55;transition:all .12s;z-index:2}
 .turno:hover .turno-evo-btn{opacity:1;background:#fff;border-color:var(--c-fisio);box-shadow:0 1px 4px rgba(0,0,0,.12)}
 .turno-evo-btn:hover{transform:scale(1.1);background:var(--c-fisio)!important;color:#fff!important}
@@ -1027,6 +1031,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 // === CONTROL DE ROL: solo admin_general puede cargar turnos en el pasado ===
 let USUARIO_FISIO = null;     // { id, nombre, email } del profesional logueado (para firmar evoluciones)
 let TURNOS_CON_EVO = new Set(); // turno_id que ya tienen evolución cargada (para pintar el botón 📝 verde)
+// AGREGADO 17/09/2026: saldo de cada tratamiento visible en la semana, para
+// mostrar en la tarjeta del turno si el paciente está al día o debe.
+// Nace de un caso real: Ale no tenía dónde ver si estaba pago, así que cargaba
+// los cobros con fecha del día siguiente para no olvidarse. El dato existía,
+// pero no estaba donde se necesitaba: en el mostrador, al ver el turno.
+let SALDO_POR_TTO = new Map(); // tratamiento_id -> saldo_pendiente (número)
 async function cargarRolUsuario() {
   try {
     const { data: { session } } = await supa.auth.getSession();
@@ -1401,7 +1411,7 @@ async function refresh() {
     // Recargamos SIEMPRE los bloqueos frescos (no dependemos del realtime, que a veces
     // falla por postMessage en el iframe y deja la caché vieja → cierres mal pintados).
     await Promise.all([loadFeriados(from,to), loadTurnos(from,to), cargarAperturasCons(), (window.Bloqueos ? Bloqueos.refrescar() : Promise.resolve())]);
-    await Promise.all([loadSesionesDeTurnos(), loadTurnosDeTratamientos(), loadEvolucionesDeTurnos()]);
+    await Promise.all([loadSesionesDeTurnos(), loadTurnosDeTratamientos(), loadEvolucionesDeTurnos(), loadSaldosDeTratamientos()]);
     renderGrid();
   } catch (e) { showError(e.message||'Error cargando'); console.error(e); }
 }
@@ -1451,6 +1461,24 @@ async function loadTurnosDeTratamientos() {
     });
   } catch (e) {
     console.warn('Error cargando turnos de tratamientos:', e);
+  }
+}
+
+// Carga el saldo pendiente de los tratamientos que aparecen en la vista actual.
+// Si falla, no rompe nada: simplemente no se muestra la insignia.
+async function loadSaldosDeTratamientos() {
+  SALDO_POR_TTO.clear();
+  const ttoIds = [...new Set(turnos.map(t => t.tratamiento_id).filter(Boolean))];
+  if (ttoIds.length === 0) return;
+  try {
+    const { data, error } = await supa
+      .from('tratamientos')
+      .select('id, saldo_pendiente')
+      .in('id', ttoIds);
+    if (error) { console.warn('No se pudieron cargar los saldos:', error.message); return; }
+    (data || []).forEach(t => SALDO_POR_TTO.set(t.id, Number(t.saldo_pendiente) || 0));
+  } catch (e) {
+    console.warn('Error cargando saldos:', e);
   }
 }
 
@@ -1943,11 +1971,22 @@ function renderTurno(t) {
   const sobreLbl = esRehab ? (esFisioPrac ? 'REHAB' : (PRACTICA_PREFIX[nPrac] || 'SOBRE')) : '';
   // Mini botón 📝 para evolucionar directo (solo si hay paciente y el turno no está cancelado).
   // Si ya tiene evolución cargada, sale en verde sólido; si no, fantasma con hover.
+  // Insignia de pago: verde si está al día, ámbar con el monto si debe.
+  // Solo en turnos con paciente y no cancelados; si no hay dato, no se muestra nada.
+  let insigniaPago = '';
+  if (t.tratamiento_id && t.estado !== 'CANCELADO' && SALDO_POR_TTO.has(t.tratamiento_id)) {
+    const saldo = SALDO_POR_TTO.get(t.tratamiento_id);
+    if (saldo > 0) {
+      insigniaPago = `<span class="turno-pago debe" title="Debe $${Number(saldo).toLocaleString('es-AR')} de este tratamiento">$${Number(saldo).toLocaleString('es-AR')}</span>`;
+    } else {
+      insigniaPago = `<span class="turno-pago aldia" title="Al día con los pagos">✓</span>`;
+    }
+  }
   const tieneEvo = TURNOS_CON_EVO.has(t.id);
   const btnEvo = (t.persona_id && t.estado !== 'CANCELADO')
     ? `<button class="turno-evo-btn ${tieneEvo?'tiene-evo':''}" data-evo-turno="${t.id}" title="${tieneEvo?'Ver / editar evolución':'Evolucionar a '+escapeHtml(nombre)}">📝</button>`
     : '';
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" data-sobre="${sobreLbl}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}">${btnEvo}<div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}</span></div></div>`;
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" data-sobre="${sobreLbl}" title="${escapeHtml(nombre)} · ${t.profesional} · ${etiqueta}${titleSes} · ${horaTxt}">${btnEvo}<div class="turno-paciente">${escapeHtml(nombre)}</div><div class="turno-meta"><span class="practica">${etiqueta}${sesTxt}</span><span>${t.profesional} · ${horaTxt}${insigniaPago}</span></div></div>`;
 }
 
 // ¿La práctica usa la sala de Especialidades (Osteo / Masaje), no los consultorios 1-2?
