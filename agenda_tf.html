@@ -978,6 +978,18 @@
     font-size:11px; font-weight:800; padding:0 2px; height:22px; max-width:44px; cursor:pointer;
   }
   .sala-card-profe { font-size:10.5px; font-weight:800; color:#fff; background:#0ea5e9; border-radius:5px; padding:0 5px; margin-left:4px; letter-spacing:.4px; }
+  /* PROFE POR ALUMNO (fila debajo de SALA/ÁREA) */
+  .prof-al-chip {
+    background:#fff; border:1.5px solid #cbd5e1; color:#475569; border-radius:6px;
+    padding:1px 7px; font-size:10.5px; font-weight:800; cursor:pointer; line-height:1.5;
+    font-family:'DM Sans',sans-serif; letter-spacing:.4px;
+  }
+  .prof-al-chip:hover { border-color:#0ea5e9; color:#0369a1; }
+  .prof-al-chip.sel { background:#0ea5e9; border-color:#0ea5e9; color:#fff; box-shadow:0 1px 3px rgba(14,165,233,.35); }
+  .prof-al-chip.hereda { background:#e0f2fe; border-color:#7dd3fc; color:#0369a1; border-style:dashed; }
+  .prof-al-chip.guardando { opacity:.5; pointer-events:none; }
+  .prof-al-nota { font-size:9.5px; color:#64748b; font-weight:600; margin-left:3px; }
+  .sala-card-nom .nom-sig { font-size:9.5px; font-weight:800; color:#0369a1; background:#e0f2fe; border-radius:4px; padding:0 4px; margin-left:4px; }
   /* Cartel "QUIÉN ATIENDE A QUIÉN" (una fila por profe) */
   .sala-xprofe { margin-top:8px; display:flex; flex-direction:column; gap:5px; }
   .sala-xprofe-fila {
@@ -4298,6 +4310,120 @@ function siglasDeUnidad(u) {
 }
 function siglasJuntas(lista) { return lista.map(siglaProfe).join('+'); }
 
+// ===================================================================
+// PROFE POR ALUMNO  (tabla `profe_alumno_turno`) — pedido de Lu 18/9/26
+// Al lado de cada alumno van las siglas de los profes para elegir quién lo
+// atiende. Si no se elige nada, el alumno "hereda" el/los profes de su
+// sala/área (chip punteado). Lo elegido a mano manda sobre lo del área.
+// ===================================================================
+let PROFE_ALUMNO = {};   // { persona_id (string) : 'Binaghi' }
+
+async function cargarProfesAlumnos(t) {
+  PROFE_ALUMNO = {};
+  const fecha = fechaRealDiaActivo();
+  try {
+    const filas = await supabaseQuery('profe_alumno_turno',
+      `?select=persona_id,profe&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => { if (f.profe) PROFE_ALUMNO[String(f.persona_id)] = f.profe; });
+  } catch (e) { console.warn('No se pudo cargar el profe de cada alumno', e); }
+}
+
+async function guardarProfeAlumno(pid, profe) {
+  const t = evoTurnoActual;
+  if (!t) throw new Error('No hay clase abierta');
+  const fecha = fechaRealDiaActivo();
+  if (!profe) {
+    const res = await fetchSupabase(
+      `${SUPABASE_URL}/rest/v1/profe_alumno_turno?turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(pid)}`,
+      { method: 'DELETE', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error(`No se pudo quitar el profe (${res.status}): ${await res.text()}`);
+    return;
+  }
+  const fila = {
+    turno_id: t.id, fecha, persona_id: parseInt(pid), profe,
+    servicio: t.servicio,
+    marcado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+    marcado_por_email: USUARIO_ACTUAL?.email || null,
+    actualizado_en: new Date().toISOString()
+  };
+  const res = await fetchSupabase(
+    `${SUPABASE_URL}/rest/v1/profe_alumno_turno?on_conflict=turno_id,fecha,persona_id`,
+    {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify(fila)
+    });
+  if (!res.ok) {
+    const txt = await res.text();
+    if (/42P01|does not exist|PGRST205/i.test(txt))
+      throw new Error('Falta correr el SQL de profe_alumno_turno.');
+    throw new Error(`No se pudo guardar el profe (${res.status}): ${txt}`);
+  }
+  const devuelto = await res.json().catch(() => null);
+  if (!Array.isArray(devuelto) || devuelto.length === 0) {
+    throw new Error('La base no guardó el profe (permisos). Avisale a Lu.');
+  }
+}
+
+// Base de una sala (para la Sala 2 A/B, el grupo 'Kinefilaxia Sala 2')
+function baseDeSala(sala) {
+  return Object.keys(GRUPOS_SALA).find(g => GRUPOS_SALA[g].includes(sala)) || sala;
+}
+// ¿Quién atiende a este alumno? { lista:[profes], propio:true|false }
+function profesDeAlumno(pid) {
+  const k = String(pid);
+  if (PROFE_ALUMNO[k]) return { lista: [PROFE_ALUMNO[k]], propio: true };
+  const sala = SALA_ALUMNO[k];
+  if (!sala) return { lista: [], propio: false };
+  return { lista: profeDeSala(sala, baseDeSala(sala)), propio: false };
+}
+
+// Fila "PROFE: SF SB" debajo de SALA/ÁREA en cada alumno
+function chipsProfeAlumno(a) {
+  const pid = String(a.id);
+  return `<div class="sala-al-fila" data-prof-al-wrap="${pid}">${chipsProfeAlumnoInner(pid)}</div>`;
+}
+function chipsProfeAlumnoInner(pid) {
+  const t = evoTurnoActual;
+  const eff = profesDeAlumno(pid);
+  const propio = PROFE_ALUMNO[pid] || '';
+  const ops = ((t && t.profes) || []).filter(p => !profeDeBaja(p));
+  eff.lista.concat(propio ? [propio] : []).forEach(p => { if (p && !ops.includes(p)) ops.push(p); });
+  const btns = ops.map(p => {
+    const cls = p === propio ? ' sel' : (!propio && eff.lista.includes(p) ? ' hereda' : '');
+    const tit = p === propio ? 'Quitar a ' + p
+      : (cls ? p + ' (por el área) — tocá para dejarlo fijo' : p + ' atiende a este alumno');
+    return `<button class="prof-al-chip${cls}" data-prof-al="${pid}" data-prof-val="${_escAttr(p)}"
+       onclick="event.stopPropagation();setProfeAlumnoDesde(this)" title="${_escAttr(tit)}">${siglaProfe(p)}</button>`;
+  }).join('');
+  const nota = (!propio && eff.lista.length) ? '<span class="prof-al-nota">por el área</span>' : '';
+  return `<span class="sala-al-lbl">PROFE:</span>${btns}${nota}`;
+}
+// Repinta SOLO las filas de profe de cada alumno (sin re-render del modal,
+// para no borrar lo que haya tipeado en la evolución).
+function repintarProfesAlumnos() {
+  document.querySelectorAll('[data-prof-al-wrap]').forEach(el => {
+    el.innerHTML = chipsProfeAlumnoInner(el.getAttribute('data-prof-al-wrap'));
+  });
+}
+window.setProfeAlumnoDesde = async (el) => {
+  const pid = el.getAttribute('data-prof-al');
+  const elegido = el.getAttribute('data-prof-val');
+  const nuevo = (PROFE_ALUMNO[pid] === elegido) ? '' : elegido;
+  el.classList.add('guardando');
+  try {
+    await guardarProfeAlumno(pid, nuevo);
+    if (nuevo) PROFE_ALUMNO[pid] = nuevo; else delete PROFE_ALUMNO[pid];
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+  pintarResumenSalas();   // también repinta las filas de los alumnos
+};
+
 // QUIÉN ATIENDE A QUIÉN: agrupa a los alumnos (sin ausentes) por el profe de su sala.
 // Si un área la comparten dos profes, el área figura en los dos, con "con XX".
 // Devuelve [{ profe, sigla, esYo, total, salas:[{titulo, con, nombres}] }], el
@@ -4307,19 +4433,32 @@ function repartoPorProfe(servicio) {
   const grupos = {};   // clave: nombre del profe ('' = sin profe)
   const grupoDe = (profe) => grupos[profe] || (grupos[profe] = {
     profe, sigla: profe ? siglaProfe(profe) : '?',
-    esYo: !!profe && !!miSigla && siglaProfe(profe) === miSigla, total: 0, salas: []
+    esYo: !!profe && !!miSigla && siglaProfe(profe) === miSigla, total: 0, salas: [], _idx: {}
   });
-  unidadesDeTablero(servicio, Object.values(SALA_ALUMNO)).forEach(u => {
-    u.salas.forEach(sa => {
-      const nombres = nombresDeSala(sa).map(n => n.nombre);
-      if (!nombres.length) return;
-      const profes = profeDeSala(sa, u.base);
-      (profes.length ? profes : ['']).forEach(profe => {
-        const g = grupoDe(profe);
-        g.salas.push({ titulo: salaCorta(sa), con: profes.filter(x => x !== profe), nombres });
-        g.total += nombres.length;
-      });
+  // Cada alumno va con SU profe (el elegido a mano, o el/los de su área)
+  const sumar = (titulo, id, nombre) => {
+    const eff = profesDeAlumno(id);
+    (eff.lista.length ? eff.lista : ['']).forEach(profe => {
+      const g = grupoDe(profe);
+      const con = eff.propio ? [] : eff.lista.filter(x => x !== profe);
+      const clave = titulo + '|' + con.join(',');
+      let bloque = g._idx[clave];
+      if (!bloque) { bloque = g._idx[clave] = { titulo, con, nombres: [] }; g.salas.push(bloque); }
+      bloque.nombres.push(nombre);
+      g.total++;
     });
+  };
+  unidadesDeTablero(servicio, Object.values(SALA_ALUMNO)).forEach(u => {
+    u.salas.forEach(sa => nombresDeSala(sa).forEach(n => sumar(salaCorta(sa), n.id, n.nombre)));
+  });
+  // Los que todavía no tienen sala/área, pero sí profe elegido a mano
+  const t = evoTurnoActual;
+  if (t) getAlumnos(t).forEach(a => {
+    const k = String(a.id);
+    if (SALA_ALUMNO[k] || !PROFE_ALUMNO[k]) return;
+    const est = getEstadoAlumno(t.dia, t.hora, t.servicio, a.id);
+    if (est === 'ausente' || est === 'ausente-justificada') return;
+    sumar('Sin ' + palabraSala(servicio).toLowerCase(), a.id, a.nombre || ('#' + a.id));
   });
   return Object.values(grupos).sort((a, b) => {
     if (!a.profe) return 1; if (!b.profe) return -1;
@@ -4381,10 +4520,18 @@ function filaProfeUna(t, key, etiqueta, tituloSala, actuales, ocup) {
 function filaProfeSala(u, t, ocup) {
   if (u.esGrupo) {
     return u.salas.map(s =>
-      filaProfeUna(t, s, 'PROFE ' + puestoDe(s, u.base), salaCorta(s), profeDeSala(s, u.base), nombresDeSala(s).length)
+      filaProfeUna(t, s, 'PROFE ' + puestoDe(s, u.base), salaCorta(s), profeDeSala(s, u.base), dependenDelArea([s]))
     ).join('');
   }
-  return filaProfeUna(t, u.base, 'PROFE', u.titulo, profeDeSala(u.base, u.base), ocup);
+  return filaProfeUna(t, u.base, 'PROFE', u.titulo, profeDeSala(u.base, u.base), dependenDelArea(u.salas));
+}
+function sigPropia(id) {
+  const p = PROFE_ALUMNO[String(id)];
+  return p ? `<span class="nom-sig" title="${_escAttr(p)}">${siglaProfe(p)}</span>` : '';
+}
+// Cuántos alumnos de estas salas NO tienen profe elegido a mano (dependen del área)
+function dependenDelArea(salas) {
+  return salas.reduce((acc, s) => acc + nombresDeSala(s).filter(n => !PROFE_ALUMNO[String(n.id)]).length, 0);
 }
 
 // Trae la distribución ya guardada de este turno + fecha
@@ -4550,14 +4697,14 @@ function pintarResumenSalas() {
       // Sala 2 → una línea por puesto: "A · NOMBRE" / "B · NOMBRE"
       lista = u.salas.map(s => {
         const g = nombresDeSala(s);
-        const quien = g.length ? g.map(n => _escAttr(n.nombre)).join(' + ') : '<span class="sala-card-vacia">libre</span>';
+        const quien = g.length ? g.map(n => _escAttr(n.nombre) + sigPropia(n.id)).join(' + ') : '<span class="sala-card-vacia">libre</span>';
         const _pp = profeDeSala(s, u.base);
         return `<div class="sala-card-nom"><span class="sala-card-puesto">${puestoDe(s, u.base)}${_pp.length ? ' · ' + siglasJuntas(_pp) : ''}</span>${quien}</div>`;
       }).join('');
     } else {
       const g = nombresDeSala(u.salas[0]);
       lista = g.length
-        ? g.map(n => `<div class="sala-card-nom">${_escAttr(n.nombre)}</div>`).join('')
+        ? g.map(n => `<div class="sala-card-nom">${_escAttr(n.nombre)}${sigPropia(n.id)}</div>`).join('')
         : '<div class="sala-card-vacia">— vacía —</div>';
     }
     const _profes = siglasDeUnidad(u);
@@ -4594,6 +4741,7 @@ function pintarResumenSalas() {
       <button class="sala-mural-btn" onclick="abrirMuralSalas()" title="Verlo en grande para recibir al grupo">🖥️ Ver en grande</button>
     </div>
     ${_salaTableroAbierto ? `<div class="sala-cards">${tarjetas}${bloqueSin}</div>${cartelPorProfe(servicio)}` : ''}`;
+  repintarProfesAlumnos();
 }
 // Plegar/desplegar el tablero (cuando ya repartiste, con la línea resumen alcanza)
 window.toggleTableroSalas = () => {
@@ -7010,6 +7158,7 @@ function renderModalBody(dia, hora, servicio) {
               <div class="alumno-id">#${a.id}${_cierreCentro?' · <span style="color:#b91c1c;font-size:11px;font-weight:700">🚫 clase cancelada</span>':est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''} ${_cierreCentro?'':chipEvo}</div>
               ${(etiquetaAgregado || etiquetaOrigenME || etiquetaPendienteFijo) ? `<div>${etiquetaAgregado}${etiquetaOrigenME}${etiquetaPendienteFijo}</div>` : ''}
               ${(_cierreCentro || esAusente) ? '' : chipsSalaAlumno(a, servicio)}
+              ${(_cierreCentro || esAusente) ? '' : chipsProfeAlumno(a)}
               ${motivo ? `<div style="font-size:11px;color:var(--texto-suave);margin-top:2px">${motivo}</div>` : ''}
               ${resumenEvo}
             </div>
@@ -7404,11 +7553,13 @@ async function abrirModal(dia, hora, servicio) {
     '<div id="evo-cargando" style="font-size:12px;color:var(--celeste);padding:4px 0">⟳ Cargando asistencia y evoluciones...</div>');
   SALA_ALUMNO = {};
   SALA_PROFE = {};
+  PROFE_ALUMNO = {};
   const tareas = [
     cargarAsistenciaTurno(t),
     cargarEvolucionesTurno(t),
     cargarSalasTurno(t),
     cargarSalaProfes(t),
+    cargarProfesAlumnos(t),
     cargarDolorReciente(t),
     cargarMensajesPendientes(t),
     cargarAvisosAlumno(t)
