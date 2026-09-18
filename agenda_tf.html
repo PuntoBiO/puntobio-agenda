@@ -961,6 +961,25 @@
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .sala-card-vacia { font-size:11px; color:#94a3b8; font-style:italic; }
+  /* PROFE A CARGO de cada sala/área (siglas) */
+  .sala-profe-fila { display:flex; align-items:center; flex-wrap:wrap; gap:3px; margin:4px 0 2px; }
+  .sala-profe-lbl { font-size:9.5px; font-weight:800; color:#64748b; letter-spacing:.3px; margin-right:2px; }
+  .sala-profe-lbl.falta { color:#b45309; }
+  .sala-profe-chip {
+    background:#fff; border:1.5px solid #cbd5e1; color:#334155; border-radius:6px;
+    padding:1px 6px; font-size:11px; font-weight:800; cursor:pointer; line-height:1.5;
+    font-family:'DM Sans',sans-serif; letter-spacing:.4px;
+  }
+  .sala-profe-chip:hover { border-color:#0ea5e9; color:#0369a1; }
+  .sala-profe-chip.sel { background:#0ea5e9; border-color:#0ea5e9; color:#fff; box-shadow:0 1px 3px rgba(14,165,233,.35); }
+  .sala-profe-chip.guardando, .sala-profe-otro.guardando { opacity:.5; pointer-events:none; }
+  .sala-profe-otro {
+    border:1.5px dashed #cbd5e1; background:#fff; color:#64748b; border-radius:6px;
+    font-size:11px; font-weight:800; padding:0 2px; height:22px; max-width:44px; cursor:pointer;
+  }
+  .sala-card-profe { font-size:10.5px; font-weight:800; color:#fff; background:#0ea5e9; border-radius:5px; padding:0 5px; margin-left:4px; letter-spacing:.4px; }
+  .mural-col-profe { font-size:15px; font-weight:800; color:#0369a1; margin:-4px 0 10px; }
+  .mural-col-profe.falta { color:#b45309; }
   /* Mural en grande (para recibir al grupo) */
   .mural-overlay {
     position:fixed; inset:0; background:rgba(15,23,42,.82); z-index:9999;
@@ -4124,6 +4143,118 @@ async function cargarEvolucionesTurno(t) {
 let SALA_ALUMNO = {};   // { persona_id (string) : 'Kinefilaxia Sala 2 A' }
 let _salaTableroAbierto = true;   // el tablero de reparto arranca desplegado
 
+// ===================================================================
+// PROFE A CARGO DE CADA SALA/ÁREA  (tabla `sala_profe_turno`)
+// Pedido de Lu (18/9/26): además de a qué sala va cada alumno, antes de
+// arrancar la clase se reparte QUÉ PROFE atiende cada sala/área, con siglas.
+// Es por clase puntual (turno + fecha). La Sala 2 (A + B) lleva UN profe.
+// Se guarda el nombre tal cual figura en turno_profes / PROFES_FALTA.
+// ===================================================================
+let SALA_PROFE = {};   // { 'Kinefilaxia Sala 1' | 'Kinefilaxia Sala 2' | 'Área 1' : 'Santi' }
+
+// Siglas fijas para que no se pisen (hay dos Santis). Si alguien no está
+// acá, se arman solas con las iniciales. Para cambiar una sigla, SOLO acá.
+const SIGLAS_PROFE = {
+  'santi': 'SF', 'santiago ferreira': 'SF',
+  'binaghi': 'SB', 'santiago binaghi': 'SB',
+  'lean': 'LE', 'male': 'MA',
+  'lu': 'LV', 'luciana velaz': 'LV',
+  'jime': 'JL', 'jimena llorente': 'JL'
+};
+function siglaProfe(nombre) {
+  const k = String(nombre || '').trim().toLowerCase();
+  return SIGLAS_PROFE[k] || inicialesDe(nombre);
+}
+
+async function cargarSalaProfes(t) {
+  SALA_PROFE = {};
+  const fecha = fechaRealDiaActivo();
+  try {
+    const filas = await supabaseQuery('sala_profe_turno',
+      `?select=sala,profe&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => { if (f.sala && f.profe) SALA_PROFE[f.sala] = f.profe; });
+  } catch (e) { console.warn('No se pudo cargar el profe de cada sala', e); }
+}
+
+async function guardarSalaProfe(sala, profe) {
+  const t = evoTurnoActual;
+  if (!t) throw new Error('No hay clase abierta');
+  const fecha = fechaRealDiaActivo();
+  const salaQ = encodeURIComponent(sala);
+  if (!profe) {
+    const res = await fetchSupabase(
+      `${SUPABASE_URL}/rest/v1/sala_profe_turno?turno_id=eq.${t.id}&fecha=eq.${fecha}&sala=eq.${salaQ}`,
+      { method: 'DELETE', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error(`No se pudo quitar el profe (${res.status}): ${await res.text()}`);
+    return;
+  }
+  const fila = {
+    turno_id: t.id, fecha, sala, profe,
+    servicio: t.servicio,
+    marcado_por_nombre: USUARIO_ACTUAL?.nombre || null,
+    marcado_por_email: USUARIO_ACTUAL?.email || null,
+    actualizado_en: new Date().toISOString()
+  };
+  // return=representation a propósito (lección de Gestión de Cupos: con RLS un
+  // return=minimal tapa una escritura rechazada).
+  const res = await fetchSupabase(
+    `${SUPABASE_URL}/rest/v1/sala_profe_turno?on_conflict=turno_id,fecha,sala`,
+    {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_KEY,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify(fila)
+    });
+  if (!res.ok) throw new Error(`No se pudo guardar el profe (${res.status}): ${await res.text()}`);
+  const devuelto = await res.json().catch(() => null);
+  if (!Array.isArray(devuelto) || devuelto.length === 0) {
+    throw new Error('La base no guardó el profe (permisos). Avisale a Lu.');
+  }
+}
+
+// Toque de un chip de siglas (o del desplegable "＋ otro"): si ya era ese, lo saca.
+window.setSalaProfeDesde = async (el) => {
+  const sala  = el.getAttribute('data-sp-sala');
+  const elegido = (el.tagName === 'SELECT') ? el.value : el.getAttribute('data-sp-profe');
+  if (!sala || (el.tagName === 'SELECT' && !elegido)) return;
+  const anterior = SALA_PROFE[sala] || '';
+  const nuevo = (anterior === elegido) ? '' : elegido;
+  el.classList.add('guardando');
+  try {
+    await guardarSalaProfe(sala, nuevo);
+    if (nuevo) SALA_PROFE[sala] = nuevo; else delete SALA_PROFE[sala];
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    pintarResumenSalas();
+  }
+};
+
+// Fila "PROFE: SF SB ＋" dentro de la tarjeta de cada sala/área.
+// Primero los profes del turno; en el ＋ el resto del equipo (por si cubre otro).
+function filaProfeSala(u, t, ocup) {
+  const actual = SALA_PROFE[u.base] || '';
+  const delTurno = ((t && t.profes) || []).slice();
+  if (actual && !delTurno.includes(actual)) delTurno.push(actual);
+  const chips = delTurno.map(p =>
+    `<button class="sala-profe-chip${p === actual ? ' sel' : ''}" data-sp-sala="${_escAttr(u.base)}" data-sp-profe="${_escAttr(p)}"
+       onclick="event.stopPropagation();setSalaProfeDesde(this)"
+       title="${p === actual ? 'Quitar a ' + _escAttr(p) : _escAttr(p) + ' atiende ' + _escAttr(u.titulo)}">${siglaProfe(p)}</button>`).join('');
+  const yaEstan = delTurno.map(x => x.toLowerCase());
+  const otros = PROFES_FALTA.filter(p => !yaEstan.includes(p.toLowerCase()));
+  const selOtro = otros.length
+    ? `<select class="sala-profe-otro" data-sp-sala="${_escAttr(u.base)}" title="Otro profe"
+         onclick="event.stopPropagation()" onchange="setSalaProfeDesde(this)">
+         <option value="">＋</option>
+         ${otros.map(p => `<option value="${_escAttr(p)}">${siglaProfe(p)} · ${_escAttr(p)}</option>`).join('')}
+       </select>` : '';
+  const falta = !actual && ocup > 0;
+  return `<div class="sala-profe-fila"><span class="sala-profe-lbl${falta ? ' falta' : ''}">${falta ? '⚠️ PROFE' : 'PROFE'}</span>${chips}${selOtro}</div>`;
+}
+
 // Trae la distribución ya guardada de este turno + fecha
 async function cargarSalasTurno(t) {
   SALA_ALUMNO = {};
@@ -4296,11 +4427,13 @@ function pintarResumenSalas() {
         ? g.map(n => `<div class="sala-card-nom">${_escAttr(n.nombre)}</div>`).join('')
         : '<div class="sala-card-vacia">— vacía —</div>';
     }
+    const _profe = SALA_PROFE[u.base] || '';
     return `<div class="sala-card${clase}">
         <div class="sala-card-top">
-          <span class="sala-card-tit">${u.titulo}</span>
+          <span class="sala-card-tit">${u.titulo}${_profe ? `<span class="sala-card-profe" title="${_escAttr(_profe)}">${siglaProfe(_profe)}</span>` : ''}</span>
           <span class="sala-card-cupo">${badge}</span>
         </div>
+        ${filaProfeSala(u, t, ocup)}
         <div class="sala-card-estado">${estado}</div>
         <div class="sala-card-lista">${lista}</div>
       </div>`;
@@ -4317,7 +4450,8 @@ function pintarResumenSalas() {
   const resumenLinea = unidades.map(u => {
     const cap = u.salas.reduce((acc, s) => { const c = capDeSala(s); return c === null ? acc : acc + c; }, 0) || null;
     const oc = u.salas.reduce((acc, s) => acc + nombresDeSala(s).length, 0);
-    return `${u.titulo} ${oc}${cap !== null ? '/' + cap : ''}`;
+    const pr = SALA_PROFE[u.base];
+    return `${u.titulo}${pr ? ' (' + siglaProfe(pr) + ')' : ''} ${oc}${cap !== null ? '/' + cap : ''}`;
   }).join(' · ');
   cont.innerHTML = `
     <div class="sala-tablero-head">
@@ -4361,6 +4495,9 @@ window.abrirMuralSalas = () => {
     return `<div class="mural-col${pasado ? ' pasada' : (lleno ? ' llena' : '')}">
       <div class="mural-col-tit">${u.titulo}</div>
       <div class="mural-col-cupo">${ocup}${cap !== null ? ' / ' + cap : ''}${pasado ? ' ⚠️' : ''}</div>
+      ${SALA_PROFE[u.base]
+        ? `<div class="mural-col-profe">👤 ${siglaProfe(SALA_PROFE[u.base])} · ${_escAttr(SALA_PROFE[u.base])}</div>`
+        : (ocup > 0 ? '<div class="mural-col-profe falta">👤 sin profe</div>' : '')}
       <div class="mural-col-lista">${lista}</div>
     </div>`;
   }).join('');
@@ -7121,10 +7258,12 @@ async function abrirModal(dia, hora, servicio) {
   document.getElementById('modal-body').insertAdjacentHTML('afterbegin',
     '<div id="evo-cargando" style="font-size:12px;color:var(--celeste);padding:4px 0">⟳ Cargando asistencia y evoluciones...</div>');
   SALA_ALUMNO = {};
+  SALA_PROFE = {};
   const tareas = [
     cargarAsistenciaTurno(t),
     cargarEvolucionesTurno(t),
     cargarSalasTurno(t),
+    cargarSalaProfes(t),
     cargarDolorReciente(t),
     cargarMensajesPendientes(t),
     cargarAvisosAlumno(t)
