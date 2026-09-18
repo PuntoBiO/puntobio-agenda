@@ -1872,6 +1872,31 @@ function renderWeek(container) {
   }
 }
 
+// POSICIÓN de la sesión dentro del tratamiento (1ª, 2ª, 3ª...), que NO es lo
+// mismo que su numero_sesion.
+// Por qué hace falta (17/09/2026): cuando un turno deja de estar PRESENTE, un
+// disparador borra su sesión, pero las que quedan NO se renumeran. Si se borró
+// la 1, las siguientes se quedan en 2, 3, 4 y el hueco no se cierra nunca.
+// Casos reales: Jorge Taberna (7 sesiones numeradas 2 a 8) y Micaela Tuja
+// (4 sesiones numeradas 2 a 5). Para saber si una sesión está paga hay que
+// contar posiciones, no leer el número: si no, la insignia sale corrida en uno
+// y marca en rojo a gente que está al día.
+function posicionDeSesion(t) {
+  if (!t.tratamiento_id) return null;
+  const sesiones = (sesionesPorTto.get(t.tratamiento_id) || []).slice()
+    .sort((a, b) => String(a.fecha || '').localeCompare(String(b.fecha || '')));
+  const i = sesiones.findIndex(x => x.turno_id === t.id);
+  if (i >= 0) return i + 1;
+  // Turno que todavía no generó sesión: va después de todas las cumplidas,
+  // en el orden cronológico que le toque entre los pendientes del tratamiento.
+  const conSesion = new Set(sesiones.map(x => x.turno_id).filter(Boolean));
+  const pendientes = (turnosPorTto.get(t.tratamiento_id) || [])
+    .filter(x => x.estado !== 'CANCELADO' && !conSesion.has(x.id))
+    .sort((a, b) => (a.fecha + a.hora_inicio).localeCompare(b.fecha + b.hora_inicio));
+  const j = pendientes.findIndex(x => x.id === t.id);
+  return sesiones.length + (j >= 0 ? j + 1 : 1);
+}
+
 function calcularNumeroSesion(t) {
   if (!t.tratamiento_id) return t.numero_sesion || null;
   const sesiones = sesionesPorTto.get(t.tratamiento_id) || [];
@@ -1991,10 +2016,11 @@ function renderTurno(t) {
   // paciente pagó el día anterior o pagó varias sesiones juntas.
   // Las sesiones se cubren en orden con lo que el paciente abonó.
   let insigniaPago = '';
-  if (t.tratamiento_id && t.estado !== 'CANCELADO' && nroSesion && PAGO_POR_TTO.has(t.tratamiento_id)) {
+  if (t.tratamiento_id && t.estado !== 'CANCELADO' && PAGO_POR_TTO.has(t.tratamiento_id)) {
     const pagas = PAGO_POR_TTO.get(t.tratamiento_id).pagas;
+    const posicion = posicionDeSesion(t);   // NO nroSesion: ver posicionDeSesion()
     // Mismo símbolo en las dos, lo que habla es el color: verde abonado, rojo debe.
-    insigniaPago = (nroSesion <= pagas)
+    insigniaPago = (posicion && posicion <= pagas)
       ? `<span class="turno-pago aldia" title="Esta sesión ya está paga — no cobrar">$</span>`
       : `<span class="turno-pago debe" title="Esta sesión NO está paga — hay que cobrarla">$</span>`;
   }
