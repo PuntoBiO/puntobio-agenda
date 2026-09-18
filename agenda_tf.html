@@ -4235,24 +4235,49 @@ window.setSalaProfeDesde = async (el) => {
 
 // Fila "PROFE: SF SB ＋" dentro de la tarjeta de cada sala/área.
 // Primero los profes del turno; en el ＋ el resto del equipo (por si cubre otro).
-function filaProfeSala(u, t, ocup) {
-  const actual = SALA_PROFE[u.base] || '';
+// Profe de UNA sala/puesto. Si hay un dato viejo guardado para el grupo entero
+// ('Kinefilaxia Sala 2'), vale para los dos puestos hasta que se marque uno.
+function profeDeSala(sala, base) {
+  return SALA_PROFE[sala] || (base && base !== sala ? SALA_PROFE[base] : '') || '';
+}
+// Siglas de todos los profes de una tarjeta (Sala 2 puede tener dos: "LV/MA")
+function siglasDeUnidad(u) {
+  const vistos = [];
+  u.salas.forEach(s => { const p = profeDeSala(s, u.base); if (p && !vistos.includes(p)) vistos.push(p); });
+  return vistos;
+}
+// Una fila de chips para una sala o un puesto concreto.
+function filaProfeUna(t, key, etiqueta, tituloSala, actual, ocup) {
   const delTurno = ((t && t.profes) || []).slice();
   if (actual && !delTurno.includes(actual)) delTurno.push(actual);
   const chips = delTurno.map(p =>
-    `<button class="sala-profe-chip${p === actual ? ' sel' : ''}" data-sp-sala="${_escAttr(u.base)}" data-sp-profe="${_escAttr(p)}"
+    `<button class="sala-profe-chip${p === actual ? ' sel' : ''}" data-sp-sala="${_escAttr(key)}" data-sp-profe="${_escAttr(p)}"
        onclick="event.stopPropagation();setSalaProfeDesde(this)"
-       title="${p === actual ? 'Quitar a ' + _escAttr(p) : _escAttr(p) + ' atiende ' + _escAttr(u.titulo)}">${siglaProfe(p)}</button>`).join('');
+       title="${p === actual ? 'Quitar a ' + _escAttr(p) : _escAttr(p) + ' atiende ' + _escAttr(tituloSala)}">${siglaProfe(p)}</button>`).join('');
   const yaEstan = delTurno.map(x => x.toLowerCase());
   const otros = PROFES_FALTA.filter(p => !yaEstan.includes(p.toLowerCase()));
   const selOtro = otros.length
-    ? `<select class="sala-profe-otro" data-sp-sala="${_escAttr(u.base)}" title="Otro profe"
+    ? `<select class="sala-profe-otro" data-sp-sala="${_escAttr(key)}" title="Otro profe"
          onclick="event.stopPropagation()" onchange="setSalaProfeDesde(this)">
          <option value="">＋</option>
          ${otros.map(p => `<option value="${_escAttr(p)}">${siglaProfe(p)} · ${_escAttr(p)}</option>`).join('')}
        </select>` : '';
   const falta = !actual && ocup > 0;
-  return `<div class="sala-profe-fila"><span class="sala-profe-lbl${falta ? ' falta' : ''}">${falta ? '⚠️ PROFE' : 'PROFE'}</span>${chips}${selOtro}</div>`;
+  return `<div class="sala-profe-fila"><span class="sala-profe-lbl${falta ? ' falta' : ''}">${falta ? '⚠️ ' : ''}${etiqueta}</span>${chips}${selOtro}</div>`;
+}
+// Fila(s) "PROFE" dentro de la tarjeta. La Sala 2 lleva una por puesto (A y B),
+// porque cada puesto lo puede atender un profe distinto (pedido de Lu 18/9).
+function filaProfeSala(u, t, ocup) {
+  if (u.esGrupo) {
+    return u.salas.map(s => {
+      // Si hay un dato viejo del grupo entero, al tocar un chip del puesto se
+      // guarda para ese puesto puntual (key = la sala del puesto).
+      const actual = SALA_PROFE[s] || '';
+      const heredado = !actual && SALA_PROFE[u.base] ? SALA_PROFE[u.base] : '';
+      return filaProfeUna(t, s, 'PROFE ' + puestoDe(s, u.base), salaCorta(s), actual || heredado, nombresDeSala(s).length);
+    }).join('');
+  }
+  return filaProfeUna(t, u.base, 'PROFE', u.titulo, SALA_PROFE[u.base] || '', ocup);
 }
 
 // Trae la distribución ya guardada de este turno + fecha
@@ -4419,7 +4444,8 @@ function pintarResumenSalas() {
       lista = u.salas.map(s => {
         const g = nombresDeSala(s);
         const quien = g.length ? g.map(n => _escAttr(n.nombre)).join(' + ') : '<span class="sala-card-vacia">libre</span>';
-        return `<div class="sala-card-nom"><span class="sala-card-puesto">${puestoDe(s, u.base)}</span>${quien}</div>`;
+        const _pp = profeDeSala(s, u.base);
+        return `<div class="sala-card-nom"><span class="sala-card-puesto">${puestoDe(s, u.base)}${_pp ? ' · ' + siglaProfe(_pp) : ''}</span>${quien}</div>`;
       }).join('');
     } else {
       const g = nombresDeSala(u.salas[0]);
@@ -4427,10 +4453,10 @@ function pintarResumenSalas() {
         ? g.map(n => `<div class="sala-card-nom">${_escAttr(n.nombre)}</div>`).join('')
         : '<div class="sala-card-vacia">— vacía —</div>';
     }
-    const _profe = SALA_PROFE[u.base] || '';
+    const _profes = siglasDeUnidad(u);
     return `<div class="sala-card${clase}">
         <div class="sala-card-top">
-          <span class="sala-card-tit">${u.titulo}${_profe ? `<span class="sala-card-profe" title="${_escAttr(_profe)}">${siglaProfe(_profe)}</span>` : ''}</span>
+          <span class="sala-card-tit">${u.titulo}${_profes.length ? `<span class="sala-card-profe" title="${_escAttr(_profes.join(' / '))}">${_profes.map(siglaProfe).join('/')}</span>` : ''}</span>
           <span class="sala-card-cupo">${badge}</span>
         </div>
         ${filaProfeSala(u, t, ocup)}
@@ -4450,8 +4476,8 @@ function pintarResumenSalas() {
   const resumenLinea = unidades.map(u => {
     const cap = u.salas.reduce((acc, s) => { const c = capDeSala(s); return c === null ? acc : acc + c; }, 0) || null;
     const oc = u.salas.reduce((acc, s) => acc + nombresDeSala(s).length, 0);
-    const pr = SALA_PROFE[u.base];
-    return `${u.titulo}${pr ? ' (' + siglaProfe(pr) + ')' : ''} ${oc}${cap !== null ? '/' + cap : ''}`;
+    const pr = siglasDeUnidad(u);
+    return `${u.titulo}${pr.length ? ' (' + pr.map(siglaProfe).join('/') + ')' : ''} ${oc}${cap !== null ? '/' + cap : ''}`;
   }).join(' · ');
   cont.innerHTML = `
     <div class="sala-tablero-head">
@@ -4486,7 +4512,8 @@ window.abrirMuralSalas = () => {
       lista = u.salas.map(s => {
         const g = nombresDeSala(s);
         const quien = g.length ? g.map(n => _escAttr(n.nombre)).join(' + ') : '<span style="opacity:.4">libre</span>';
-        return `<div><span class="mural-puesto">${puestoDe(s, u.base)}</span>${quien}</div>`;
+        const _pp = profeDeSala(s, u.base);
+        return `<div><span class="mural-puesto">${puestoDe(s, u.base)}${_pp ? ' · ' + siglaProfe(_pp) : ''}</span>${quien}</div>`;
       }).join('');
     } else {
       const g = nombresDeSala(u.salas[0]);
@@ -4495,9 +4522,11 @@ window.abrirMuralSalas = () => {
     return `<div class="mural-col${pasado ? ' pasada' : (lleno ? ' llena' : '')}">
       <div class="mural-col-tit">${u.titulo}</div>
       <div class="mural-col-cupo">${ocup}${cap !== null ? ' / ' + cap : ''}${pasado ? ' ⚠️' : ''}</div>
-      ${SALA_PROFE[u.base]
-        ? `<div class="mural-col-profe">👤 ${siglaProfe(SALA_PROFE[u.base])} · ${_escAttr(SALA_PROFE[u.base])}</div>`
-        : (ocup > 0 ? '<div class="mural-col-profe falta">👤 sin profe</div>' : '')}
+      ${(() => {
+        const _ps = siglasDeUnidad(u);
+        if (_ps.length) return `<div class="mural-col-profe">👤 ${_ps.map(p => siglaProfe(p) + ' · ' + _escAttr(p)).join(' / ')}</div>`;
+        return ocup > 0 ? '<div class="mural-col-profe falta">👤 sin profe</div>' : '';
+      })()}
       <div class="mural-col-lista">${lista}</div>
     </div>`;
   }).join('');
