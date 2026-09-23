@@ -631,6 +631,27 @@
   }
   .justif-motivo:focus { border-color: var(--celeste); }
   .justif-motivo.visible { display: block; }
+  /* ¿Por qué faltó? — tipo de motivo */
+  .justif-tipos { display:none; flex-wrap:wrap; gap:6px; margin:0 0 10px; }
+  .justif-tipos.visible { display:flex; }
+  .justif-tipos .lbl { width:100%; font-size:12px; font-weight:700; color:var(--texto-suave); margin-bottom:2px; }
+  .justif-tipo {
+    background:#fff; border:1.5px solid var(--gris-borde); border-radius:8px; padding:5px 10px;
+    font-size:12.5px; font-weight:700; color:var(--texto); cursor:pointer; font-family:inherit;
+  }
+  .justif-tipo:hover { border-color: var(--celeste); }
+  .justif-tipo.sel { background:#0ea5e9; border-color:#0ea5e9; color:#fff; }
+  .justif-tipo.sel.dolor { background:#dc2626; border-color:#dc2626; }
+  .chip-falta-motivo {
+    display:inline-block; background:#fee2e2; color:#991b1b; font-size:10px; font-weight:800;
+    padding:2px 7px; border-radius:5px; margin-right:5px;
+  }
+  .chip-falta-motivo.otro { background:#e2e8f0; color:#334155; }
+  /* Faltó por dolor en las últimas 2 semanas: se ve solo, sin pasar el mouse */
+  .chip-falto-dolor {
+    display:inline-block; background:#fee2e2; color:#991b1b; border:1px solid #fca5a5;
+    font-size:10px; font-weight:800; padding:2px 7px; border-radius:5px; margin-right:5px;
+  }
   .justif-footer {
     padding: 12px 20px; border-top: 1px solid var(--gris-borde);
     display: flex; gap: 8px; justify-content: flex-end;
@@ -1191,6 +1212,14 @@
         <button class="justif-opcion" id="justif-no" onclick="seleccionarJustif('no')">✗ No justificada</button>
       </div>
       <button class="justif-opcion" id="justif-cambio" onclick="seleccionarJustif('cambio')" style="width:100%;margin-bottom:12px">🔄 Cambio de área (mismo día)</button>
+      <div class="justif-tipos" id="justif-tipos">
+        <div class="lbl">¿Por qué falta? (opcional)</div>
+        <button type="button" class="justif-tipo" data-tipo="dolor"    onclick="seleccionarTipoFalta('dolor')">🩹 Dolor o molestia</button>
+        <button type="button" class="justif-tipo" data-tipo="salud"    onclick="seleccionarTipoFalta('salud')">🤒 Salud</button>
+        <button type="button" class="justif-tipo" data-tipo="viaje"    onclick="seleccionarTipoFalta('viaje')">✈️ Viaje</button>
+        <button type="button" class="justif-tipo" data-tipo="trabajo"  onclick="seleccionarTipoFalta('trabajo')">💼 Trabajo</button>
+        <button type="button" class="justif-tipo" data-tipo="otro"     onclick="seleccionarTipoFalta('otro')">🙂 Otro</button>
+      </div>
       <textarea class="justif-motivo" id="justif-motivo" rows="3" placeholder="Motivo (opcional)..."></textarea>
       <!-- Selector de turno destino (solo aparece en Cambio de área) -->
       <div id="justif-destino-box" style="display:none;margin-top:4px">
@@ -3209,6 +3238,68 @@ async function cargarDolorReciente(t) {
       DOLOR_DETALLE[pid] = det;
     });
   } catch (e) { console.warn('No se pudo cargar dolor reciente (alumno)', e); }
+
+  // Fuente 3: faltó y dijo que era por dolor (falta_motivo, tipo 'dolor').
+  // Es la que más importa antes de la clase: el alumno vuelve después de una
+  // molestia y el profe tiene que saberlo para adaptar.
+  try {
+    const filas3 = await supabaseQuery('falta_motivo',
+      `?select=persona_id,detalle,fecha,cargado_por&tipo=eq.dolor&fecha=gte.${desde}&persona_id=in.(${ids})&order=fecha.desc`);
+    (filas3 || []).forEach(f => {
+      const pid = String(f.persona_id);
+      DOLOR_RECIENTE.add(pid);
+      const det = DOLOR_DETALLE[pid] || { origenes: new Set(), max_eva: null, zona: null };
+      det.origenes.add('falta');
+      if (!det.falta) det.falta = { fecha: f.fecha, detalle: f.detalle || '', quien: f.cargado_por || '' };
+      DOLOR_DETALLE[pid] = det;
+    });
+  } catch (e) { console.warn('No se pudo cargar faltas por dolor', e); }
+}
+
+// ===================================================================
+// POR QUÉ FALTÓ  (tabla `falta_motivo`) — pedido de Lu 23/9/26
+// Cuando un alumno avisa que va a faltar, puede decir POR QUÉ: si es por
+// dolor o molestia, el profe tiene que enterarse. Lo carga el alumno desde
+// Mi Espacio o la secretaría al marcar la ausencia acá.
+// Una fila por alumno + turno + fecha. No toca la asistencia ni los créditos.
+// ===================================================================
+const FALTA_TIPOS = { dolor:'🩹 Dolor o molestia', salud:'🤒 Salud', viaje:'✈️ Viaje', trabajo:'💼 Trabajo', otro:'🙂 Otro' };
+let FALTA_MOTIVO_TURNO = {};   // persona_id -> { tipo, detalle }
+
+async function cargarFaltaMotivosTurno(t) {
+  FALTA_MOTIVO_TURNO = {};
+  const fecha = fechaRealDiaActivo();
+  try {
+    const filas = await supabaseQuery('falta_motivo',
+      `?select=persona_id,tipo,detalle&turno_id=eq.${t.id}&fecha=eq.${fecha}`);
+    (filas || []).forEach(f => { FALTA_MOTIVO_TURNO[String(f.persona_id)] = { tipo: f.tipo, detalle: f.detalle || '' }; });
+  } catch (e) { console.warn('No se pudo cargar el motivo de las faltas', e); }
+}
+
+async function guardarFaltaMotivo(turnoId, fecha, personaId, tipo, detalle) {
+  if (!tipo) {   // sin tipo elegido: si había algo cargado, se borra
+    const res = await fetchSupabase(
+      `${SUPABASE_URL}/rest/v1/falta_motivo?turno_id=eq.${turnoId}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}`,
+      { method: 'DELETE', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' } });
+    if (!res.ok) console.warn('No se pudo limpiar el motivo de falta', await res.text());
+    delete FALTA_MOTIVO_TURNO[String(personaId)];
+    return;
+  }
+  const fila = {
+    turno_id: turnoId, fecha, persona_id: parseInt(personaId),
+    tipo, detalle: detalle || null,
+    cargado_por: 'equipo',
+    autor_nombre: USUARIO_ACTUAL?.nombre || USUARIO_ACTUAL?.email || null,
+    actualizado_en: new Date().toISOString()
+  };
+  const res = await fetchSupabase(
+    `${SUPABASE_URL}/rest/v1/falta_motivo?on_conflict=turno_id,fecha,persona_id`,
+    { method:'POST',
+      headers:{ apikey: SUPABASE_KEY, 'Content-Type':'application/json',
+                Prefer:'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(fila) });
+  if (!res.ok) { toast('No se pudo guardar el motivo de la falta', 'error'); console.warn(await res.text()); return; }
+  FALTA_MOTIVO_TURNO[String(personaId)] = { tipo, detalle: detalle || '' };
 }
 
 // Avisos del alumno cargados en Mi Espacio en los ÚLTIMOS 7 DÍAS:
@@ -7044,6 +7135,22 @@ function renderModalBody(dia, hora, servicio) {
           const est = getEstadoAlumno(dia,hora,servicio,a.id);
           const esAusente = est==='ausente' || est==='ausente-justificada';
           const motivo = asistenciaMotivos[`${fechaModalIso}-${hora}-${servicio}-${a.id}`] || '';
+          // ¿Dijo por qué falta? (lo carga el alumno en Mi Espacio o el equipo acá)
+          const _fm = esAusente ? FALTA_MOTIVO_TURNO[String(a.id)] : null;
+          const chipFaltaMotivo = _fm
+            ? `<span class="chip-falta-motivo${_fm.tipo === 'dolor' ? '' : ' otro'}" title="${_escAttr((FALTA_TIPOS[_fm.tipo] || _fm.tipo) + (_fm.detalle ? ' · ' + _fm.detalle : ''))}">${_escAttr(FALTA_TIPOS[_fm.tipo] || _fm.tipo)}${_fm.detalle ? ' · ' + _escAttr(_fm.detalle) : ''}</span>`
+            : '';
+          // Faltó por dolor en las últimas 2 semanas y HOY vino: chip propio con la
+          // fecha, para no confundirlo con el dolor que viene de la bitácora.
+          // Si la falta es la de esta misma clase, ya lo dice el chip de arriba.
+          const _fd = (!esAusente && DOLOR_DETALLE[String(a.id)]) ? DOLOR_DETALLE[String(a.id)].falta : null;
+          const chipFaltoDolor = (_fd && String(_fd.fecha) !== fechaModalIso)
+            ? (() => {
+                const [, _mm, _dd] = String(_fd.fecha).split('-');
+                const _quien = _fd.quien === 'alumno' ? 'Lo avisó el alumno' : 'Lo cargó el equipo';
+                return `<span class="chip-falto-dolor" title="${_escAttr(_quien + (_fd.detalle ? ' · ' + _fd.detalle : ''))}">🩹 Faltó ${_dd}/${_mm} por dolor${_fd.detalle ? ' · ' + _escAttr(_fd.detalle) : ''}</span>`;
+              })()
+            : '';
           const ev = EVO_TURNO[String(a.id)];
           const tieneEvo = !!ev;
           const tuvoDolor = DOLOR_RECIENTE.has(String(a.id));
@@ -7079,9 +7186,13 @@ function renderModalBody(dia, hora, servicio) {
             }
             if (det.max_eva != null) titulo += ` · EVA máx ${det.max_eva}/10`;
             if (det.zona) titulo += ` · ${det.zona}`;
+            if (det.falta) {
+              const [yy, mm2, dd] = String(det.falta.fecha).split('-');
+              titulo += ` · faltó el ${dd}/${mm2} por dolor` + (det.falta.detalle ? `: ${det.falta.detalle}` : '');
+            }
             // Visual: si lo cargó el alumno (autoreporte), naranja más fuerte
-            const color = tieneAlumno ? '#dc2626' : '#ea580c';
-            alertaDolor = `<span class="alerta-dolor" style="color:${color};font-weight:700" title="${titulo.replace(/"/g,'&quot;')}">⚠️${tieneAlumno?'🩹':''}</span>`;
+            const color = (tieneAlumno || det.origenes.has('falta')) ? '#dc2626' : '#ea580c';
+            alertaDolor = `<span class="alerta-dolor" style="color:${color};font-weight:700" title="${titulo.replace(/"/g,'&quot;')}">⚠️${(tieneAlumno || det.origenes.has('falta'))?'🩹':''}</span>`;
           }
           const _ejerMiniArr = tieneEvo ? ejerciciosDe(ev) : [];
           const _ejerMini = _ejerMiniArr.length === 1
@@ -7154,7 +7265,7 @@ function renderModalBody(dia, hora, servicio) {
             <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
             <div id="ag-avatar-${a.id}" style="width:32px;height:32px;border-radius:50%;background:var(--celeste);color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;overflow:hidden;flex-shrink:0;margin-right:8px">${inicialesDe(a.nombre)}</div>
             <div style="flex:1; min-width:0">
-              <div class="alumno-nombre">${alertaDolor}${chipMsj}${chipDevoCompe}${chipBitaReciente}${a.nombre}${etiquetaNuevo}</div>
+              <div class="alumno-nombre">${alertaDolor}${chipMsj}${chipDevoCompe}${chipBitaReciente}${chipFaltaMotivo}${chipFaltoDolor}${a.nombre}${etiquetaNuevo}</div>
               <div class="alumno-id">#${a.id}${_cierreCentro?' · <span style="color:#b91c1c;font-size:11px;font-weight:700">🚫 clase cancelada</span>':est==='ausente-justificada'?' · <span style="color:#16a34a;font-size:11px">justificada</span>':est==='ausente'?' · <span style="color:#dc2626;font-size:11px">sin justificar</span>':''} ${_cierreCentro?'':chipEvo}</div>
               ${(etiquetaAgregado || etiquetaOrigenME || etiquetaPendienteFijo) ? `<div>${etiquetaAgregado}${etiquetaOrigenME}${etiquetaPendienteFijo}</div>` : ''}
               ${(_cierreCentro || esAusente) ? '' : chipsSalaAlumno(a, servicio)}
@@ -7560,6 +7671,7 @@ async function abrirModal(dia, hora, servicio) {
     cargarSalasTurno(t),
     cargarSalaProfes(t),
     cargarProfesAlumnos(t),
+    cargarFaltaMotivosTurno(t),
     cargarDolorReciente(t),
     cargarMensajesPendientes(t),
     cargarAvisosAlumno(t)
@@ -7586,6 +7698,18 @@ function filtrar(tipo, btn) {
 // Justificación de ausencias
 let justifDia = '', justifHora = '', justifServicio = '', justifId = '', justifNombreAlumno = '';
 let justifSeleccion = '';
+let justifTipoFalta = '';   // dolor | salud | viaje | trabajo | otro
+window.seleccionarTipoFalta = function(tipo) {
+  justifTipoFalta = (justifTipoFalta === tipo) ? '' : tipo;
+  document.querySelectorAll('#justif-tipos .justif-tipo').forEach(b => {
+    const t = b.getAttribute('data-tipo');
+    b.className = 'justif-tipo' + (t === justifTipoFalta ? ' sel' + (t === 'dolor' ? ' dolor' : '') : '');
+  });
+  const ta = document.getElementById('justif-motivo');
+  if (ta) ta.placeholder = justifTipoFalta === 'dolor'
+    ? '¿Qué le duele? (zona, desde cuándo)...'
+    : 'Motivo (opcional)...';
+};
 
 // === REGLA: solo se puede JUSTIFICAR (o cambiar de área) hasta 2 horas antes del turno ===
 // Excepción: las ADMIN pueden forzar la justificación fuera de plazo (con confirmación).
@@ -7627,6 +7751,12 @@ function abrirJustif(dia, hora, servicio, id, nombre) {
   document.getElementById('justif-cambio').className = 'justif-opcion';
   document.getElementById('justif-motivo').value = '';
   document.getElementById('justif-motivo').className = 'justif-motivo';
+  justifTipoFalta = '';
+  seleccionarTipoFalta('');
+  document.getElementById('justif-tipos').className = 'justif-tipos';
+  // Si ya había un motivo cargado para este alumno, lo mostramos para editarlo
+  const _yaFm = FALTA_MOTIVO_TURNO[String(id)];
+  if (_yaFm) { seleccionarTipoFalta(_yaFm.tipo); if (_yaFm.detalle) document.getElementById('justif-motivo').value = _yaFm.detalle; }
   document.getElementById('justif-destino-box').style.display = 'none';
   // FUERA DE PLAZO (menos de 2 hs o clase ya empezada): si NO es Lu/Jime,
   // "Sí, justificada" y "Cambio de área" quedan apagados directamente.
@@ -7662,6 +7792,7 @@ function seleccionarJustif(opcion) {
   // En cambio de área mostramos el selector de destino y ocultamos el motivo libre
   document.getElementById('justif-destino-box').style.display = esCambio ? 'block' : 'none';
   document.getElementById('justif-motivo').className = 'justif-motivo' + (esCambio ? '' : ' visible');
+  document.getElementById('justif-tipos').className = 'justif-tipos' + (esCambio ? '' : ' visible');
   if (esCambio) {
     // Llenar el selector SOLO con turnos del mismo día que tengan cupo disponible
     // ese día (mismo cálculo que chequearCupo: anotados - ausentes vs capacidad).
@@ -7778,7 +7909,9 @@ async function confirmarJustif() {
     motivo = motivo ? `${sello} ${motivo}` : sello;
   }
   document.getElementById('justif-overlay').classList.remove('activo');
-  guardarAsistencia(t, justifId, estado, motivo).then(() => {
+  const _tipoFalta = justifTipoFalta, _detalleFalta = document.getElementById('justif-motivo').value.trim();
+  guardarAsistencia(t, justifId, estado, motivo).then(async () => {
+    try { await guardarFaltaMotivo(t.id, fechaDelDia(justifDia), justifId, _tipoFalta, _detalleFalta); } catch (e) { console.warn(e); }
     renderModalBody(justifDia, justifHora, justifServicio);
     renderTurnos();
   });

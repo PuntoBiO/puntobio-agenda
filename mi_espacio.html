@@ -2492,6 +2492,8 @@ window.avisarFalta = async function(turnoId, dia, hora, servicio, fechaISO){
     iniciarCountdown(turnoId, fechaISO);
     // Refrescar la agenda para que aparezca "Programar acá" sin recargar a mano.
     refrescarDatosAgenda();
+    // Y preguntarle el motivo (opcional): si es por dolor, el profe lo ve.
+    setTimeout(() => pbPedirMotivoFalta(turnoId, fechaISO, dia, hora, servicio), 400);
   } catch(e){
     btn.disabled = false;
     btn.textContent = '🚫 Avisar falta';
@@ -2736,6 +2738,7 @@ function pbMsgErrorFalta(e){
 
 // Avisar falta para UNA fecha elegida en el selector
 window.pbFaltaAvisarFecha = async function(turnoId, fecha, dia, hora, serv){
+  // (al final, si el aviso sale bien, se le pregunta el motivo)
   let dentroDePlazo = true;
   try {
     const [hh,mm] = String(hora||'00:00').split(':').map(Number);
@@ -2752,6 +2755,7 @@ window.pbFaltaAvisarFecha = async function(turnoId, fecha, dia, hora, serv){
     await refrescarDatosAgenda();
     pbRenderSelectorFaltaBody(turnoId, dia, hora, serv);
     if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+    pbPedirMotivoFalta(turnoId, fecha, dia, hora, serv);
   } catch(e){
     alert(pbMsgErrorFalta(e));
   }
@@ -2834,6 +2838,7 @@ window.pbCancelarFijaDesdeAgenda = async function(turnoId, fecha, dia, hora, ser
     if (error) throw error;
     await refrescarDatosAgenda();
     if (window.pbRefrescarMisClases) window.pbRefrescarMisClases();
+    pbPedirMotivoFalta(turnoId, fecha, dia, hora, serv);
   } catch(e){
     alert(pbMsgErrorFalta(e));
   }
@@ -6858,6 +6863,91 @@ window.pbResumenNavMes = function(delta){
   }
   window._resumenMesNav = { year, mes };
   pbResumenTab('historico');
+};
+
+
+// ============================================================
+//  ¿POR QUÉ FALTÁS?  (tabla `falta_motivo`) — pedido de Lu 23/9/26
+//  Después de avisar la falta, el alumno puede decir el motivo.
+//  Si es por dolor o molestia, el profe lo ve en la agenda antes
+//  de la clase a la que vuelva. Es OPCIONAL y no cambia nada del
+//  crédito ni del recuperatorio: es solo información para el equipo.
+// ============================================================
+const PB_FALTA_TIPOS = [
+  { id:'dolor',   label:'\U0001FA79 Dolor o molestia' },
+  { id:'salud',   label:'\U0001F912 Salud' },
+  { id:'viaje',   label:'\u2708\uFE0F Viaje' },
+  { id:'trabajo', label:'\U0001F4BC Trabajo / estudio' },
+  { id:'otro',    label:'\U0001F642 Otro' }
+];
+let _pbFaltaMotivoCtx = null;   // { turnoId, fecha, tipo }
+
+window.pbPedirMotivoFalta = function(turnoId, fecha, dia, hora, serv){
+  _pbFaltaMotivoCtx = { turnoId, fecha, tipo: '' };
+  const chips = PB_FALTA_TIPOS.map(t =>
+    `<button type="button" class="pb-fm-chip" id="pb-fm-${t.id}" onclick="pbElegirTipoFalta('${t.id}')">${t.label}</button>`).join('');
+  pbAbrirModal({
+    titulo: '¿Por qué vas a faltar?',
+    subtitulo: `${dia||''} ${hora||''}${serv?' · '+serv:''} — ${fmtFechaCorta(fecha)}. Contarnos es opcional.`,
+    cuerpoHTML: `
+      <style>
+        .pb-fm-chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}
+        .pb-fm-chip{background:#fff;border:1.5px solid #cbd5e1;border-radius:9px;padding:7px 11px;
+          font-size:13.5px;font-weight:700;color:#334155;cursor:pointer;font-family:inherit}
+        .pb-fm-chip.sel{background:#0ea5e9;border-color:#0ea5e9;color:#fff}
+        .pb-fm-chip.sel.dolor{background:#dc2626;border-color:#dc2626}
+        #pb-fm-detalle{display:none;width:100%;box-sizing:border-box;border:1.5px solid #cbd5e1;border-radius:9px;
+          padding:9px 11px;font-size:14px;font-family:inherit;resize:vertical}
+        #pb-fm-detalle.visible{display:block}
+        .pb-fm-nota{font-size:12px;color:#64748b;margin-top:8px}
+      </style>
+      <div class="pb-fm-chips">${chips}</div>
+      <textarea id="pb-fm-detalle" rows="3" placeholder="Contanos un poco m\u00e1s (opcional)..."></textarea>
+      <div class="pb-fm-nota">Si es por dolor o molestia, el profe lo va a ver para adaptarte la clase cuando vuelvas.</div>`,
+    botones: [
+      { label:'Prefiero no decir', cls:'cancel',  onclick:'pbCerrarModal()' },
+      { label:'Guardar',           cls:'confirm', onclick:'pbGuardarMotivoFalta()' }
+    ]
+  });
+};
+
+window.pbElegirTipoFalta = function(tipo){
+  if (!_pbFaltaMotivoCtx) return;
+  _pbFaltaMotivoCtx.tipo = (_pbFaltaMotivoCtx.tipo === tipo) ? '' : tipo;
+  PB_FALTA_TIPOS.forEach(t => {
+    const el = document.getElementById('pb-fm-' + t.id);
+    if (el) el.className = 'pb-fm-chip' + (t.id === _pbFaltaMotivoCtx.tipo ? ' sel' + (t.id === 'dolor' ? ' dolor' : '') : '');
+  });
+  const ta = document.getElementById('pb-fm-detalle');
+  if (ta) {
+    ta.className = _pbFaltaMotivoCtx.tipo ? 'visible' : '';
+    ta.placeholder = _pbFaltaMotivoCtx.tipo === 'dolor'
+      ? '\u00bfQu\u00e9 te duele? (por ejemplo: rodilla derecha desde el s\u00e1bado)'
+      : 'Contanos un poco m\u00e1s (opcional)...';
+  }
+};
+
+window.pbGuardarMotivoFalta = async function(){
+  const ctx = _pbFaltaMotivoCtx;
+  if (!ctx || !ctx.tipo) { pbCerrarModal(); return; }
+  const ta = document.getElementById('pb-fm-detalle');
+  const detalle = ta ? ta.value.trim() : '';
+  try {
+    const { error } = await sb.from('falta_motivo').upsert({
+      turno_id: ctx.turnoId,
+      fecha: ctx.fecha,
+      persona_id: window._pidActivo(),
+      tipo: ctx.tipo,
+      detalle: detalle || null,
+      cargado_por: 'alumno',
+      autor_nombre: window._personaNombreActual || 'Alumno',
+      actualizado_en: new Date().toISOString()
+    }, { onConflict: 'turno_id,fecha,persona_id' });
+    if (error) throw error;
+  } catch (e) {
+    console.warn('No se pudo guardar el motivo de la falta', e);
+  }
+  pbCerrarModal();
 };
 
 function pbAbrirModal(cfg) {
