@@ -704,7 +704,7 @@ async function cargar(){
   for (let i = 0; i < tratIds.length; i += 150){
     const lote = tratIds.slice(i, i + 150);
     const { data: sesData } = await sbLeerTodo(() => sb.from('sesiones')
-      .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, modalidad, obra_social, personas(nombre))')
+      .select('id, tratamiento_id, fecha, profesional, monto_profesional, monto_centro, tratamientos(codigo_id, practica_codigo, modalidad, obra_social, tipo_cobro, personas(nombre))')
       .in('tratamiento_id', lote).order('fecha').order('id'));
     if (sesData) sesAll.push(...sesData);
     const { data: pagData } = await sbLeerTodo(() => sb.from('pagos_consultorio')
@@ -1060,7 +1060,19 @@ function vistaNueva(ctx){
     for (const s of (MT.sesAll || [])){
       if (s.tratamiento_id == null || !s.id) continue;
       const tS0 = s.tratamientos || {};
-      if ((tS0.practica_codigo || '') === 'MOPLEX' || String(tS0.practica_codigo || '').startsWith('MASAJES')) continue;
+      // FIX 23/09/2026: los masajes estaban excluidos del cálculo de deuda, así que
+      // TODAS las sesiones de masoterapia salían "✓ abonada" por defecto —el estado
+      // se deduce de si hay deuda registrada, y para los masajes nunca se registraba.
+      // Lo detectó Pau con Isabel Arzani: pack de 2 masajes por $90.000, pagó $45.000
+      // el 8/9, y la sesión del 22/9 figuraba abonada sin estarlo.
+      // La cascada funciona igual de bien con los packs: la plata cubre las sesiones
+      // en orden, así que un pack pagado a medias marca las que faltan.
+      // MOPLEX sigue afuera porque se liquida por su propio circuito.
+      if ((tS0.practica_codigo || '') === 'MOPLEX') continue;
+      // Donde el paciente no pone plata no hay deuda que mostrar: regalos y cortesías
+      // se cubren con la bonificación del centro y nunca van a tener un pago asociado.
+      const _tc = String(tS0.tipo_cobro || '').toUpperCase();
+      if (['CORTESIA','CORTESIA_PB','REGALO_CUMPLE','REGALO_CENTRO'].includes(_tc)) continue;
       const v = (Number(s.monto_profesional) || 0) + (Number(s.monto_centro) || 0);
       if (v <= 0.5) continue;
       (_sesT[s.tratamiento_id] = _sesT[s.tratamiento_id] || []).push({ id: s.id, fecha: s.fecha || '', need: v });
