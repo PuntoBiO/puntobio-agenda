@@ -1753,6 +1753,62 @@ function render(pagos, sesiones, filtroProf){
       }
       html += `</tbody></table></details>`;
     }
+
+    // ===== BLOQUE 4 bis: MASOTERAPIA (23/09/2026) =====
+    // Masoterapia se liquida por PAGO, no por sesión, así que sus sesiones no entran
+    // al motor y nunca aparecían acá. Pedido de Lu: verlas igual, en las dos puntas.
+    // Esto es INFORMATIVO: no cambia un peso de lo que cobra nadie, solo muestra
+    // dónde está parada la plata de los masajes.
+    {
+      const _ses = {}, _pag = {};
+      for (const x of (MT.sesAll || [])){
+        const _t = x.tratamientos || {};
+        if (!String(_t.practica_codigo || '').startsWith('MASAJES')) continue;
+        const v2 = (Number(x.monto_profesional) || 0) + (Number(x.monto_centro) || 0);
+        const k = x.tratamiento_id;
+        if (!_ses[k]) _ses[k] = { hechas: 0, valor: 0, prof: '', pac: '', prac: _t.practica_codigo || '', cod: _t.codigo_id || '—', ultima: '' };
+        _ses[k].hechas++; _ses[k].valor += v2;
+        if (x.profesional) _ses[k].prof = normProf(x.profesional) || _ses[k].prof;
+        _ses[k].pac = ((_t.personas || {}).nombre) || _ses[k].pac;
+        if ((x.fecha || '') > _ses[k].ultima) _ses[k].ultima = x.fecha || '';
+      }
+      for (const p of (MT.pagosAll || [])){
+        if (p.tratamiento_id == null) continue;
+        _pag[p.tratamiento_id] = (_pag[p.tratamiento_id] || 0) + (Number(p.importe) || 0);
+      }
+      const hechasSinPagar = [], pagasSinHacer = [];
+      for (const k of new Set([...Object.keys(_ses), ...Object.keys(_pag)])){
+        const d = _ses[k]; if (!d) continue;                 // sin sesiones: no sabemos la práctica
+        if (filtroProf && d.prof !== filtroProf) continue;
+        const cobrado = _pag[k] || 0;
+        const dif = d.valor - cobrado;
+        if (dif > 0.5)  hechasSinPagar.push(Object.assign({ tto: k, falta: dif }, d));
+        if (dif < -0.5) pagasSinHacer.push(Object.assign({ tto: k, favor: -dif }, d));
+      }
+      if (hechasSinPagar.length || pagasSinHacer.length){
+        html += `<h2 class="bloque-tit">4 bis · Masoterapia</h2>
+          <p style="color:#666;font-size:13px;margin:-6px 0 12px;">Los masajes <b>se liquidan cuando entra la plata</b>, no cuando se hace la sesión, así que no entran en el bloque de arriba. Esto es <b>solo informativo</b>: muestra las dos puntas y no cambia lo que cobra nadie.</p>`;
+        if (hechasSinPagar.length){
+          const tot = hechasSinPagar.reduce((a,x)=> a + x.falta, 0);
+          html += `<p style="font-weight:700;color:#92400e;margin:10px 0 6px;">Hechas y no abonadas — ${fmt(tot)}</p>
+            <table><thead><tr><th>Última sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Profesional</th><th class="num">Sesiones</th><th class="num">Falta cobrar</th></tr></thead><tbody>`;
+          for (const x of hechasSinPagar.sort((a,b)=> b.falta - a.falta)){
+            html += `<tr><td>${x.ultima}</td><td>${x.pac}</td><td>${x.cod}</td><td>${practicaLabel(x.prac)}</td><td>${badge(x.prof)}</td><td class="num">${fmtNum(x.hechas)}</td><td class="num">${fmt(x.falta)}</td></tr>`;
+          }
+          html += `</tbody></table>`;
+        }
+        if (pagasSinHacer.length){
+          const tot = pagasSinHacer.reduce((a,x)=> a + x.favor, 0);
+          html += `<p style="font-weight:700;color:#065f46;margin:14px 0 6px;">Abonadas y sin realizar — ${fmt(tot)} en custodia</p>
+            <p style="color:#666;font-size:12.5px;margin:-2px 0 8px;">Packs y masajes pagados por adelantado. La plata ya entró; las sesiones están por hacerse.</p>
+            <table><thead><tr><th>Última sesión</th><th>Paciente</th><th>Tto</th><th>Práctica</th><th>Profesional</th><th class="num">Hechas</th><th class="num">A favor</th></tr></thead><tbody>`;
+          for (const x of pagasSinHacer.sort((a,b)=> b.favor - a.favor)){
+            html += `<tr><td>${x.ultima || '—'}</td><td>${x.pac}</td><td>${x.cod}</td><td>${practicaLabel(x.prac)}</td><td>${badge(x.prof)}</td><td class="num">${fmtNum(x.hechas)}</td><td class="num">${fmt(x.favor)}</td></tr>`;
+          }
+          html += `</tbody></table>`;
+        }
+      }
+    }
   }
 
   // ===== BLOQUE 5: DETALLE POR PROFESIONAL Y PRÁCTICA ===== (lista de profes: oculta en modo MOPLEX)
