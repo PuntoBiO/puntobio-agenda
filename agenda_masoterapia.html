@@ -78,6 +78,10 @@ body.is-multi-mode .grid-cell.is-libre{cursor:cell}
 .turno-paciente{font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:14px}
 .turno-meta{display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);margin-top:1px;letter-spacing:.04em;text-transform:uppercase}
 .turno-meta .practica{font-weight:600}
+/* Insignia de pago en la tarjeta del turno (23/09/2026) — misma que en Agenda Fisio */
+.turno-pago{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;margin-left:6px;border-radius:50%;font-size:11px;font-weight:800;line-height:1;vertical-align:middle;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.turno-pago.debe{background:#dc2626;color:#fff;border:1.5px solid #7f1d1d}
+.turno-pago.aldia{background:#16a34a;color:#fff;border:1.5px solid #14532d}
 .turno.p-fisio,.turno.p-fisio_pq{border-color:var(--c-fisio);background:var(--c-fisio-bg)}
 .turno.p-fisio .practica,.turno.p-fisio_pq .practica{color:var(--c-fisio)}
 .turno.p-osteopatia{border-color:var(--c-osteo);background:var(--c-osteo-bg)}
@@ -844,7 +848,7 @@ async function calcularOrdinalesYTratamientos() {
   // Carga tratamientos
   try {
     const { data: ttoData, error: e1 } = await supa.from('tratamientos')
-      .select('id, codigo_id, practica_codigo, total_sesiones, persona_id')
+      .select('id, codigo_id, practica_codigo, total_sesiones, persona_id, valor_sesion, total_abonado, tipo_cobro')
       .in('id', trataIds);
     if (e1) throw e1;
     tratamientosCache.clear();
@@ -1151,7 +1155,25 @@ function renderTurno(t) {
       sesionTxt = ` · S${ord}/${tto.total_sesiones}`;
     }
   }
-  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombreMostrar)} · ${tipoLabel}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombreMostrar)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}${sesionTxt}</span><span>${horaTxt}</span></div></div>`;
+  // Insignia de pago de ESTA sesión (23/09/2026, pedido de Pau: el mismo simbolito
+  // que ya está en la agenda de Fisio). Verde = abonada, rojo = hay que cobrarla.
+  // La plata que pagó el paciente va cubriendo sus sesiones EN ORDEN, así que un
+  // pack pagado a medias marca cuáles faltan. Si la sesión no cuesta nada
+  // (regalo, cortesía, sin cargo), sale verde: no hay nada que cobrar.
+  let insigniaPago = '';
+  if (t.tratamiento_id && (t.estado||'').toUpperCase() !== 'CANCELADO') {
+    const tto = tratamientosCache.get(t.tratamiento_id);
+    const ord = turnoOrdinalMap.get(t.id);
+    if (tto && ord) {
+      const valor = Number(tto.valor_sesion) || 0;
+      const abonado = Number(tto.total_abonado) || 0;
+      const pagas = valor <= 0 ? (Number(tto.total_sesiones) || 999) : Math.floor(abonado / valor);
+      insigniaPago = (ord <= pagas)
+        ? `<span class="turno-pago aldia" title="Esta sesión ya está paga — no cobrar">$</span>`
+        : `<span class="turno-pago debe" title="Esta sesión NO está paga — hay que cobrarla">$</span>`;
+    }
+  }
+  return `<div class="turno ${pCls} ${eCls} ${sCls}" data-turno-id="${t.id}" title="${escapeHtml(nombreMostrar)} · ${tipoLabel}${sesionTxt} · ${horaTxt}"><div class="turno-paciente">${escapeHtml(nombreMostrar)}</div><div class="turno-meta"><span class="practica">${escapeHtml(tipoLabel)}${sesionTxt}</span><span>${horaTxt}${insigniaPago}</span></div></div>`;
 }
 
 function renderMonth(container) {
