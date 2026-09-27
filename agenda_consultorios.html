@@ -483,6 +483,10 @@ body.modo-gestion .grid-cell.is-bloqueo.gest-fijo:hover{outline:2px dashed #1e9f
       <div class="cs-esp-btns" id="csEspBtns"></div>
       <label class="form-label" style="display:block;margin:2px 0 2px;font-weight:700">¿Cuántas semanas?</label>
       <div class="cs-weeks" id="csWeeks"></div>
+      <label class="form-label" style="display:block;margin:2px 0 2px;font-weight:700">¿Qué horarios?</label>
+      <div class="cs-weeks" id="csFranja"></div>
+      <label class="form-label" style="display:block;margin:2px 0 2px;font-weight:700">¿De qué profesional?</label>
+      <div class="cs-esp-btns" id="csProf"></div>
       <label class="form-label" style="display:block;margin:2px 0 8px;font-weight:700">¿Cómo lo querés generar?</label>
       <div class="cs-gen-btns">
         <button class="cs-gen img" onclick="generarShareCons('img')">🖼️ Imagen (WhatsApp)</button>
@@ -3233,9 +3237,53 @@ const ESPECIALIDADES_SHARE = [
 ];
 let espShareSel = 'FISIO';
 let semanasShare = 1;
+// Franja horaria a compartir: para repartir la demanda (si no, todos eligen tarde).
+// Mañana = turnos que arrancan antes de las 13; tarde = de las 13 en adelante.
+const CORTE_TARDE = 13;
+const FRANJAS_SHARE = [
+  { key:'TODO',   label:'Todo el día', txt:'' },
+  { key:'MANANA', label:'Solo mañana', txt:'Turnos de mañana' },
+  { key:'TARDE',  label:'Solo tarde',  txt:'Turnos de tarde' },
+];
+let franjaShare = 'TODO';
+function enFranjaShare(hora) {
+  if (franjaShare === 'MANANA') return hora < CORTE_TARDE;
+  if (franjaShare === 'TARDE')  return hora >= CORTE_TARDE;
+  return true;
+}
+function textoFranjaShare() {
+  const f = FRANJAS_SHARE.find(x => x.key === franjaShare);
+  return (f && f.txt ? ' · ' + f.txt : '') + (profShare ? ' · Con ' + profShare : '');
+}
+// Profesional a compartir (null = todos). Solo se ofrecen los que hacen la especialidad elegida.
+let profShare = null;
+function profesDeEspShare(esp) {
+  if (!esp) return [];
+  if (esp.profe) return [esp.profe];
+  return PROFESIONALES.filter(p => practicasHabitualesDe(p).includes(esp.cod));
+}
+// Con profe elegido: ese profe tiene que estar en la lista. Sin profe: alcanza con que haya alguno.
+function profOkShare(lista) { return profShare ? lista.includes(profShare) : lista.length > 0; }
+function setProfShare(p) { profShare = p || null; renderProfBtns(); }
+function renderProfBtns() {
+  const cont = document.getElementById('csProf');
+  if (!cont) return;
+  const esp = ESPECIALIDADES_SHARE.find(e => e.key === espShareSel);
+  const profes = profesDeEspShare(esp);
+  if (profShare && !profes.includes(profShare)) profShare = null;
+  cont.innerHTML = [`<button class="cs-esp ${!profShare?'is-sel':''}" onclick="setProfShare(null)">Todos</button>`]
+    .concat(profes.map(p => `<button class="cs-esp ${p===profShare?'is-sel':''}" onclick="setProfShare('${p}')">${p}</button>`)).join('');
+}
+function setFranjaShare(k) { franjaShare = k; renderFranjaBtns(); }
+function renderFranjaBtns() {
+  const cont = document.getElementById('csFranja');
+  if (!cont) return;
+  cont.innerHTML = FRANJAS_SHARE.map(f =>
+    `<button class="cs-week-btn ${f.key===franjaShare?'is-sel':''}" onclick="setFranjaShare('${f.key}')">${f.label}</button>`).join('');
+}
 
-function abrirCompartirCons() { espShareSel = 'FISIO'; semanasShare = 1; renderEspBtns(); renderWeeksBtns(); openModal('modalCompartirCons'); }
-function setEspShare(k) { espShareSel = k; renderEspBtns(); }
+function abrirCompartirCons() { espShareSel = 'FISIO'; semanasShare = 1; franjaShare = 'TODO'; profShare = null; renderEspBtns(); renderWeeksBtns(); renderFranjaBtns(); renderProfBtns(); openModal('modalCompartirCons'); }
+function setEspShare(k) { espShareSel = k; renderEspBtns(); renderProfBtns(); }
 function setSemanasShare(n) { semanasShare = n; renderWeeksBtns(); }
 function renderEspBtns() {
   const cont = document.getElementById('csEspBtns');
@@ -3252,6 +3300,7 @@ function renderWeeksBtns() {
 
 // Hay lugar libre para esa especialidad en ese dia/hora/fecha? (usa los globales turnos/feriadosMap)
 function slotLibreShare(esp, diaNumero, hora, fecha) {
+  if (!enFranjaShare(hora)) return false;
   if (feriadosMap.has(fecha)) return false;
   if (esBloqueoFijo(diaNumero, hora) && aperturasConsEn(fecha, hora).length === 0) return false;
   const slotTurnos = turnos.filter(t => t.fecha===fecha && parseInt(t.hora_inicio.slice(0,2),10)===hora && t.estado!=='CANCELADO');
@@ -3272,10 +3321,10 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
     const esMarJue19 = (diaNumero === 2 || diaNumero === 4) && hora === 19;
     if (esMarJue19 && esp.cod === 'OSTEOPATIA') {
       // Jime osteo convive con la fisio de Bruno — pero si ese día no está, no va.
-      return !hayEspecialidad && disponiblesEn(diaNumero, hora, fecha).some(d => d.practicas.includes('OSTEOPATIA'));
+      return !hayEspecialidad && profOkShare(disponiblesEn(diaNumero, hora, fecha).filter(d => d.practicas.includes('OSTEOPATIA')).map(d => d.profesional));
     }
     if (!vacioCompleto) return false;                                    // osteo es exclusivo (bloquea consultorio y viceversa)
-    return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0; // donde atiende Jime
+    return profOkShare(profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha)); // donde atiende Jime
   }
 
   // Si hay osteo/masaje en el horario, bloquea todo lo de consultorio/rehab/individual
@@ -3284,12 +3333,13 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
   // PUNCIÓN SECA / DLM (individuales): casillero LIBRE COMPLETO + que atienda el profe
   if (esp.tipo === 'individual') {
     if (!vacioCompleto) return false;
+    if (profShare && profShare !== esp.profe) return false;
     return disponiblesEn(diaNumero, hora, fecha).some(d => d.profesional === esp.profe && d.practicas.includes(esp.cod));
   }
 
   // REHABILITACIÓN FÍSICA / SUELO PÉLVICO: lugar de rehab (sobreturno) libre + hay kine de fisio
   if (esp.tipo === 'rehab') {
-    const hayProfFisio = disponiblesEn(diaNumero, hora, fecha).some(d => d.practicas.includes('FISIO'));
+    const hayProfFisio = profOkShare(disponiblesEn(diaNumero, hora, fecha).filter(d => d.practicas.includes('FISIO')).map(d => d.profesional));
     const sobreUsados = slotTurnos.filter(esSobreTurnoCons).length;
     return hayProfFisio && sobreUsados === 0;
   }
@@ -3304,7 +3354,7 @@ function slotLibreShare(esp, diaNumero, hora, fecha) {
     const consOcupados = slotTurnos.filter(t => !esSobreTurnoCons(t) && !esEspecialidadCons(t.practica_codigo)).length;
     if (consOcupados >= (regla.cap_normal || 2)) return false;
   }
-  return profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha).length > 0;
+  return profOkShare(profesionalesParaPracticaEn(diaNumero, hora, esp.cod, fecha));
 }
 
 function construirShareCardCons(esp, semanas) {
@@ -3334,7 +3384,7 @@ function construirShareCardCons(esp, semanas) {
   }
   const primerLun = base;
   const ultimoVie = addDays(base, (semanas-1)*7 + 4);
-  const rango = 'Del ' + fmt(primerLun) + ' al ' + fmt(ultimoVie) + (semanas > 1 ? ' · ' + semanas + ' semanas' : '');
+  const rango = 'Del ' + fmt(primerLun) + ' al ' + fmt(ultimoVie) + (semanas > 1 ? ' · ' + semanas + ' semanas' : '') + textoFranjaShare();
   return `
     <img class="sc-logo-img" src="${LOGO_PB_B64}" alt="PuntoBiO">
     <div class="sc-title"><span class="pb">PuntoBiO</span>${nb(' · Turnos disponibles')}</div>
@@ -3384,7 +3434,7 @@ async function dibujarShareCanvas(esp, semanas) {
     y += 22;
     // Rango de fechas
     const ultV = addDays(base, (semanas-1)*7 + 4);
-    const rango = 'Del ' + fmt(base) + ' al ' + fmt(ultV) + (semanas > 1 ? ' · ' + semanas + ' semanas' : '');
+    const rango = 'Del ' + fmt(base) + ' al ' + fmt(ultV) + (semanas > 1 ? ' · ' + semanas + ' semanas' : '') + textoFranjaShare();
     ctx.font = '400 13px Arial, sans-serif';
     if (draw) { ctx.fillStyle = '#7b8a99'; ctx.fillText(rango, W/2, y+12); }
     y += 26;
@@ -3493,7 +3543,7 @@ async function generarShareCons(formato) {
     feriadosMap = ferMap;
     const canvas = await dibujarShareCanvas(esp, semanas);
     turnos = tBak; feriadosMap = fBak;
-    const fname = `turnos-${esp.key.toLowerCase()}-${desde}-al-${hasta}`;
+    const fname = `turnos-${esp.key.toLowerCase()}${franjaShare !== 'TODO' ? '-' + franjaShare.toLowerCase() : ''}${profShare ? '-' + profShare.toLowerCase() : ''}-${desde}-al-${hasta}`;
     if (formato === 'pdf') {
       const { jsPDF } = window.jspdf;
       const pdf = new jsPDF({ orientation:'portrait', unit:'px', format:[canvas.width, canvas.height] });
