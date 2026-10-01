@@ -134,15 +134,32 @@ async function buscarPacientes(q) {
     : supabase.from('pacientes_sarkmed').select('id, apellido_nombre, dni, fecha_nacimiento').ilike('apellido_nombre', `%${q}%`).order('apellido_nombre').limit(15)
   const [a, b] = await Promise.all([pPB, pSK])
   if (a.error) console.warn('personas', a.error); if (b.error) console.warn('sarkmed', b.error)
-  return [
-    ...(a.data || []).map(p => ({ origen: 'PUNTOBIO', id: String(p.id), nombre: p.nombre, dni: p.dni, edad: edadDe(p.fecha_nacimiento) })),
-    ...(b.data || []).map(p => ({ origen: 'SARKMED', id: String(p.id), nombre: p.apellido_nombre, dni: p.dni, edad: edadDe(p.fecha_nacimiento) })),
+  const todos = [
+    ...(a.data || []).map(p => ({ origen: 'PUNTOBIO', id: String(p.id), nombre: p.nombre, dni: normDni(p.dni), edad: edadDe(p.fecha_nacimiento) })),
+    ...(b.data || []).map(p => ({ origen: 'SARKMED', id: String(p.id), nombre: p.apellido_nombre, dni: normDni(p.dni), edad: edadDe(p.fecha_nacimiento) })),
   ]
+  // La misma persona en los dos padrones (mismo DNI) aparece UNA sola vez, con las dos etiquetas.
+  // Es UNA persona: sus tomas se guardan una vez y se leen por DNI desde cualquiera de los dos lados.
+  const porDni = new Map(), salida = []
+  for (const p of todos) {
+    p.padrones = [p.origen]
+    if (!p.dni) { salida.push(p); continue }
+    const ya = porDni.get(p.dni)
+    if (!ya) { porDni.set(p.dni, p); salida.push(p) }
+    else if (!ya.padrones.includes(p.origen)) {
+      ya.padrones.push(p.origen)
+      if (ya.edad == null) ya.edad = p.edad
+      if (p.origen === 'PUNTOBIO') { ya.origen = 'PUNTOBIO'; ya.id = p.id; ya.nombre = p.nombre }   // el padrón general manda
+    }
+  }
+  return salida
 }
+const normDni = (d) => { const x = String(d ?? '').replace(/\D/g, ''); return x || null }
+const etiquetas = (p) => (p.padrones || [p.origen]).map(o => `<em>${o === 'SARKMED' ? 'SARKMED' : 'PuntoBiO'}</em>`).join('')
 function chipPaciente() {
   if (!paciente) return ''
   if (paciente.origen === 'PRUEBA') return `<span class="pac prueba">🧪 Prueba sin paciente · no se guarda</span>`
-  return `<span class="pac">👤 ${esc(paciente.nombre)}${paciente.dni ? ' · DNI ' + esc(paciente.dni) : ''}${paciente.edad != null ? ' · ' + paciente.edad + ' años' : ''} <em>${paciente.origen === 'SARKMED' ? 'SARKMED' : 'PuntoBiO'}</em></span>`
+  return `<span class="pac">👤 ${esc(paciente.nombre)}${paciente.dni ? ' · DNI ' + esc(paciente.dni) : ''}${paciente.edad != null ? ' · ' + paciente.edad + ' años' : ''} ${etiquetas(paciente)}</span>`
 }
 
 // ============================================================
@@ -724,7 +741,7 @@ function mostrarResultado(html, texto, datos) {
 async function guardarResultado() {
   const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Guardando…'
   const fila = {
-    origen: paciente.origen, paciente_id: paciente.id, paciente_nombre: paciente.nombre, paciente_dni: paciente.dni || null,
+    origen: paciente.origen, paciente_id: paciente.id, paciente_nombre: paciente.nombre, paciente_dni: normDni(paciente.dni),
     test: actual.id, valor: datosRes.valor, unidad: datosRes.unidad, detalle: datosRes.detalle,
     texto: textoCopiar, manos_libres: !!manosLibres
   }
@@ -754,7 +771,9 @@ async function cargarEvolucion(testId) {
   const ult = $('ultima'), box = $('evo')
   if (!ult || !paciente || paciente.origen === 'PRUEBA') return
   const { data, error } = await supabase.from('tests_biolab').select('valor, unidad, detalle, creado_en')
-    .eq('origen', paciente.origen).eq('paciente_id', paciente.id).eq('test', testId)
+    // por DNI junta las tomas de la persona venga de PuntoBiO o de SARKMED; sin DNI, por su ficha
+    .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
+    .eq('test', testId)
     .order('creado_en', { ascending: true })
   if (error) { ult.textContent = ''; return }
   const cfg = EVO[testId]
@@ -855,7 +874,7 @@ function renderCatalogo() {
       try {
         resultadosBusq = await buscarPacientes(q.value)
         lista.innerHTML = resultadosBusq.length
-          ? resultadosBusq.map((p, i) => `<button data-i="${i}">${esc(p.nombre)}${p.dni ? ' · DNI ' + esc(p.dni) : ''}${p.edad != null ? ' · ' + p.edad + ' años' : ''}<em>${p.origen === 'SARKMED' ? 'SARKMED' : 'PuntoBiO'}</em></button>`).join('')
+          ? resultadosBusq.map((p, i) => `<button data-i="${i}">${esc(p.nombre)}${p.dni ? ' · DNI ' + esc(p.dni) : ''}${p.edad != null ? ' · ' + p.edad + ' años' : ''}${etiquetas(p)}</button>`).join('')
           : '<div class="nota">No encontré a nadie con eso. Probá con el apellido o el DNI sin puntos.</div>'
         lista.querySelectorAll('button').forEach(b => b.onclick = () => { paciente = resultadosBusq[+b.dataset.i]; renderCatalogo() })
       } catch (e) { lista.innerHTML = `<div class="nota c-bad">Error al buscar: ${esc(e.message || e)}</div>` }
