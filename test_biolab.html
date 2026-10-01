@@ -102,14 +102,14 @@ const TESTS = [
       Hacé 2 intentos: el sistema se queda con el mejor.` },
   { id:'step2', ico:'🦵', nombre:'Marcha en el lugar (2 min)',
     desc:'2-Minute Step Test. Calibra la altura de rodilla sola y cuenta cada vez que la rodilla derecha llega a la marca.',
-    pos:'iPad de frente, cuerpo entero en cuadro', encuadre:'frente',
-    info:`<b>Preparación:</b> iPad de frente, a 2-3 m, que se vea el cuerpo entero. Puede apoyar una mano en una silla o pared (para equilibrio, no para impulsarse).<br>
+    pos:'iPad VERTICAL de frente, cuerpo entero en cuadro', encuadre:'frente',
+    info:`<b>Preparación:</b> iPad <b>vertical</b> y de frente, a 2-3 m, que se vea el cuerpo entero de la cabeza a los pies. Puede apoyar una mano en una silla o pared (para equilibrio, no para impulsarse).<br>
       <b>Cómo:</b> tocás <b>Empezar</b> y el paciente se queda <b>quieto 2 segundos</b>: el sistema mide cadera y rodilla y marca la altura objetivo (punto medio entre rótula y cresta ilíaca). Suena el «ya» y marcha 2 minutos.<br>
       <b>Conteo:</b> cuenta las veces que la <b>rodilla derecha</b> llega a la línea. La izquierda se muestra como referencia.` },
   { id:'equilibrio', ico:'🧍', nombre:'Equilibrio SPPB (3 posturas)',
     desc:'Pies juntos, semi-tándem y tándem, en secuencia. Cronometra 10 s y corta si mueve los pies.',
-    pos:'iPad de frente, pies bien visibles', encuadre:'frente',
-    info:`<b>Preparación:</b> iPad de frente, que se vean bien los pies. Ayudás al paciente a ubicarse y lo soltás.<br>
+    pos:'iPad VERTICAL de frente, de la cabeza a los pies', encuadre:'frente',
+    info:`<b>Preparación:</b> iPad <b>vertical</b> y de frente, que se vea de la cabeza a los pies. Ayudás al paciente a ubicarse y lo soltás.<br>
       <b>Cómo:</b> para cada postura tocás <b>Empezar</b>. Corre hasta 10 s y corta solo si mueve los pies. Si se agarra de algo, tocá <b>Se apoyó / cortar</b>.<br>
       <b>Orden:</b> pies juntos → semi-tándem → tándem. Si no completa una postura, las siguientes quedan en 0.<br>
       <b>Puntaje:</b> pies juntos y semi-tándem, 10 s = 1 punto. Tándem: 10 s = 2 · 3 a 9,99 s = 1 · menos de 3 s = 0. Total 0 a 4.` },
@@ -195,11 +195,36 @@ async function cargarModelo() {
   catch (e) { landmarker = await PoseLandmarker.createFromOptions(vision, opts('CPU')) }
 }
 
+// Cámara elegida: '' = automática (prefiere el ultra gran angular trasero si existe)
+let camId = (() => { try { return localStorage.getItem('testbiolab_cam') || '' } catch (e) { return '' } })()
+
 async function prenderCamara() {
   apagarCamara()
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: false, video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }
-  })
+  // Sin forzar 16:9: el sensor del iPad es 4:3 y en 16:9 recorta arriba y abajo (se pierde cabeza o pies)
+  const base = { width: { ideal: 1920 }, height: { ideal: 1440 } }
+  const pedir = camId ? { ...base, deviceId: { exact: camId } } : { ...base, facingMode: facing }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: pedir }) }
+  catch (e) { if (camId) { camId = ''; stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, facingMode: facing } }) } else throw e }
+
+  // Primera vez: si hay ultra gran angular trasero, pasamos a esa (es la que ve el cuerpo entero más cerca)
+  await llenarCamaras()
+  if (!camId) {
+    const ultra = camaras.find(c => /ultra/i.test(c.label) && !/front|frontal|delanter/i.test(c.label))
+    if (ultra && facing === 'environment') {
+      stream.getTracks().forEach(t => t.stop())
+      camId = ultra.deviceId
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...base, deviceId: { exact: camId } } })
+      llenarCamaras()
+    }
+  }
+  const track = stream.getVideoTracks()[0]
+  const st = track.getSettings ? track.getSettings() : {}
+  if (st.facingMode) facing = st.facingMode === 'user' ? 'user' : 'environment'
+  else if (camId) { const c = camaras.find(x => x.deviceId === camId); if (c) facing = /front|frontal|delanter/i.test(c.label) ? 'user' : 'environment' }
+
+  // Zoom: si la cámara lo permite, arrancamos en el más abierto (ej. 0,5x)
+  configurarZoom(track)
+
   const v = $('video')
   v.srcObject = stream
   v.style.transform = facing === 'user' ? 'scaleX(-1)' : ''
@@ -211,6 +236,27 @@ async function prenderCamara() {
   loop()
 }
 
+let camaras = []
+async function llenarCamaras() {
+  try {
+    camaras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput')
+    const sel = $('selCam'); if (!sel || !camaras.length || !camaras[0].label) return
+    const actualId = stream && stream.getVideoTracks()[0].getSettings().deviceId
+    sel.innerHTML = camaras.map((c, i) => `<option value="${i}">${c.label.replace(/</g, '')}</option>`).join('')
+    const i = camaras.findIndex(c => c.deviceId === (camId || actualId)); if (i >= 0) sel.value = String(i)
+  } catch (e) {}
+}
+
+function configurarZoom(track) {
+  const box = $('zoomBox'); if (!box) return
+  const cap = track.getCapabilities ? track.getCapabilities() : {}
+  if (!cap.zoom || cap.zoom.max <= cap.zoom.min) { box.style.display = 'none'; return }
+  const r = $('zoom'); r.min = cap.zoom.min; r.max = Math.min(cap.zoom.max, 3); r.step = cap.zoom.step || 0.1
+  r.value = cap.zoom.min; box.style.display = ''
+  const aplicar = () => { track.applyConstraints({ advanced: [{ zoom: parseFloat(r.value) }] }).catch(() => {}); $('zoomVal').textContent = parseFloat(r.value).toFixed(1).replace('.', ',') + 'x' }
+  r.oninput = aplicar; aplicar()
+}
+
 function apagarCamara() {
   if (rafId) cancelAnimationFrame(rafId); rafId = null
   if (stream) stream.getTracks().forEach(t => t.stop()); stream = null
@@ -220,6 +266,8 @@ function loop() {
   const v = $('video')
   if (!v || !stream) return
   if (v.currentTime !== lastVideoTime && landmarker && v.videoWidth) {
+    const cv = $('canvas')
+    if (cv.width !== v.videoWidth || cv.height !== v.videoHeight) { cv.width = v.videoWidth; cv.height = v.videoHeight; pose = null }
     lastVideoTime = v.currentTime
     const now = performance.now()
     const r = landmarker.detectForVideo(v, now)
@@ -635,6 +683,7 @@ function renderTest(id) {
         <div class="info">${actual.info}</div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
+          <label id="zoomBox" style="display:none">Zoom <input id="zoom" type="range" style="width:110px;vertical-align:middle"> <span id="zoomVal" class="mono"></span></label>
           ${id === 'step2' ? `<label>Aviso al contar <select id="selAviso"><option value="pitido">Pitido</option><option value="voz">Decir el número</option><option value="silencio">Silencio</option></select></label>` : ''}
           ${id === 'marcha4' ? `<label>Distancia entre líneas <input id="dist4" type="number" step="0.5" min="1" value="4"> m</label>` : ''}
         </div>
@@ -663,7 +712,13 @@ function renderTest(id) {
       else if (avisoConteo === 'pitido') beep(1200, 60)
     }
   }
-  $('selCam').onchange = async (e) => { facing = e.target.value; if (stream) await prenderCamara() }
+  $('selCam').onchange = async (e) => {
+    const val = e.target.value
+    if (val === 'environment' || val === 'user') { facing = val; camId = '' }
+    else { const c = camaras[parseInt(val)]; if (c) camId = c.deviceId }
+    try { localStorage.setItem('testbiolab_cam', camId) } catch (er) {}
+    if (stream) await prenderCamara()
+  }
   $('btnPreparar').onclick = async () => {
     beep(1, 1) // destraba el audio en el iPad
     if (avisoConteo === 'voz') decir(' ')
