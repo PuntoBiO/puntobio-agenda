@@ -42,6 +42,14 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .pill.ok{background:rgba(22,163,74,.85)} .pill.warn{background:rgba(217,119,6,.9)}
 .big{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,.8);color:#fff;border-radius:16px;padding:8px 22px;font-family:'JetBrains Mono',monospace;font-size:44px;font-weight:600;pointer-events:none;white-space:nowrap}
 .big:empty{display:none}
+.chk{position:absolute;left:12px;top:52px;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+.chk span{background:rgba(15,23,42,.78);color:#fff;border-radius:8px;padding:5px 10px;font-size:13px;font-weight:600}
+.chk span.ok{background:rgba(22,163,74,.85)}
+.chk span.no{background:rgba(220,38,38,.85)}
+.consejo{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(15,23,42,.85);color:#fff;border-radius:14px;padding:12px 20px;font-size:22px;font-weight:800;text-align:center;pointer-events:none;max-width:85%}
+.consejo:empty{display:none}
+.consejo.ok{background:rgba(22,163,74,.9)}
+button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
 .panel h2{margin:0 0 6px;font-size:19px}
@@ -82,25 +90,25 @@ import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@m
 const TESTS = [
   { id:'tug', ico:'🪑', nombre:'Pararse y caminar (TUG)',
     desc:'Movilidad funcional y riesgo de caídas. El sistema arranca en «ya» y corta solo cuando se vuelve a sentar.',
-    pos:'iPad de costado, que se vea la silla y los 3 m',
+    pos:'iPad de costado, que se vea la silla y los 3 m', encuadre:'costado',
     info:`<b>Preparación:</b> silla con apoyabrazos en un extremo de la alfombra y cono en el 3. iPad de costado, a la altura de la cadera, que se vea todo el recorrido.<br>
       <b>Cómo:</b> el paciente sentado y apoyado en el respaldo. Tocás <b>Empezar</b>: cuenta 3-2-1 y suena el «ya». Se levanta, camina, gira, vuelve y se sienta. El tiempo se corta solo al sentarse.<br>
       Puede usar su calzado y bastón habitual. 1 intento de práctica y después 1 medido.` },
   { id:'marcha4', ico:'🚶', nombre:'Marcha 4 metros',
     desc:'Velocidad de marcha a paso habitual. Vos marcás en la pantalla las dos líneas de la alfombra y el sistema cronometra el cruce.',
-    pos:'iPad de costado, perpendicular al centro de la alfombra',
+    pos:'iPad de costado, perpendicular al centro de la alfombra', encuadre:'lineas',
     info:`<b>Preparación:</b> iPad de costado, perpendicular a la mitad de la alfombra, que se vean las dos marcas. Protocolo: arranca en el 0, <b>1,5 m</b> de aceleración, <b>4 m</b> cronometrados (del 1,5 al 5,5) y frena al final.<br>
       <b>Cómo:</b> tocá en la imagen la línea de inicio y después la de llegada. Tocás <b>Empezar</b> y el paciente camina a su paso habitual. El tiempo corre cuando el tronco cruza la primera línea y corta en la segunda.<br>
       Hacé 2 intentos: el sistema se queda con el mejor.` },
   { id:'step2', ico:'🦵', nombre:'Marcha en el lugar (2 min)',
     desc:'2-Minute Step Test. Calibra la altura de rodilla sola y cuenta cada vez que la rodilla derecha llega a la marca.',
-    pos:'iPad de frente, cuerpo entero en cuadro',
+    pos:'iPad de frente, cuerpo entero en cuadro', encuadre:'frente',
     info:`<b>Preparación:</b> iPad de frente, a 2-3 m, que se vea el cuerpo entero. Puede apoyar una mano en una silla o pared (para equilibrio, no para impulsarse).<br>
       <b>Cómo:</b> tocás <b>Empezar</b> y el paciente se queda <b>quieto 2 segundos</b>: el sistema mide cadera y rodilla y marca la altura objetivo (punto medio entre rótula y cresta ilíaca). Suena el «ya» y marcha 2 minutos.<br>
       <b>Conteo:</b> cuenta las veces que la <b>rodilla derecha</b> llega a la línea. La izquierda se muestra como referencia.` },
   { id:'equilibrio', ico:'🧍', nombre:'Equilibrio SPPB (3 posturas)',
     desc:'Pies juntos, semi-tándem y tándem, en secuencia. Cronometra 10 s y corta si mueve los pies.',
-    pos:'iPad de frente, pies bien visibles',
+    pos:'iPad de frente, pies bien visibles', encuadre:'frente',
     info:`<b>Preparación:</b> iPad de frente, que se vean bien los pies. Ayudás al paciente a ubicarse y lo soltás.<br>
       <b>Cómo:</b> para cada postura tocás <b>Empezar</b>. Corre hasta 10 s y corta solo si mueve los pies. Si se agarra de algo, tocá <b>Se apoyó / cortar</b>.<br>
       <b>Orden:</b> pies juntos → semi-tándem → tándem. Si no completa una postura, las siguientes quedan en 0.<br>
@@ -140,6 +148,29 @@ function legLen() {
   const a = dist(pose[L.hipL], pose[L.ankL]), b = dist(pose[L.hipR], pose[L.ankR])
   return (a + b) / 2
 }
+// Aviso al contar (marcha en el lugar): 'pitido' | 'voz' | 'silencio'. Se recuerda en este iPad.
+let avisoConteo = (() => { try { return localStorage.getItem('testbiolab_aviso') || 'pitido' } catch (e) { return 'pitido' } })()
+let vozEs = null
+function elegirVoz() {
+  try {
+    const vs = speechSynthesis.getVoices()
+    vozEs = vs.find(v => /es[-_]AR/i.test(v.lang)) || vs.find(v => /es[-_](419|MX|US)/i.test(v.lang)) || vs.find(v => /^es/i.test(v.lang)) || null
+  } catch (e) {}
+}
+try { elegirVoz(); speechSynthesis.onvoiceschanged = elegirVoz } catch (e) {}
+function decir(txt) {
+  try {
+    speechSynthesis.cancel()               // si viene rápido, no se acumulan números atrasados
+    const u = new SpeechSynthesisUtterance(String(txt))
+    u.lang = vozEs ? vozEs.lang : 'es-AR'; if (vozEs) u.voice = vozEs
+    u.rate = 1.3; speechSynthesis.speak(u)
+  } catch (e) {}
+}
+function avisarConteo(n) {
+  if (avisoConteo === 'pitido') beep(1200, 60)
+  else if (avisoConteo === 'voz') decir(n)
+}
+
 function setEstado(txt, cls = '') { const e = $('estado'); if (e) { e.textContent = txt; e.className = 'estado ' + cls } }
 function setBig(txt) { const e = $('big'); if (e) e.textContent = txt }
 function setPill(txt, cls = '') { const e = $('pill'); if (e) { e.textContent = txt; e.className = 'pill ' + cls } }
@@ -199,6 +230,7 @@ function loop() {
       setPill('Paciente detectado', 'ok')
     } else { pose = null; setPill('No veo al paciente', 'warn') }
     if (det && det.frame) det.frame(now)
+    actualizarCalibrador()
     dibujar()
   }
   rafId = requestAnimationFrame(loop)
@@ -211,11 +243,90 @@ function dibujar() {
   const s = c.width / 640
   // líneas del detector (objetivo de rodilla, líneas de la alfombra, etc.)
   if (det && det.dibujar) det.dibujar(ctx, s)
+  if (zona && det && !MEDIDO.includes(det.fase) && actual.encuadre !== 'lineas') {
+    ctx.setLineDash([16 * s, 10 * s]); ctx.lineWidth = 4 * s
+    ctx.strokeStyle = posOk ? 'rgba(34,197,94,.95)' : 'rgba(239,68,68,.9)'
+    ctx.strokeRect(zona.x0, zona.y0, zona.x1 - zona.x0, zona.y1 - zona.y0)
+    ctx.setLineDash([])
+  }
   if (!pose) return
   ctx.lineWidth = 4 * s; ctx.strokeStyle = 'rgba(30,159,224,.9)'
   HUESOS.forEach(([a, b]) => { if (pose[a].v > .4 && pose[b].v > .4) { ctx.beginPath(); ctx.moveTo(pose[a].x, pose[a].y); ctx.lineTo(pose[b].x, pose[b].y); ctx.stroke() } })
   ctx.fillStyle = '#fff'
   ;[23,24,25,26,27,28].forEach(i => { if (pose[i].v > .4) { ctx.beginPath(); ctx.arc(pose[i].x, pose[i].y, 6 * s, 0, 7); ctx.fill() } })
+}
+
+// ============================================================
+// CALIBRADOR DE POSICIÓN (estilo HumanTrak)
+// Antes de cada toma revisa: cuerpo entero en cuadro, distancia, centrado
+// y orientación (de frente / de costado). Empezar se habilita cuando todo
+// queda en verde 1 segundo seguido.
+// ============================================================
+let posOkFrames = 0, posOk = false, zona = null
+const MEDIDO = ['calibrando', 'cuenta', 'midiendo', 'esperando', 'corriendo']
+
+function chequearPosicion() {
+  const c = $('canvas'); if (!c || !actual) return null
+  const W = c.width, H = c.height, tipo = actual.encuadre
+  if (tipo === 'lineas') {
+    const ok = det.lineas && det.lineas.length === 2
+    return { ok, items: [{ ok, txt: 'Líneas de la alfombra marcadas' }], consejo: ok ? '' : 'Marcá las dos líneas tocando la imagen' }
+  }
+  if (!pose) return { ok: false, items: [{ ok: false, txt: 'Paciente en cuadro' }], consejo: 'No veo al paciente' }
+  const vis = (i) => pose[i].v > 0.5
+  const dentro = (i, m = 0.02) => pose[i].x > W * m && pose[i].x < W * (1 - m) && pose[i].y > H * m && pose[i].y < H * (1 - m)
+  const cabeza = vis(0) && dentro(0)
+  const pies = [27, 28, 29, 30, 31, 32].every(i => vis(i) && dentro(i))
+  const tronco = [11, 12, 23, 24].every(i => vis(i))
+  const yPies = Math.max(...[27, 28, 29, 30, 31, 32].map(i => pose[i].y))
+  const alto = (yPies - pose[0].y) / H
+  const cad = mid(pose[23], pose[24]), hom = mid(pose[11], pose[12])
+  const torso = Math.max(dist(cad, hom), 1)
+  const ancho = Math.abs(pose[11].x - pose[12].x) / torso
+  const xRel = cad.x / W
+  const [aMin, aMax] = tipo === 'costado' ? [0.30, 0.85] : [0.55, 0.88]
+
+  const items = [], consejos = []
+  items.push({ ok: cabeza, txt: 'Cabeza en cuadro' }); if (!cabeza) consejos.push('Se corta la cabeza: alejá el iPad o bajalo un poco')
+  items.push({ ok: pies, txt: 'Pies en cuadro' }); if (!pies) consejos.push('No veo los pies: alejá el iPad o inclinalo hacia abajo')
+  const distOk = cabeza && pies && alto >= aMin && alto <= aMax
+  items.push({ ok: distOk, txt: 'Distancia' })
+  if (cabeza && pies && alto < aMin) consejos.push('Está muy lejos: acercá el iPad')
+  if (cabeza && pies && alto > aMax) consejos.push('Está muy cerca: alejá el iPad')
+  const centOk = xRel > 0.33 && xRel < 0.67
+  items.push({ ok: centOk, txt: 'Centrado' })
+  if (!centOk) {
+    // en cámara frontal la imagen va espejada: lo que el evaluador ve a la izquierda es la derecha del cuadro
+    const izq = facing === 'user' ? xRel > 0.67 : xRel < 0.33
+    consejos.push(izq ? 'Corré al paciente hacia el centro (está a la izquierda de la imagen)' : 'Corré al paciente hacia el centro (está a la derecha de la imagen)')
+  }
+  let oriOk = tronco
+  if (tipo === 'frente') { oriOk = tronco && ancho > 0.45; items.push({ ok: oriOk, txt: 'De frente a la cámara' }); if (tronco && !oriOk) consejos.push('Que se ponga de frente al iPad') }
+  if (tipo === 'costado') { oriOk = tronco && ancho < 0.35; items.push({ ok: oriOk, txt: 'De costado a la cámara' }); if (tronco && !oriOk) consejos.push('Ubicá la silla de costado al iPad') }
+  zona = { x0: W * 0.33, x1: W * 0.67, y0: H * 0.02, y1: H * 0.98 }
+  const ok = cabeza && pies && distOk && centOk && oriOk
+  return { ok, items, consejo: consejos[0] || '' }
+}
+
+function actualizarCalibrador() {
+  const chk = $('chk'), cons = $('consejo'), btn = $('btnEmpezar')
+  if (!chk || !det) return
+  if (MEDIDO.includes(det.fase)) {
+    chk.innerHTML = ''; cons.textContent = ''; cons.className = 'consejo'
+    // durante la toma solo avisamos si se sale de cuadro
+    if (actual.encuadre !== 'lineas' && pose) {
+      const r = chequearPosicion()
+      if (r && !r.items[0].ok || r && !r.items[1].ok) setPill('⚠ Se está saliendo de cuadro', 'warn')
+    }
+    return
+  }
+  const r = chequearPosicion(); if (!r) return
+  posOkFrames = r.ok ? posOkFrames + 1 : 0
+  posOk = posOkFrames >= 15
+  chk.innerHTML = r.items.map(i => `<span class="${i.ok ? 'ok' : 'no'}">${i.ok ? '✓' : '✗'} ${i.txt}</span>`).join('')
+  if (posOk) { cons.textContent = actual.encuadre === 'lineas' ? '' : '✓ Posición correcta'; cons.className = 'consejo ok' }
+  else { cons.textContent = r.consejo; cons.className = 'consejo' }
+  if (btn && $('btnPreparar').disabled && !det.ocupado) btn.disabled = !posOk
 }
 
 // ============================================================
@@ -250,7 +361,7 @@ const DETECTORES = {
         const histD = d.base.kR - (d.base.kR - d.objetivo.R) * 0.35
         const histI = d.base.kL - (d.base.kL - d.objetivo.L) * 0.35
         const kR = pose[L.kneeR].y, kL = pose[L.kneeL].y
-        if (!d.arribaD && kR <= d.objetivo.R) { d.arribaD = true; d.cuentaD++; beep(1200, 50) }
+        if (!d.arribaD && kR <= d.objetivo.R) { d.arribaD = true; d.cuentaD++; avisarConteo(d.cuentaD) }
         if (d.arribaD && kR > histD) d.arribaD = false
         if (!d.arribaI && kL <= d.objetivo.L) { d.arribaI = true; d.cuentaI++ }
         if (d.arribaI && kL > histI) d.arribaI = false
@@ -492,6 +603,8 @@ function renderTest(id) {
           <video id="video" playsinline muted></video>
           <canvas id="canvas"></canvas>
           <div class="hud"><span class="pill" id="pill">—</span></div>
+          <div class="chk" id="chk"></div>
+          <div class="consejo" id="consejo"></div>
           <div class="big" id="big"></div>
         </div>
       </div>
@@ -500,6 +613,7 @@ function renderTest(id) {
         <div class="info">${actual.info}</div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
+          ${id === 'step2' ? `<label>Aviso al contar <select id="selAviso"><option value="pitido">Pitido</option><option value="voz">Decir el número</option><option value="silencio">Silencio</option></select></label>` : ''}
           ${id === 'marcha4' ? `<label>Distancia entre líneas <input id="dist4" type="number" step="0.5" min="1" value="4"> m</label>` : ''}
         </div>
         <div class="estado" id="estado">Tocá Preparar cámara.</div>
@@ -510,19 +624,30 @@ function renderTest(id) {
           ${id === 'marcha4' ? `<button class="b" id="btnLineas" disabled>Marcar líneas de nuevo</button>` : ''}
           <button class="b" id="btnReiniciar">Reiniciar test</button>
         </div>
+        <button class="lnk" id="btnForzar" style="display:none">Empezar sin verificar la posición</button>
         <div class="res" id="res"></div>
       </div>
     </div>`
   $('btnVolver').onclick = renderCatalogo
   $('btnReiniciar').onclick = () => renderTest(id)
   $('selCam').value = facing
+  if ($('selAviso')) {
+    $('selAviso').value = avisoConteo
+    $('selAviso').onchange = (e) => {
+      avisoConteo = e.target.value
+      try { localStorage.setItem('testbiolab_aviso', avisoConteo) } catch (er) {}
+      if (avisoConteo === 'voz') decir('uno')       // prueba de voz (y destraba el audio en el iPad)
+      else if (avisoConteo === 'pitido') beep(1200, 60)
+    }
+  }
   $('selCam').onchange = async (e) => { facing = e.target.value; if (stream) await prenderCamara() }
   $('btnPreparar').onclick = async () => {
     beep(1, 1) // destraba el audio en el iPad
+    if (avisoConteo === 'voz') decir(' ')
     $('btnPreparar').disabled = true
     try {
       await cargarModelo(); await prenderCamara()
-      $('btnPreparar').textContent = 'Cámara lista'; $('btnEmpezar').disabled = false; $('btnDetener').disabled = false
+      $('btnPreparar').textContent = 'Cámara lista'; $('btnDetener').disabled = false; $('btnForzar').style.display = ''
       if (det.init) det.init(); else setEstado('Listo. Ubicá al paciente y tocá Empezar.', 'ok')
     } catch (e) {
       console.error(e); $('btnPreparar').disabled = false
@@ -533,6 +658,7 @@ function renderTest(id) {
   }
   $('btnEmpezar').onclick = () => { $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
   $('btnDetener').onclick = () => det.terminar && det.terminar()
+  $('btnForzar').onclick = () => { $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
   if (id === 'marcha4') $('btnLineas').onclick = () => det.relineas()
   $('canvas').addEventListener('pointerdown', (ev) => {
     if (!det.tap) return
