@@ -263,6 +263,9 @@ function dibujar() {
 // queda en verde 1 segundo seguido.
 // ============================================================
 let posOkFrames = 0, posOk = false, zona = null
+// MANOS LIBRES (autoevaluación): se toca el botón cerca del iPad, uno se aleja y se ubica,
+// y la toma arranca sola cuando la posición queda en verde. Los consejos se dicen en voz alta.
+let manosLibres = false, armadoFrames = 0, ultimoConsejo = '', tUltimoConsejo = 0
 const MEDIDO = ['calibrando', 'cuenta', 'midiendo', 'esperando', 'corriendo']
 
 function chequearPosicion() {
@@ -327,6 +330,19 @@ function actualizarCalibrador() {
   if (posOk) { cons.textContent = actual.encuadre === 'lineas' ? '' : '✓ Posición correcta'; cons.className = 'consejo ok' }
   else { cons.textContent = r.consejo; cons.className = 'consejo' }
   if (btn && $('btnPreparar').disabled && !det.ocupado) btn.disabled = !posOk
+
+  if (manosLibres && det.armado) {
+    const ahora = performance.now()
+    if (!posOk && r.consejo && (r.consejo !== ultimoConsejo || ahora - tUltimoConsejo > 4000) && ahora - tUltimoConsejo > 2500) {
+      decir(r.consejo.split(':')[0]); ultimoConsejo = r.consejo; tUltimoConsejo = ahora
+    }
+    armadoFrames = posOk ? armadoFrames + 1 : 0
+    if (armadoFrames >= 30) {             // ~1 s más en verde después del chequeo: arranca
+      det.armado = false; armadoFrames = 0; ultimoConsejo = ''
+      decir('Posición correcta')
+      setTimeout(() => det.empezar(), 1200)
+    }
+  }
 }
 
 // ============================================================
@@ -430,7 +446,13 @@ const DETECTORES = {
       if (!completa && d.idx < 2) { for (let k = d.idx + 1; k < 3; k++) d.seg[k] = 0; d.idx = 3 }
       else d.idx++
       if (d.idx >= 3) d.final()
-      else { setEstado(`${POST[d.idx - 1]}: ${fmt(t, 1)} s ${motivo ? '(' + motivo + ')' : '✓'}. Seguimos.`, 'ok'); prox() }
+      else {
+        setEstado(`${POST[d.idx - 1]}: ${fmt(t, 1)} s ${motivo ? '(' + motivo + ')' : '✓'}. Seguimos.`, 'ok'); prox()
+        if (manosLibres) {
+          setTimeout(() => decir(`Siguiente: ${POST[d.idx]}. Ubicate.`), 1200)
+          setTimeout(() => { if (d.fase === 'quieto' && d.idx < 3) d.armado = true }, 6000)
+        }
+      }
     }
     d.terminar = () => d.cortar(null, 'se apoyó / cortado a mano')
     d.final = () => {
@@ -620,6 +642,7 @@ function renderTest(id) {
         <div class="btns">
           <button class="b pri" id="btnPreparar">Preparar cámara</button>
           <button class="b pri" id="btnEmpezar" disabled>Empezar</button>
+          <button class="b" id="btnSolo" disabled>🙋 Empezar solo (manos libres)</button>
           <button class="b dan" id="btnDetener" disabled>${id === 'equilibrio' ? 'Se apoyó / cortar' : 'Detener a mano'}</button>
           ${id === 'marcha4' ? `<button class="b" id="btnLineas" disabled>Marcar líneas de nuevo</button>` : ''}
           <button class="b" id="btnReiniciar">Reiniciar test</button>
@@ -647,7 +670,7 @@ function renderTest(id) {
     $('btnPreparar').disabled = true
     try {
       await cargarModelo(); await prenderCamara()
-      $('btnPreparar').textContent = 'Cámara lista'; $('btnDetener').disabled = false; $('btnForzar').style.display = ''
+      $('btnPreparar').textContent = 'Cámara lista'; $('btnDetener').disabled = false; $('btnForzar').style.display = ''; $('btnSolo').disabled = false
       if (det.init) det.init(); else setEstado('Listo. Ubicá al paciente y tocá Empezar.', 'ok')
     } catch (e) {
       console.error(e); $('btnPreparar').disabled = false
@@ -656,7 +679,14 @@ function renderTest(id) {
         : 'No se pudo prender la cámara o el detector: ' + (e && e.message ? e.message : e), 'err')
     }
   }
-  $('btnEmpezar').onclick = () => { $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
+  $('btnSolo').onclick = () => {
+    manosLibres = true; armadoFrames = 0; ultimoConsejo = ''; tUltimoConsejo = 0
+    if (id !== 'marcha4' && id !== 'equilibrio') $('res').innerHTML = ''
+    det.armado = true
+    setEstado('Manos libres: ubicate en posición. Arranca solo cuando todo esté en verde.', 'warn')
+    decir('Ubicate en posición')
+  }
+  $('btnEmpezar').onclick = () => { manosLibres = false; if (det) det.armado = false; $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
   $('btnDetener').onclick = () => det.terminar && det.terminar()
   $('btnForzar').onclick = () => { $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
   if (id === 'marcha4') $('btnLineas').onclick = () => det.relineas()
