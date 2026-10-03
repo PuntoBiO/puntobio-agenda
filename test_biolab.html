@@ -70,6 +70,12 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .evo td.num{font-family:'JetBrains Mono',monospace;text-align:right}
 .tend{display:inline-block;border-radius:8px;padding:6px 10px;font-weight:800;font-size:14px;margin-top:4px}
 .tend.up{background:#dcfce7;color:#14532d}.tend.down{background:#fee2e2;color:#7f1d1d}.tend.eq{background:#f1f5f9;color:#334155}
+.crit{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+.crit th{text-align:left;font-size:12px;color:var(--dim);padding:6px 4px;border-bottom:1px solid var(--border)}
+.crit td{padding:6px 4px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+.crit select{font:inherit;font-size:13px;padding:4px 6px;border:1px solid var(--border);border-radius:6px}
+.crit .sug{font-size:11px;color:var(--faint)}
+.crit tr.tot td{font-weight:800;border-top:2px solid var(--border)}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -193,6 +199,14 @@ const TESTS = [
       <b>Cómo:</b> para cada postura tocás <b>Empezar</b>. Corre hasta 10 s y corta solo si mueve los pies. Si se agarra de algo, tocá <b>Se apoyó / cortar</b>.<br>
       <b>Orden:</b> pies juntos → semi-tándem → tándem. Si no completa una postura, las siguientes quedan en 0.<br>
       <b>Puntaje:</b> pies juntos y semi-tándem, 10 s = 1 punto. Tándem: 10 s = 2 · 3 a 9,99 s = 1 · menos de 3 s = 0. Total 0 a 4.` },
+  { id:'fsd', ico:'🪜', nombre:'Forward Step Down (calidad de movimiento)',
+    desc:'Park et al. 2013. Bajada unipodal desde un cajón, 5 repeticiones por pierna. La cámara cuenta las bajadas y propone el puntaje de los 5 criterios; vos lo confirmás.',
+    pos:'iPad VERTICAL de frente, cajón y paciente enteros', encuadre:'frente',
+    info:`<b>Preparación:</b> cajón de unos <b>20 cm</b> (usá siempre la misma altura). iPad <b>vertical</b> y de frente, que se vea al paciente entero parado arriba del cajón. Manos en la cintura.<br>
+      <b>Cómo:</b> apoyado en una pierna en el borde del cajón, baja la otra hacia adelante hasta tocar el piso con el talón y vuelve a subir. <b>5 repeticiones</b> por pierna. El sistema cuenta cada bajada y corta solo en la 5.ª.<br>
+      <b>Puntaje (se suma por cada error):</b> estrategia de brazos (saca las manos de la cintura) 1 · movimiento de tronco 1 · pelvis fuera del plano horizontal 1 · rodilla medial al 2.º dedo 1, medial al borde interno del pie 2 · no mantiene la postura unipodal quieta 1. Total 0 a 6.<br>
+      <b>Lectura:</b> 0–1 = buena calidad · 2–3 = moderada · 4 o más = pobre.<br>
+      <b>Importante:</b> el puntaje de la cámara es una <b>sugerencia</b>. Al final lo revisás criterio por criterio y lo corregís si hace falta.` },
 ]
 
 // ============================================================
@@ -534,6 +548,144 @@ const DETECTORES = {
     return d
   },
 
+  // ---------- FORWARD STEP DOWN (Park et al. 2013) ----------
+  // Por pierna: el sistema mide la postura inicial (línea de base) parado en el cajón,
+  // cuenta 5 bajadas del pie libre y registra el peor valor de cada criterio durante la serie.
+  // Los cortes son PUNTO DE PARTIDA: se ajustan con pacientes reales (constantes FSD).
+  fsd() {
+    const FSD = {
+      brazos: 0.30,        // muñeca se aleja de la cintura > 30% del largo del tronco
+      tronco: 10,          // inclinación lateral del tronco > 10° respecto de la base
+      pelvis: 8,           // la línea de caderas se inclina > 8° respecto de la base
+      rodilla1: 0.06,      // rodilla medial al 2.º dedo (en largos de pierna)
+      rodilla2: 0.15,      // rodilla medial al borde interno del pie
+      apoyo: 0.06,         // el pie de apoyo se mueve > 6% del largo de pierna
+      // conteo de bajadas (en largos de pierna; un cajón de 20 cm ≈ 0,23)
+      bajaAbajo: 0.15, bajaArriba: 0.05, bajaRodilla: 0.10,
+    }
+    const PIERNAS = [{ lado: 'der', nombre: 'derecha', hip: L.hipR, knee: L.kneeR, ank: L.ankR, heel: L.heelR, toe: L.toeR, wr: 16, oHip: L.hipL, oHeel: L.heelL },
+                     { lado: 'izq', nombre: 'izquierda', hip: L.hipL, knee: L.kneeL, ank: L.ankL, heel: L.heelL, toe: L.toeL, wr: 15, oHip: L.hipR, oHeel: L.heelR }]
+    const d = { idx: 0, fase: 'quieto', res: {}, base: null, muestras: [], max: null, reps: 0, abajo: false }
+    const prox = () => {
+      if (d.idx < 2) setEstado(`Pierna de apoyo: ${PIERNAS[d.idx].nombre.toUpperCase()}. Parado en el cajón, manos en la cintura, y tocá Empezar.`)
+      $('btnEmpezar').textContent = d.idx < 2 ? `Empezar · apoyo ${PIERNAS[d.idx].nombre}` : 'Empezar'
+    }
+    d.init = prox
+    const ang = (a, b) => Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI
+    const difAng = (a, b) => Math.abs(((a - b + 540) % 360) - 180)
+    const medir = (P) => {
+      const cad = mid(pose[L.hipL], pose[L.hipR]), hom = mid(pose[11], pose[12])
+      const torso = Math.max(dist(cad, hom), 1)
+      const pierna = Math.max(dist(pose[P.hip], pose[P.ank]), 1)
+      const dirMed = Math.sign(pose[P.oHip].x - pose[P.hip].x) || 1      // hacia la línea media
+      return {
+        pelvis: ang(pose[L.hipR], pose[L.hipL]),
+        tronco: Math.atan2(hom.x - cad.x, cad.y - hom.y) * 180 / Math.PI,
+        munecas: [mid(pose[15], pose[15]), mid(pose[16], pose[16])],
+        torso, pierna,
+        rodilla: ((pose[P.knee].x - pose[P.toe].x) * dirMed) / pierna,
+        apoyo: { x: pose[P.ank].x, y: pose[P.ank].y },
+        talonLibre: pose[P.oHeel].y, talonApoyo: pose[P.heel].y,
+      }
+    }
+    d.empezar = async () => {
+      if (d.idx >= 2) return
+      d.muestras = []; d.base = null; d.reps = 0; d.abajo = false
+      d.max = { brazos: 0, tronco: 0, pelvis: 0, rodilla: -1, apoyo: 0 }
+      d.fase = 'calibrando'; setEstado('Quieto en el cajón: midiendo la postura inicial…', 'warn')
+    }
+    d.frame = async (now) => {
+      const P = PIERNAS[d.idx]; if (!P || !pose) return
+      if (d.fase === 'calibrando') {
+        if (!visible(L.hipL, L.hipR, 11, 12, P.knee, P.ank)) return
+        d.muestras.push(medir(P))
+        if (d.muestras.length >= 30) {
+          const m = d.muestras, n = m.length, av = (f) => m.reduce((s, x) => s + f(x), 0) / n
+          d.base = { pelvis: av(x => x.pelvis), tronco: av(x => x.tronco),
+            munecas: [0, 1].map(i => ({ x: av(x => x.munecas[i].x), y: av(x => x.munecas[i].y) })),
+            apoyo: { x: av(x => x.apoyo.x), y: av(x => x.apoyo.y) }, pierna: av(x => x.pierna), torso: av(x => x.torso),
+            talon: av(x => x.talonApoyo) }
+          d.fase = 'cuenta'; await cuentaRegresiva(); d.fase = 'midiendo'
+          setEstado(`Bajadas con apoyo ${P.nombre}: 0 de 5`, 'ok')
+        }
+        return
+      }
+      if (d.fase !== 'midiendo') return
+      const m = medir(P), b = d.base
+      d.max.pelvis = Math.max(d.max.pelvis, difAng(m.pelvis, b.pelvis))
+      d.max.tronco = Math.max(d.max.tronco, difAng(m.tronco, b.tronco))
+      d.max.brazos = Math.max(d.max.brazos, ...[0, 1].map(i => dist(m.munecas[i], b.munecas[i]) / b.torso))
+      d.max.apoyo = Math.max(d.max.apoyo, dist(m.apoyo, b.apoyo) / b.pierna)
+      // la rodilla se evalúa en la bajada (cuando el pie libre está abajo)
+      const baja = (m.talonLibre - b.talon) / b.pierna
+      if (baja > FSD.bajaRodilla) d.max.rodilla = Math.max(d.max.rodilla, m.rodilla)
+      // repeticiones: el talón libre baja por debajo del pie de apoyo (umbral bajaAbajo) y vuelve a subir
+      if (!d.abajo && baja > FSD.bajaAbajo) d.abajo = true
+      if (d.abajo && baja < FSD.bajaArriba) {
+        d.abajo = false; d.reps++; avisarConteo(d.reps)
+        setEstado(`Bajadas con apoyo ${P.nombre}: ${d.reps} de 5`, 'ok')
+        if (d.reps >= 5) d.cerrarPierna()
+      }
+      setBig(`${d.reps} / 5`)
+    }
+    d.cerrarPierna = () => {
+      if (d.fase !== 'midiendo') return
+      const P = PIERNAS[d.idx], mx = d.max
+      d.fase = 'quieto'; beep(900, 400)
+      d.res[P.lado] = {
+        reps: d.reps,
+        sug: {
+          brazos: mx.brazos > FSD.brazos ? 1 : 0,
+          tronco: mx.tronco > FSD.tronco ? 1 : 0,
+          pelvis: mx.pelvis > FSD.pelvis ? 1 : 0,
+          rodilla: mx.rodilla > FSD.rodilla2 ? 2 : mx.rodilla > FSD.rodilla1 ? 1 : 0,
+          apoyo: mx.apoyo > FSD.apoyo ? 1 : 0,
+        },
+        medidas: { brazos: +mx.brazos.toFixed(3), tronco_grados: +mx.tronco.toFixed(1), pelvis_grados: +mx.pelvis.toFixed(1), rodilla: +mx.rodilla.toFixed(3), apoyo: +mx.apoyo.toFixed(3) }
+      }
+      d.res[P.lado].puntos = { ...d.res[P.lado].sug }
+      d.idx++
+      if (d.idx < 2) {
+        setEstado(`Apoyo ${P.nombre} listo (${d.reps} bajadas). Ahora la otra pierna.`, 'ok'); prox()
+        if (manosLibres) {
+          setTimeout(() => decir('Ahora apoyo pierna izquierda. Ubicate.'), 1200)
+          setTimeout(() => { if (d.fase === 'quieto' && d.idx < 2) d.armado = true }, 6000)
+        }
+      } else d.final()
+    }
+    d.terminar = () => d.cerrarPierna()
+
+    const CRIT = [['brazos', 'Estrategia de brazos', [0, 1]], ['tronco', 'Movimiento de tronco', [0, 1]], ['pelvis', 'Plano de la pelvis', [0, 1]],
+                  ['rodilla', 'Posición de la rodilla', [0, 1, 2]], ['apoyo', 'Postura unipodal quieta', [0, 1]]]
+    const clasif = (t) => t <= 1 ? ['c-ok', 'Buena calidad'] : t <= 3 ? ['c-warn', 'Moderada calidad'] : ['c-bad', 'Calidad pobre']
+    const total = (lado) => d.res[lado] ? CRIT.reduce((s, [k]) => s + d.res[lado].puntos[k], 0) : null
+    d.final = () => {
+      setEstado('Terminado. Revisá el puntaje sugerido y corregilo si hace falta.', 'ok'); $('btnEmpezar').textContent = 'Empezar'
+      pintar()
+    }
+    const pintar = () => {
+      const lados = ['der', 'izq'].filter(l => d.res[l])
+      const celda = (l, k, ops) => `<select data-l="${l}" data-k="${k}">${ops.map(o => `<option value="${o}" ${d.res[l].puntos[k] === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
+        ${d.res[l].puntos[k] !== d.res[l].sug[k] ? '<span class="sug">(cámara: ' + d.res[l].sug[k] + ')</span>' : ''}`
+      const tD = total('der'), tI = total('izq')
+      const peor = Math.max(...lados.map(total))
+      const texto = lados.map(l => `${l === 'der' ? 'Der' : 'Izq'} ${total(l)}/6 (${clasif(total(l))[1].toLowerCase()})`).join(' · ')
+      const html = `
+        <div class="val">${lados.map(l => `${l === 'der' ? 'D' : 'I'} ${total(l)}`).join(' · ')} <span style="font-size:16px">/ 6</span></div>
+        ${lados.map(l => `<div class="interp ${clasif(total(l))[0]}">Apoyo ${l === 'der' ? 'derecho' : 'izquierdo'}: ${clasif(total(l))[1]}</div>`).join('')}
+        <table class="crit"><tr><th>Criterio</th>${lados.map(l => `<th>${l === 'der' ? 'Derecha' : 'Izquierda'}</th>`).join('')}</tr>
+          ${CRIT.map(([k, n, ops]) => `<tr><td>${n}</td>${lados.map(l => `<td>${celda(l, k, ops)}</td>`).join('')}</tr>`).join('')}
+          <tr class="tot"><td>Total</td>${lados.map(l => `<td>${total(l)} / 6</td>`).join('')}</tr></table>
+        <div class="nota">Mayor puntaje = peor calidad. Se guarda la pierna con peor puntaje como valor principal y el detalle de las dos.</div>`
+      mostrarResultado(html, `Forward Step Down: ${texto}`, {
+        valor: peor, unidad: 'puntos',
+        detalle: { altura_cajon_cm: parseFloat(($('altCajon') || {}).value) || null, der: d.res.der || null, izq: d.res.izq || null, total_der: tD, total_izq: tI }
+      })
+      document.querySelectorAll('.crit select').forEach(sel => sel.onchange = () => { d.res[sel.dataset.l].puntos[sel.dataset.k] = +sel.value; pintar() })
+    }
+    return d
+  },
+
   // ---------- EQUILIBRIO SPPB ----------
   equilibrio() {
     const POST = ['Pies juntos', 'Semi-tándem', 'Tándem']
@@ -762,6 +914,8 @@ const EVO = {
                 val: r => r.detalle && r.detalle.velocidad_ms != null ? +r.detalle.velocidad_ms : (r.valor ? 4 / r.valor : null),
                 bandas: [{ y: 0.8, txt: '0,8 m/s · fragilidad' }, { y: 1.0, txt: '1,0 m/s · independencia' }] },
   step2:      { titulo: 'Pasos en 2 minutos (rodilla derecha)', unidad: 'pasos', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [] },
+  fsd:        { titulo: 'Forward Step Down (peor pierna)', unidad: 'puntos', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 6,
+                bandas: [{ y: 1.5, txt: 'hasta 1 · buena' }, { y: 3.5, txt: '4 o más · pobre' }] },
   equilibrio: { titulo: 'Equilibrio SPPB', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [], min: 0, max: 4 },
 }
 
@@ -909,7 +1063,8 @@ function renderTest(id) {
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
           <label id="zoomBox" style="display:none">Zoom <input id="zoom" type="range" style="width:110px;vertical-align:middle"> <span id="zoomVal" class="mono"></span></label>
-          ${id === 'step2' ? `<label>Aviso al contar <select id="selAviso"><option value="pitido">Pitido</option><option value="voz">Decir el número</option><option value="silencio">Silencio</option></select></label>` : ''}
+          ${id === 'fsd' ? `<label>Altura del cajón <input id="altCajon" type="number" step="1" min="5" value="20"> cm</label>` : ''}
+          ${id === 'step2' || id === 'fsd' ? `<label>Aviso al contar <select id="selAviso"><option value="pitido">Pitido</option><option value="voz">Decir el número</option><option value="silencio">Silencio</option></select></label>` : ''}
           ${id === 'marcha4' ? `<label>Distancia entre líneas <input id="dist4" type="number" step="0.5" min="1" value="4"> m</label>` : ''}
         </div>
         <div class="estado" id="estado">Tocá Preparar cámara.</div>
@@ -917,7 +1072,7 @@ function renderTest(id) {
           <button class="b pri" id="btnPreparar">Preparar cámara</button>
           <button class="b pri" id="btnEmpezar" disabled>Empezar</button>
           <button class="b" id="btnSolo" disabled>🙋 Empezar solo (manos libres)</button>
-          <button class="b dan" id="btnDetener" disabled>${id === 'equilibrio' ? 'Se apoyó / cortar' : 'Detener a mano'}</button>
+          <button class="b dan" id="btnDetener" disabled>${id === 'equilibrio' ? 'Se apoyó / cortar' : id === 'fsd' ? 'Cerrar esta pierna' : 'Detener a mano'}</button>
           ${id === 'marcha4' ? `<button class="b" id="btnLineas" disabled>Marcar líneas de nuevo</button>` : ''}
           <button class="b" id="btnReiniciar">Reiniciar test</button>
         </div>
@@ -962,14 +1117,14 @@ function renderTest(id) {
   }
   $('btnSolo').onclick = () => {
     manosLibres = true; armadoFrames = 0; ultimoConsejo = ''; tUltimoConsejo = 0
-    if (id !== 'marcha4' && id !== 'equilibrio') $('res').innerHTML = ''
+    if (!['marcha4', 'equilibrio', 'fsd'].includes(id)) $('res').innerHTML = ''
     det.armado = true
     setEstado('Manos libres: ubicate en posición. Arranca solo cuando todo esté en verde.', 'warn')
     decir('Ubicate en posición')
   }
-  $('btnEmpezar').onclick = () => { manosLibres = false; if (det) det.armado = false; $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
+  $('btnEmpezar').onclick = () => { manosLibres = false; if (det) det.armado = false; $('res').innerHTML = ['marcha4', 'equilibrio', 'fsd'].includes(id) ? $('res').innerHTML : ''; det.empezar() }
   $('btnDetener').onclick = () => det.terminar && det.terminar()
-  $('btnForzar').onclick = () => { $('res').innerHTML = id === 'marcha4' || id === 'equilibrio' ? $('res').innerHTML : ''; det.empezar() }
+  $('btnForzar').onclick = () => { $('res').innerHTML = ['marcha4', 'equilibrio', 'fsd'].includes(id) ? $('res').innerHTML : ''; det.empezar() }
   if (id === 'marcha4') $('btnLineas').onclick = () => det.relineas()
   $('canvas').addEventListener('pointerdown', (ev) => {
     if (!det.tap) return
