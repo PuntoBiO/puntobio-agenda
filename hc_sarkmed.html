@@ -644,6 +644,7 @@ function renderFicha(){
     :                              solapaBiolab(biolab, ro)}
   `;
   if(solapa === 'nutricion') calcularIMC();
+  if(solapa === 'suelo_pelvico') cargarProtocoloSP();
   if(solapa === 'biolab')    calcularBiolab();
   pintarFirmasSark();
 }
@@ -1095,9 +1096,55 @@ function siNo(campo, valor, ro){
   </div>`;
 }
 
+/* Suelo pélvico: SARKMED usa el MISMO protocolo que Test BiOLAB (anamnesis, cuestionarios, postura,
+   provocación y tacto). Acá se ve el último protocolo de la paciente, completo, y se abre para hacerlo
+   o actualizarlo. En SARKMED quedan el diagnóstico y la firma. Los campos viejos de esta solapa
+   siguen guardados y visibles abajo, plegados, como "carga anterior". */
+function bloqueProtocoloSP(){
+  const post = biolab && biolab.protocolo_tests && biolab.protocolo_tests.__hallazgos && biolab.protocolo_tests.__hallazgos.postura;
+  const htTxt = post ? Object.entries(post).map(([k, x]) => `${k.replace(/_/g, ' ')}: ${typeof x === 'object' ? (x.cm ?? '') + ' cm' + (x.lado_descendido ? ' (baja ' + x.lado_descendido + ')' : '') : x}`).join(' · ') : '';
+  return `
+  <div class="bloque" style="border-color:var(--azul-border)">
+    <div class="bloque-head" style="background:var(--azul)">Protocolo de suelo pélvico · Test BiOLAB</div>
+    <div class="bloque-body">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn btn-azul" type="button" onclick="abrirProtocoloSP()">🌸 Hacer / actualizar el protocolo</button>
+        <span style="font-size:12px;color:var(--muted)">Se abre en otra pestaña con la paciente ya elegida. Al guardarlo, volvé acá y tocá la solapa de nuevo para verlo.</span>
+      </div>
+      ${htTxt ? `<div style="font-size:12.5px;background:var(--panel-2);border:1px dashed var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px"><b>Postura HumanTrak (de esta HC):</b> ${esc(htTxt)}</div>` : ''}
+      <div id="sp-protocolo" style="font-size:13px;color:var(--muted)">Buscando el protocolo…</div>
+    </div>
+  </div>`;
+}
+window.abrirProtocoloSP = function(){
+  const p = (fichaActual && fichaActual.paciente) || {};
+  const q = new URLSearchParams({ origen: 'SARKMED', id: p.id, dni: String(p.dni || '').replace(/\D/g, ''), nombre: p.apellido_nombre || '', test: 'pelvico' });
+  const ed = edadDe(p.fecha_nacimiento); if(ed != null) q.set('edad', ed);
+  window.open('test_biolab.html?' + q.toString(), '_blank');
+};
+async function cargarProtocoloSP(){
+  const caja = document.getElementById('sp-protocolo'); if(!caja) return;
+  const p = (fichaActual && fichaActual.paciente) || {};
+  try{
+    const dni = String(p.dni || '').replace(/\D/g, '');
+    const filtro = [dni ? `paciente_dni.eq.${dni}` : null, `and(origen.eq.SARKMED,paciente_id.eq.${p.id})`].filter(Boolean).join(',');
+    const { data, error } = await sb.from('tests_biolab').select('detalle, creado_en').or(filtro).eq('test', 'pelvico').order('creado_en', { ascending: false }).limit(1);
+    if(error) throw error;
+    if(!data || !data.length){ caja.innerHTML = 'Todavía no hay un protocolo de suelo pélvico para esta paciente. Tocá <b>Hacer / actualizar el protocolo</b>.'; return; }
+    const m = await import('./tests_biolab_comun.js');
+    caja.style.color = 'var(--text)';
+    caja.innerHTML = m.htmlProtocoloPelvico(data[0].detalle, data[0].creado_en);
+  }catch(e){ caja.innerHTML = 'No se pudo leer el protocolo: ' + esc(String(e && e.message ? e.message : e)); }
+}
+
 function solapaSuelo(s, ro){
   const ubic = s.prolapso_ubicacion || [];
+  const hayViejo = ['embarazos_partos','cirugias_previas','cirugias_abdominales','otros_antecedentes','frecuencia_urinaria','inspeccion','palpacion','ecografia','urodinamia','otras_pruebas']
+    .some(k => (s[k] || '').toString().trim()) || s.escala_oxford != null || s.escala_popq || (s.prolapso_ubicacion || []).length;
   return `
+  ${bloqueProtocoloSP()}
+  <details ${hayViejo ? 'open' : ''} style="margin-bottom:14px">
+    <summary style="cursor:pointer;font-weight:700;font-size:13px;color:var(--muted);margin-bottom:8px">${hayViejo ? 'Carga anterior en esta solapa (campos viejos)' : 'Campos sueltos de la solapa (opcional: el protocolo de arriba ya los incluye)'}</summary>
   <div class="bloque">
     <div class="bloque-head">Antecedentes ginecológicos / urológicos</div>
     <div class="bloque-body">
@@ -1172,6 +1219,7 @@ function solapaSuelo(s, ro){
     </div>
   </div>
 
+  </details>
   <div class="bloque">
     <div class="bloque-head">Diagnóstico</div>
     <div class="bloque-body">
@@ -2101,6 +2149,19 @@ async function crearInformeIA(){
   try{
     const p = fichaActual.paciente || {};
     const obs = (biolab.observacion_prof || '').trim();
+    // Evaluación funcional de Test BiOLAB (cámara del iPad): la última toma de cada test de los últimos 120 días,
+    // con su resumen, entra como observación del profesional para que la IA la tome en cuenta en el informe.
+    let obsTB = null;
+    try{
+      const dniTB = String(p.dni || '').replace(/\D/g, '');
+      const filtroTB = [dniTB ? `paciente_dni.eq.${dniTB}` : null, `and(origen.eq.SARKMED,paciente_id.eq.${p.id})`].filter(Boolean).join(',');
+      const desdeTB = new Date(Date.now() - 120 * 86400000).toISOString();
+      const { data: tb } = await sb.from('tests_biolab').select('test, texto, creado_en').or(filtroTB).gte('creado_en', desdeTB).order('creado_en', { ascending: false });
+      const vistosTB = new Set(), lineasTB = [];
+      (tb || []).forEach(r => { if(vistosTB.has(r.test) || !r.texto) return; vistosTB.add(r.test); lineasTB.push(`${r.texto} (${new Date(r.creado_en).toLocaleDateString('es-AR')})`); });
+      if(lineasTB.length) obsTB = { fecha: new Date().toISOString().slice(0,10), autor: 'Test BiOLAB (evaluación funcional con cámara)',
+        texto: 'EVALUACIÓN FUNCIONAL MEDIDA EN BiOLAB — tomarla muy en cuenta e integrarla con los datos de VALD: ' + lineasTB.join(' · ') };
+    }catch(e){ console.warn('Test BiOLAB para la IA', e); }
     const payload = {
       paciente: {
         nombre: p.apellido_nombre || '',
@@ -2116,7 +2177,7 @@ async function crearInformeIA(){
       },
       hallazgos: { postura: H.postura, movilidad: H.movilidad, fuerza: H.fuerza, forceDecks: H.forceDecks },
       calculadoras: calculadorasParaIA(),
-      observaciones: obs ? [{ fecha: new Date().toISOString().slice(0,10), autor: miEmail, texto: obs }] : [],
+      observaciones: [ ...(obs ? [{ fecha: new Date().toISOString().slice(0,10), autor: miEmail, texto: obs }] : []), ...(obsTB ? [obsTB] : []) ],
       fecha: (H.fecha || new Date().toISOString()).slice(0, 10),
     };
 

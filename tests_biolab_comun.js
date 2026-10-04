@@ -162,3 +162,94 @@ export function interpretar(test, v) {
 
 // Normaliza un DNI a solo dígitos (así se guarda en tests_biolab.paciente_dni)
 export const normDni = (d) => { const x = String(d ?? '').replace(/\D/g, ''); return x || null }
+
+// ============================================================
+// SUELO PÉLVICO: definiciones del protocolo (las usan Test BiOLAB, la ficha y la HC de SARKMED)
+// ============================================================
+export const PEL_ANAM = [
+  { sec: 'Contexto', campos: [
+    { k: 'sexo', n: 'Sexo', t: 'ops', ops: ['Mujer', 'Hombre'], def: 'Mujer' },
+    { k: 'etapa', n: 'Etapa', t: 'ops', ops: ['—', 'Embarazo', 'Posparto (menos de 1 año)', 'Perimenopausia / menopausia', 'Ninguna en particular'], si: c => c.sexo === 'Mujer' },
+    { k: 'motivo', n: 'Motivo de consulta', t: 'txt' } ] },
+  { sec: 'Antecedentes gineco-obstétricos', si: c => c.sexo === 'Mujer', campos: [
+    { k: 'gestas', n: 'Embarazos', t: 'num' }, { k: 'partos_vag', n: 'Partos vaginales', t: 'num' }, { k: 'cesareas', n: 'Cesáreas', t: 'num' },
+    { k: 'instrumental', n: 'Parto instrumental (fórceps / ventosa)', t: 'sino' }, { k: 'desgarro', n: 'Desgarro o episiotomía', t: 'ops', ops: ['—', 'No', 'Episiotomía', 'Desgarro grado 1–2', 'Desgarro grado 3–4'] },
+    { k: 'peso_bebe', n: 'Bebé de más de 4 kg', t: 'sino' }, { k: 'ultimo_parto', n: 'Fecha del último parto', t: 'txt' },
+    { k: 'lactancia', n: 'Lactancia actual', t: 'sino', si: c => c.etapa.startsWith('Posparto') },
+    { k: 'semanas', n: 'Semanas de embarazo', t: 'num', si: c => c.etapa === 'Embarazo' },
+    { k: 'thr', n: 'Terapia hormonal', t: 'sino', si: c => c.etapa.startsWith('Perimeno') },
+    { k: 'sequedad', n: 'Sequedad / síntomas genitourinarios', t: 'sino', si: c => c.etapa.startsWith('Perimeno') || (c.edad || 0) >= 45 } ] },
+  { sec: 'Antecedentes urológicos y quirúrgicos', campos: [
+    { k: 'prostatectomia', n: 'Prostatectomía u otra cirugía de próstata', t: 'sino', si: c => c.sexo === 'Hombre' },
+    { k: 'cirugias', n: 'Cirugías pélvicas o abdominales', t: 'txt' }, { k: 'itu', n: 'Infecciones urinarias recurrentes', t: 'sino' } ] },
+  { sec: 'Síntomas', campos: [
+    { k: 'iu_esfuerzo', n: 'Escape de orina al toser, estornudar, saltar o hacer fuerza', t: 'sino' },
+    { k: 'iu_urgencia', n: 'Escape con urgencia (no llega al baño)', t: 'sino' }, { k: 'urgencia', n: 'Urgencia miccional', t: 'sino' },
+    { k: 'frecuencia', n: 'Veces que orina de día', t: 'num' }, { k: 'nocturia', n: 'Veces que se levanta a orinar de noche', t: 'num' },
+    { k: 'vaciado', n: 'Sensación de vaciado incompleto / chorro débil', t: 'sino' },
+    { k: 'if_heces', n: 'Escape de heces', t: 'sino' }, { k: 'if_gases', n: 'Escape de gases', t: 'sino' },
+    { k: 'bulto', n: 'Sensación de peso o bulto', t: 'sino' }, { k: 'dolor_pel', n: 'Dolor pélvico', t: 'sino' },
+    { k: 'dispareunia', n: 'Dolor en las relaciones', t: 'sino' },
+    { k: 'caida_urg', n: 'Se apura o se cayó yendo al baño', t: 'sino', si: c => (c.edad || 0) >= 65 } ] },
+  { sec: 'Intestino y hábitos', campos: [
+    { k: 'constipacion', n: 'Constipación / esfuerzo al evacuar', t: 'sino' }, { k: 'bristol', n: 'Escala de Bristol habitual', t: 'ops', ops: ['—', '1', '2', '3', '4', '5', '6', '7'] },
+    { k: 'liquidos', n: 'Litros de líquido por día', t: 'num' }, { k: 'cafeina', n: 'Tazas de café o mate por día', t: 'num' },
+    { k: 'deporte', n: 'Deporte o entrenamiento', t: 'txt' }, { k: 'impacto', n: 'Hace deporte de impacto o fuerza', t: 'sino' },
+    { k: 'perdida_entreno', n: 'Pierde al entrenar (saltos, soga, carrera, cargas)', t: 'sino', si: c => c.perfil !== 'sedentario' },
+    { k: 'quiere_correr', n: 'Quiere volver a correr / al impacto', t: 'sino', si: c => c.etapa.startsWith('Posparto') } ] },
+  { sec: 'Banderas de derivación', campos: [
+    { k: 'rf_sangre', n: 'Sangre en la orina', t: 'sino' }, { k: 'rf_retencion', n: 'No puede orinar / retención', t: 'sino' },
+    { k: 'rf_dolor', n: 'Dolor intenso o que no cede', t: 'sino' }, { k: 'rf_neuro', n: 'Adormecimiento en la zona genital / perineal o de piernas', t: 'sino' },
+    { k: 'rf_bulto', n: 'Bulto visible fuera de la vagina', t: 'sino', si: c => c.sexo === 'Mujer' } ] },
+]
+// ICIQ-SF (puntaje 0 a 21) · Sandvik (frecuencia × cantidad) · pad test
+export const ICIQ_FREC = [['Nunca', 0], ['Una vez por semana o menos', 1], ['2 o 3 veces por semana', 2], ['Una vez al día', 3], ['Varias veces al día', 4], ['Continuamente', 5]]
+export const ICIQ_CANT = [['Nada', 0], ['Muy poca cantidad', 2], ['Cantidad moderada', 4], ['Mucha cantidad', 6]]
+export const ICIQ_CUANDO = ['Nunca', 'Antes de llegar al baño', 'Al toser o estornudar', 'Mientras duerme', 'Al hacer actividad física / ejercicio', 'Al terminar de orinar y vestirse', 'Sin motivo evidente', 'De forma continua']
+export const SANDVIK_F = [['—', 0], ['Menos de una vez al mes', 1], ['Algunas veces al mes', 2], ['Algunas veces por semana', 3], ['Todos los días y/o noches', 4]]
+export const SANDVIK_C = [['—', 0], ['Gotas', 1], ['Pequeñas cantidades', 2], ['Más', 3]]
+// Batería de provocación: de menos a más presión. nivel = exigencia (se filtra por el perfil del paciente)
+export const PEL_TAREAS = [
+  { k: 'tos', n: 'Tos fuerte ×3, de pie', nivel: 1 }, { k: 'silla', n: 'Pararse de la silla ×5', nivel: 1 },
+  { k: 'levantar', n: 'Levantar 5 kg del piso', nivel: 1 }, { k: 'caminar', n: 'Caminar rápido 1 min', nivel: 1 }, { k: 'escalon', n: 'Subir y bajar un escalón ×10', nivel: 1 },
+  { k: 'cuadriceps', n: 'Extensión de rodilla isométrica máxima, sentada (DynaMo)', nivel: 2 }, { k: 'overhead', n: 'Sostener carga por encima de la cabeza 20 s', nivel: 2 },
+  { k: 'sentadilla', n: 'Sentadilla con carga ×10', nivel: 2 }, { k: 'plancha', n: 'Plancha frontal (hasta 30 s)', nivel: 2 },
+  { k: 'imtp', n: 'Tirón de medio muslo máximo (IMTP · ForceDecks)', nivel: 3 }, { k: 'trote', n: 'Trote en el lugar 1 min', nivel: 3 },
+  { k: 'saltos', n: 'Saltos en el lugar ×10', nivel: 3 }, { k: 'saltos1', n: 'Saltos a una pierna ×10 por lado', nivel: 3 },
+  { k: 'jacks', n: 'Jumping jacks 1 min', nivel: 3 }, { k: 'soga', n: 'Soga / doble salto 30 s', nivel: 3 },
+]
+
+
+// Protocolo completo en solo lectura (para la HC de SARKMED y la ficha). Recibe el detalle guardado de la toma.
+export function htmlProtocoloPelvico(v, fecha) {
+  if (!v) return ''
+  const e = (t) => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  const vacio = (x) => x == null || x === '' || x === '—'
+  const ctx = { sexo: v.sexo || 'Mujer', etapa: v.etapa || '—', edad: null, perfil: null }
+  const filas = (pares) => pares.filter(([, x]) => !vacio(x)).map(([n, x]) => `<tr><td style="padding:4px 8px;color:#475569">${e(n)}</td><td style="padding:4px 8px;font-weight:600">${e(x)}</td></tr>`).join('')
+  const bloque = (tit, cuerpo) => cuerpo ? `<div style="margin:10px 0"><div style="font-weight:800;font-size:13px;color:#0c7bb8;margin-bottom:4px">${e(tit)}</div><table style="width:100%;border-collapse:collapse;font-size:13px">${cuerpo}</table></div>` : ''
+  let h = ''
+  PEL_ANAM.forEach(sx => { const cs = sx.campos.filter(f => !f.si || (() => { try { return f.si({ ...ctx, etapa: ctx.etapa, edad: 99, perfil: 'activo' }) } catch (er) { return true } })())
+    h += bloque(sx.sec, filas(cs.map(f => [f.n, v[f.k]]))) })
+  const r = v.resultados || {}
+  h += bloque('Cuestionarios', filas([['ICIQ-SF', r.iciq != null ? `${r.iciq}/21 (${r.iciq_grado})` : null], ['Cuándo pierde', (v.iciq_cuando || []).join(', ')],
+    ['Sandvik', r.sandvik != null ? `${r.sandvik} (${r.sandvik_grado})` : null], ['Pad test 1 h', v.pad_g != null ? `${v.pad_g} g (${r.pad})` : null]]))
+  h += bloque('Diástasis y respiración', filas([['Arriba del ombligo (reposo / curl-up)', vacio(v.dr_sup_r) && vacio(v.dr_sup_c) ? null : `${v.dr_sup_r ?? '—'} / ${v.dr_sup_c ?? '—'}`],
+    ['Ombligo (reposo / curl-up)', vacio(v.dr_umb_r) && vacio(v.dr_umb_c) ? null : `${v.dr_umb_r ?? '—'} / ${v.dr_umb_c ?? '—'}`],
+    ['Abajo del ombligo (reposo / curl-up)', vacio(v.dr_inf_r) && vacio(v.dr_inf_c) ? null : `${v.dr_inf_r ?? '—'} / ${v.dr_inf_c ?? '—'}`],
+    ['Abombamiento', v.doming], ['Patrón respiratorio', v.respiracion]]))
+  const post = []
+  if (v.postura_ht) Object.entries(v.postura_ht).forEach(([k, x]) => post.push([`HumanTrak · ${k.replace(/_/g, ' ')}`, typeof x === 'object' ? `${x.cm ?? ''} cm ${x.lado_descendido ? '(baja ' + x.lado_descendido + ')' : ''}` : x]))
+  if (v.postura) Object.entries(v.postura).forEach(([k, x]) => post.push([`Foto · ${k.replace(/_/g, ' ')}`, x]))
+  h += bloque('Postura', filas(post))
+  const tareas = PEL_TAREAS.filter(t => v.tareas && v.tareas[t.k]).map(t => { const x = v.tareas[t.k]
+    return [t.n, [x.esc && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : '', x.est && !['—', 'Normal'].includes(x.est) ? x.est.toLowerCase() : ''].filter(Boolean).join(' · ') || 'sin síntomas'] })
+  h += bloque('Batería de provocación', filas(tareas))
+  h += bloque('Tacto (especialista)', filas([['Inspección', v.inspeccion], ['Tono en reposo', v.tono], ['Dolor a la palpación', v.palp_dolor], ['Oxford', v.oxford], ['PERFECT', r.perfect],
+    ['POP-Q anterior', v.popq_a], ['POP-Q apical', v.popq_ap], ['POP-Q posterior', v.popq_p], ['Observaciones', v.esp_obs]]))
+  const hall = v.hallazgos_txt || []
+  return `<div style="font-family:inherit">${fecha ? `<div style="color:#64748b;font-size:12.5px">Protocolo del ${e(new Date(fecha).toLocaleDateString('es-AR'))}</div>` : ''}
+    ${(v.banderas || []).length ? `<div style="background:#fee2e2;color:#7f1d1d;border-radius:8px;padding:8px 10px;margin:8px 0;font-weight:700">Banderas de derivación: ${e(v.banderas.join(', '))}</div>` : ''}
+    ${hall.length ? `<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:8px 12px;margin:8px 0;font-size:13.5px;line-height:1.5"><b>Resumen</b><br>${hall.map(e).join('<br>')}</div>` : ''}
+    ${h}${v.obs ? `<div style="font-size:13px"><b>Observaciones:</b> ${e(v.obs)}</div>` : ''}</div>`
+}
