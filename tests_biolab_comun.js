@@ -27,6 +27,17 @@ export const EVO = {
   rotoracica: { titulo: 'Rotación torácica · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
   shouldermob:{ titulo: 'Shoulder mobility FMS (peor lado)', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
   puente:     { titulo: 'Puente 1 pierna (lados sin control)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  silla5:     { titulo: 'Silla 5 repeticiones', unidad: 's', mejor: 'menos', dec: 2, val: r => r.valor != null ? +r.valor : null,
+                bandas: [{ y: 11.19, txt: '11,2 s · SPPB 4' }, { y: 16.7, txt: '16,7 s · SPPB 1' }] },
+  silla30:    { titulo: 'Silla 30 segundos', unidad: 'repeticiones', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [] },
+  pushup:     { titulo: 'Push ups', unidad: 'repeticiones', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [] },
+  pullup:     { titulo: 'Pull ups', unidad: 'repeticiones', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [] },
+  salto:      { titulo: 'Salto horizontal', unidad: 'cm', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, bandas: [] },
+  hop:        { titulo: 'Hop simple · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
+  triplehop:  { titulo: 'Triple hop · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
+  ybalance:   { titulo: 'Y-Balance · compuesto (peor lado)', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 94, txt: '94% · referencia' }] },
+  tronco:     { titulo: 'Tronco · cocientes alterados', unidad: 'cocientes', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
+  sfma:       { titulo: 'SFMA · patrones no FN', unidad: 'patrones', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 4, bandas: [] },
   cva:        { titulo: 'Ángulo craneovertebral', unidad: '°', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 50, txt: '50° · cabeza adelantada' }] },
   rotcerv:    { titulo: 'Rotación cervical · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
   dnf:        { titulo: 'Flexores profundos de cuello', unidad: 's', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [] },
@@ -76,12 +87,22 @@ export const INFO = {
   rotoracica: { ico: '🔄', nombre: 'Rotación torácica', pac: 'Rotación de tu espalda', pacUnidad: '% de simetría' },
   shouldermob:{ ico: '🤲', nombre: 'Shoulder mobility (FMS)', pac: 'Movilidad de hombros', pacUnidad: 'de 3 puntos' },
   puente:     { ico: '🌉', nombre: 'Puente glúteo 1 pierna', pac: 'Puente a una pierna', pacUnidad: 'lados a trabajar' },
+  silla5:     { ico: '💺', nombre: 'Silla 5 repeticiones', pac: 'Pararte y sentarte 5 veces', pacUnidad: 'segundos (menos es mejor)' },
+  silla30:    { ico: '🪑', nombre: 'Silla 30 segundos', pac: 'Veces que te parás en 30 segundos', pacUnidad: 'repeticiones' },
+  pushup:     { ico: '💪', nombre: 'Push ups', pac: 'Flexiones de brazos', pacUnidad: 'repeticiones' },
+  pullup:     { ico: '🧗', nombre: 'Pull ups', pac: 'Dominadas', pacUnidad: 'repeticiones' },
+  salto:      { ico: '🐸', nombre: 'Salto horizontal', pac: 'Tu salto en largo', pacUnidad: 'cm' },
+  hop:        { ico: '🦘', nombre: 'Hop test simple', pac: 'Salto a una pierna', pacUnidad: '% de simetría' },
+  triplehop:  { ico: '🐇', nombre: 'Triple hop', pac: 'Triple salto a una pierna', pacUnidad: '% de simetría' },
+  ybalance:   { ico: '⭐', nombre: 'Y-Balance', pac: 'Equilibrio en estrella', pacUnidad: '%' },
+  tronco:     { ico: '🧱', nombre: 'Resistencia de tronco (McGill)', pac: 'Resistencia de tu tronco', pacUnidad: 'ajustes a trabajar' },
+  sfma:       { ico: '🧘', nombre: 'Patrones SFMA', pac: 'Movimientos globales', pacUnidad: 'patrones a trabajar' },
   cva:        { ico: '🗿', nombre: 'Ángulo craneovertebral', pac: 'Postura de tu cabeza', pacUnidad: 'grados (más es mejor)' },
   rotcerv:    { ico: '↔️', nombre: 'Rotación cervical', pac: 'Giro de tu cuello', pacUnidad: '% de simetría' },
   dnf:        { ico: '⏱️', nombre: 'Flexores profundos de cuello', pac: 'Resistencia de tu cuello', pacUnidad: 'segundos' },
   estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'equilibrio', 'tug', 'marcha4', 'step2']
+export const ORDEN = ['ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'equilibrio', 'silla5', 'silla30', 'tug', 'marcha4', 'step2']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {
@@ -92,6 +113,10 @@ export function interpretar(test, v) {
     case 'fsd': return v <= 1 ? ['ok', 'Buena calidad de movimiento'] : v <= 3 ? ['warn', 'Calidad moderada'] : ['bad', 'Calidad pobre']
     case 'equilibrio': return v >= 4 ? ['ok', 'Equilibrio completo'] : v >= 2 ? ['warn', 'Equilibrio parcial'] : ['bad', 'Equilibrio muy limitado']
     case 'ohs': return v === 0 ? ['ok', 'Patrón sin compensaciones'] : v <= 2 ? ['warn', v + ' compensación' + (v === 1 ? '' : 'es')] : ['bad', v + ' compensaciones']
+    case 'silla5': return v <= 11.19 ? ['ok', 'SPPB silla 4/4'] : v <= 13.69 ? ['ok', 'SPPB silla 3/4'] : v <= 16.69 ? ['warn', 'SPPB silla 2/4'] : ['bad', 'SPPB silla 1/4']
+    case 'hop': case 'triplehop': return v >= LSI_OK ? ['ok', 'Simétrico'] : ['bad', 'Asimetría de salto']
+    case 'ybalance': return v >= 94 ? ['ok', 'Compuesto en rango'] : ['warn', 'Compuesto bajo']
+    case 'tronco': case 'sfma': return v === 0 ? ['ok', 'Sin hallazgos'] : ['warn', v + ' hallazgo' + (v === 1 ? '' : 's')]
     case 'cva': return v < 50 ? ['warn', 'Cabeza adelantada'] : ['ok', 'Postura de cabeza adecuada']
     case 'dnf': return v < 20 ? ['warn', 'Resistencia baja'] : v < 30 ? ['warn', 'Resistencia moderada'] : ['ok', 'Buena resistencia']
     case 'rom': case 'rotoracica': case 'rotcerv': return v >= LSI_OK ? ['ok', 'Sin asimetrías relevantes'] : ['bad', 'Asimetría (LSI < ' + LSI_OK + '%)']
