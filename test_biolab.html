@@ -168,6 +168,12 @@ button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px
 .estado{margin:14px 0;padding:10px 12px;border-radius:10px;background:#f1f5f9;font-size:14px;font-weight:600}
 .estado.ok{background:#dcfce7;color:#14532d}.estado.warn{background:#fef3c7;color:#78350f}.estado.err{background:#fee2e2;color:#7f1d1d}
 .btns{display:flex;flex-wrap:wrap;gap:8px}
+.mando{position:sticky;bottom:0;z-index:20;background:#fff;margin:10px -14px -14px;padding:10px 14px 12px;border-top:1px solid var(--border);box-shadow:0 -8px 24px rgba(15,23,42,.10);border-radius:0 0 14px 14px}
+.mando .estado{margin:0 0 8px}
+@media (max-width:900px){ .layout > .stage.fija{position:sticky;top:0;z-index:19;max-height:56vh} .layout > .stage.fija video,.layout > .stage.fija canvas{max-height:56vh;object-fit:contain} }
+.ubicar{background:#0f2744;color:#e2e8f0;border-radius:14px;padding:18px 20px;max-width:620px;text-align:left;font-size:15px;line-height:1.45}
+.ubicar h4{margin:0 0 10px;font-size:18px;color:#fff}.ubicar .fila{display:flex;gap:10px;margin:8px 0}.ubicar .fila b{color:#7cc4f2}
+.ubitip{position:absolute;left:10px;right:10px;bottom:10px;z-index:4;background:rgba(15,23,42,.84);color:#fff;font:700 14px Manrope,sans-serif;padding:8px 12px;border-radius:12px;line-height:1.4}
 button.b{font:inherit;font-weight:700;font-size:15px;border-radius:10px;padding:12px 16px;border:1px solid var(--border);background:#fff;color:var(--text);cursor:pointer}
 button.b.pri{background:var(--turq);border-color:var(--turq);color:#fff}
 button.b.dan{background:#fff;border-color:var(--red);color:var(--red)}
@@ -190,7 +196,7 @@ button.b:disabled{opacity:.45;cursor:not-allowed}
 <div class="wrap" id="app"></div>
 
 <script type="module">
-import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
+import { FilesetResolver, PoseLandmarker, ImageSegmenter } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
 import { EVO, ROM, ROM_ITEMS, LSI_OK, INFO, interpretar, PEL_ANAM, ICIQ_FREC, ICIQ_CANT, ICIQ_CUANDO, SANDVIK_F, SANDVIK_C, PEL_TAREAS, htmlProtocoloPelvico, curvaPro, COLOR_I, COLOR_D } from './tests_biolab_comun.js'
 
@@ -742,7 +748,7 @@ function actualizarCalibrador() {
   // diana (círculo grande = zona correcta, círculo chico = el paciente) y sonidos correcto / incorrecto
   if (actual.encuadre !== 'lineas') {
     const v = $('video'), cont = $('canvas') && $('canvas').parentElement
-    if (cont && (!dianaPpal || !cont.contains(dianaPpal.el))) { if (dianaPpal) dianaPpal.quitar(); dianaPpal = crearDiana(cont); dianaPpal.el = cont.lastElementChild; const au = dianaPpal.el.querySelector('.aut'); if (au) au.style.display = 'none' }   // acá el inicio automático es el de manos libres
+    if (cont && (!dianaPpal || !cont.contains(dianaPpal.el))) { if (dianaPpal) dianaPpal.quitar(); dianaPpal = crearDiana(cont); dianaPpal.el = cont.lastElementChild }
     if (dianaPpal && v && v.videoWidth) { const g = pose ? chequeoEncuadre(pose, v.videoWidth, v.videoHeight, null) : null; dianaPpal.set(g && g.geo, posOk, r.consejo) }
   }
   if (posOk && !antes && actual.encuadre !== 'lineas' && avisoConteo !== 'silencio') { sonidoCorrecto(); if (!det.armado) decir('OK, posición correcta') }
@@ -752,7 +758,7 @@ function actualizarCalibrador() {
   else { cons.textContent = r.consejo; cons.className = 'consejo' }
   if (btn && $('btnPreparar').disabled && !det.ocupado) btn.disabled = !posOk
 
-  if ((manosLibres || det.autoArmar) && det.armado) {
+  if ((manosLibres || (det.autoArmar && inicioAuto)) && det.armado) {
     const ahora = performance.now()
     if (!posOk && r.consejo && (r.consejo !== ultimoConsejo || ahora - tUltimoConsejo > 4000) && ahora - tUltimoConsejo > 2500) {
       decir(r.consejo.split(':')[0]); ultimoConsejo = r.consejo; tUltimoConsejo = ahora
@@ -948,7 +954,10 @@ FOTO.eips_pie_1 = fotoEips('Test de flexión DE PIE · en flexión', 'pie_1')
 FOTO.eips_sen_0 = fotoEips('Test de flexión SENTADO · erguido', 'sen_0')
 FOTO.eips_sen_1 = fotoEips('Test de flexión SENTADO · en flexión', 'sen_1')
 const fotoAdams = (zona, n) => ({ titulo: 'Maniobra de Adams · ' + n + ' (automático)', modo: 'adams', zona, nombres: ['Espalda', 'Espalda'],
-  ayuda: 'Paciente inclinado hacia adelante, espalda horizontal y descubierta. iPad derecho, a la ALTURA DE LA ESPALDA y "de canto": ' + (zona === 'lum' ? 'desde ATRÁS del paciente' : 'desde la CABEZA del paciente') + ', que se vea el ancho de la espalda contra un fondo liso. Sacá la foto: el sistema encuentra la giba, traza la línea y mide el ángulo solo. Si hace falta, corré un punto con el dedo.' })
+  ayuda: (zona === 'lum'
+    ? 'LUMBAR: el iPad va DETRÁS del paciente, bajo, a la altura de la cintura, apaisado. '
+    : 'TORÁCICA: el iPad va ADELANTE del paciente (del lado de la cabeza), bajo, a la altura de la espalda inclinada, apaisado, en trípode o sostenido por otra persona. Vos podés quedarte atrás mirando, como siempre: el que tiene que estar adelante es el iPad, porque desde atrás la cola tapa la parte alta de la espalda. ')
+    + 'Paciente inclinado hasta la espalda horizontal, espalda descubierta, fondo liso. La espalda tiene que verse como una lomita contra el fondo. Capturá: el sistema encuentra la giba, traza la línea y mide el ángulo solo. Si hace falta, corré un punto con el dedo.' })
 FOTO.adams_tor = fotoAdams('tor', 'zona torácica')
 FOTO.adams_tl = fotoAdams('tl', 'zona toracolumbar')
 FOTO.adams_lum = fotoAdams('lum', 'zona lumbar')
@@ -1103,8 +1112,8 @@ function envolverSeguimiento(lmk, modo) {
 // Sonidos de posición: correcto (dos tonos que suben) e incorrecto (uno grave)
 const sonidoCorrecto = () => { beep(880, 90); setTimeout(() => beep(1320, 140), 110) }
 const sonidoIncorrecto = () => beep(300, 220)
-// Inicio automático (se recuerda en el iPad): con el paciente dentro del círculo 1,5 s arranca solo (o captura sola)
-let inicioAuto = (() => { try { return localStorage.getItem('testbiolab_inicio_auto') === '1' } catch (e) { return false } })()
+// Inicio automático (se recuerda en el iPad): con el paciente dentro del círculo 3 s arranca solo (o captura sola). Por defecto: MANUAL
+let inicioAuto = (() => { try { return localStorage.getItem('testbiolab_inicio_auto2') === '1' } catch (e) { return false } })()   // por defecto MANUAL
 // DIANA estilo HumanTrak: círculo grande = zona correcta; círculo chico = el paciente (izquierda/derecha y cerca/lejos).
 function crearDiana(cont, onToggle) {
   const el = document.createElement('div')
@@ -1146,7 +1155,7 @@ function crearDiana(cont, onToggle) {
   pintarFij()
   const dot = el.querySelector('.dot'), txt = el.querySelector('.txt'), aut = el.querySelector('.aut')
   const pintarAut = () => { aut.textContent = inicioAuto ? '⏯ Inicio: AUTOMÁTICO' : '⏯ Inicio: MANUAL'; aut.style.background = inicioAuto ? '#4ade80' : '#e2e8f0'; aut.style.color = '#0f172a' }
-  aut.onclick = (e) => { e.stopPropagation(); inicioAuto = !inicioAuto; try { localStorage.setItem('testbiolab_inicio_auto', inicioAuto ? '1' : '0') } catch (er) {} pintarAut(); if (onToggle) onToggle(inicioAuto) }
+  aut.onclick = (e) => { e.stopPropagation(); inicioAuto = !inicioAuto; try { localStorage.setItem('testbiolab_inicio_auto2', inicioAuto ? '1' : '0') } catch (er) {} pintarAut(); if (onToggle) onToggle(inicioAuto) }
   pintarAut()
   return {
     set(geo, ok, consejo) {
@@ -1174,7 +1183,7 @@ function panelEncuadre(cont, opts = {}) {
       okAntes = ok
       diana.set(r.geo, ok, r.consejo)
       if (ok) { tOk = tOk || performance.now()
-        if (inicioAuto && opts.alListo && !disparado && performance.now() - tOk > 1500) { disparado = true; opts.alListo() } }
+        if (inicioAuto && opts.alListo && !disparado && performance.now() - tOk > 3000) { disparado = true; opts.alListo() } }
       else tOk = null
       el.innerHTML = r.items.map(i => `<div style="color:${i.ok ? '#86efac' : '#fca5a5'}">${i.ok ? '✓' : '✗'} ${esc(i.txt)}</div>`).join('')
         + `<div style="margin-top:4px;color:${ok ? '#86efac' : '#fde68a'}">${ok ? '✓ Posición correcta' : esc(r.consejo || 'Acomodando…')}</div>`
@@ -1204,18 +1213,31 @@ async function modeloImagenSeg() {
   try { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('GPU')) } catch (e) { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('CPU')) }
   return envolverSeguimiento(landmarkerSeg, 'foto')
 }
+let segPersona = null
+async function modeloSegPersona() {
+  if (segPersona) return segPersona
+  const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm')
+  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite', delegate }, runningMode: 'IMAGE', outputConfidenceMasks: true, outputCategoryMask: false })
+  try { segPersona = await ImageSegmenter.createFromOptions(vision, o('GPU')) } catch (e) { segPersona = await ImageSegmenter.createFromOptions(vision, o('CPU')) }
+  return segPersona
+}
 // ADAMS AUTOMÁTICO: con la espalda "de canto", el borde de arriba de la silueta es la superficie de la espalda.
 // Busca el punto más alto (la giba) en el ancho del tronco de la zona elegida, toma el punto espejo del otro lado
 // de la columna y mide la inclinación de esa línea (como el escoliómetro). También dice de qué lado está la giba.
 async function adamsAuto(img, W, H, zona) {
-  const r = (await modeloImagenSeg()).detect(img)
-  const m = r.segmentationMasks && r.segmentationMasks[0]; if (!m) return null
+  let r = null; try { r = (await modeloImagenSeg()).detect(img) } catch (e) {}
+  let m = r && r.segmentationMasks && r.segmentationMasks[0]
+  if (!m) {                                   // con el cuerpo doblado a veces no reconoce la postura: se usa la silueta sola
+    try { const rs = (await modeloSegPersona()).segment(img); m = rs.confidenceMasks && rs.confidenceMasks[0]; r = { landmarks: [] } } catch (e) {}
+  }
+  if (!m) return null
   const mw = m.width, mh = m.height, a = m.getAsFloat32Array()
   const top = new Array(mw).fill(null)
   for (let x = 0; x < mw; x++) for (let y = 0; y < mh; y++) if (a[y * mw + x] > 0.5) { top[x] = y; break }
   try { m.close() } catch (e) {}
   const L = r.landmarks && r.landmarks[0]
-  let mid, half, derImg = 'der'
+  // sin puntos del cuerpo: desde la CABEZA el lado derecho del paciente queda a la IZQUIERDA de la foto; desde ATRÁS, a la derecha
+  let mid, half, derImg = zona === 'lum' ? 'der' : 'izq'
   if (L) {
     const par = zona === 'lum' ? [23, 24] : zona === 'tl' ? null : [11, 12]
     const xs = par ? par.map(i => L[i].x * mw) : [L[11].x, L[12].x, L[23].x, L[24].x].map(v => v * mw)
@@ -1426,7 +1448,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
           cx.lineWidth = 2.5; cx.strokeStyle = 'rgba(255,255,255,.55)'
           SKEL.forEach(([a, b]) => { if (P[a].v > 0.4 && P[b].v > 0.4) { const A = S(P[a]), B = S(P[b]); cx.beginPath(); cx.moveTo(A.x, A.y); cx.lineTo(B.x, B.y); cx.stroke() } })
           const idx = idxTest()
-          habilitar(panel.set(chequeoEncuadre(P, W, H, idx, nStk ? { stickers: nStk, vistos: contarStickersVivo(v, nStk) } : {})))
+          habilitar(panel.set(chequeoEncuadre(P, W, H, idx, nStk ? { stickers: nStk, vistos: contarStickersVivo(v, nStk) } : {})) || cfg.modo === 'adams')   // Adams: con el cuerpo doblado se puede capturar siempre
           if (idx) {
             const Q = idx.map(i => P[i]), QS = Q.map(S)
             cx.lineWidth = 6; cx.strokeStyle = '#22d3ee'
@@ -1437,7 +1459,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
             lect.textContent = val == null ? 'Viendo al paciente ✓' : typeof val === 'object' ? (val.texto || '') : Math.round(val) + '°'
           } else lect.textContent = 'Viendo al paciente ✓'
         } else { lect.textContent = 'Que se vea el cuerpo en la pantalla'
-          habilitar(panel.set(nStk && !idxTest() ? chequeoEncuadre(null, W, H, null, { stickers: nStk, vistos: contarStickersVivo(v, nStk) }) : chequeoEncuadre(null, W, H, idxTest()))) }
+          habilitar(panel.set(nStk && !idxTest() ? chequeoEncuadre(null, W, H, null, { stickers: nStk, vistos: contarStickersVivo(v, nStk) }) : chequeoEncuadre(null, W, H, idxTest())) || cfg.modo === 'adams') }
       }
       requestAnimationFrame(loop)
     }
@@ -1797,10 +1819,26 @@ const PLANILLAS = {
         lectura: !hay ? null : (h.length ? ['warn', `${h.length} hallazgo${h.length === 1 ? '' : 's'}`] : ['ok', 'Simétrico']).map((x, i) => i === 1 && res.imc ? `${x} · IMC ${fmt(res.imc, 1)}` : x) }
     } },
   adams: {
+    autoBtn: '📷 Adams automático (2 fotos: torácica y lumbar)',
+    autoRun: (listo) => {
+      const lado = (cfg) => { const l = cfg._lado; cfg._lado = null; return l && l !== '—' ? l : '—' }
+      const c1 = { ...FOTO.adams_tor, titulo: 'Adams · 1/2 · TORÁCICA (iPad adelante, del lado de la cabeza)' }
+      const c2 = { ...FOTO.adams_lum, titulo: 'Adams · 2/2 · LUMBAR (iPad detrás, a la altura de la cintura)' }
+      abrirGoniometro(c1, null, (v1) => {
+        const l1 = lado(c1)
+        setTimeout(() => abrirGoniometro(c2, null, (v2) => {
+          const l2 = lado(c2), tl = Math.max(v1 || 0, v2 || 0), ltl = (v1 || 0) >= (v2 || 0) ? l1 : l2
+          const giba = (v) => v >= 5 ? 'con giba' : 'sin giba'
+          listo({ atr_tor: v1, giba_tor: v1 >= 3 ? l1 : '—', atr_lum: v2, giba_lum: v2 >= 3 ? l2 : '—', atr_tl: tl, giba_tl: tl >= 3 ? ltl : '—' },
+            `Adams automático: torácica ${v1}° (${giba(v1)}${v1 >= 3 && l1 !== '—' ? ', lado ' + l1.toLowerCase() : ''}) · lumbar ${v2}° (${giba(v2)}${v2 >= 3 && l2 !== '—' ? ', lado ' + l2.toLowerCase() : ''}) · toracolumbar estimada con la mayor de las dos vistas.`)
+        }), 300)
+      })
+    },
     info: `<ol class="pasos">
         <li>Espalda <b>descubierta</b>, descalzo, pies juntos y rodillas estiradas.</li>
         <li>Se inclina <b>hacia adelante</b> con los brazos colgando y las palmas juntas, hasta que la espalda quede horizontal, despacio.</li>
-        <li><b>📷 Foto de cada zona</b> (torácica, toracolumbar, lumbar): iPad <b>bajo, a la altura de la espalda inclinada</b> y apaisado, mirando a lo largo de la espalda "de canto" (torácica y toracolumbar desde la <b>cabeza</b> del paciente; lumbar desde <b>atrás</b>), con fondo liso. Se ven las líneas en vivo; capturás y el sistema <b>encuentra la giba, mide el ángulo y marca el lado</b>. Tocás <b>Usar este valor</b>. El escoliómetro queda como opción.</li>
+        <li><b>📷 Botón azul "Adams automático" (2 fotos):</b> 1) iPad <b>adelante, del lado de la cabeza</b>, bajo y apaisado a la altura de la espalda inclinada → zona <b>torácica</b>; 2) iPad <b>detrás</b>, a la altura de la cintura → zona <b>lumbar</b>. En cada una capturás y tocás <b>Usar este valor</b>: el sistema encuentra si hay giba, mide el ángulo, marca el lado y <b>escribe todo solo</b> (la toracolumbar queda con la mayor de las dos vistas). Vos podés quedarte atrás mirando; el que cambia de lugar es el iPad.</li>
+        <li>Si querés repetir una sola zona, tenés el 📷 de cada renglón. El escoliómetro queda como opción.</li>
         <li>Si hay giba, repetilo <b>sentado</b>: si desaparece, puede venir de una diferencia de largo de piernas.</li>
       </ol>
       <b>Cómo se lee:</b> un ángulo de rotación del tronco (ATR) de <b>5° o más</b> se vigila y de <b>7° o más</b> suele derivarse para radiografía (los cortes varían según la guía). Es un <b>screening</b>: no diagnostica escoliosis, que se confirma con Rx (ángulo de Cobb).`,
@@ -2652,7 +2690,7 @@ function detectorUnipodal() {
   const d = { idx: 0, fase: 'quieto', res: {}, autoArmar: false }
   const max = () => parseFloat(($('uniMax') || {}).value) || 30
   const ojos = () => ($('uniOjos') || {}).value || 'Abiertos'
-  const prox = () => { if (d.idx < 2) setEstado(`Apoyo ${PIERNAS[d.idx].nombre.toUpperCase()}, ojos ${ojos().toLowerCase()}${d.idx ? ': arranca solo al quedar ubicado.' : '. Tocá Empezar.'}`)
+  const prox = () => { if (d.idx < 2) setEstado(`Apoyo ${PIERNAS[d.idx].nombre.toUpperCase()}, ojos ${ojos().toLowerCase()}${d.idx ? ': ' + (inicioAuto ? 'arranca solo al quedar ubicado' : 'tocá Empezar cuando esté listo') + '.' : '. Tocá Empezar.'}`)
     $('btnEmpezar').textContent = d.idx < 2 ? `Empezar · apoyo ${PIERNAS[d.idx].nombre}` : 'Empezar' }
   d.init = prox
   d.empezar = async () => {
@@ -3077,7 +3115,7 @@ const DETECTORES = {
     const d = { idx: 0, fase: 'quieto', encuadre: 'frente', base: null, muestras: [], reps: 0, abajo: false, mx: {}, f: null, obs: '', fotos: {}, autoArmar: false }
     const prox = () => {
       d.encuadre = VISTAS[Math.min(d.idx, NV - 1)].enc; posOkFrames = 0; posOk = false
-      if (d.idx < NV) setEstado(`Vista ${d.idx + 1} de ${NV} · ${VISTAS[d.idx].etq.toUpperCase()}: paciente ${VISTAS[d.idx].nombre} al iPad, brazos arriba${d.idx ? '. Arranca solo cuando esté bien ubicado.' : ', y tocá Empezar.'}`)
+      if (d.idx < NV) setEstado(`Vista ${d.idx + 1} de ${NV} · ${VISTAS[d.idx].etq.toUpperCase()}: paciente ${VISTAS[d.idx].nombre} al iPad, brazos arriba${d.idx ? '. ' + (inicioAuto ? 'Arranca solo cuando esté bien ubicado' : 'Tocá Empezar cuando esté listo') + '.' : ', y tocá Empezar.'}`)
       $('btnEmpezar').textContent = d.idx < NV ? `Empezar · ${VISTAS[d.idx].etq}` : 'Empezar'
     }
     // foto en el punto más profundo: video + esqueleto + nombre de la vista
@@ -3222,7 +3260,7 @@ const DETECTORES = {
       d.idx++
       if (d.idx < NV) {
         const sig = VISTAS[d.idx]
-        prox(); setEstado(`${hecha.etq} lista ✓. Ahora ${sig.voz.toUpperCase()} al iPad: arranca solo cuando esté bien ubicado.`, 'ok')
+        prox(); setEstado(`${hecha.etq} lista ✓. Ahora ${sig.voz.toUpperCase()} al iPad: ${inicioAuto ? 'arranca solo cuando esté bien ubicado' : 'tocá Empezar cuando esté listo'}.`, 'ok')
         setTimeout(() => decir(`${hecha.etq} lista. Ahora ${sig.voz}.`), 900)
         setTimeout(() => { if (d.fase === 'quieto' && d.idx < NV) d.armado = true }, 4500)
       } else { d.encuadre = 'frente'; d.autoArmar = false; decir('Listo. Terminamos.'); setEstado('Terminado. Revisá la planilla: todo se marcó solo (el arqueo lumbar sale de la silueta de perfil).', 'ok'); $('btnEmpezar').textContent = 'Empezar'; pintar() }
@@ -3310,7 +3348,7 @@ const DETECTORES = {
     const LADOS = [{ lado: 'D', nombre: 'derecha', libre: 'izquierda' }, { lado: 'I', nombre: 'izquierda', libre: 'derecha' }]
     const d = { idx: 0, fase: 'quieto', res: {}, sug: {}, autoArmar: false, obs: '' }
     const objetivo = () => parseFloat(($('pteObj') || {}).value) || 30
-    const prox = () => { if (d.idx < 2) setEstado(`Apoyo ${LADOS[d.idx].nombre.toUpperCase()} (estira la ${LADOS[d.idx].libre})${d.idx ? ': arranca solo al quedar ubicado.' : '. Tocá Empezar.'}`)
+    const prox = () => { if (d.idx < 2) setEstado(`Apoyo ${LADOS[d.idx].nombre.toUpperCase()} (estira la ${LADOS[d.idx].libre})${d.idx ? ': ' + (inicioAuto ? 'arranca solo al quedar ubicado' : 'tocá Empezar cuando esté listo') + '.' : '. Tocá Empezar.'}`)
       $('btnEmpezar').textContent = d.idx < 2 ? `Empezar · apoyo ${LADOS[d.idx].nombre}` : 'Empezar' }
     d.init = prox
     const angPelvis = () => Math.atan2(pose[23].y - pose[24].y, pose[23].x - pose[24].x) * 180 / Math.PI
@@ -3501,7 +3539,7 @@ const DETECTORES = {
                      { lado: 'I', nombre: 'izquierda', hip: 23, knee: 25, ank: 27, toe: 31, oHip: 24, hom: 11, oHom: 12 }]
     const d = { idx: 0, fase: 'quieto', res: {}, sug: {}, med: {}, base: null, muestras: [], reps: 0, abajo: false, autoArmar: false, obs: '' }
     const prox = () => {
-      if (d.idx < 2) setEstado(`Apoyo ${PIERNAS[d.idx].nombre.toUpperCase()}: parado en esa pierna, manos en la cintura${d.idx ? '. Arranca solo al quedar bien ubicado.' : ', y tocá Empezar.'}`)
+      if (d.idx < 2) setEstado(`Apoyo ${PIERNAS[d.idx].nombre.toUpperCase()}: parado en esa pierna, manos en la cintura${d.idx ? '. ' + (inicioAuto ? 'Arranca solo al quedar bien ubicado' : 'Tocá Empezar cuando esté listo') + '.' : ', y tocá Empezar.'}`)
       $('btnEmpezar').textContent = d.idx < 2 ? `Empezar · apoyo ${PIERNAS[d.idx].nombre}` : 'Empezar'
     }
     d.init = prox
@@ -3561,7 +3599,7 @@ const DETECTORES = {
       d.res[P.lado] = { ...s }; d.sug[P.lado] = { ...s }
       d.med[P.lado] = { pelvis_drop_grados: +mx.drop.toFixed(1), pelvis_elev_grados: +mx.elev.toFixed(1), rodilla_medial: +mx.valgo.toFixed(3), rotacion_hombros: +mx.rot.toFixed(3), giro_tronco: +mx.giroMax.toFixed(3), muslo_al_fondo: +mx.musloMin.toFixed(2), reps: d.reps }
       d.idx++
-      if (d.idx < 2) { prox(); setEstado('Apoyo derecho listo ✓. Ahora apoyo IZQUIERDO: arranca solo cuando esté bien ubicado.', 'ok')
+      if (d.idx < 2) { prox(); setEstado('Apoyo derecho listo ✓. Ahora apoyo IZQUIERDO: ' + (inicioAuto ? 'arranca solo cuando esté bien ubicado' : 'tocá Empezar cuando esté listo') + '.', 'ok')
         setTimeout(() => decir('Derecha lista. Ahora apoyo izquierdo.'), 900); setTimeout(() => { if (d.fase === 'quieto' && d.idx < 2) d.armado = true }, 4500) }
       else { d.autoArmar = false; decir('Listo. Terminamos.'); setEstado('Terminado. Revisá la planilla: todo se marcó solo, incluido el sentido de la rotación y si pasó los 90°.', 'ok'); $('btnEmpezar').textContent = 'Empezar'; pintar() }
     }
@@ -5242,6 +5280,22 @@ function renderCatalogo() {
   }
 }
 
+// "Cómo se ubica": dónde va el iPad y cómo se pone el paciente, sacado de los pasos del propio test
+function pasosDe(t) { return [...String(t.info || '').matchAll(/<li>([\s\S]*?)<\/li>/g)].map(m => m[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()) }
+function ubicacionDe(t) {
+  const p = pasosDe(t), esIpad = (x) => /ipad|trípode|tripode|cámara|camara/i.test(x)
+  return { ipad: t.pos || (p.find(esIpad) || ''), ipadPaso: p.find(esIpad) || '', paciente: p.find(x => !esIpad(x)) || '' }
+}
+function ubicacionHTML(t) {
+  const u = ubicacionDe(t)
+  return `<div class="ubicar"><h4>Antes de empezar: cómo se ubican</h4>
+    <div class="fila">📱<div><b>Dónde va el iPad:</b> ${esc(u.ipad)}${u.ipadPaso && u.ipadPaso !== u.ipad ? `. ${esc(u.ipadPaso)}` : ''}</div></div>
+    ${u.paciente ? `<div class="fila">🧍<div><b>El paciente:</b> ${esc(u.paciente)}</div></div>` : ''}
+    ${t.necesita ? `<div class="fila">🧰<div><b>Necesitás:</b> ${esc(t.necesita)}</div></div>` : ''}
+    <div style="margin-top:12px;color:#94a3b8">Después tocá <b style="color:#fff">Preparar cámara</b> (abajo).</div></div>`
+}
+function ubicacionCorta(t) { const u = ubicacionDe(t); return `📱 ${esc(u.ipad)}${u.paciente ? ' · 🧍 ' + esc(u.paciente) : ''}` }
+
 function renderTest(id, opts = {}) {
   resetSeguimiento()
   if (!puedeEvaluar()) {
@@ -5260,7 +5314,7 @@ function renderTest(id, opts = {}) {
     <button class="back" id="btnVolver">← Todos los tests</button>
     <div class="layout">
       <div class="stage">
-        <div class="empty" id="vempty">La cámara se prende al tocar <b>Preparar cámara</b>.</div>
+        <div class="empty" id="vempty">${ubicacionHTML(actual)}</div>
         <div class="vbox" id="vbox" style="display:none">
           <video id="video" playsinline muted></video>
           <canvas id="canvas"></canvas>
@@ -5268,6 +5322,7 @@ function renderTest(id, opts = {}) {
           <div class="chk" id="chk"></div>
           <div class="consejo" id="consejo"></div>
           <div class="big" id="big"></div>
+          <div class="ubitip" id="ubitip">${ubicacionCorta(actual)} <span style="opacity:.7">(tocá para ocultar)</span></div>
         </div>
       </div>
       <div class="panel">
@@ -5292,7 +5347,7 @@ function renderTest(id, opts = {}) {
           ${id === 'alcance' ? `<label>Distancia entre las dos marcas <input id="distRef" type="number" step="1" min="5" value="100"> cm</label>` : ''}
           ${id === 'unipodal' ? `<label>Ojos <select id="uniOjos"><option>Abiertos</option><option>Cerrados</option></select></label><label>Máximo <input id="uniMax" type="number" step="5" min="10" value="30"> s</label>` : ''}
         </div>
-        <div class="estado" id="estado">Tocá Preparar cámara.</div>
+        <div class="mando" id="mando"><div class="estado" id="estado">Tocá Preparar cámara.</div>
         <div class="btns">
           <button class="b pri" id="btnPreparar">Preparar cámara</button>
           <button class="b pri" id="btnEmpezar" disabled>Empezar</button>
@@ -5305,6 +5360,7 @@ function renderTest(id, opts = {}) {
         ${['ohs', 'squatmono', 'puente', 'estocada'].includes(id) ? '<button class="lnk" id="btnManual">Cargar la planilla a ojo, sin cámara</button>' : ''}
         ${['salto', 'hop', 'triplehop', 'crossover', 'alcance'].includes(id) ? '<button class="lnk" id="btnManual">Cargar la distancia a mano (medida con cinta)</button>' : ''}
         ${['unipodal', 'sidehop', 'ckcuest'].includes(id) ? '<button class="lnk" id="btnManual">Cargar el resultado a mano</button>' : ''}
+        </div>
         <div class="res" id="res"></div>
       </div>
     </div>
@@ -5334,6 +5390,8 @@ function renderTest(id, opts = {}) {
     $('btnPreparar').disabled = true
     try {
       await cargarModelo(); await prenderCamara()
+      const stg = document.querySelector('.layout > .stage'); if (stg) { stg.classList.add('fija'); stg.scrollIntoView({ block: 'start', behavior: 'smooth' }) }
+      const tip = $('ubitip'); if (tip) { tip.onclick = () => tip.remove(); setTimeout(() => { if (tip.isConnected) tip.remove() }, 15000) }
       $('btnPreparar').textContent = 'Cámara lista'; $('btnDetener').disabled = false; $('btnForzar').style.display = ''; $('btnSolo').disabled = false
       if (det.init) det.init(); else setEstado('Listo. Ubicá al paciente y tocá Empezar.', 'ok')
     } catch (e) {
