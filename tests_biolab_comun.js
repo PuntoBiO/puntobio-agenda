@@ -27,6 +27,7 @@ export const EVO = {
   rotoracica: { titulo: 'Rotación torácica · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
   shouldermob:{ titulo: 'Shoulder mobility FMS (peor lado)', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
   puente:     { titulo: 'Puente 1 pierna (lados sin control)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  antropo:    { titulo: 'Antropometría · hallazgos', unidad: 'hallazgos', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [] },
   adams:      { titulo: 'Adams · ATR máximo', unidad: '°', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [{ y: 5, txt: '5° · vigilar' }, { y: 7, txt: '7° · derivar' }] },
   postural:   { titulo: 'Hallazgos posturales', unidad: 'hallazgos', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [] },
   unipodal:   { titulo: 'Apoyo unipodal (peor lado)', unidad: 's', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 10, txt: '10 s' }] },
@@ -98,6 +99,7 @@ export const INFO = {
   rotoracica: { ico: '🔄', nombre: 'Rotación torácica', pac: 'Rotación de tu espalda', pacUnidad: '% de simetría' },
   shouldermob:{ ico: '🤲', nombre: 'Shoulder mobility (FMS)', pac: 'Movilidad de hombros', pacUnidad: 'de 3 puntos' },
   puente:     { ico: '🌉', nombre: 'Puente glúteo 1 pierna', pac: 'Puente a una pierna', pacUnidad: 'lados a trabajar' },
+  antropo:    { ico: '📏', nombre: 'Antropometría BiOLAB', pac: 'Medidas de tus brazos y piernas', pacUnidad: 'diferencias a trabajar' },
   adams:      { ico: '🙇', nombre: 'Maniobra de Adams', pac: 'Simetría de tu espalda', pacUnidad: 'grados (menos es mejor)' },
   postural:   { ico: '🧍‍♂️', nombre: 'Análisis postural', pac: 'Tu postura', pacUnidad: 'puntos a trabajar' },
   unipodal:   { ico: '🦩', nombre: 'Apoyo unipodal', pac: 'Equilibrio en una pierna', pacUnidad: 'segundos' },
@@ -124,7 +126,7 @@ export const INFO = {
   dnf:        { ico: '⏱️', nombre: 'Flexores profundos de cuello', pac: 'Resistencia de tu cuello', pacUnidad: 'segundos' },
   estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['postural', 'adams', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin']
+export const ORDEN = ['postural', 'adams', 'antropo', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {
@@ -139,6 +141,7 @@ export function interpretar(test, v) {
     case 'alcance': return v < 15 ? ['bad', 'Riesgo alto de caídas (orientativo)'] : v < 25 ? ['warn', 'Riesgo moderado (orientativo)'] : ['ok', 'Alcance adecuado']
     case 'sidehop': case 'crossover': return v >= LSI_OK ? ['ok', 'Simétrico'] : ['bad', 'Asimetría']
     case 'aslr': return v === 0 ? ['ok', 'Sin dificultad'] : v <= 2 ? ['warn', `${v}/10`] : ['bad', `${v}/10`]
+    case 'antropo': return v === 0 ? ['ok', 'Simétrico'] : ['warn', v + ' hallazgo' + (v === 1 ? '' : 's')]
     case 'adams': return v >= 7 ? ['bad', 'Derivar para radiografía'] : v >= 5 ? ['warn', 'Vigilar'] : ['ok', 'Dentro de lo esperable']
     case 'postural': return v === 0 ? ['ok', 'Sin desvíos relevantes'] : ['warn', v + ' hallazgo' + (v === 1 ? '' : 's')]
     case 'silla5': return v <= 11.19 ? ['ok', 'SPPB silla 4/4'] : v <= 13.69 ? ['ok', 'SPPB silla 3/4'] : v <= 16.69 ? ['warn', 'SPPB silla 2/4'] : ['bad', 'SPPB silla 1/4']
