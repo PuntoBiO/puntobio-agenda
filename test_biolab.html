@@ -533,10 +533,11 @@ async function cargarModelo() {
   const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm')
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate },
-    runningMode: 'VIDEO', numPoses: 1, minPoseDetectionConfidence: 0.5, minTrackingConfidence: 0.5
+    runningMode: 'VIDEO', numPoses: 3, minPoseDetectionConfidence: 0.5, minTrackingConfidence: 0.5
   })
   try { landmarker = await PoseLandmarker.createFromOptions(vision, opts('GPU')) }
   catch (e) { landmarker = await PoseLandmarker.createFromOptions(vision, opts('CPU')) }
+  envolverSeguimiento(landmarker, 'video')
 }
 
 // Cámara elegida: '' = automática (prefiere el ultra gran angular trasero si existe)
@@ -721,6 +722,7 @@ function chequearPosicion() {
   return { ok, items, consejo: consejos[0] || '' }
 }
 
+let dianaPpal = null
 function actualizarCalibrador() {
   const chk = $('chk'), cons = $('consejo'), btn = $('btnEmpezar')
   if (!chk || !det) return
@@ -737,8 +739,14 @@ function actualizarCalibrador() {
   posOkFrames = r.ok ? posOkFrames + 1 : 0
   const antes = posOk
   posOk = posOkFrames >= 15
-  // avisa en voz alta cuando la posición (distancia, centrado, orientación) queda bien
-  if (posOk && !antes && actual.encuadre !== 'lineas' && avisoConteo !== 'silencio') { beep(1100, 120); if (!det.armado) decir('OK, posición correcta') }
+  // diana (círculo grande = zona correcta, círculo chico = el paciente) y sonidos correcto / incorrecto
+  if (actual.encuadre !== 'lineas') {
+    const v = $('video'), cont = $('canvas') && $('canvas').parentElement
+    if (cont && (!dianaPpal || !cont.contains(dianaPpal.el))) { if (dianaPpal) dianaPpal.quitar(); dianaPpal = crearDiana(cont); dianaPpal.el = cont.lastElementChild; const au = dianaPpal.el.querySelector('.aut'); if (au) au.style.display = 'none' }   // acá el inicio automático es el de manos libres
+    if (dianaPpal && v && v.videoWidth) { const g = pose ? chequeoEncuadre(pose, v.videoWidth, v.videoHeight, null) : null; dianaPpal.set(g && g.geo, posOk, r.consejo) }
+  }
+  if (posOk && !antes && actual.encuadre !== 'lineas' && avisoConteo !== 'silencio') { sonidoCorrecto(); if (!det.armado) decir('OK, posición correcta') }
+  if (!posOk && antes && !r.ok && actual.encuadre !== 'lineas' && avisoConteo !== 'silencio') sonidoIncorrecto()
   chk.innerHTML = r.items.map(i => `<span class="${i.ok ? 'ok' : 'no'}">${i.ok ? '✓' : '✗'} ${i.txt}</span>`).join('')
   if (posOk) { cons.textContent = actual.encuadre === 'lineas' ? '' : '✓ Posición correcta'; cons.className = 'consejo ok' }
   else { cons.textContent = r.consejo; cons.className = 'consejo' }
@@ -963,16 +971,16 @@ let landmarkerImg = null
 async function modeloImagen() {
   if (landmarkerImg) return landmarkerImg
   const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm')
-  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 1 })
+  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 3 })
   try { landmarkerImg = await PoseLandmarker.createFromOptions(vision, o('GPU')) } catch (e) { landmarkerImg = await PoseLandmarker.createFromOptions(vision, o('CPU')) }
-  return landmarkerImg
+  return envolverSeguimiento(landmarkerImg, 'foto')
 }
 
 // STICKERS: círculos VERDE FLÚOR de 19 mm. Se buscan por el color (la piel nunca es verde) y su tamaño da la escala
 // (19 mm de diámetro), así no hace falta regla. Devuelve los más grandes con su centro y diámetro en pixeles.
 const DIAM_STICKER_MM = 19
 function detectarStickers(img, cuantos = 2) {
-  const esc = Math.min(1, 900 / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height))
+  const esc = Math.min(1, 900 / Math.max(img.naturalWidth || img.videoWidth || img.width, img.naturalHeight || img.videoHeight || img.height))
   const w = Math.round((img.naturalWidth || img.width) * esc), h = Math.round((img.naturalHeight || img.height) * esc)
   const c = document.createElement('canvas'); c.width = w; c.height = h
   const cx = c.getContext('2d', { willReadFrequently: true }); cx.drawImage(img, 0, 0, w, h)
@@ -997,14 +1005,204 @@ function detectarStickers(img, cuantos = 2) {
   return top.length === cuantos && (cuantos < 2 || Math.min(top[0].n, top[1].n) / Math.max(top[0].n, top[1].n) > 0.35) ? top : null
 }
 
+// ============================================================
+// ENCUADRE PARA TODAS LAS CÁMARAS (fotos, video en vivo, temporizador, 6 minutos, SFMA, ASLR, rock back inverso).
+// Misma idea que el calibrador de los tests con cámara: una lista en verde y rojo y un consejo.
+// idx = puntos del cuerpo que el test necesita ver (null = cuerpo entero); stickers = cuántos stickers verdes tiene que ver.
+// ============================================================
+function chequeoEncuadre(P, W, H, idx, opts = {}) {
+  const items = []
+  if (opts.stickers != null) {
+    const ok = (opts.vistos || 0) >= opts.stickers
+    items.push({ ok, txt: `Se ven los ${opts.stickers} sticker${opts.stickers > 1 ? 's' : ''} verde${opts.stickers > 1 ? 's' : ''}${ok ? '' : ` (veo ${opts.vistos || 0})`}` })
+    if (!idx) return { ok, items, consejo: ok ? '' : 'Acercá el iPad o mejorá la luz: tienen que verse los stickers verdes' }
+  }
+  if (!P) { items.push({ ok: false, txt: 'Paciente en cuadro' }); return { ok: false, items, consejo: 'Que el paciente entre en la pantalla' } }
+  items.push({ ok: true, txt: 'Paciente en cuadro' })
+  // cuerpo entero: alcanza con que se vea completo UN lado (de perfil el otro queda tapado)
+  const ladoA = [0, 12, 24, 26, 28], ladoB = [0, 11, 23, 25, 27], sv = (l) => l.reduce((t, i) => t + ((P[i] && P[i].v) || 0), 0)
+  const req = idx || (sv(ladoA) >= sv(ladoB) ? ladoA : ladoB)
+  const vis = req.filter(i => P[i] && P[i].v > 0.5 && P[i].x > W * 0.02 && P[i].x < W * 0.98 && P[i].y > H * 0.02 && P[i].y < H * 0.98)
+  const todos = vis.length === req.length
+  items.push({ ok: todos, txt: idx ? 'Se ven los puntos del test' : 'Cuerpo entero en cuadro' })
+  let consejo = todos ? '' : (idx ? 'Que se vea bien la zona que se mide' : 'Alejá el iPad: que entre de la cabeza a los pies')
+  if (vis.length >= 2) {
+    const xs = vis.map(i => P[i].x), ys = vis.map(i => P[i].y), cx = (Math.min(...xs) + Math.max(...xs)) / 2
+    const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / Math.max(W, H)
+    const cerca = span >= (idx ? 0.12 : 0.35), lejos = span <= 0.97
+    items.push({ ok: cerca && lejos, txt: 'Distancia correcta' })
+    if (!cerca) consejo = consejo || 'Acercá el iPad: el paciente se ve muy chico'
+    if (!lejos) consejo = consejo || 'Alejá el iPad: está muy cerca'
+    const centrado = cx > W * 0.2 && cx < W * 0.8
+    items.push({ ok: centrado, txt: 'Centrado' })
+    const ideal = idx ? 0.45 : 0.68, tol = idx ? 0.33 : 0.29
+    var geo = { dx: (cx / W - 0.5) / 0.3, dd: (span - ideal) / tol }
+    if (!centrado) consejo = consejo || (cx < W * 0.2 ? 'Corré el iPad hacia la izquierda del paciente' : 'Corré el iPad hacia la derecha del paciente')
+  }
+  if (opts.stickers != null && !(opts.vistos >= opts.stickers)) consejo = consejo || 'Tienen que verse los stickers verdes'
+  const ok = items.every(i => i.ok)
+  return { ok, items, consejo, geo: typeof geo !== 'undefined' ? geo : null }
+}
+// ============================================================
+// SEGUIMIENTO DEL PACIENTE (como la calibración de HumanTrak): el detector busca hasta 3 personas y el sistema
+// se queda SIEMPRE con la que eligió al principio (por posición y tamaño). Si alguien pasa por detrás, no lo toma.
+// Si el paciente sale de cuadro, espera a que vuelva; recién después de 4 s sin verlo se re-engancha con el más grande.
+// ============================================================
+const SEG = { c: null, s: null, t: 0, fijo: false }
+function resetSeguimiento(suave) { if (suave && SEG.fijo) { SEG.t = performance.now(); return }    // dentro del mismo test se mantiene el paciente fijado
+  SEG.c = null; SEG.s = null; SEG.t = 0; SEG.fijo = false; SEG.vistos = [] }
+function cajaPose(lm) { const v = lm.filter(p => (p.visibility ?? 1) > 0.4), L = v.length ? v : lm, xs = L.map(p => p.x), ys = L.map(p => p.y)
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) } }
+// el profesional toca al paciente en la pantalla: queda fijado y el sistema lo sigue solo a él
+function fijarPacienteEn(nx, ny) {
+  const c = (SEG.vistos || []); if (!c.length) return false
+  const dentro = c.filter(k => nx >= k.caja.x0 - 0.03 && nx <= k.caja.x1 + 0.03 && ny >= k.caja.y0 - 0.05 && ny <= k.caja.y1 + 0.05)
+  const el = (dentro.length ? dentro : c).reduce((m, k) => Math.hypot(k.c.x - nx, k.c.y - ny) < Math.hypot(m.c.x - nx, m.c.y - ny) ? k : m)
+  SEG.c = el.c; SEG.s = el.s; SEG.t = performance.now(); SEG.fijo = true; return true
+}
+function datosPose(lm) {
+  const v = lm.filter(p => (p.visibility ?? 1) > 0.4); const L = v.length ? v : lm
+  const xs = L.map(p => p.x), ys = L.map(p => p.y)
+  return { c: { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 }, s: Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) }
+}
+function elegirPaciente(r) {
+  if (!r || !r.landmarks || r.landmarks.length === 0) { SEG.vistos = []; return SEG.fijo ? { ...r, landmarks: [] } : r }
+  const ahora = performance.now(), cand = r.landmarks.map((lm, i) => ({ i, ...datosPose(lm), caja: cajaPose(lm) }))
+  SEG.vistos = cand
+  let el = null
+  if (SEG.fijo && SEG.c) {                                   // paciente elegido con el dedo: nunca se cambia solo
+    const d = (k) => Math.hypot(k.c.x - SEG.c.x, k.c.y - SEG.c.y) + Math.abs(k.s - SEG.s) * 0.7
+    el = cand.reduce((m, k) => d(k) < d(m) ? k : m, cand[0])
+    if (d(el) > (ahora - SEG.t < 1500 ? 0.3 : 0.45)) el = null       // si se fue, lo espera (y lo reconoce al volver)
+  } else if (SEG.c && ahora - SEG.t < 4000) {
+    const d = (k) => Math.hypot(k.c.x - SEG.c.x, k.c.y - SEG.c.y) + Math.abs(k.s - SEG.s) * 0.7
+    el = cand.reduce((m, k) => d(k) < d(m) ? k : m, cand[0])
+    if (d(el) > 0.3) el = null                               // nadie se parece al paciente: es otro que pasa
+  } else el = cand.reduce((m, k) => k.s > m.s ? k : m, cand[0])     // arranque: la persona más grande (la más cerca)
+  if (!el) return { ...r, landmarks: [], worldLandmarks: [], segmentationMasks: [] }
+  SEG.c = el.c; SEG.s = el.s; SEG.t = ahora
+  const reord = (a) => a && a.length > el.i ? [a[el.i]] : a
+  return { ...r, landmarks: reord(r.landmarks), worldLandmarks: reord(r.worldLandmarks), segmentationMasks: reord(r.segmentationMasks) }
+}
+// en fotos: se queda con la persona más parecida a la que se venía siguiendo (o la más grande)
+function elegirEnFoto(r) {
+  if (!r || !r.landmarks || r.landmarks.length < 2) return r
+  const cand = r.landmarks.map((lm, i) => ({ i, ...datosPose(lm) }))
+  const el = SEG.c ? cand.reduce((m, k) => Math.hypot(k.c.x - SEG.c.x, k.c.y - SEG.c.y) < Math.hypot(m.c.x - SEG.c.x, m.c.y - SEG.c.y) ? k : m, cand[0])
+    : cand.reduce((m, k) => k.s > m.s ? k : m, cand[0])
+  const reord = (a) => a && a.length > el.i ? [a[el.i]] : a
+  return { ...r, landmarks: reord(r.landmarks), worldLandmarks: reord(r.worldLandmarks), segmentationMasks: reord(r.segmentationMasks) }
+}
+function envolverSeguimiento(lmk, modo) {
+  if (!lmk || lmk._seguido) return lmk
+  if (modo === 'video') { const o = lmk.detectForVideo.bind(lmk); lmk.detectForVideo = (v, t) => elegirPaciente(o(v, t)) }
+  else { const o = lmk.detect.bind(lmk); lmk.detect = (img) => elegirEnFoto(o(img)) }
+  lmk._seguido = true; return lmk
+}
+
+// Sonidos de posición: correcto (dos tonos que suben) e incorrecto (uno grave)
+const sonidoCorrecto = () => { beep(880, 90); setTimeout(() => beep(1320, 140), 110) }
+const sonidoIncorrecto = () => beep(300, 220)
+// Inicio automático (se recuerda en el iPad): con el paciente dentro del círculo 1,5 s arranca solo (o captura sola)
+let inicioAuto = (() => { try { return localStorage.getItem('testbiolab_inicio_auto') === '1' } catch (e) { return false } })()
+// DIANA estilo HumanTrak: círculo grande = zona correcta; círculo chico = el paciente (izquierda/derecha y cerca/lejos).
+function crearDiana(cont, onToggle) {
+  const el = document.createElement('div')
+  el.style.cssText = 'position:absolute;top:10px;right:10px;z-index:7;width:150px;background:rgba(15,23,42,.82);border-radius:16px;padding:8px;color:#fff;font:700 12px Manrope,sans-serif;text-align:center'
+  el.innerHTML = `<svg viewBox="0 0 120 120" width="134" height="134"><circle cx="60" cy="60" r="44" fill="rgba(74,222,128,.12)" stroke="#4ade80" stroke-width="3" stroke-dasharray="6 5"/>
+      <line x1="60" y1="8" x2="60" y2="112" stroke="rgba(255,255,255,.15)"/><line x1="8" y1="60" x2="112" y2="60" stroke="rgba(255,255,255,.15)"/>
+      <text x="60" y="13" text-anchor="middle" font-size="8" fill="#94a3b8">más cerca</text><text x="60" y="117" text-anchor="middle" font-size="8" fill="#94a3b8">más lejos</text>
+      <circle class="dot" cx="60" cy="60" r="13" fill="#f87171" stroke="#fff" stroke-width="2.5"/></svg>
+    <div class="txt" style="margin-top:2px">Buscando al paciente…</div>
+    <button type="button" class="aut" style="margin-top:6px;pointer-events:auto;border:0;border-radius:10px;padding:5px 8px;font:800 12px Manrope,sans-serif;cursor:pointer"></button>
+    <button type="button" class="eleg" style="margin-top:6px;pointer-events:auto;border:0;border-radius:10px;padding:6px 8px;font:800 12px Manrope,sans-serif;cursor:pointer;background:#fbbf24;color:#0f172a;width:100%">👆 Elegir paciente</button>
+    <div class="fij" style="margin-top:4px;font-size:11px;color:#fde68a"></div>`
+  cont.appendChild(el)
+  // ---- elegir al paciente tocándolo (cuando hay otra persona cerca, por ejemplo el profesional mostrando el test) ----
+  const eleg = el.querySelector('.eleg'), fij = el.querySelector('.fij')
+  let capa = null, ivCapa = null
+  const mapa = () => { const v = cont.querySelector('video'); if (!v || !v.videoWidth) return null
+    const r = v.getBoundingClientRect(), e = Math.min(r.width / v.videoWidth, r.height / v.videoHeight)
+    return { v, r, e, ox: (r.width - v.videoWidth * e) / 2, oy: (r.height - v.videoHeight * e) / 2, espejo: /-1/.test(getComputedStyle(v).transform || '') } }
+  const cerrarCapa = () => { if (ivCapa) clearInterval(ivCapa); ivCapa = null; if (capa) capa.remove(); capa = null; eleg.textContent = '👆 Elegir paciente' }
+  const pintarFij = () => { fij.textContent = SEG.fijo ? '🔒 Paciente fijado: sigue solo a esa persona' : 'Sigue a la persona más cercana' }
+  eleg.onclick = (ev) => { ev.stopPropagation()
+    if (capa) { cerrarCapa(); return }
+    const m0 = mapa(); if (!m0) return
+    capa = document.createElement('div'); capa.style.cssText = 'position:absolute;inset:0;z-index:8;cursor:crosshair;background:rgba(15,23,42,.25)'
+    capa.innerHTML = '<div style="position:absolute;top:12px;left:50%;transform:translateX(-50%);background:#fbbf24;color:#0f172a;font:800 18px Manrope,sans-serif;padding:10px 18px;border-radius:14px">👆 Tocá al PACIENTE en la pantalla</div><div class="cajas"></div>'
+    cont.appendChild(capa); eleg.textContent = '✕ Cancelar'
+    const pintarCajas = () => { const m = mapa(); if (!m || !capa) return
+      capa.querySelector('.cajas').innerHTML = (SEG.vistos || []).map((k, n) => { const X = (x) => m.espejo ? 1 - x : x
+        const x0 = m.ox + Math.min(X(k.caja.x0), X(k.caja.x1)) * m.v.videoWidth * m.e, x1 = m.ox + Math.max(X(k.caja.x0), X(k.caja.x1)) * m.v.videoWidth * m.e
+        const y0 = m.oy + k.caja.y0 * m.v.videoHeight * m.e, y1 = m.oy + k.caja.y1 * m.v.videoHeight * m.e
+        return `<div style="position:absolute;left:${x0}px;top:${y0}px;width:${x1 - x0}px;height:${y1 - y0}px;border:3px dashed #fbbf24;border-radius:10px"><span style="position:absolute;top:-14px;left:-3px;background:#fbbf24;color:#0f172a;font:800 13px Manrope,sans-serif;padding:1px 8px;border-radius:8px">${n + 1}</span></div>` }).join('') }
+    pintarCajas(); ivCapa = setInterval(pintarCajas, 250)
+    capa.onclick = (e2) => { const m = mapa(); if (!m) return
+      const rc = m.v.getBoundingClientRect(); let nx = (e2.clientX - rc.left - m.ox) / (m.v.videoWidth * m.e), ny = (e2.clientY - rc.top - m.oy) / (m.v.videoHeight * m.e)
+      if (m.espejo) nx = 1 - nx
+      if (fijarPacienteEn(nx, ny)) { try { sonidoCorrecto() } catch (er) {} decir('Paciente elegido') }
+      cerrarCapa(); pintarFij() } }
+  pintarFij()
+  const dot = el.querySelector('.dot'), txt = el.querySelector('.txt'), aut = el.querySelector('.aut')
+  const pintarAut = () => { aut.textContent = inicioAuto ? '⏯ Inicio: AUTOMÁTICO' : '⏯ Inicio: MANUAL'; aut.style.background = inicioAuto ? '#4ade80' : '#e2e8f0'; aut.style.color = '#0f172a' }
+  aut.onclick = (e) => { e.stopPropagation(); inicioAuto = !inicioAuto; try { localStorage.setItem('testbiolab_inicio_auto', inicioAuto ? '1' : '0') } catch (er) {} pintarAut(); if (onToggle) onToggle(inicioAuto) }
+  pintarAut()
+  return {
+    set(geo, ok, consejo) {
+      pintarFij()
+      if (!geo) { dot.setAttribute('cx', 60); dot.setAttribute('cy', 60); dot.setAttribute('fill', '#64748b'); txt.textContent = 'Buscando al paciente…'; return }
+      const lim = (v) => Math.max(-1.25, Math.min(1.25, v))
+      dot.setAttribute('cx', (60 + lim(geo.dx) * 44).toFixed(1)); dot.setAttribute('cy', (60 - lim(geo.dd) * 44).toFixed(1))
+      dot.setAttribute('fill', ok ? '#4ade80' : '#f87171'); txt.textContent = ok ? '✓ Dentro del círculo' : (consejo || 'Llevá el punto al círculo') },
+    quitar() { el.remove(); if (capa) capa.remove(); if (ivCapa) clearInterval(ivCapa) } }
+}
+function panelEncuadre(cont, opts = {}) {
+  resetSeguimiento(true)
+  const diana = crearDiana(cont)
+  let tOk = null, disparado = false
+  const el = document.createElement('div')
+  el.style.cssText = 'position:absolute;top:10px;left:10px;z-index:6;background:rgba(15,23,42,.82);color:#fff;font:700 13px Manrope,sans-serif;padding:8px 12px;border-radius:12px;max-width:62%;pointer-events:none;line-height:1.55'
+  cont.appendChild(el)
+  let okFrames = 0, ultVoz = 0, okAntes = false
+  return {
+    set(r) { if (!r) return
+      okFrames = r.ok ? okFrames + 1 : 0
+      const ok = okFrames >= 8
+      if (ok && !okAntes) sonidoCorrecto()
+      if (!ok && okAntes && !r.ok) sonidoIncorrecto()
+      okAntes = ok
+      diana.set(r.geo, ok, r.consejo)
+      if (ok) { tOk = tOk || performance.now()
+        if (inicioAuto && opts.alListo && !disparado && performance.now() - tOk > 1500) { disparado = true; opts.alListo() } }
+      else tOk = null
+      el.innerHTML = r.items.map(i => `<div style="color:${i.ok ? '#86efac' : '#fca5a5'}">${i.ok ? '✓' : '✗'} ${esc(i.txt)}</div>`).join('')
+        + `<div style="margin-top:4px;color:${ok ? '#86efac' : '#fde68a'}">${ok ? '✓ Posición correcta' : esc(r.consejo || 'Acomodando…')}</div>`
+      const ahora = performance.now()
+      if (!ok && r.consejo && ahora - ultVoz > 6000 && avisoConteo === 'voz') { ultVoz = ahora; decir(r.consejo) }
+      return ok },
+    ok: () => okFrames >= 8,
+    rearmar() { disparado = false; tOk = null },
+    quitar() { el.remove(); diana.quitar() } }
+}
+// stickers en vivo: busca manchas verdes en un cuadro chico del video (cada 600 ms, liviano)
+const contarStickersVivo = (() => { let c = null, t = 0, n = 0
+  return (v, cuantos) => { const ahora = performance.now(); if (ahora - t < 600) return n; t = ahora
+    try { c = c || document.createElement('canvas'); const k = Math.min(1, 480 / Math.max(v.videoWidth, v.videoHeight)); c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k)
+      c.getContext('2d', { willReadFrequently: true }).drawImage(v, 0, 0, c.width, c.height)
+      const img = { naturalWidth: c.width, naturalHeight: c.height, width: c.width, height: c.height }
+      // detectarStickers dibuja la imagen que recibe: le pasamos el canvas
+      const st = detectarStickers(c, cuantos); n = st ? st.length : 0 } catch (e) { n = 0 }
+    return n } })()
+
 // Mismo modelo pero que además devuelve la silueta (máscara de la persona): la usa Adams para leer el contorno de la espalda.
 let landmarkerSeg = null
 async function modeloImagenSeg() {
   if (landmarkerSeg) return landmarkerSeg
   const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm')
-  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 1, outputSegmentationMasks: true })
+  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 3, outputSegmentationMasks: true })
   try { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('GPU')) } catch (e) { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('CPU')) }
-  return landmarkerSeg
+  return envolverSeguimiento(landmarkerSeg, 'foto')
 }
 // ADAMS AUTOMÁTICO: con la espalda "de canto", el borde de arriba de la silueta es la superficie de la espalda.
 // Busca el punto más alto (la giba) en el ancho del tronco de la zona elegida, toma el punto espejo del otro lado
@@ -1197,9 +1395,14 @@ function abrirGoniometro(cfg, lado, alUsar) {
       <div class="lect" style="top:12px;bottom:auto">Prendiendo la cámara…</div>
       <div style="position:absolute;left:0;right:0;bottom:16px;display:flex;gap:12px;justify-content:center">
         <button class="b pri" data-cap="0" style="font-size:20px;padding:14px 26px">📸 Capturar</button>
-        <button class="b" data-cap="3" style="font-size:18px;padding:14px 20px">⏱ En 3 s</button></div>`
+        <button class="b" data-cap="3" style="font-size:18px;padding:14px 20px">⏱ En 3 s</button>
+        <button class="b" data-cap="0" data-igual="1" style="font-size:14px;padding:10px 14px;opacity:.85">Capturar igual</button></div>`
     lienzo.appendChild(box); ov.querySelector('#gVacio').style.display = 'none'
     const v = box.querySelector('video'), c = box.querySelector('canvas'), cx = c.getContext('2d'), lect = box.querySelector('.lect')
+    lect.style.top = 'auto'; lect.style.bottom = '84px'
+    const panel = panelEncuadre(box, { alListo: () => { const b = box.querySelector('[data-cap="3"]'); if (b) b.click() } }), nStk = cfg.sticker === 'eips' ? 2 : cfg.sticker === 'tri' ? 3 : cfg.sticker === 'nav' ? 1 : null
+    const habilitar = (ok) => box.querySelectorAll('[data-cap]:not([data-igual])').forEach(b => { b.disabled = !ok; b.style.opacity = ok ? 1 : 0.45 })
+    habilitar(false)
     let st = null, vivo = true, ult = -1, ultP = null
     camVivo = { parar: () => { vivo = false; if (st) st.getTracks().forEach(t => t.stop()); box.remove(); camVivo = null } }
     const capturar = () => {
@@ -1223,6 +1426,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
           cx.lineWidth = 2.5; cx.strokeStyle = 'rgba(255,255,255,.55)'
           SKEL.forEach(([a, b]) => { if (P[a].v > 0.4 && P[b].v > 0.4) { const A = S(P[a]), B = S(P[b]); cx.beginPath(); cx.moveTo(A.x, A.y); cx.lineTo(B.x, B.y); cx.stroke() } })
           const idx = idxTest()
+          habilitar(panel.set(chequeoEncuadre(P, W, H, idx, nStk ? { stickers: nStk, vistos: contarStickersVivo(v, nStk) } : {})))
           if (idx) {
             const Q = idx.map(i => P[i]), QS = Q.map(S)
             cx.lineWidth = 6; cx.strokeStyle = '#22d3ee'
@@ -1232,7 +1436,8 @@ function abrirGoniometro(cfg, lado, alUsar) {
             let val = null; try { val = Q.length >= n ? medir(Q.slice(0, n).map(q => ({ x: q.x, y: q.y }))) : null } catch (e) {}
             lect.textContent = val == null ? 'Viendo al paciente ✓' : typeof val === 'object' ? (val.texto || '') : Math.round(val) + '°'
           } else lect.textContent = 'Viendo al paciente ✓'
-        } else lect.textContent = 'Que se vea el cuerpo en la pantalla'
+        } else { lect.textContent = 'Que se vea el cuerpo en la pantalla'
+          habilitar(panel.set(nStk && !idxTest() ? chequeoEncuadre(null, W, H, null, { stickers: nStk, vistos: contarStickersVivo(v, nStk) }) : chequeoEncuadre(null, W, H, idxTest()))) }
       }
       requestAnimationFrame(loop)
     }
@@ -1287,7 +1492,7 @@ function abrirVivo(key, lado, alUsar) {
   const L = lado || 'D'
   const ov = document.createElement('div'); ov.className = 'gon'
   ov.innerHTML = `<div class="bar"><h3>🎥 ${esc(cfg.titulo)} · lado ${L === 'D' ? 'derecho' : 'izquierdo'} · toma el máximo</h3>
-      <button class="b pri" id="vEmp" disabled>Empezar</button><button class="b" id="vPar" disabled>Parar</button>
+      <button class="b pri" id="vEmp" disabled>Empezar</button><button class="b" id="vEmpIgual" style="font-size:13px">Empezar sin verificar</button><button class="b" id="vPar" disabled>Parar</button>
       <button class="b pri" id="vUsar" disabled>✓ Usar el máximo</button><button class="b" id="vCer">Cancelar</button></div>
     <div class="ay">${esc(vcfg.ayuda)} Tocá <b>Empezar</b>: cuenta 3-2-1 y desde ahí guarda el máximo. Podés hacer 2 o 3 intentos seguidos; se queda con el mejor.</div>
     <div class="lienzo" id="vLienzo"><div class="vacio" id="vVacio">Prendiendo la cámara…</div>
@@ -1296,6 +1501,7 @@ function abrirVivo(key, lado, alUsar) {
       <div class="lect" id="vLect" style="display:none"></div></div>`
   document.body.appendChild(ov)
   const vid = ov.querySelector('#vVid'), can = ov.querySelector('#vCan'), ctx = can.getContext('2d')
+  const panelV = panelEncuadre(ov.querySelector('#vLienzo'), { alListo: () => { const b = ov.querySelector('#vEmp'); if (b && !b.disabled) b.onclick() } })
   let st = null, raf = null, ultT = -1, P = null, hist = [], maximo = null, midiendo = false, vivo = true, contando = false, baseRat = [], rat0 = null, cuadroMax = null
   const cerrar = () => { vivo = false; if (raf) cancelAnimationFrame(raf); if (st) st.getTracks().forEach(t => t.stop()); ov.remove() }
   ov.querySelector('#vCer').onclick = cerrar
@@ -1358,6 +1564,7 @@ function abrirVivo(key, lado, alUsar) {
         const W = vid.videoWidth, H = vid.videoHeight
         const nuevo = r.landmarks[0].map(p => ({ x: p.x * W, y: p.y * H, z: p.z * W, v: p.visibility ?? 1 }))
         P = P ? nuevo.map((p, i) => ({ x: P[i].x * 0.4 + p.x * 0.6, y: P[i].y * 0.4 + p.y * 0.6, z: P[i].z * 0.4 + p.z * 0.6, v: p.v })) : nuevo
+        if (ov.querySelector('#vPar').disabled) { const okE = panelV.set(chequeoEncuadre(P, W, H, cfg.lm ? cfg.lm(L) : null)); ov.querySelector('#vEmp').disabled = !okE }
         const v = valorDe(P)
         if (v != null) { hist.push(v); if (hist.length > 5) hist.shift() }
         const med = hist.length >= 3 ? hist.slice().sort((a, b) => a - b)[Math.floor(hist.length / 2)] : null
@@ -1381,6 +1588,7 @@ function abrirVivo(key, lado, alUsar) {
       loop()
     } catch (e) { ov.querySelector('#vVacio').textContent = 'No se pudo prender la cámara: ' + (e.message || e) }
   })()
+  ov.querySelector('#vEmpIgual').onclick = () => { const b = ov.querySelector('#vEmp'); b.disabled = false; b.onclick() }
   ov.querySelector('#vEmp').onclick = async () => {
     beep(1, 1); maximo = null; midiendo = false; hist = []; ov.querySelector('#vEmp').disabled = true; ov.querySelector('#vPar').disabled = false
     const lect = ov.querySelector('#vLect')
@@ -2035,13 +2243,15 @@ function camaraAuto(titulo, ayuda) {
       <div id="caPreg" style="position:absolute;left:0;right:0;bottom:18px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap"></div></div>`
   document.body.appendChild(ov)
   const vid = ov.querySelector('#caVid'), can = ov.querySelector('#caCan'), ctx = can.getContext('2d')
-  const api = { ov, vid, vivo: true, st: null, alCuadro: null, P: null,
+  const panelC = panelEncuadre(ov.querySelector('.lienzo'), { alListo: () => { const b = ov.querySelector('#caBtns button.pri'); if (b && /Empezar/.test(b.textContent)) b.click() } })
+  const api = { ov, vid, vivo: true, st: null, alCuadro: null, P: null, encuadre: null, encuadreOk: () => panelC.ok(),
     cartel: (t) => { ov.querySelector('#caCartel').innerHTML = t },
     botones: (lista) => { const b = ov.querySelector('#caBtns'); b.innerHTML = ''; lista.forEach(([txt, fn, pri]) => { const x = document.createElement('button'); x.className = 'b' + (pri ? ' pri' : ''); x.textContent = txt; x.onclick = fn; b.appendChild(x) }) },
     preguntar: (txt, ops) => new Promise(res => { decir(txt); api.cartel(txt); const box = ov.querySelector('#caPreg'); box.innerHTML = ''
       ops.forEach(o => { const x = document.createElement('button'); x.textContent = o; x.style.cssText = 'font:800 26px Manrope,sans-serif;padding:20px 34px;border-radius:18px;border:0;background:#fff;color:#0B2540;box-shadow:0 8px 24px rgba(0,0,0,.35)'
         x.onclick = () => { box.innerHTML = ''; res(o) }; box.appendChild(x) }) }),
     esperar: (ms) => new Promise(r => setTimeout(r, ms)),
+    ocultarEncuadre: () => { api.encuadre = false; panelC.quitar() },
     cerrar: () => { api.vivo = false; if (api.st) api.st.getTracks().forEach(t => t.stop()); ov.remove() } }
   ov.querySelector('#caCer').onclick = api.cerrar
   let ultT = -1
@@ -2057,6 +2267,7 @@ function camaraAuto(titulo, ayuda) {
       if (api.P) { const e = Math.min(can.width / W, can.height / H), ox = (can.width - W * e) / 2, oy = (can.height - H * e) / 2
         ctx.strokeStyle = '#4FA6E3'; ctx.lineWidth = 3
         ;[[11, 12], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28], [11, 13], [13, 15], [12, 14], [14, 16], [27, 31], [28, 32]].forEach(([a, b]) => { ctx.beginPath(); ctx.moveTo(ox + api.P[a].x * e, oy + api.P[a].y * e); ctx.lineTo(ox + api.P[b].x * e, oy + api.P[b].y * e); ctx.stroke() }) }
+      if (api.encuadre !== false) panelC.set(chequeoEncuadre(api.P, W, H, api.encuadre || null))
       if (api.alCuadro) api.alCuadro(api.P, W, H)
     }
     requestAnimationFrame(loop)
@@ -2103,7 +2314,7 @@ function abrir6min(largo, alTerminar) {
   }
   ca.botones([['▶ Empezar', async () => {
     for (const n of ['3', '2', '1']) { decir(n); ca.cartel(n); await ca.esperar(900) }
-    decir('Ya'); t0 = Date.now(); ultVista = t0; presente = true; pintar()
+    decir('Ya'); t0 = Date.now(); ultVista = t0; presente = true; ca.ocultarEncuadre(); pintar()
     iv = setInterval(() => { const t = (Date.now() - t0) / 1000; pintar()
       const min = Math.floor(t / 60); if (min > avisos && min < 6) { avisos = min; decir(`Lleva ${min} minuto${min > 1 ? 's' : ''}. Siga así, le quedan ${6 - min}.`) }
       if (t >= 360) terminar(true) }, 500)
@@ -2269,6 +2480,7 @@ function abrirRBInverso(listo) {
 function abrirASLR(listo) {
   const ca = camaraAuto('ASLR · rotación de la pelvis', 'iPad en trípode <b>a los pies de la camilla</b>, mirando hacia la cabeza, que se vean las dos caderas. Boca arriba, piernas estiradas. Cuando te diga, levantá la pierna estirada unos 20 cm y sostenela.')
   const R = {}, txt = []
+  ca.encuadre = [23, 24]                                   // desde los pies: alcanza con ver las dos caderas
   const medir = (seg) => new Promise(res => { const v = []; const t0 = Date.now(); ca.alCuadro = (P) => { if (P && P[23].v > 0.4 && P[24].v > 0.4)
       v.push({ inc: Math.atan2(P[24].y - P[23].y, Math.abs(P[24].x - P[23].x) || 1) * 180 / Math.PI, z: (P[24].z - P[23].z) / (Math.abs(P[24].x - P[23].x) || 1) })
     if (Date.now() - t0 > seg * 1000) { ca.alCuadro = null; res(v) } } })
@@ -4346,6 +4558,8 @@ function abrirTemporizador({ titulo, dur = null, motivos = ['Cansancio / no pudo
     }
     requestAnimationFrame(pintarVivo)
   }
+  const panelT = panelEncuadre(ov.querySelector('#tCan').parentElement, { alListo: () => { const b = ov.querySelector('#tPlay'); if (b && !b.disabled) b.click() } })
+  setInterval(() => { if (abierto && !corriendo && vid.videoWidth) panelT.set(chequeoEncuadre(ultP ? ultP.map(p => ({ x: p.x * vid.videoWidth, y: p.y * vid.videoHeight, v: p.v })) : null, vid.videoWidth, vid.videoHeight, null)) }, 300)
   cargarModelo().then(pintarVivo).catch(() => {})
   const vigilarPos = () => {
     if (!vigilar || !corriendo || !ultP || cuadro === cuadroUsado) return
@@ -5029,6 +5243,7 @@ function renderCatalogo() {
 }
 
 function renderTest(id, opts = {}) {
+  resetSeguimiento()
   if (!puedeEvaluar()) {
     if (ubic.estado === 'cargando') { verificarUbicacion().then(() => puedeEvaluar() ? renderTest(id, opts) : pantallaBloqueo()); return }
     return pantallaBloqueo()
