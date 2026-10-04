@@ -3294,7 +3294,7 @@ function itemDeToma(r) {
   const v = cfg.val(r), lect = interpretar(r.test, v)
   const det = r.detalle || {}
   const hall = (det.hallazgos_txt && det.hallazgos_txt.length ? det.hallazgos_txt : [])
-  return { id: r.id, test: r.test, nombre: info.nombre, fecha: r.creado_en.slice(0, 10),
+  return { id: r.id, test: r.test, nombre: info.nombre, fecha: r.creado_en.slice(0, 10), detalle: det,
     valor: v != null && !isNaN(v) ? `${fmt(v, cfg.dec ?? 1)} ${cfg.unidad || r.unidad || ''}`.trim() : '—',
     lectura: lect ? lect[1] : '', nivel: lect ? lect[0] : '', hallazgos: hall, texto: r.texto || '',
     musculos_sob: det.musculos_sobreactivos || [], musculos_poc: det.musculos_poco_activos || [] }
@@ -3353,7 +3353,7 @@ async function renderInforme() {
     document.querySelectorAll('[data-t]').forEach(c => c.onchange = () => { c.checked ? selT.add(+c.dataset.t) : selT.delete(+c.dataset.t) })
     $('infConc').oninput = (e) => { conclusion = e.target.value }
     $('btnBorr').onclick = () => { conclusion = borradorConclusion(items()); $('infConc').value = conclusion }
-    $('btnPdf').onclick = async () => { const its = items(); if (!its.length) return alert('Elegí al menos una prueba.'); const doc = armarPdf(its, conclusion); doc.save(nombrePdf()); await guardarInforme(its) }
+    $('btnPdf').onclick = async () => { const its = items(); if (!its.length) return alert('Elegí al menos una prueba.'); $('btnPdf').disabled = true; $('btnPdf').textContent = 'Armando el PDF…'; const doc = await armarPdf(its, conclusion); doc.save(nombrePdf()); $('btnPdf').disabled = false; $('btnPdf').textContent = '📄 Descargar PDF'; await guardarInforme(its) }
     if ($('btnMiEsp')) $('btnMiEsp').onclick = () => subirMiEspacio()
     $('btnLink').onclick = () => crearLink()
   }
@@ -3374,7 +3374,7 @@ async function renderInforme() {
     if (!personaId) { $('infRes').innerHTML = '<div class="nota c-warn">Este paciente no tiene ficha de PuntoBiO: usá el link.</div>'; return }
     const b = $('btnMiEsp'); b.disabled = true; b.textContent = 'Subiendo…'
     try {
-      const blob = armarPdf(its, conclusion).output('blob')
+      const blob = (await armarPdf(its, conclusion)).output('blob')
       const path = `hc/testbiolab-${personaId}/evaluacion-funcional-${Date.now()}.pdf`
       const up = await supabase.storage.from('hc-adjuntos').upload(path, blob, { contentType: 'application/pdf', upsert: false })
       if (up.error) throw up.error
@@ -3405,32 +3405,155 @@ async function renderInforme() {
   pintar()
 }
 
-// PDF con jsPDF (solo texto, sin emojis: la fuente estándar no los tiene)
-function armarPdf(its, conclusion) {
+// ============================================================
+// PDF DEL INFORME (jsPDF). Por cada prueba: resultado + DETALLE COMPLETO según el test
+// (protocolos de suelo pélvico y osteopatía enteros, planillas campo por campo, ROM, músculos, fotos).
+// La fuente estándar del PDF no tiene emojis: el texto se limpia antes de escribirlo.
+// ============================================================
+const limpiarPdf = (t) => String(t ?? '').replace(/→/g, '->').replace(/≥/g, '>=').replace(/≤/g, '<=').replace(/✓/g, '(ok)').replace(/[✕✗]/g, 'x')
+  .replace(/[^\u0000-\u00FF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u2026]/g, '').replace(/ {2,}/g, ' ').trim()
+const OHS_FILAS = [['valgo', 'Valgo de rodillas'], ['varo', 'Rodillas hacia afuera'], ['abduccion', 'Abducción de pie'], ['colapso', 'Colapso de pie'], ['peso', 'Peso asimétrico'], ['tibia', 'Tibia paralela al tronco'], ['arqueo', 'Arqueo lumbar'], ['brazos', 'Brazos caen adelante']]
+const SQM_FILAS = [['drop', 'Drop pélvico'], ['elev', 'Elevación pélvica'], ['valgo', 'Valgo de rodilla'], ['rot', 'Rotación de tronco'], ['mas90', 'Más de 90°']]
+const FSD_FILAS = [['brazos', 'Estrategia de brazos'], ['tronco', 'Movimiento de tronco'], ['pelvis', 'Plano de la pelvis'], ['rodilla', 'Posición de la rodilla'], ['apoyo', 'Postura unipodal quieta']]
+
+// Secciones de detalle de una toma: [{ titulo, filas: [[col1, col2, col3?, ...]], cabecera? }]
+function detallePdf(i) {
+  const d = i.detalle || {}, S = []
+  const vac = (x) => x == null || x === '' || x === '—'
+  const sec = (titulo, filas, cabecera) => { const f = filas.filter(r => r.slice(1).some(x => !vac(x))); if (f.length) S.push({ titulo, filas: f, cabecera }) }
+  const fx = (v) => typeof v === 'number' ? fmt(v, Number.isInteger(v) ? 0 : 1) : v
+  if (i.test === 'pelvico') {
+    const ctx = { sexo: d.sexo || 'Mujer', etapa: d.etapa || '—', edad: 99, perfil: 'activo' }
+    PEL_ANAM.forEach(sx => { if (sx.si && !sx.si(ctx)) return; sec(sx.sec, sx.campos.filter(f => { try { return !f.si || f.si(ctx) } catch (e) { return true } }).map(f => [f.n, fx(d[f.k])])) })
+    const r = d.resultados || {}
+    sec('Cuestionarios', [['ICIQ-SF', r.iciq != null ? `${r.iciq}/21 (${r.iciq_grado})` : null], ['Cuándo pierde', (d.iciq_cuando || []).join(', ')],
+      ['Sandvik', r.sandvik != null ? `${r.sandvik} (${r.sandvik_grado})` : null], ['Pad test 1 h', d.pad_g != null ? `${fx(d.pad_g)} g (${r.pad})` : null]])
+    sec('Diástasis de rectos (reposo / curl-up)', [['4,5 cm arriba del ombligo', vac(d.dr_sup_r) && vac(d.dr_sup_c) ? null : `${fx(d.dr_sup_r) ?? '—'} / ${fx(d.dr_sup_c) ?? '—'}`],
+      ['En el ombligo', vac(d.dr_umb_r) && vac(d.dr_umb_c) ? null : `${fx(d.dr_umb_r) ?? '—'} / ${fx(d.dr_umb_c) ?? '—'}`], ['4,5 cm abajo del ombligo', vac(d.dr_inf_r) && vac(d.dr_inf_c) ? null : `${fx(d.dr_inf_r) ?? '—'} / ${fx(d.dr_inf_c) ?? '—'}`],
+      ['Abombamiento', d.doming], ['Patrón respiratorio', d.respiracion]])
+    const post = []
+    if (d.postura_ht) Object.entries(d.postura_ht).forEach(([k, x]) => post.push([`HumanTrak · ${k.replace(/_/g, ' ')}`, typeof x === 'object' ? `${x.cm ?? ''} cm${x.lado_descendido ? ' (baja ' + x.lado_descendido + ')' : ''}` : x]))
+    if (d.postura) Object.entries(d.postura).forEach(([k, x]) => post.push([`Foto · ${k.replace(/_/g, ' ')}`, fx(x)]))
+    sec('Postura', post)
+    const tar = PEL_TAREAS.filter(t => d.tareas && d.tareas[t.k]).map(t => { const x = d.tareas[t.k]
+      return [t.n, vac(x.esc) ? '' : x.esc.toLowerCase(), x.pes === 'SI' ? 'sí' : x.pes === 'NO' ? 'no' : '', x.dol === 'SI' ? 'sí' : x.dol === 'NO' ? 'no' : '', vac(x.est) ? '' : x.est.toLowerCase()] })
+    sec('Batería de provocación (en orden)', tar, ['Tarea', 'Escape', 'Pesadez', 'Dolor', 'Estrategia'])
+    sec('Tacto (especialista)', [['Inspección', d.inspeccion], ['Tono en reposo', d.tono], ['Dolor a la palpación', d.palp_dolor], ['Oxford modificada', d.oxford], ['PERFECT', r.perfect],
+      ['POP-Q anterior', d.popq_a], ['POP-Q apical', d.popq_ap], ['POP-Q posterior', d.popq_p], ['Observaciones', d.esp_obs]])
+    if ((d.banderas || []).length) sec('Banderas de derivación', d.banderas.map(b => [b.replace('rf_', '').replace(/_/g, ' '), 'SÍ']))
+  } else if (i.test === 'osteo') {
+    if ((d.banderas || []).length) sec('Banderas rojas (derivar antes de tratar)', d.banderas.map(b => [b.replace('rf_', '').replace(/_/g, ' '), 'SÍ']))
+    sec('Motivo de consulta', [['Motivo', d.motivo], ['Inicio', d.inicio], ['Empeora / alivia', d.agrava], ['Tipo de dolor', d.tipo_dolor]])
+    sec('Mapa del dolor (0 a 10)', Object.entries(d.zonas || {}).sort((a, b) => b[1] - a[1]).map(([id, e]) => [(ZONAS.find(x => x[0] === id) || [, id])[1], `${e}/10`]))
+    const r = d.resultados || {}, e = d.eips || {}
+    sec('Tests', [['Flexión de pie (EIPS)', r.pie != null ? (Math.abs(r.pie) < 3 ? 'negativo' : `positivo ${r.pie > 0 ? 'derecho' : 'izquierdo'} (${Math.abs(r.pie)} mm)`) : null],
+      ['Flexión sentado (EIPS)', r.sen != null ? (Math.abs(r.sen) < 3 ? 'negativo' : `positivo ${r.sen > 0 ? 'derecho' : 'izquierdo'} (${Math.abs(r.sen)} mm)`) : null],
+      ['Gillet', d.gillet], ['Spring test (rigidez / dolor)', (d.spring || []).join(', ')]])
+    sec('Hallazgos palpatorios (TART)', (d.tart || []).filter(t => (t.tart || []).length || t.desc).map(t => [t.reg, t.niv || '', vac(t.lado) ? '' : t.lado, (t.tart || []).join(' '), t.desc || '']),
+      ['Región', 'Nivel', 'Lado', 'TARS', 'Descripción'])
+    sec('Antes / después de la sesión', (r.cambios || []).map(c => [c.n, fx(c.antes), fx(c.despues), `${c.d > 0 ? '+' : ''}${fx(c.d)}${c.mejor ? ' (mejoró)' : ''}`]), ['Marcador', 'Antes', 'Después', 'Cambio'])
+    sec('Técnicas y observaciones de la sesión', [['', d.obs]])
+  } else if (i.test === 'ohs' && d.hallazgos) {
+    sec('Sentadilla overhead', OHS_FILAS.map(([k, n]) => [n, d.hallazgos[k]]))
+    sec('Músculos', [['Sobreactivos', (d.musculos_sobreactivos || []).join(', ')], ['Poco activos', (d.musculos_poco_activos || []).join(', ')]])
+    sec('Próximos tests sugeridos', [['', (d.tests_sugeridos || []).map(t => CATALOGO_MAPA[t] || t).join(' · ')]])
+  } else if (i.test === 'squatmono' && d.hallazgos) {
+    sec('Squat monopodal', SQM_FILAS.map(([k, n]) => [n, d.hallazgos.D && d.hallazgos.D[k], d.hallazgos.I && d.hallazgos.I[k]]), ['', 'Apoyo D', 'Apoyo I'])
+    sec('Músculos', [['Sobreactivos', (d.musculos_sobreactivos || []).join(', ')], ['Poco activos', (d.musculos_poco_activos || []).join(', ')]])
+  } else if (i.test === 'fsd' && (d.der || d.izq)) {
+    sec('Forward Step Down (puntos)', FSD_FILAS.map(([k, n]) => [n, d.der && d.der.puntos[k], d.izq && d.izq.puntos[k]]).concat([['TOTAL (0 a 6)', d.total_der, d.total_izq]]), ['Criterio', 'Derecha', 'Izquierda'])
+  } else if (i.test === 'rom' && d.medidas) {
+    sec('ROM', ROM_ITEMS.filter(it => d.medidas[it.k]).map(it => { const m = d.medidas[it.k]; return [it.n, fx(m.D), fx(m.I), m.lsi != null ? fmt(m.lsi, 0) + '%' : ''] }), ['Medida', 'D', 'I', 'LSI'])
+  } else if (PLANILLAS[i.test] && d.campos) {
+    const P = PLANILLAS[i.test]
+    sec('Planilla', P.campos.map(c => c.lados ? [c.n, fx(d.campos[c.k + '_D']), fx(d.campos[c.k + '_I'])] : [c.n, fx(d.campos[c.k]), '']).filter(r => !vac(r[1]) || !vac(r[2])),
+      P.campos.some(c => c.lados) ? ['', (P.ladosNombres || ['D', 'I'])[0], (P.ladosNombres || ['D', 'I'])[1]] : null)
+    if (d.resultado && typeof d.resultado === 'object') sec('Cálculos', Object.entries(d.resultado).filter(([, x]) => typeof x !== 'object').map(([k, x]) => [k.replace(/_/g, ' '), fx(x)]))
+  } else if (d.lados && typeof d.lados === 'object') {
+    const ks = [...new Set(Object.values(d.lados).flatMap(o => Object.keys(o || {})))]
+    sec('Por lado', ks.map(k => [k.replace(/_/g, ' '), fx(d.lados.D && d.lados.D[k]), fx(d.lados.I && d.lados.I[k])]), ['', 'Derecha', 'Izquierda'])
+  }
+  if (!['pelvico', 'osteo'].includes(i.test) && (d.hallazgos_txt || []).length) sec('Hallazgos', d.hallazgos_txt.map(h => ['•', h]))
+  if (d.observaciones) sec('Observaciones', [['', d.observaciones]])
+  if (d.perfil) sec('Perfil al evaluar', [['Edad / actividad', `${d.perfil.edad ?? '—'} años · ${d.perfil.actividad}${d.perfil.ayuda ? ' · usa ayuda para caminar' : ''}`]])
+  return S
+}
+async function fotosDeToma(i) {
+  const f = (i.detalle && i.detalle.fotos) || []; if (!f.length) return []
+  try {
+    const { data } = await supabase.storage.from('tests-biolab').createSignedUrls(f.map(x => x.ruta), 600)
+    const out = []
+    for (let k = 0; k < f.length; k++) {
+      const u = data && data[k] && data[k].signedUrl; if (!u) continue
+      const blob = await (await fetch(u)).blob()
+      const dataUrl = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob) })
+      const dim = await new Promise(res => { const im = new Image(); im.onload = () => res([im.naturalWidth, im.naturalHeight]); im.onerror = () => res([4, 3]); im.src = dataUrl })
+      out.push({ vista: f[k].vista, dataUrl, w: dim[0], h: dim[1] })
+    }
+    return out
+  } catch (e) { console.warn('fotos del PDF', e); return [] }
+}
+async function armarPdf(its, conclusion) {
   const { jsPDF } = window.jspdf
-  const doc = new jsPDF({ unit: 'mm', format: 'a4' }), W = 210, M = 16
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' }), W = 210, M = 16, AN = W - 2 * M
   let y = 18
-  const salto = (h) => { if (y + h > 282) { doc.addPage(); y = 18 } }
-  const txt = (t, size = 10, estilo = 'normal', color = [15, 23, 42]) => { doc.setFont('helvetica', estilo); doc.setFontSize(size); doc.setTextColor(...color)
-    const lineas = doc.splitTextToSize(String(t || ''), W - 2 * M); salto(lineas.length * size * 0.45); doc.text(lineas, M, y); y += lineas.length * size * 0.45 + 1.5 }
+  const salto = (h) => { if (y + h > 280) { doc.addPage(); y = 18 } }
+  const txt = (t, size = 10, estilo = 'normal', color = [15, 23, 42], x = M, ancho = AN) => { doc.setFont('helvetica', estilo); doc.setFontSize(size); doc.setTextColor(...color)
+    const lineas = doc.splitTextToSize(limpiarPdf(t), ancho); salto(lineas.length * size * 0.42 + 1); doc.text(lineas, x, y); y += lineas.length * size * 0.42 + 1.4 }
+  // tabla simple: columnas proporcionales, cada fila crece según el texto más largo
+  const tabla = (filas, cabecera) => {
+    const n = Math.max(...filas.map(f => f.length), cabecera ? cabecera.length : 0)
+    const anchos = n === 2 ? [AN * 0.42, AN * 0.58] : n === 3 ? [AN * 0.46, AN * 0.27, AN * 0.27] : n === 4 ? [AN * 0.4, AN * 0.18, AN * 0.18, AN * 0.24] : Array(n).fill(AN / n)
+    if (n === 5) anchos.splice(0, 5, AN * 0.36, AN * 0.14, AN * 0.12, AN * 0.12, AN * 0.26)
+    const fila = (cells, negrita, fondo) => {
+      doc.setFont('helvetica', negrita ? 'bold' : 'normal'); doc.setFontSize(8.8)
+      const partes = cells.map((c, k) => doc.splitTextToSize(limpiarPdf(c), anchos[k] - 2))
+      const h = Math.max(...partes.map(p => p.length)) * 3.7 + 1.6
+      salto(h)
+      if (fondo) { doc.setFillColor(241, 245, 249); doc.rect(M, y - 3.2, AN, h, 'F') }
+      let x = M; partes.forEach((p, k) => { doc.setTextColor(negrita ? 51 : 15, negrita ? 65 : 23, negrita ? 85 : 42); doc.text(p, x + 1, y); x += anchos[k] })
+      doc.setDrawColor(226, 232, 240); doc.line(M, y + h - 3.4, M + AN, y + h - 3.4); y += h
+    }
+    if (cabecera) fila(cabecera, true, true)
+    filas.forEach(f => fila(f.concat(Array(n - f.length).fill('')), false, false))
+    y += 1.5
+  }
   doc.setFillColor(30, 159, 224); doc.rect(0, 0, W, 10, 'F')
-  txt('PuntoBiO · BiOLAB', 9, 'bold', [12, 123, 184])
-  y += 2; txt('Informe de evaluación funcional', 18, 'bold')
+  y = 18; txt('PuntoBiO · BiOLAB', 9, 'bold', [12, 123, 184]); y += 1
+  txt('Informe de evaluación funcional', 18, 'bold')
   const fechas = [...new Set(its.map(i => i.fecha))].sort().map(f => new Date(f + 'T12:00:00').toLocaleDateString('es-AR'))
   txt(`Paciente: ${paciente.nombre || '—'}${paciente.dni ? ' · DNI ' + paciente.dni : ''}${paciente.edad != null ? ' · ' + paciente.edad + ' años' : ''}`, 10.5, 'normal', [51, 65, 85])
-  txt(`Fecha${fechas.length > 1 ? 's' : ''} de evaluación: ${fechas.join(', ')}`, 10.5, 'normal', [51, 65, 85])
-  y += 3
-  its.forEach(i => {
-    salto(18); doc.setDrawColor(226, 232, 240); doc.line(M, y - 2, W - M, y - 2); y += 2
-    txt(i.nombre, 12, 'bold')
+  txt(`Fecha${fechas.length > 1 ? 's' : ''} de evaluación: ${fechas.join(', ')} · ${its.length} prueba${its.length === 1 ? '' : 's'}`, 10.5, 'normal', [51, 65, 85])
+  // índice de resultados
+  y += 2; txt('Resumen de resultados', 12, 'bold')
+  tabla(its.map(i => [i.nombre, i.valor, i.lectura || '']), ['Prueba', 'Resultado', 'Lectura'])
+  for (const i of its) {
+    y += 3; salto(45); doc.setDrawColor(30, 159, 224); doc.setLineWidth(0.6); doc.line(M, y - 2, M + 30, y - 2); doc.setLineWidth(0.2); y += 2
+    txt(i.nombre, 13, 'bold')
     const col = i.nivel === 'ok' ? [21, 128, 61] : i.nivel === 'bad' ? [185, 28, 28] : i.nivel ? [180, 83, 9] : [51, 65, 85]
-    txt(`Resultado: ${i.valor}${i.lectura && i.lectura !== i.valor ? '  ·  ' + i.lectura : ''}`, 10.5, 'bold', col)
-    if (i.texto) txt(i.texto.replace(/[\u{1F000}-\u{1FAFF}\u{2190}-\u{2BFF}\u{FE0F}\u{200D}]/gu, ''), 9.5, 'normal', [71, 85, 105])
-  })
+    txt(`Resultado: ${i.valor}${i.lectura && i.lectura !== i.valor ? '  ·  ' + i.lectura : ''}  ·  ${new Date(i.fecha + 'T12:00:00').toLocaleDateString('es-AR')}`, 10.5, 'bold', col)
+    const secs = detallePdf(i)
+    if (!secs.length && i.texto) txt(i.texto, 9.5, 'normal', [71, 85, 105])
+    if (['pelvico', 'osteo'].includes(i.test) && (i.hallazgos || []).length) { txt('Resumen', 10.5, 'bold', [12, 123, 184]); i.hallazgos.forEach(h => txt('• ' + h, 9.3, 'normal', [51, 65, 85])) }
+    secs.forEach(sx => { salto(12); txt(sx.titulo, 10.5, 'bold', [12, 123, 184]); tabla(sx.filas, sx.cabecera) })
+    const fotos = await fotosDeToma(i)
+    if (fotos.length) {
+      txt('Fotos', 10.5, 'bold', [12, 123, 184])
+      const ancho = (AN - 8) / 3
+      for (let k = 0; k < fotos.length; k += 3) {
+        const fila = fotos.slice(k, k + 3), alto = Math.min(70, Math.max(...fila.map(f => ancho * f.h / f.w)))
+        salto(alto + 8)
+        fila.forEach((f, j) => { const h = Math.min(alto, ancho * f.h / f.w), w = h * f.w / f.h
+          try { doc.addImage(f.dataUrl, 'JPEG', M + j * (ancho + 4) + (ancho - w) / 2, y, w, h) } catch (e) {}
+          doc.setFontSize(8); doc.setTextColor(100, 116, 139); doc.text(limpiarPdf(f.vista), M + j * (ancho + 4), y + alto + 4) })
+        y += alto + 8
+      }
+    }
+  }
   if ((conclusion || '').trim()) { y += 4; salto(20); txt('Conclusión', 13, 'bold'); txt(conclusion, 10.5) }
-  y += 6; txt('Las pruebas de este informe evalúan calidad de movimiento y capacidad funcional; no constituyen un diagnóstico médico.', 8.5, 'italic', [100, 116, 139])
+  y += 6; txt('Este informe preliminar reúne pruebas de calidad de movimiento y capacidad funcional; no constituye un diagnóstico médico.', 8.5, 'italic', [100, 116, 139])
   const pags = doc.getNumberOfPages()
-  for (let k = 1; k <= pags; k++) { doc.setPage(k); doc.setFontSize(8); doc.setTextColor(148, 163, 184); doc.text(`PuntoBiO · Libertad 1549, Córdoba · página ${k} de ${pags}`, M, 292) }
+  for (let k = 1; k <= pags; k++) { doc.setPage(k); doc.setFontSize(8); doc.setTextColor(148, 163, 184); doc.text(limpiarPdf(`PuntoBiO · Libertad 1549, Córdoba · ${paciente.nombre || ''} · página ${k} de ${pags}`), M, 292) }
   return doc
 }
 
