@@ -152,9 +152,14 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   const lista = Number(c.precio_lista)||0;
   const modeloSept = lista > 0;
   let moplex, prof;
+  let baseProf = precio;
   if (modeloSept){
     moplex = Number(c.costo_moplex)||0;
-    prof   = Math.round(lista * (Number(c.pct_profesional)||0)/100);
+    // DESCUENTO (4/10/26, regla de Lu "como si fuéramos casa central"): si al paciente se
+    // le cobró MENOS que el precio del catálogo, el profesional cobra su % sobre la LISTA
+    // con ese mismo descuento aplicado. Sin descuento (o con recargo) → lista entera.
+    baseProf = (custom && precioDef > 0 && precio < precioDef) ? Math.round(lista * precio / precioDef) : lista;
+    prof   = Math.round(baseProf * (Number(c.pct_profesional)||0)/100);
   } else {
     // DOBLE CONDICIÓN (fix 5/8): el 20% aplica solo si la consulta es de agosto+ Y el
     // mes que se liquida es agosto+ (julio es intocable).
@@ -172,18 +177,18 @@ function calcConsultaMoplex(c, montoCustom, fechaC, cortesiaPB, incluidaEval){
   // INCLUIDA EN UNA EVALUACIÓN: el paciente no paga (ya pagó la eval), MOPLEX cobra
   // igual su parte y el centro la absorbe → su parte queda negativa.
   if (incluidaEval && moplex > 0){
-    return { precio: 0, moplex, prof: 0, centro: -moplex, incluidaEval: true };
+    return { precio: 0, moplex, prof: 0, centro: -moplex, incluidaEval: true, baseProf: 0 };
   }
   // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX; prof $0 y centro $0.
   if (cortesiaPB && moplex > 0){
-    return { precio: moplex, moplex, prof: 0, centro: 0 };
+    return { precio: moplex, moplex, prof: 0, centro: 0, baseProf: 0 };
   }
   // Consulta sin cargo (0 explícito): no cobra nadie.
   if (tieneMonto && precio === 0){
-    return { precio: 0, moplex: 0, prof: 0, centro: 0 };
+    return { precio: 0, moplex: 0, prof: 0, centro: 0, baseProf: 0 };
   }
   const centro = precio - moplex - prof;
-  return { precio, moplex, prof, centro };
+  return { precio, moplex, prof, centro, baseProf };
 }
 // URGENTE (26/8/26): extra fijo de MOPLEX por fabricación express.
 // $22.000 → $18.700 MOPLEX (85%) · $3.300 centro (15%) · $0 profesional.
@@ -241,10 +246,10 @@ function _calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortes
     const precio = Number(montoCustom)||0;                          // rectificación: monto custom
     const moplex = Math.round(precio*0.85);
     // Cortesía PuntoBiO: el paciente paga SOLO lo de MOPLEX (el 85%)
-    if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:true };
+    if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:true, baseProf: 0 };
     const prof   = 0;
     const centro = precio - moplex;                                 // 15%
-    return { precio, moplex, prof, centro, rectif:true };
+    return { precio, moplex, prof, centro, rectif:true, baseProf: 0 };
   }
   const precioDef = Number(p.precio_paciente)||0;
   const precio = (Number(montoPlantilla) > 0) ? Number(montoPlantilla) : precioDef;
@@ -254,18 +259,21 @@ function _calcPlantillaMoplexBase(p, rectif, montoCustom, montoPlantilla, cortes
   const lista = Number(p.precio_lista)||0;
   const modeloSept = lista > 0;
   let moplex, prof;
+  let baseProf = precio;
   if (modeloSept){
     moplex = Number(p.costo_moplex)||0;
-    prof   = Math.round(lista * (Number(p.pct_profesional)||0)/100);
+    // DESCUENTO (4/10/26): mismo criterio que la consulta — % sobre la lista con el descuento aplicado.
+    baseProf = (custom && precioDef > 0 && precio < precioDef) ? Math.round(lista * precio / precioDef) : lista;
+    prof   = Math.round(baseProf * (Number(p.pct_profesional)||0)/100);
   } else {
     const moplexBase = Number(p.costo_moplex)||0;
     moplex = (custom && precioDef > 0) ? Math.round(moplexBase * precio / precioDef) : moplexBase;
     prof   = Math.round(precio*0.10);
   }
   // Cortesía PuntoBiO en la plantilla nueva: el paciente paga SOLO el costo MOPLEX
-  if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:false };
+  if (cortesiaPB && moplex > 0) return { precio: moplex, moplex, prof: 0, centro: 0, rectif:false, baseProf: 0 };
   const centro = precio - moplex - prof;
-  return { precio, moplex, prof, centro, rectif:false };
+  return { precio, moplex, prof, centro, rectif:false, baseProf };
 }
 // Precio de LISTA del ítem (solo para MOSTRAR en la vista del profesional: él ve la
 // lista, nunca lo que se le cobró al paciente). Rectificación: sin lista (sin honorario).
@@ -368,7 +376,7 @@ function prepararMoplex(monthPagos){
       const lbl = 'Eval. — ' + ((evalItem&&evalItem.nombre)||'');
       const k = prof + '||' + lbl;
       if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0, lista:0};
-      out.detalle[k].lista += listaItemMoplex(evalItem, false);
+      out.detalle[k].lista += (evalRep.baseProf||0);
       out.detalle[k].cobrado += evalCob; out.detalle[k].mProf += evalProf; out.detalle[k].centro += evalCentro;
       // Las evaluaciones NO empujan línea de franquicia acá: la deuda con MOPLEX
       // por evaluaciones nace de la CONSULTA REALIZADA (regla del 5/8, caso Manuel
@@ -379,7 +387,7 @@ function prepararMoplex(monthPagos){
       const lbl = 'Plantilla — ' + ((rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''));
       const k = prof + '||' + lbl;
       if(!out.detalle[k]) out.detalle[k] = {prof, prac:lbl, cobrado:0, mProf:0, centro:0, lista:0};
-      out.detalle[k].lista += listaItemMoplex(plantItem, rectif);
+      out.detalle[k].lista += (plantRep.baseProf||0);
       out.detalle[k].cobrado += plantCob; out.detalle[k].mProf += plantProf; out.detalle[k].centro += plantCentro;
       out.franquicia.push({ tratId:p0.tratamiento_id, fecha:p0.fecha, paciente, prof, tipo:'Plantilla', desc:(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||''), montoMoplex:plantMoplex });
       out.totalMoplex += plantMoplex;
@@ -394,7 +402,8 @@ function prepararMoplex(monthPagos){
         prof, paciente, fecha: p0.fecha,
         detalle: comps.join(' + '),
         concepto: [evalCob > 0.5 ? `Evaluación (${(evalItem&&evalItem.nombre)||''})` : '', plantCob > 0.5 ? `Plantilla (${(rectif?'Rectif. ':'')+((plantItem&&plantItem.nombre)||'')})` : ''].filter(Boolean).join(' + '),
-        lista: (evalCob > 0.5 ? listaItemMoplex(evalItem, false) : 0) + (plantCob > 0.5 ? listaItemMoplex(plantItem, rectif) : 0),
+        lista: (evalCob > 0.5 ? (evalRep.baseProf||0) : 0) + (plantCob > 0.5 ? (plantRep.baseProf||0) : 0),
+        conDesc: (evalCob > 0.5 && evalRep.baseProf && evalRep.baseProf < listaItemMoplex(evalItem,false)) || (plantCob > 0.5 && plantRep.baseProf && plantRep.baseProf < listaItemMoplex(plantItem,rectif)),
         ambos: comps.length > 1,
         montoProf: evalProf + plantProf,
         esRectifSinHonorario: (comps.length === 1 && rectif && plantCob > 0.5 && (evalProf + plantProf) === 0)
@@ -551,7 +560,7 @@ async function cargar(){
           prof: normProf(t.profesional) || profSesion[t.id] || profTurno[t.codigo_id] || '',
           consultaNombre: ((byId[t.moplex_consulta_id]||{}).nombre || '—') + (t.moplex_consulta_incluida_eval ? ' 🔗 en evaluación' : ''),
           plantillaNombre: plantRep ? ((rectif?'Rectif. ':'') + ((byId[t.moplex_plantilla_id]||{}).nombre||'') + ((fact && t.moplex_plantilla_urgente) ? ' ⚡ urgente' : '')) : '',
-          listaPrecio: listaItemMoplex(byId[t.moplex_consulta_id], false) + (plantRep ? listaItemMoplex(byId[t.moplex_plantilla_id], rectif) : 0),
+          listaPrecio: (fact && evalRep ? (evalRep.baseProf||0) : 0) + (fact && plantRep ? (plantRep.baseProf||0) : 0),
           precio, prof_monto: (ev.prof||0)+(pl.prof||0), centro: (ev.centro||0)+(pl.centro||0), moplex: (ev.moplex||0)+(pl.moplex||0),
           // Componentes discriminados (consulta vs plantilla) para mostrar qué se paga
           ev: { precio: ev.precio||0, prof: ev.prof||0, centro: ev.centro||0, moplex: ev.moplex||0 },
@@ -670,7 +679,7 @@ function render(pagos){
   const items = Object.values(MPX.detalle).filter(d => deProf(d.prof)).sort((a,b)=> a.prof.localeCompare(b.prof) || a.prac.localeCompare(b.prac));
   html += `<h2 class="bloque-tit">👤 Por profesional — lo que le corresponde de MOPLEX</h2>
     <p class="bloque-nota">${PROF_CLAVADO
-      ? 'Tu parte se calcula sobre el <b>precio de lista</b> de cada estudio (evaluación 40% · plantilla 10% · rectificación sin honorario). Se liquida a medida que el estudio se cobra.'
+      ? 'Tu parte se calcula sobre el <b>precio de lista</b> de cada estudio (evaluación 40% · plantilla 10% · rectificación sin honorario); si hubo descuento, sobre la lista con ese descuento. Se liquida a medida que el estudio se cobra.'
       : 'Reparto del catálogo (evaluación 40% al profesional · plantilla 10% · rectificación 0%), sobre el <b>precio de lista</b> en los ítems que lo tienen cargado. Este monto <b>no está más adentro de Liquidaciones general</b>: se salda por acá.'}</p>`;
   if (items.length && PROF_CLAVADO){
     // Vista del profesional: UNA FILA POR PACIENTE (por fecha de cobro), así ve cada
@@ -680,7 +689,7 @@ function render(pagos){
     html += `<table><thead><tr><th>Fecha de cobro</th><th>Paciente</th><th>Qué se te paga</th><th class="num">Precio de lista</th><th class="num">Te corresponde</th></tr></thead><tbody>`;
     let tProf = 0;
     for (const l of lns){
-      html += `<tr><td>${l.fecha||'—'}</td><td>${l.paciente}</td><td>${l.concepto}${l.esRectifSinHonorario ? ' <span style="color:#64748b;">(sin honorario)</span>' : ''}</td><td class="num">${l.lista ? fmt(l.lista) : '—'}</td><td class="num">${fmt(l.montoProf)}</td></tr>`;
+      html += `<tr><td>${l.fecha||'—'}</td><td>${l.paciente}</td><td>${l.concepto}${l.esRectifSinHonorario ? ' <span style="color:#64748b;">(sin honorario)</span>' : ''}</td><td class="num">${l.lista ? fmt(l.lista) : '—'}${l.conDesc ? '<div style="font-size:10.5px;color:#64748b;">lista con descuento</div>' : ''}</td><td class="num">${fmt(l.montoProf)}</td></tr>`;
       tProf += l.montoProf;
     }
     html += `<tr style="font-weight:700;background:#f0fdfa;color:#0f766e;"><td colspan="4">TOTAL</td><td class="num">${fmt(tProf)}</td></tr></tbody></table>`;
