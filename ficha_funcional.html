@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="es-AR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evaluación funcional · PuntoBiO</title>
+<style>
+:root{ --border:#e5e7eb; --text:#0f172a; --dim:#64748b; --faint:#94a3b8; --turq:#1e9fe0; --turq-d:#0c7bb8;
+  --ok:#16a34a; --okb:#dcfce7; --warn:#d97706; --warnb:#fef3c7; --bad:#dc2626; --badb:#fee2e2; }
+*{box-sizing:border-box}
+html,body{margin:0;background:transparent;color:var(--text);font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+.wrap{padding:2px}
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.top h2{margin:0;font-size:17px}
+.top .sub{color:var(--dim);font-size:12.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:12px}
+.card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.card h3{margin:0;font-size:14.5px;display:flex;justify-content:space-between;gap:8px}
+.card h3 small{color:var(--faint);font-weight:600;font-size:11.5px;white-space:nowrap}
+.val{font-size:26px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums}
+.val span{font-size:13px;font-weight:600;color:var(--dim)}
+.pill{display:inline-block;border-radius:8px;padding:3px 8px;font-size:12px;font-weight:700;margin-top:4px}
+.pill.ok{background:var(--okb);color:#14532d}.pill.warn{background:var(--warnb);color:#78350f}.pill.bad{background:var(--badb);color:#7f1d1d}.pill.eq{background:#f1f5f9;color:#334155}
+.cambio{font-size:12.5px;margin-top:4px;color:var(--dim)}
+.c-ok{color:var(--ok);font-weight:700}.c-bad{color:var(--bad);font-weight:700}
+svg{width:100%;height:auto;display:block;margin-top:6px}
+details{margin-top:8px;border-top:1px solid #f1f5f9;padding-top:6px}
+summary{cursor:pointer;font-size:12.5px;color:var(--turq-d);font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+th{text-align:left;color:var(--dim);font-size:11.5px;padding:4px;border-bottom:1px solid var(--border)}
+td{padding:5px 4px;border-bottom:1px solid #f8fafc}
+td.n{text-align:right;font-variant-numeric:tabular-nums}
+.pub{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--dim);cursor:pointer;white-space:nowrap}
+.pub input{margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.chips span{background:var(--warnb);color:#78350f;border-radius:6px;padding:2px 7px;font-size:11.5px;font-weight:700}
+.musc{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px;font-size:11.5px;line-height:1.45}
+.musc div{border-radius:8px;padding:6px 8px}.musc .s{background:var(--badb);color:#7f1d1d}.musc .p{background:#dbeafe;color:#1e3a8a}
+.musc b{display:block;font-size:10.5px;letter-spacing:.03em}
+.fotos{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.fotos a{display:block;background:#0b1220;border-radius:8px;overflow:hidden}
+.fotos img{width:100%;display:block}
+.fotos span{display:block;color:#fff;font-size:11px;font-weight:800;text-align:center;padding:2px}
+.lsi{font-weight:800;border-radius:5px;padding:1px 5px}.lsi.ok{background:var(--okb);color:#14532d}.lsi.bad{background:var(--badb);color:#7f1d1d}
+.vacio{color:var(--dim);font-size:13.5px;padding:14px;border:1px dashed var(--border);border-radius:12px;background:#fff}
+.err{color:var(--bad)}
+/* modo paciente: más grande y amable */
+body.pac .card{border-radius:16px;padding:16px}
+body.pac .val{font-size:30px}
+.logro{margin-top:6px;font-size:14px;font-weight:700}
+.logro.up{color:#14532d}.logro.eq{color:#334155}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="vacio">Cargando evaluación funcional…</div></div>
+<script type="module">
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
+import { EVO, ROM_ITEMS, LSI_OK, INFO, ORDEN, interpretar, normDni } from './tests_biolab_comun.js'
+
+const sb = createClient('https://bqpjtoiictnzcasxfucf.supabase.co', 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi', {
+  auth: { lock: (name, acquireTimeout, fn) => fn() }
+})
+// ============================================================
+// ficha_funcional.html — UNA ficha, varias puertas:
+//   ?modo=pro&dni=…&origen=PUNTOBIO|SARKMED&id=…&nombre=…   (HC, SARKMED, Test BiOLAB)
+//   ?modo=paciente&persona=…                               (Mi Espacio: solo lo publicado)
+// Lee de tests_biolab. No escribe nada salvo el tilde "Mostrar en Mi Espacio" (modo pro).
+// ============================================================
+const P = new URLSearchParams(location.search)
+const MODO = P.get('modo') === 'paciente' ? 'paciente' : 'pro'
+const RO = P.get('ro') === '1'                  // solo lectura: sin tilde de publicar
+const $ = (id) => document.getElementById(id)
+const esc = (t) => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const fmt = (v, d = 2) => v == null || isNaN(v) ? '—' : (+v).toFixed(d).replace('.', ',')
+const fecha = (f) => new Date(f).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+if (MODO === 'paciente') document.body.classList.add('pac')
+
+// avisa al que la contiene cuánto mide (para que el iframe no tenga scroll propio)
+const avisarAltura = () => parent !== window && parent.postMessage({ tipo: 'ficha-altura', alto: document.documentElement.scrollHeight }, '*')
+new ResizeObserver(avisarAltura).observe(document.body)
+const avisarVacio = (vacio) => parent !== window && parent.postMessage({ tipo: 'ficha-vacia', vacio }, '*')
+
+// ------------------------------------------------------------
+async function cargar() {
+  if (MODO === 'paciente') {
+    const persona = parseInt(P.get('persona'))
+    if (!persona) throw new Error('Falta la persona')
+    const { data, error } = await sb.rpc('alumno_mis_tests', { p_persona_id: persona })
+    if (error) throw error
+    return (data || []).map(r => ({ ...r, id: null }))
+  }
+  const dni = normDni(P.get('dni')), origen = P.get('origen'), id = P.get('id')
+  if (!dni && !(origen && id)) throw new Error('Falta el DNI o la ficha del paciente')
+  const filtro = [dni ? `paciente_dni.eq.${dni}` : null, origen && id ? `and(origen.eq.${origen},paciente_id.eq.${id})` : null].filter(Boolean).join(',')
+  const { data, error } = await sb.from('tests_biolab').select('id, test, valor, unidad, detalle, texto, creado_en, creado_por_email, publicado_paciente').or(filtro).order('creado_en', { ascending: true })
+  if (error) throw error
+  return data || []
+}
+
+// ------------------------------------------------------------
+// cambio entre dos valores según para qué lado es mejor
+function cambio(a, b, cfg) {
+  if (a == null || b == null) return null
+  const d = b - a, pct = a ? d / Math.abs(a) * 100 : 0
+  const igual = Math.abs(d) < Math.pow(10, -cfg.dec) / 2 || Math.abs(pct) < 1
+  const mejoro = cfg.mejor === 'menos' ? d < 0 : d > 0
+  return { d, pct, igual, mejoro, txt: `${d > 0 ? '+' : ''}${fmt(d, cfg.dec)}${a ? ` (${d > 0 ? '+' : ''}${fmt(pct, 0)}%)` : ''}` }
+}
+
+function curva(tomas, cfg) {
+  if (tomas.length < 2) return ''
+  const W = 320, H = 120, ml = 30, mr = 22, mt = 16, mb = 18
+  const vals = tomas.map(t => t.v).concat((cfg.bandas || []).map(b => b.y))
+  let lo = cfg.min != null ? cfg.min : Math.min(...vals), hi = cfg.max != null ? cfg.max : Math.max(...vals)
+  if (cfg.min == null) { const pad = (hi - lo) * 0.18 || Math.abs(hi) * 0.1 || 1; lo -= pad; hi += pad }
+  const t0 = +tomas[0].f, t1 = +tomas[tomas.length - 1].f
+  const X = (f) => ml + (t1 === t0 ? 0.5 : (+f - t0) / (t1 - t0)) * (W - ml - mr)
+  const Y = (v) => mt + (1 - (v - lo) / (hi - lo || 1)) * (H - mt - mb)
+  const c = cambio(tomas[0].v, tomas[tomas.length - 1].v, cfg)
+  const col = c.igual ? '#64748b' : c.mejoro ? '#16a34a' : '#dc2626'
+  const lin = tomas.map((t, i) => `${i ? 'L' : 'M'}${X(t.f).toFixed(1)},${Y(t.v).toFixed(1)}`).join(' ')
+  const anc = (i) => tomas.length > 1 && i === 0 ? 'start' : i === tomas.length - 1 ? 'end' : 'middle'
+  return `<svg viewBox="0 0 ${W} ${H}">
+    ${(cfg.bandas || []).filter(b => b.y > lo && b.y < hi).map(b => `<line x1="${ml}" x2="${W - mr}" y1="${Y(b.y)}" y2="${Y(b.y)}" stroke="#d97706" stroke-dasharray="5 4"/>${MODO === 'pro' ? `<text x="${W - mr}" y="${Y(b.y) - 3}" text-anchor="end" font-size="9" fill="#b45309">${esc(b.txt)}</text>` : ''}`).join('')}
+    <path d="${lin} L${X(tomas[tomas.length - 1].f)},${H - mb} L${X(tomas[0].f)},${H - mb} Z" fill="${col}" opacity=".08"/>
+    <path d="${lin}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round"/>
+    ${tomas.map((t, i) => `<circle cx="${X(t.f)}" cy="${Y(t.v)}" r="4" fill="#fff" stroke="${col}" stroke-width="2.5"/>
+      <text x="${X(t.f)}" y="${Y(t.v) - 7}" text-anchor="${anc(i)}" font-size="10" font-weight="800" fill="#0f172a">${fmt(t.v, cfg.dec)}</text>
+      <text x="${X(t.f)}" y="${H - 4}" text-anchor="${anc(i)}" font-size="9" fill="#64748b">${fecha(t.f)}</text>`).join('')}
+  </svg>`
+}
+
+// ------------------------------------------------------------
+// TARJETA PROFESIONAL
+async function tarjetaPro(test, filas) {
+  const cfg = EVO[test] || { mejor: 'mas', dec: 1, val: r => +r.valor }
+  const info = INFO[test] || { ico: '🧪', nombre: test }
+  const tomas = filas.map(r => ({ r, f: new Date(r.creado_en), v: cfg.val(r) })).filter(t => t.v != null && !isNaN(t.v))
+  const ult = filas[filas.length - 1], u = tomas[tomas.length - 1]
+  const lect = u ? interpretar(test, u.v) : null
+  const vsAnt = tomas.length > 1 ? cambio(tomas[tomas.length - 2].v, u.v, cfg) : null
+  const vsPri = tomas.length > 2 ? cambio(tomas[0].v, u.v, cfg) : null
+  const ch = (c, txt) => c ? `${txt}: <span class="${c.igual ? '' : c.mejoro ? 'c-ok' : 'c-bad'}">${c.igual ? '= se mantiene' : (c.mejoro ? '▲ ' : '▼ ') + c.txt}</span>` : ''
+  let extra = ''
+  const det = ult.detalle || {}
+  if (test === 'ohs' && det.hallazgos) {
+    const h = det.hallazgos
+    const comp = [['valgo', 'Valgo de rodillas'], ['varo', 'Rodillas afuera'], ['abduccion', 'Abducción de pie'], ['colapso', 'Colapso de pie'], ['peso', 'Peso asimétrico'], ['arqueo', 'Arqueo lumbar'], ['brazos', 'Brazos caen']]
+      .filter(([k]) => h[k] && h[k] !== 'NO').map(([k, n]) => `${n}${['D', 'I', 'BILATERAL'].includes(h[k]) ? ' (' + h[k].toLowerCase() + ')' : h[k].startsWith('HACIA') ? ' (' + h[k].toLowerCase() + ')' : ''}`)
+    if (h.tibia === 'NO') comp.push('Tibia NO paralela al tronco')
+    extra += comp.length ? `<div class="chips">${comp.map(c => `<span>${esc(c)}</span>`).join('')}</div>` : ''
+    if ((det.musculos_sobreactivos || []).length) extra += `<div class="musc"><div class="s"><b>SOBREACTIVOS</b>${esc(det.musculos_sobreactivos.join(', '))}</div><div class="p"><b>POCO ACTIVOS</b>${esc((det.musculos_poco_activos || []).join(', '))}</div></div>`
+    if ((det.fotos || []).length) {
+      const { data } = await sb.storage.from('tests-biolab').createSignedUrls(det.fotos.map(f => f.ruta), 3600)
+      if (data) extra += `<div class="fotos">${det.fotos.map((f, i) => data[i] && data[i].signedUrl ? `<a href="${data[i].signedUrl}" target="_blank" rel="noopener"><img src="${data[i].signedUrl}" alt="${esc(f.vista)}"><span>${esc(f.vista)}</span></a>` : '').join('')}</div>`
+    }
+  }
+  if (test === 'fsd' && (det.total_der != null || det.total_izq != null)) extra += `<div class="cambio">Derecha <b>${det.total_der ?? '—'}</b>/6 · Izquierda <b>${det.total_izq ?? '—'}</b>/6</div>`
+  if (test === 'equilibrio' && det.pies_juntos_s != null) extra += `<div class="cambio">Pies juntos ${fmt(det.pies_juntos_s, 1)} s · semi-tándem ${fmt(det.semitandem_s, 1)} s · tándem ${fmt(det.tandem_s, 1)} s</div>`
+  if (test === 'tug' && ult.valor != null) extra += ''
+  if (test === 'marcha4' && det.intentos_s) extra += `<div class="cambio">Mejor tiempo ${fmt(ult.valor, 2)} s · intentos ${det.intentos_s.map(x => fmt(x, 2)).join(' / ')}</div>`
+  if (test === 'rom' && det.medidas) extra += tablaRom(filas)
+  const val = u ? `${fmt(u.v, cfg.dec)} <span>${esc(cfg.unidad || '')}</span>` : '—'
+  return `<div class="card">
+    <h3><span>${info.ico} ${esc(info.nombre)}</span><small>${filas.length} toma${filas.length === 1 ? '' : 's'} · última ${fecha(ult.creado_en)}</small></h3>
+    <div class="val">${val}</div>
+    ${lect ? `<span class="pill ${lect[0]}">${esc(lect[1])}</span>` : ''}
+    <div class="cambio">${[ch(vsAnt, 'vs. anterior'), ch(vsPri, 'vs. primera')].filter(Boolean).join(' · ')}</div>
+    ${extra}
+    ${curva(tomas, cfg)}
+    <details><summary>Tomas${RO ? '' : ' y qué ve el paciente'}</summary>
+      <table><tr><th>Fecha</th><th style="text-align:right">Valor</th>${RO ? '' : '<th style="text-align:right">Mi Espacio</th>'}</tr>
+      ${filas.slice().reverse().map(r => { const v = cfg.val(r)
+        return `<tr><td>${fecha(r.creado_en)}</td><td class="n">${fmt(v, cfg.dec)} ${esc(cfg.unidad || '')}</td>
+          ${RO ? '' : `<td class="n"><label class="pub"><input type="checkbox" data-pub="${r.id}" ${r.publicado_paciente ? 'checked' : ''}> mostrar</label></td>`}</tr>` }).join('')}
+      </table></details>
+  </div>`
+}
+
+function tablaRom(filas) {
+  const ult = filas[filas.length - 1].detalle.medidas, ant = filas.length > 1 ? (filas[filas.length - 2].detalle || {}).medidas || {} : {}
+  const items = ROM_ITEMS.filter(it => ult[it.k])
+  if (!items.length) return ''
+  const pct = (a, b, menos) => { if (a == null || b == null || !a) return ''; const x = (b - a) / Math.abs(a) * 100; return ` <span class="${(menos ? -x : x) >= 0 ? 'c-ok' : 'c-bad'}">${x > 0 ? '+' : ''}${fmt(x, 0)}%</span>` }
+  return `<table><tr><th>Medida</th><th style="text-align:right">D</th><th style="text-align:right">I</th><th style="text-align:right">LSI</th></tr>
+    ${items.map(it => { const m = ult[it.k], a = ant[it.k] || {}
+      return `<tr><td>${esc(it.n)}</td><td class="n">${fmt(m.D, 0)}${pct(a.D, m.D, it.menos)}</td><td class="n">${fmt(m.I, 0)}${pct(a.I, m.I, it.menos)}</td>
+        <td class="n">${m.lsi != null ? `<span class="lsi ${m.lsi >= LSI_OK ? 'ok' : 'bad'}">${fmt(m.lsi, 0)}%</span>` : '—'}</td></tr>` }).join('')}</table>`
+}
+
+// ------------------------------------------------------------
+// TARJETA PACIENTE (lenguaje amable, sin lectura clínica ni músculos)
+function tarjetaPac(test, filas) {
+  const cfg = EVO[test] || { mejor: 'mas', dec: 1, val: r => +r.valor }
+  const info = INFO[test] || { ico: '✨', pac: 'Evaluación' }
+  if (test === 'rom') {
+    const ult = (filas[filas.length - 1].detalle || {}).medidas || {}, pri = (filas[0].detalle || {}).medidas || {}
+    const items = ROM_ITEMS.filter(it => ult[it.k] && !it.calc)
+    return `<div class="card"><h3><span>${info.ico} ${info.pac}</span><small>${fecha(filas[filas.length - 1].creado_en)}</small></h3>
+      <table><tr><th></th><th style="text-align:right">Derecha</th><th style="text-align:right">Izquierda</th></tr>
+      ${items.map(it => { const m = ult[it.k], p = pri[it.k] || {}
+        const fl = (a, b) => filas.length > 1 && a != null && b != null && b !== a ? ((it.menos ? b < a : b > a) ? ' <span class="c-ok">▲</span>' : '') : ''
+        return `<tr><td>${esc(it.n.replace(/ \(.*\)/, ''))}</td><td class="n">${fmt(m.D, 0)}${fl(p.D, m.D)}</td><td class="n">${fmt(m.I, 0)}${fl(p.I, m.I)}</td></tr>` }).join('')}
+      </table>${filas.length > 1 ? `<div class="cambio">▲ = mejoró desde tu primera evaluación (${fecha(filas[0].creado_en)})</div>` : ''}</div>`
+  }
+  const tomas = filas.map(r => ({ f: new Date(r.creado_en), v: cfg.val(r) })).filter(t => t.v != null && !isNaN(t.v))
+  if (!tomas.length) return ''
+  const u = tomas[tomas.length - 1], c = tomas.length > 1 ? cambio(tomas[0].v, u.v, cfg) : null
+  const logro = !c ? '' : c.igual ? `<div class="logro eq">Se mantiene desde ${fecha(tomas[0].f)} 💪</div>`
+    : c.mejoro ? `<div class="logro up">${cfg.mejor === 'menos' ? 'Bajó' : 'Mejoró'} ${fmt(Math.abs(c.pct), 0)}% desde ${fecha(tomas[0].f)} 🎉</div>`
+    : `<div class="logro eq">Seguimos trabajando en esto 💪</div>`
+  return `<div class="card"><h3><span>${info.ico} ${info.pac}</span><small>${fecha(u.f)}</small></h3>
+    <div class="val">${fmt(u.v, cfg.dec)} <span>${esc(info.pacUnidad || cfg.unidad || '')}</span></div>
+    ${logro}${curva(tomas, { ...cfg, bandas: [] })}</div>`
+}
+
+// ------------------------------------------------------------
+async function pintar() {
+  let filas
+  try { filas = await cargar() }
+  catch (e) { $('app').innerHTML = `<div class="vacio err">No se pudo cargar la evaluación funcional: ${esc(e.message || e)}</div>`; avisarAltura(); return }
+  const grupos = {}
+  filas.forEach(r => { (grupos[r.test] = grupos[r.test] || []).push(r) })
+  const tests = ORDEN.filter(t => grupos[t]).concat(Object.keys(grupos).filter(t => !ORDEN.includes(t)))
+  avisarVacio(!tests.length)
+  if (!tests.length) {
+    $('app').innerHTML = `<div class="vacio">${MODO === 'paciente' ? 'Todavía no hay evaluaciones para mostrarte.' : 'Este paciente todavía no tiene tests guardados en Test BiOLAB.'}</div>`
+    avisarAltura(); return
+  }
+  const nombre = P.get('nombre')
+  const cards = MODO === 'pro' ? await Promise.all(tests.map(t => tarjetaPro(t, grupos[t]))) : tests.map(t => tarjetaPac(t, grupos[t]))
+  const ultima = filas[filas.length - 1].creado_en
+  $('app').innerHTML = `
+    <div class="top"><div><h2>${MODO === 'pro' ? '📊 Evaluación funcional · Test BiOLAB' : '📈 Mi evolución'}</h2>
+      <div class="sub">${MODO === 'pro' ? `${nombre ? esc(nombre) + ' · ' : ''}${filas.length} tomas en ${tests.length} test${tests.length === 1 ? '' : 's'} · última ${fecha(ultima)}`
+        : 'Tus resultados en las evaluaciones que hicimos juntos'}</div></div>
+      ${MODO === 'pro' && !RO ? '<div class="sub">El tilde “mostrar” publica esa toma en Mi Espacio del paciente</div>' : ''}</div>
+    <div class="grid">${cards.join('')}</div>`
+  document.querySelectorAll('[data-pub]').forEach(cb => cb.onchange = async () => {
+    cb.disabled = true
+    const { data: u } = await sb.auth.getUser()
+    const pub = cb.checked
+    const { data, error } = await sb.from('tests_biolab').update({ publicado_paciente: pub, publicado_en: pub ? new Date().toISOString() : null, publicado_por: pub && u && u.user ? u.user.email : null }).eq('id', +cb.dataset.pub).select('id')
+    cb.disabled = false
+    // .select() para confirmar: si la RLS no deja escribir, no hay error pero vuelve vacío (escritura muda)
+    if (error || !data || !data.length) { cb.checked = !pub; alert('No se pudo cambiar: ' + (error ? error.message : 'sin permiso para modificar esta toma')) }
+  })
+  avisarAltura()
+}
+pintar()
+</script>
+</body>
+</html>
