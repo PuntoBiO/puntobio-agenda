@@ -27,6 +27,7 @@ export const EVO = {
   rotoracica: { titulo: 'Rotación torácica · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
   shouldermob:{ titulo: 'Shoulder mobility FMS (peor lado)', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
   puente:     { titulo: 'Puente 1 pierna (lados sin control)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  osteo:      { titulo: 'Osteopatía · dolor máximo', unidad: '/10', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 10, bandas: [] },
   pelvico:    { titulo: 'Suelo pélvico · tareas sin síntomas', unidad: 'tareas', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [] },
   antropo:    { titulo: 'Antropometría · hallazgos', unidad: 'hallazgos', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [] },
   adams:      { titulo: 'Adams · ATR máximo', unidad: '°', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [{ y: 5, txt: '5° · vigilar' }, { y: 7, txt: '7° · derivar' }] },
@@ -100,6 +101,7 @@ export const INFO = {
   rotoracica: { ico: '🔄', nombre: 'Rotación torácica', pac: 'Rotación de tu espalda', pacUnidad: '% de simetría' },
   shouldermob:{ ico: '🤲', nombre: 'Shoulder mobility (FMS)', pac: 'Movilidad de hombros', pacUnidad: 'de 3 puntos' },
   puente:     { ico: '🌉', nombre: 'Puente glúteo 1 pierna', pac: 'Puente a una pierna', pacUnidad: 'lados a trabajar' },
+  osteo:      { ico: '🤲', nombre: 'Osteopatía', pac: 'Tu dolor', pacUnidad: 'de 10 (menos es mejor)' },
   pelvico:    { ico: '🌸', nombre: 'Suelo pélvico funcional', pac: 'Tu tolerancia a la carga', pacUnidad: 'tareas sin síntomas' },
   antropo:    { ico: '📏', nombre: 'Antropometría BiOLAB', pac: 'Medidas de tus brazos y piernas', pacUnidad: 'diferencias a trabajar' },
   adams:      { ico: '🙇', nombre: 'Maniobra de Adams', pac: 'Simetría de tu espalda', pacUnidad: 'grados (menos es mejor)' },
@@ -128,7 +130,7 @@ export const INFO = {
   dnf:        { ico: '⏱️', nombre: 'Flexores profundos de cuello', pac: 'Resistencia de tu cuello', pacUnidad: 'segundos' },
   estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['pelvico', 'postural', 'adams', 'antropo', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin']
+export const ORDEN = ['osteo', 'pelvico', 'postural', 'adams', 'antropo', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {

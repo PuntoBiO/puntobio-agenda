@@ -324,6 +324,8 @@ const TESTS = [
       <b>Tiempo objetivo:</b> 30 s por lado es un criterio práctico de control para el screening (no es una norma validada). Si querés medir resistencia, subilo y que sostenga hasta no poder: el tiempo queda guardado.` },
   { id:'postural', necesita:'Pared o fondo liso · iPad en trípode, vertical y nivelado · paciente con ropa ajustada o en ropa interior deportiva', modoMed:'📷 Se mide con foto (3 fotos)', ico:'🧍‍♂️', nombre:'Análisis postural (frente · perfil · espalda)', planilla: true,
     desc:'Tres fotos y el sistema mide inclinación de cabeza, hombros y pelvis, rodillas, y la plomada de perfil. Quedan las fotos con las líneas.', pos:'Planilla · 3 fotos' },
+  { id:'osteo', necesita:'Camilla · stickers redondos para marcar las EIPS · regla o cinta (referencia en la foto) · iPad o celu', modoMed:'✍️ Protocolo (mapa del dolor, TART, tests y antes / después)', ico:'🤲', nombre:'Osteopatía · evaluación y sesión', custom: true,
+    desc:'Mapa corporal del dolor, banderas rojas, test de flexión de pie y sentado medidos con foto, Gillet y spring test, registro TART por región y el antes / después de la sesión con video o foto.', pos:'Protocolo de evaluación y sesión' },
   { id:'pelvico', necesita:'Camilla · carga de 5 kg y mancuernas · cajón o escalón · VALD (DynaMo y ForceDecks para la extensión de rodilla y el IMTP) · apósitos y balanza (pad test) · guantes y lubricante (tacto)', modoMed:'✍️ Protocolo completo (anamnesis, cuestionarios, provocación y tacto)', ico:'🌸', nombre:'Suelo pélvico funcional', custom: true,
     desc:'Anamnesis que se adapta a la edad y la etapa, ICIQ-SF y Sandvik con puntaje, diástasis, batería de provocación por escalones (con IMTP) y la sección de tacto de la especialista. Da el umbral de carga y la estrategia.', pos:'Protocolo de evaluación' },
   { id:'antropo', necesita:'Cinta métrica inextensible · tallímetro y balanza · lápiz dermográfico · alzas de distintos mm (para el test de alzas) · iPad para la foto (opcional)', modoMed:'📏 Con cinta (alzas con foto)', ico:'📏', nombre:'Antropometría BiOLAB (MMII · MMSS)', planilla: true,
@@ -908,6 +910,16 @@ FOTO.alza_sin = { titulo: 'Test de alzas · pelvis SIN alza', modo: 'multi', lmF
   calcular: (P) => { const v = +incl(P[0], P[1]).toFixed(1); return { valores: { pel_sin: v }, texto: `Pelvis ${v}° (${v > 0 ? 'baja la derecha' : v < 0 ? 'baja la izquierda' : 'nivelada'})` } } }
 FOTO.alza_con = { ...FOTO.alza_sin, titulo: 'Test de alzas · pelvis CON alza',
   calcular: (P) => { const v = +incl(P[0], P[1]).toFixed(1); return { valores: { pel_con: v }, texto: `Pelvis con alza ${v}°` } } }
+// EIPS con stickers: 2 puntos de regla (escala) + EIPS derecha e izquierda. Da la diferencia de altura en mm (+ = la derecha más alta).
+const fotoEips = (titulo, clave) => ({ titulo, modo: 'multi', nombres: ['Regla R1', 'Regla R2', 'EIPS derecha', 'EIPS izquierda'], lineas: [[0, 1, '#fbbf24'], [2, 3, '#22d3ee']], horizontales: [2],
+  ayuda: 'Foto DE ESPALDAS, iPad en trípode a la altura de la pelvis y FIJO entre las dos fotos. Stickers en las dos EIPS y una regla pegada a la piel o a la cadera. Marcá 2 puntos de la regla separados 10 cm y los dos stickers.',
+  calcular: (P) => { const esc = 100 / Math.max(dist(P[0], P[1]), 1)    // mm por pixel (R1–R2 = 10 cm)
+    const dif = +(((P[3].y - P[2].y) * esc)).toFixed(0)                  // + = la EIPS derecha está más alta
+    return { valores: { [clave]: dif }, texto: `Diferencia de altura entre EIPS: ${Math.abs(dif)} mm (${dif > 0 ? 'derecha más alta' : dif < 0 ? 'izquierda más alta' : 'parejas'})` } } })
+FOTO.eips_pie_0 = fotoEips('Test de flexión DE PIE · erguido', 'pie_0')
+FOTO.eips_pie_1 = fotoEips('Test de flexión DE PIE · en flexión', 'pie_1')
+FOTO.eips_sen_0 = fotoEips('Test de flexión SENTADO · erguido', 'sen_0')
+FOTO.eips_sen_1 = fotoEips('Test de flexión SENTADO · en flexión', 'sen_1')
 FOTO.adams_foto = { titulo: 'Maniobra de Adams · ángulo de la giba', modo: 'horizontal', nombres: ['Lado izquierdo de la espalda', 'Lado derecho de la espalda'],
   ayuda: 'Foto con la espalda "de canto": iPad a la altura de la espalda, mirando desde la cabeza o desde atrás. Marcá un punto a cada lado de la columna, en lo más alto de cada lado, a la altura de la giba. Mide la inclinación de esa línea contra la horizontal (el iPad tiene que estar derecho).' }
 FOTO.alcance_v = { titulo: 'Alcance funcional', modo: 'alcance' }
@@ -929,7 +941,7 @@ async function modeloImagen() {
 // y el valor cae en el casillero con "Usar este valor".
 function abrirGoniometro(cfg, lado, alUsar) {
   if (!cfg) return
-  const n = cfg.modo === 'multi' ? cfg.lmFijos.length : cfg.modo === 'angulo' ? 3 : cfg.modo === 'lineas' || cfg.modo === 'distancia' ? 4 : 2
+  const n = cfg.modo === 'multi' ? (cfg.lmFijos || cfg.nombres).length : cfg.modo === 'angulo' ? 3 : cfg.modo === 'lineas' || cfg.modo === 'distancia' ? 4 : 2
   const nombres = cfg.nombres || (cfg.modo === 'distancia' ? ['R1', 'R2', 'P1', 'P2'] : [])
   const ov = document.createElement('div'); ov.className = 'gon'
   ov.innerHTML = `<div class="bar"><h3>📷 ${esc(cfg.titulo)} ${lado ? '· lado ' + (lado === 'D' ? 'derecho' : 'izquierdo') : ''}</h3>
@@ -994,7 +1006,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
       const W = img.width, H = img.height
       pts = Array.from({ length: n }, (_, i) => ({ x: W * (0.3 + 0.4 * (i % 2)), y: H * (0.3 + 0.4 * Math.floor(i / 2)) }))
       if (n === 3) pts = [{ x: W * 0.35, y: H * 0.3 }, { x: W * 0.5, y: H * 0.5 }, { x: W * 0.4, y: H * 0.75 }]
-      if (cfg.modo === 'multi') pts = cfg.lmFijos.map((_, i) => ({ x: W * (0.42 + 0.16 * (i % 2)), y: H * (0.1 + 0.8 * i / Math.max(n - 1, 1)) }))
+      if (cfg.modo === 'multi') pts = Array.from({ length: n }, (_, i) => ({ x: W * (0.42 + 0.16 * (i % 2)), y: H * (0.1 + 0.8 * i / Math.max(n - 1, 1)) }))
       dibujar()
       if (cfg.lm || cfg.lmP || cfg.lmFijos) {
         ov.querySelector('#gLect').textContent = 'Buscando el cuerpo…'
@@ -3427,6 +3439,161 @@ function armarPdf(its, conclusion) {
 // Anamnesis (se amplía según sexo, edad y etapa), cuestionarios con puntaje, diástasis, batería de provocación
 // por escalones (filtrada por el perfil del paciente) y la sección de tacto de la especialista.
 // ============================================================
+// ============================================================
+// 🤲 OSTEOPATÍA — evaluación y sesión
+// Lo palpatorio se REGISTRA (TART por región); lo medible se MIDE (fotos de EIPS, ROM con video);
+// y el antes / después de la sesión muestra el cambio inmediato.
+// ============================================================
+const ZONAS = [
+  // [id, nombre, vista, forma: e=elipse(cx,cy,rx,ry) r=rect(x,y,w,h)]
+  ['cabeza', 'Cabeza', 'f', 'e', 100, 30, 18, 22], ['cuello', 'Cuello', 'f', 'r', 90, 52, 20, 14], ['hombro_d', 'Hombro derecho', 'f', 'e', 66, 74, 14, 10], ['hombro_i', 'Hombro izquierdo', 'f', 'e', 134, 74, 14, 10],
+  ['torax', 'Tórax / esternón', 'f', 'r', 78, 70, 44, 46], ['abdomen', 'Abdomen', 'f', 'r', 80, 118, 40, 34], ['ingle_d', 'Ingle / cadera derecha', 'f', 'e', 84, 162, 12, 10], ['ingle_i', 'Ingle / cadera izquierda', 'f', 'e', 116, 162, 12, 10],
+  ['brazo_d', 'Brazo derecho', 'f', 'r', 48, 84, 14, 50], ['brazo_i', 'Brazo izquierdo', 'f', 'r', 138, 84, 14, 50], ['mano_d', 'Mano / muñeca derecha', 'f', 'e', 52, 150, 8, 12], ['mano_i', 'Mano / muñeca izquierda', 'f', 'e', 148, 150, 8, 12],
+  ['muslo_d', 'Muslo derecho', 'f', 'r', 78, 174, 20, 54], ['muslo_i', 'Muslo izquierdo', 'f', 'r', 102, 174, 20, 54], ['rodilla_d', 'Rodilla derecha', 'f', 'e', 88, 236, 10, 9], ['rodilla_i', 'Rodilla izquierda', 'f', 'e', 112, 236, 10, 9],
+  ['pierna_d', 'Pierna derecha', 'f', 'r', 80, 246, 16, 46], ['pierna_i', 'Pierna izquierda', 'f', 'r', 104, 246, 16, 46], ['pie_d', 'Tobillo / pie derecho', 'f', 'e', 86, 300, 10, 8], ['pie_i', 'Tobillo / pie izquierdo', 'f', 'e', 114, 300, 10, 8],
+  ['nuca', 'Nuca / cervical', 'e', 'r', 90, 50, 20, 18], ['trapecio_d', 'Trapecio / escápula derecha', 'e', 'e', 72, 84, 16, 14], ['trapecio_i', 'Trapecio / escápula izquierda', 'e', 'e', 128, 84, 16, 14],
+  ['dorsal', 'Dorsal', 'e', 'r', 88, 72, 24, 46], ['lumbar', 'Lumbar', 'e', 'r', 82, 120, 36, 28], ['sacro', 'Sacro / coxis', 'e', 'e', 100, 156, 12, 10],
+  ['gluteo_d', 'Glúteo / sacroilíaca derecha', 'e', 'e', 82, 160, 14, 12], ['gluteo_i', 'Glúteo / sacroilíaca izquierda', 'e', 'e', 118, 160, 14, 12],
+  ['isquio_d', 'Posterior de muslo derecho', 'e', 'r', 78, 178, 20, 52], ['isquio_i', 'Posterior de muslo izquierdo', 'e', 'r', 102, 178, 20, 52],
+  ['gemelo_d', 'Pantorrilla derecha', 'e', 'r', 80, 246, 16, 46], ['gemelo_i', 'Pantorrilla izquierda', 'e', 'r', 104, 246, 16, 46],
+]
+const REGIONES_OSTEO = ['Craneal', 'Cervical', 'Dorsal', 'Costillas', 'Lumbar', 'Pelvis / sacroilíaca', 'Sacro / coxis', 'Hombro / miembro superior', 'Cadera / miembro inferior', 'Pie', 'Visceral', 'Fascial / otro']
+const MEDIDAS_OSTEO = [
+  ['EVA (dolor 0–10)', null, null, 'menos'], ['Rotación cervical D', 'rotcerv_v', 'D', 'mas'], ['Rotación cervical I', 'rotcerv_v', 'I', 'mas'],
+  ['Rotación torácica D', 'rot_tor_v', 'D', 'mas'], ['Rotación torácica I', 'rot_tor_v', 'I', 'mas'], ['Elevación de hombro D', 'hom_elev', 'D', 'mas'], ['Elevación de hombro I', 'hom_elev', 'I', 'mas'],
+  ['Rotación interna de cadera D', 'cad_ri', 'D', 'mas'], ['Rotación interna de cadera I', 'cad_ri', 'I', 'mas'], ['Rotación externa de cadera D', 'cad_re', 'D', 'mas'], ['Rotación externa de cadera I', 'cad_re', 'I', 'mas'],
+  ['Flexión de rodilla D (de pie)', 'rod_flex_act', 'D', 'mas'], ['Flexión de rodilla I (de pie)', 'rod_flex_act', 'I', 'mas'], ['Lunge (dorsiflexión) D', 'lunge_g', 'D', 'mas'], ['Lunge (dorsiflexión) I', 'lunge_g', 'I', 'mas'],
+  ['Distancia dedos-piso en flexión (cm)', null, null, 'menos'], ['Otro (escribí el nombre)', null, null, 'mas'],
+]
+function renderOsteo() {
+  const v = { zonas: {}, tart: [], marcadores: [], eips: {} }
+  let zonaSel = null, vista = 'f'
+  const color = (e) => e == null ? 'rgba(148,163,184,.25)' : e === 0 ? 'rgba(34,197,94,.45)' : e <= 3 ? 'rgba(250,204,21,.6)' : e <= 6 ? 'rgba(249,115,22,.7)' : 'rgba(220,38,38,.75)'
+  const sel = (k, ops, val, extra = '') => `<select data-ok="${k}" ${extra}>${ops.map(o => `<option ${String(val ?? '') === String(o) ? 'selected' : ''}>${o}</option>`).join('')}</select>`
+  const svg = () => `<svg viewBox="0 0 200 320" style="width:200px;max-width:45vw;height:auto;background:#f8fafc;border-radius:12px;border:1px solid var(--border)">
+      <text x="100" y="316" text-anchor="middle" font-size="9" fill="#64748b">${vista === 'f' ? 'DE FRENTE (su derecha a tu izquierda)' : 'DE ESPALDAS'}</text>
+      ${ZONAS.filter(z => z[2] === vista).map(([id, n, , f, a, b, c, d]) => { const e = v.zonas[id]
+        const st = `fill="${color(e)}" stroke="${zonaSel === id ? '#0c7bb8' : '#94a3b8'}" stroke-width="${zonaSel === id ? 2.5 : 1}" style="cursor:pointer" data-zona="${id}"`
+        return f === 'e' ? `<ellipse cx="${a}" cy="${b}" rx="${c}" ry="${d}" ${st}><title>${n}</title></ellipse>` : `<rect x="${a}" y="${b}" width="${c}" height="${d}" rx="6" ${st}><title>${n}</title></rect>` }).join('')}
+    </svg>`
+  const pintar = () => {
+    const z = zonaSel ? ZONAS.find(x => x[0] === zonaSel) : null
+    $('osBody').innerHTML = `
+      <h3 style="margin:14px 0 6px">1 · Motivo y banderas rojas</h3>
+      <table class="crit">
+        <tr><td>Motivo de consulta</td><td><input type="text" data-ok="motivo" value="${esc(v.motivo || '')}" style="width:100%"></td></tr>
+        <tr><td>Desde cuándo / cómo empezó</td><td><input type="text" data-ok="inicio" value="${esc(v.inicio || '')}" style="width:100%"></td></tr>
+        <tr><td>Qué lo empeora / qué lo alivia</td><td><input type="text" data-ok="agrava" value="${esc(v.agrava || '')}" style="width:100%"></td></tr>
+        ${[['rf_trauma', 'Traumatismo importante reciente'], ['rf_noche', 'Dolor nocturno que no cambia con la posición'], ['rf_peso', 'Pérdida de peso sin explicación / fiebre'], ['rf_cancer', 'Antecedente de cáncer'], ['rf_neuro', 'Pérdida de fuerza, adormecimiento progresivo o cambios en esfínteres'], ['rf_cardio', 'Dolor con esfuerzo, falta de aire o palpitaciones']]
+          .map(([k, n]) => `<tr><td>${n}</td><td>${sel(k, ['—', 'NO', 'SI'], v[k] || '—')}</td></tr>`).join('')}
+      </table>
+      <h3 style="margin:14px 0 6px">2 · Mapa del dolor <small style="font-weight:600;color:var(--dim)">tocá la zona y elegí el dolor de 0 a 10</small></h3>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">
+        <div><div class="chips" style="margin:0 0 6px"><button data-vista="f" class="${vista === 'f' ? 'on' : ''}">De frente</button><button data-vista="e" class="${vista === 'e' ? 'on' : ''}">De espaldas</button></div>${svg()}</div>
+        <div style="flex:1;min-width:220px">
+          ${z ? `<b>${z[1]}</b><div class="chips">${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => `<button data-eva="${n}" class="${v.zonas[z[0]] === n ? 'on' : ''}">${n}</button>`).join('')}<button data-eva="x">Quitar</button></div>` : '<div class="nota">Tocá una zona del cuerpo.</div>'}
+          <div class="nota">${Object.keys(v.zonas).length ? Object.entries(v.zonas).map(([id, e]) => `${(ZONAS.find(x => x[0] === id) || [, id])[1]}: <b>${e}</b>`).join(' · ') : 'Sin zonas marcadas.'}</div>
+          <table class="crit"><tr><td>Tipo de dolor</td><td>${sel('tipo_dolor', ['—', 'Mecánico (cambia con el movimiento)', 'Inflamatorio (peor en reposo / a la mañana)', 'Neuropático (quemazón, hormigueo)', 'Mixto'], v.tipo_dolor || '—')}</td></tr></table>
+        </div>
+      </div>
+      <h3 style="margin:14px 0 6px">3 · Tests medidos</h3>
+      <details class="infobox" open><summary style="cursor:pointer;font-weight:800">Test de flexión de pie y sentado (EIPS con stickers, medido con foto)</summary>
+        <div class="nota" style="margin:4px 0">Trípode fijo a la altura de la pelvis, de espaldas. Dos fotos por test: erguido y en flexión. El sistema calcula qué EIPS sube más y cuántos mm.</div>
+        <div class="btns">${[['eips_pie_0', 'De pie · erguido'], ['eips_pie_1', 'De pie · en flexión'], ['eips_sen_0', 'Sentado · erguido'], ['eips_sen_1', 'Sentado · en flexión']]
+          .map(([k, n]) => `<button class="b ${v.eips[k.replace('eips_', '')] != null ? '' : 'pri'}" data-eips="${k}">📷 ${n}${v.eips[k.replace('eips_', '')] != null ? ' ✓' : ''}</button>`).join('')}</div>
+        <div class="nota" id="osEips"></div>
+      </details>
+      <details class="infobox" open><summary style="cursor:pointer;font-weight:800">Gillet y spring test (a mano)</summary><table class="crit">
+        <tr><td>Gillet (cigüeña) · lado que no desciende la EIPS</td><td>${sel('gillet', ['—', 'Negativo', 'Positivo derecho', 'Positivo izquierdo', 'Bilateral'], v.gillet || '—')}</td></tr>
+        <tr><td>Spring test lumbar · niveles con rigidez o dolor</td><td><div class="chips">${['L1', 'L2', 'L3', 'L4', 'L5', 'S1'].map(n => `<button data-spring="${n}" class="${(v.spring || []).includes(n) ? 'on' : ''}">${n}</button>`).join('')}</div></td></tr></table></details>
+      <div class="nota">Para postura, Adams, dismetría, ROM y patrones globales usá los tests de la ruta 🤲: quedan en la misma ficha.</div>
+      <h3 style="margin:14px 0 6px">4 · Hallazgos palpatorios (TART) <button class="lnk" id="osAddTart">+ agregar hallazgo</button></h3>
+      ${v.tart.length ? `<div style="overflow-x:auto"><table class="crit"><tr><th>Región</th><th>Nivel</th><th>Lado</th><th>T · A · R · S</th><th>Descripción</th><th></th></tr>
+        ${v.tart.map((t, i) => `<tr><td>${sel('tart_' + i + '_reg', REGIONES_OSTEO, t.reg)}</td>
+          <td><input type="text" data-ok="tart_${i}_niv" value="${esc(t.niv || '')}" placeholder="ej. L4" style="width:70px"></td>
+          <td>${sel('tart_' + i + '_lado', ['—', 'D', 'I', 'Bilateral'], t.lado || '—')}</td>
+          <td><div class="chips" style="margin:0">${[['T', 'Textura'], ['A', 'Asimetría'], ['R', 'Restricción'], ['S', 'Sensibilidad']].map(([k, n]) => `<button data-tart="${i}" data-l="${k}" title="${n}" class="${(t.tart || []).includes(k) ? 'on' : ''}">${k}</button>`).join('')}</div></td>
+          <td><input type="text" data-ok="tart_${i}_desc" value="${esc(t.desc || '')}" placeholder="ej. rotación derecha" style="width:100%;min-width:140px"></td>
+          <td><button class="lnk" data-borrar="${i}">✕</button></td></tr>`).join('')}</table></div>` : '<div class="nota">Sin hallazgos cargados. T = textura del tejido · A = asimetría · R = restricción de movimiento · S = sensibilidad.</div>'}
+      <h3 style="margin:14px 0 6px">5 · Antes / después de la sesión <button class="lnk" id="osAddMarc">+ agregar marcador</button></h3>
+      <div class="nota">Elegí 2 o 3 marcadores al empezar, medilos, hacé la sesión y volvé a medir. Los ángulos se pueden tomar con 🎥 (toma el máximo).</div>
+      ${v.marcadores.length ? `<div style="overflow-x:auto"><table class="crit"><tr><th>Marcador</th><th>Antes</th><th>Después</th><th>Cambio</th><th></th></tr>
+        ${v.marcadores.map((m, i) => { const def = MEDIDAS_OSTEO[m.tipo]
+          const cel = (cual) => `<input type="number" step="any" data-ok="marc_${i}_${cual}" value="${m[cual] ?? ''}" style="width:70px">${def[1] ? ` <button class="btnfoto" data-mvivo="${i}" data-cual="${cual}">🎥</button>` : ''}`
+          const dlt = m.antes != null && m.despues != null ? m.despues - m.antes : null, mejor = dlt == null ? null : (def[3] === 'menos' ? dlt < 0 : dlt > 0)
+          return `<tr><td>${sel('marc_' + i + '_tipo', MEDIDAS_OSTEO.map(x => x[0]), def[0])}${m.tipo === MEDIDAS_OSTEO.length - 1 ? `<input type="text" data-ok="marc_${i}_nom" value="${esc(m.nom || '')}" placeholder="nombre" style="width:100%;margin-top:4px">` : ''}</td>
+            <td>${cel('antes')}</td><td>${cel('despues')}</td><td class="${dlt == null ? '' : mejor ? 'c-ok' : dlt === 0 ? '' : 'c-bad'}">${dlt == null ? '—' : (dlt > 0 ? '+' : '') + fmt(dlt, 0)}</td>
+            <td><button class="lnk" data-bmarc="${i}">✕</button></td></tr>` }).join('')}</table></div>` : ''}
+      <textarea class="obs" id="osObs" placeholder="Técnicas aplicadas y observaciones de la sesión">${esc(v.obs || '')}</textarea>
+      <div class="estado" id="estado">Completá lo que evaluaste y guardá.</div>
+      <div class="res" id="res"></div>`
+    // eventos
+    document.querySelectorAll('[data-zona]').forEach(el => el.onclick = () => { zonaSel = el.dataset.zona; pintar() })
+    document.querySelectorAll('[data-vista]').forEach(b => b.onclick = () => { vista = b.dataset.vista; zonaSel = null; pintar() })
+    document.querySelectorAll('[data-eva]').forEach(b => b.onclick = () => { if (b.dataset.eva === 'x') delete v.zonas[zonaSel]; else v.zonas[zonaSel] = +b.dataset.eva; pintar() })
+    document.querySelectorAll('[data-spring]').forEach(b => b.onclick = () => { const n = b.dataset.spring; v.spring = (v.spring || []).includes(n) ? v.spring.filter(x => x !== n) : [...(v.spring || []), n]; pintar() })
+    document.querySelectorAll('[data-eips]').forEach(b => b.onclick = () => abrirGoniometro(FOTO[b.dataset.eips], null, (valores) => { Object.assign(v.eips, valores); pintar() }))
+    $('osAddTart').onclick = () => { v.tart.push({ reg: REGIONES_OSTEO[1], tart: [] }); pintar() }
+    $('osAddMarc').onclick = () => { v.marcadores.push({ tipo: 0 }); pintar() }
+    document.querySelectorAll('[data-borrar]').forEach(b => b.onclick = () => { v.tart.splice(+b.dataset.borrar, 1); pintar() })
+    document.querySelectorAll('[data-bmarc]').forEach(b => b.onclick = () => { v.marcadores.splice(+b.dataset.bmarc, 1); pintar() })
+    document.querySelectorAll('[data-tart]').forEach(b => b.onclick = () => { const t = v.tart[+b.dataset.tart], l = b.dataset.l; t.tart = (t.tart || []).includes(l) ? t.tart.filter(x => x !== l) : [...(t.tart || []), l]; pintar() })
+    document.querySelectorAll('[data-mvivo]').forEach(b => b.onclick = () => { const m = v.marcadores[+b.dataset.mvivo], def = MEDIDAS_OSTEO[m.tipo]
+      abrirVivo(def[1], def[2], (val) => { m[b.dataset.cual] = val; pintar() }) })
+    document.querySelectorAll('#osBody [data-ok]').forEach(el => el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      const k = el.dataset.ok, val = el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value
+      let m
+      if ((m = k.match(/^tart_(\d+)_(reg|niv|lado|desc)$/))) v.tart[+m[1]][m[2]] = val
+      else if ((m = k.match(/^marc_(\d+)_(antes|despues|nom)$/))) { v.marcadores[+m[1]][m[2]] = val; if (m[2] !== 'nom') return pintarSinFoco() }
+      else if ((m = k.match(/^marc_(\d+)_tipo$/))) { v.marcadores[+m[1]].tipo = MEDIDAS_OSTEO.findIndex(x => x[0] === val); return pintar() }
+      else v[k] = val
+      calcular() }))
+    $('osObs').oninput = (e) => { v.obs = e.target.value; calcular() }
+    pintarEips(); calcular()
+  }
+  const pintarSinFoco = () => { calcular() }
+  const pintarEips = () => {
+    const e = v.eips, t = (a, b, n) => a != null && b != null ? (() => { const d = b - a; return `${n}: ${Math.abs(d) < 3 ? 'negativo (diferencia ' + Math.abs(d) + ' mm)' : `<b>positivo ${d > 0 ? 'derecho' : 'izquierdo'}</b> (la EIPS ${d > 0 ? 'derecha' : 'izquierda'} sube ${Math.abs(d)} mm más)`}` })() : null
+    const x = [t(e.pie_0, e.pie_1, 'De pie'), t(e.sen_0, e.sen_1, 'Sentado')].filter(Boolean)
+    if ($('osEips')) $('osEips').innerHTML = x.length ? x.join('<br>') : 'Sacá las dos fotos de un test para ver el resultado.'
+  }
+  const calcular = () => {
+    const h = [], r = {}
+    const rf = ['rf_trauma', 'rf_noche', 'rf_peso', 'rf_cancer', 'rf_neuro', 'rf_cardio'].filter(k => v[k] === 'SI')
+    const zonas = Object.entries(v.zonas).sort((a, b) => b[1] - a[1])
+    const evaMax = zonas.length ? zonas[0][1] : null
+    if (zonas.length) h.push('Dolor: ' + zonas.map(([id, e]) => `${(ZONAS.find(x => x[0] === id) || [, id])[1].toLowerCase()} ${e}/10`).join(', '))
+    if (v.tipo_dolor && v.tipo_dolor !== '—') h.push(`Tipo de dolor: ${v.tipo_dolor.toLowerCase()}`)
+    const e = v.eips
+    ;[['pie', 'Test de flexión de pie'], ['sen', 'Test de flexión sentado']].forEach(([k, n]) => { const a = e[k + '_0'], b = e[k + '_1']
+      if (a != null && b != null) { const d = b - a; r[k] = d; h.push(Math.abs(d) < 3 ? `${n}: negativo` : `${n}: positivo ${d > 0 ? 'derecho' : 'izquierdo'} (${Math.abs(d)} mm)`) } })
+    if (v.gillet && v.gillet !== '—') h.push(`Gillet: ${v.gillet.toLowerCase()}`)
+    if ((v.spring || []).length) h.push(`Spring test con rigidez o dolor en ${v.spring.join(', ')}`)
+    v.tart.forEach(t => { if (!(t.tart || []).length && !t.desc) return
+      h.push(`TART ${t.reg}${t.niv ? ' ' + t.niv : ''}${t.lado && t.lado !== '—' ? ' ' + t.lado : ''}: ${(t.tart || []).join('')}${t.desc ? ' · ' + t.desc : ''}`) })
+    const cambios = v.marcadores.filter(m => m.antes != null && m.despues != null).map(m => { const def = MEDIDAS_OSTEO[m.tipo], d = m.despues - m.antes
+      return { n: m.tipo === MEDIDAS_OSTEO.length - 1 ? (m.nom || 'Otro') : def[0], antes: m.antes, despues: m.despues, d, mejor: def[3] === 'menos' ? d < 0 : d > 0 } })
+    cambios.forEach(c => h.push(`Sesión: ${c.n} ${fmt(c.antes, 0)} → ${fmt(c.despues, 0)} (${c.d > 0 ? '+' : ''}${fmt(c.d, 0)})${c.mejor ? ' ✓' : ''}`))
+    r.cambios = cambios; r.eva_max = evaMax
+    const html = `${rf.length ? `<div class="necbox" style="background:#fee2e2;border-color:#fca5a5;color:#7f1d1d">🚩 <b>Banderas rojas: derivar al médico antes de tratar.</b></div>` : ''}
+      <div class="val">${evaMax != null ? `${evaMax} <span style="font-size:16px">/10 dolor máximo</span>` : '—'}</div>
+      ${cambios.length ? `<div class="interp ${cambios.every(c => c.mejor) ? 'c-ok' : 'c-warn'}">${cambios.filter(c => c.mejor).length} de ${cambios.length} marcadores mejoraron en la sesión</div>` : ''}
+      ${h.length ? `<div class="nota">${h.map(esc).join('<br>')}</div>` : ''}`
+    mostrarResultado(html, `Osteopatía: ${h.join(' · ') || 'sin hallazgos'}${v.obs ? '. Sesión: ' + v.obs : ''}`,
+      { valor: evaMax, unidad: '/10 dolor máximo', detalle: { ...v, resultados: r, banderas: rf, hallazgos_txt: h } })
+  }
+  $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
+    <div class="panel"><h2>🤲 Osteopatía · evaluación y sesión</h2><div style="margin:4px 0 6px">${chipPaciente()}</div>
+      <div class="ultima" id="ultima"></div>
+      <div class="necbox">🧰 <b>Necesitás:</b> ${actual.necesita}</div>
+      <div class="nota">Lo palpatorio se registra (TART); lo que se puede medir, se mide con foto o video. Al final, el antes / después de la sesión.</div>
+      <div id="osBody"></div></div>
+    <div class="panel evo" id="evo" style="display:none"></div>`
+  $('btnVolver').onclick = renderCatalogo
+  pintar()
+  setTimeout(() => cargarUltima('osteo'), 0)
+}
+
 function renderPelvico() {
   const pf = perfilActual() || {}
   const v = { sexo: 'Mujer', etapa: '—', iciq_cuando: [], tareas: {}, pf_ect: {} }
@@ -3594,6 +3761,10 @@ function renderFicha() {
 // Rutas por motivo de consulta: qué tests y en qué orden. sec = región de la planilla de ROM.
 // Primero va SIEMPRE la anamnesis y el descarte de banderas rojas (esto evalúa calidad de movimiento, no diagnostica).
 const RUTAS = {
+  osteo:    { n: '🤲 Osteopatía', pasos: [
+    { id: 'osteo', por: 'mapa del dolor, tests, TART y antes / después de la sesión' }, { id: 'postural', por: 'postura de frente, perfil y espalda' },
+    { id: 'adams', por: 'asimetrías de la columna' }, { id: 'antropo', por: 'dismetría y test de alzas' }, { id: 'sfma', por: 'patrones globales' },
+    { id: 'rom', por: 'ROM de la región que consulta' } ] },
   pelvico:  { n: '🌸 Suelo pélvico', pasos: [
     { id: 'pelvico', por: 'anamnesis, cuestionarios, provocación por escalones y tacto' }, { id: 'aslr', por: 'control lumbopélvico con compresión' },
     { id: 'postural', por: 'postura de perfil (presiones)' }, { id: 'tug', por: 'si es mayor: movilidad para llegar al baño' } ] },
@@ -3799,6 +3970,7 @@ function renderTest(id, opts = {}) {
   if (actual.sinCamara) { apagarCamara(); det = null; return renderROM(opts) }
   if (actual.planilla) { apagarCamara(); det = null; return renderPlanilla(actual, PLANILLAS[id]) }
   if (actual.id === 'pelvico') { apagarCamara(); det = null; return renderPelvico() }
+  if (actual.id === 'osteo') { apagarCamara(); det = null; return renderOsteo() }
   det = DETECTORES[id]()
   setTimeout(() => cargarUltima(id), 0)
   $('app').innerHTML = `
