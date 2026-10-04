@@ -1255,7 +1255,7 @@ window.accesoSarkmedDe = function(mail) {
 // Cambia lo que se MUESTRA, no lo que se puede hacer.
 window.__verComoSarkmed = null
 window.mailSarkmedEfectivo = function() {
-  return (window.__verComoSarkmed || (usuario && usuario.email) || window.__mailLogin || '').toLowerCase().trim()
+  return (window.__verComoSarkmed || (window.__verComo && window.__verComo.email) || (usuario && usuario.email) || window.__mailLogin || '').toLowerCase().trim()
 }
 window.miAccesoSarkmed = function() { return window.accesoSarkmedDe(window.mailSarkmedEfectivo()) }
 window.esSoloSarkmed = function() { return !!window.miAccesoSarkmed()?.solo_sarkmed }
@@ -1266,9 +1266,11 @@ window.sarkmedVeCaja = function() { return !!window.miAccesoSarkmed()?.ve_caja }
 // Lo usamos en el menú y para abrir la HC en modo solo-lectura.
 // Se cuelga de window para que sea visible desde otros bloques <script> (ej: abrirHCGlobal).
 window.esProfeVistaAcotada = function() {
-  if (!permisos) return false
-  const miEmail = (usuario && usuario.email ? usuario.email : '').toLowerCase().trim()
-  const porPermiso = permisos.solo_lo_mio && !permisos.admin_total && !permisos.operativo_general
+  // Ver como (4/10/26): en vista previa se evalúa con los permisos de la persona elegida.
+  const p = window.__verComo ? window.__verComo.permisos : permisos
+  if (!p) return false
+  const miEmail = (window.__verComo ? window.__verComo.email : (usuario && usuario.email ? usuario.email : '')).toLowerCase().trim()
+  const porPermiso = p.solo_lo_mio && !p.admin_total && !p.operativo_general
   return porPermiso || EMAILS_PROFE_SUELDO.includes(miEmail)
 }
 
@@ -1771,7 +1773,38 @@ function rolLabel(rol) {
   }[rol] || rol
 }
 
+// ======================
+// VER COMO · Ecosistema completo (4/10/26, solo Lu y Jime)
+// Arma el menú con los permisos y el mail de otra persona del equipo.
+// Cambia lo que se MUESTRA, nunca lo que se puede hacer: la sesión, el RLS y lo
+// que se guarda siguen siendo de quien está logueada. Las pantallas internas
+// (iframes) se siguen viendo como vos.
+// ======================
+window.__verComo = null   // { persona_id, nombre, email, permisos }
+const EMAILS_VER_COMO = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
+function _escVC(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
+
 function buildNav() {
+  const v = window.__verComo
+  if (!v) return buildNavCore(permisos, usuario)
+  const aviso = `<div class="nav-section">
+    <div class="nav-section-title">VISTA PREVIA</div>
+    <div class="nav-item" onclick="window.salirVerComo()" style="background:#fef3c7;color:#92400e;">
+      <span class="nav-icon">👁</span>
+      <span class="nav-label">Viendo como ${_escVC(v.nombre)} · salir</span>
+    </div>
+  </div>`
+  let menu = ''
+  try {
+    menu = buildNavCore(v.permisos || {}, { ...usuario, id: v.persona_id, nombre: v.nombre, email: v.email })
+  } catch (e) {
+    console.warn('Ver como: no se pudo armar el menú', e)
+    menu = '<div class="nav-section"><div class="nav-section-title">No se pudo armar el menú de esta persona</div></div>'
+  }
+  return aviso + menu
+}
+
+function buildNavCore(permisos, usuario) {
   const items = []
 
   // ¿Es un profesional que ve "solo lo suyo"? (Bruno, Male, Vero, y profes TF)
@@ -2216,6 +2249,14 @@ function buildNav() {
         <span class="nav-label">Revisión HC equipo</span>
       </div>`)
     }
+    // Ver como (4/10/26): el Ecosistema con los ojos de cada integrante del equipo.
+    if (EMAILS_VER_COMO.includes(miEmailBit)) {
+      items.push(`<div class="nav-item" onclick="irA('ver-como')">
+        <span class="nav-icon">🕶️</span>
+        <span class="nav-label">Ver como…</span>
+        ${window.badgeNuevo('2026-10-04')}
+      </div>`)
+    }
 
     items.push(`</div>`)
   }
@@ -2295,6 +2336,7 @@ window.irA = function(modulo) {
   else if (modulo === 'hc-sarkmed') renderHcSarkmed()
   else if (modulo === 'padron-sarkmed') renderPadronSarkmed()
   else if (modulo === 'sarkmed-vercomo') window.abrirVerComoSarkmed()
+  else if (modulo === 'ver-como') window.abrirVerComo()
   else if (modulo === 'agenda-masoterapia' || modulo === 'masoterapia') renderAgendaMasoterapia()
   else if (modulo === 'liquidaciones') renderLiquidaciones()
   else if (modulo === 'pagos-obras-sociales') renderPagosObrasSociales()
@@ -3866,6 +3908,80 @@ function renderAgendaSarkmed() {
   contentEl.innerHTML = `
     <iframe src="agenda_sarkmed.html${q}" class="module-iframe-tab" title="Agenda SARKMED"></iframe>
   `
+}
+
+// ======================
+// VER COMO · Ecosistema completo (pantalla de elección)
+// ======================
+window.__candidatosVerComo = []
+window.abrirVerComo = async function() {
+  const yoMail = ((usuario && usuario.email) || window.__mailLogin || '').toLowerCase().trim()
+  if (!EMAILS_VER_COMO.includes(yoMail) && !EMAILS_VER_COMO.includes((window.__mailLogin || '').toLowerCase().trim())) { renderHome(); return }
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  contentEl.innerHTML = `<div style="max-width:680px;margin:40px auto;padding:0 20px;color:var(--text-muted,#64748b);">Cargando equipo…</div>`
+  try {
+    const [rP, rQ] = await Promise.all([
+      supabase.from('personas').select('id, nombre, email').eq('es_equipo', true).order('nombre'),
+      supabase.from('permisos_equipo').select('*')
+    ])
+    if (rP.error) throw rP.error
+    if (rQ.error) throw rQ.error
+    const permPorPersona = {}
+    ;(rQ.data || []).forEach(x => { permPorPersona[x.persona_id] = x })
+    window.__candidatosVerComo = (rP.data || [])
+      .filter(p => p.id !== usuario.id)
+      .map(p => ({
+        persona_id: p.id,
+        nombre: p.nombre || ('Persona #' + p.id),
+        email: (p.email || '').toLowerCase().trim(),
+        permisos: permPorPersona[p.id] || {}
+      }))
+    const etiqueta = c => {
+      const q = c.permisos
+      const partes = []
+      if (q.admin_total) partes.push('Admin')
+      else if (q.operativo_general) partes.push('Administración')
+      else if (q.solo_lo_mio) partes.push('Profesional · solo lo suyo')
+      else partes.push('Equipo')
+      const areas = [q.ve_terapia_fisica && 'TF', q.ve_consultorios && 'Fisio', q.ve_masoterapia && 'Maso', q.ve_biolab && 'BioLab', q.ve_vald && 'VALD'].filter(Boolean)
+      if (areas.length) partes.push(areas.join(', '))
+      if (!permPorPersona[c.persona_id]) partes.push('sin fila de permisos')
+      if (!c.email) partes.push('⚠️ sin mail en el padrón')
+      return partes.join(' · ')
+    }
+    contentEl.innerHTML = `
+      <div style="max-width:680px;margin:40px auto;padding:0 20px;">
+        <h2 style="margin:0 0 6px;">Ver el Ecosistema como otra persona</h2>
+        <p style="color:var(--text-muted,#64748b);margin:0 0 22px;font-size:14px;line-height:1.5;">
+          Te muestra el menú y los accesos que tiene esa persona. Es solo vista:
+          por debajo seguís siendo vos, y adentro de cada pantalla los datos se ven con tus permisos.
+        </p>
+        ${window.__candidatosVerComo.map((c, i) => `
+          <div onclick="window.activarVerComo(${i})"
+               style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:14px 16px;margin-bottom:10px;cursor:pointer;background:#fff;">
+            <div style="font-weight:700;font-size:15px;">${_escVC(c.nombre)}</div>
+            <div style="color:var(--text-muted,#64748b);font-size:12.5px;margin-top:3px;">${_escVC(etiqueta(c))}</div>
+          </div>`).join('') || '<p>No hay otras personas del equipo.</p>'}
+      </div>`
+  } catch (e) {
+    console.warn('Ver como: no se pudo leer el equipo', e)
+    contentEl.innerHTML = `<div style="max-width:680px;margin:40px auto;padding:0 20px;">
+      <h2>No se pudo leer el equipo</h2><p style="color:#b91c1c;">${_escVC(e.message || e)}</p></div>`
+  }
+}
+window.activarVerComo = function(i) {
+  const c = window.__candidatosVerComo[i]
+  if (!c) return
+  window.__verComoSarkmed = null
+  window.__verComo = c
+  document.getElementById('nav-items').innerHTML = buildNav()
+  renderHome()
+}
+window.salirVerComo = function() {
+  window.__verComo = null
+  document.getElementById('nav-items').innerHTML = buildNav()
+  renderHome()
 }
 
 // ======================
