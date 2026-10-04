@@ -213,12 +213,12 @@ export const SANDVIK_C = [['—', 0], ['Gotas', 1], ['Pequeñas cantidades', 2],
 // Batería de provocación: de menos a más presión. nivel = exigencia (se filtra por el perfil del paciente)
 export const PEL_TAREAS = [
   { k: 'tos', n: 'Tos fuerte ×3, de pie', nivel: 1 }, { k: 'silla', n: 'Pararse de la silla ×5', nivel: 1 },
-  { k: 'levantar', n: 'Levantar 5 kg del piso', nivel: 1 }, { k: 'caminar', n: 'Caminar rápido 1 min', nivel: 1 }, { k: 'escalon', n: 'Subir y bajar un escalón ×10', nivel: 1 },
-  { k: 'cuadriceps', n: 'Extensión de rodilla isométrica máxima, sentada (DynaMo)', nivel: 2 }, { k: 'overhead', n: 'Sostener carga por encima de la cabeza 20 s', nivel: 2 },
-  { k: 'sentadilla', n: 'Sentadilla con carga ×10', nivel: 2 }, { k: 'plancha', n: 'Plancha frontal (hasta 30 s)', nivel: 2 },
-  { k: 'imtp', n: 'Tirón de medio muslo máximo (IMTP · ForceDecks)', nivel: 3 }, { k: 'trote', n: 'Trote en el lugar 1 min', nivel: 3 },
+  { k: 'levantar', n: 'Levantar 5 kg del piso', nivel: 1 }, { k: 'caminar', dur: 60, n: 'Caminar rápido 1 min', nivel: 1 }, { k: 'escalon', n: 'Subir y bajar un escalón ×10', nivel: 1 },
+  { k: 'cuadriceps', dur: 5, n: 'Extensión de rodilla isométrica máxima, sentada (DynaMo)', nivel: 2 }, { k: 'overhead', dur: 20, n: 'Sostener carga por encima de la cabeza 20 s', nivel: 2 },
+  { k: 'sentadilla', n: 'Sentadilla con carga ×10', nivel: 2 }, { k: 'plancha', dur: 30, n: 'Plancha frontal (hasta 30 s)', nivel: 2 },
+  { k: 'imtp', dur: 5, n: 'Tirón de medio muslo máximo (IMTP · ForceDecks)', nivel: 3 }, { k: 'trote', dur: 60, n: 'Trote en el lugar 1 min', nivel: 3 },
   { k: 'saltos', n: 'Saltos en el lugar ×10', nivel: 3 }, { k: 'saltos1', n: 'Saltos a una pierna ×10 por lado', nivel: 3 },
-  { k: 'jacks', n: 'Jumping jacks 1 min', nivel: 3 }, { k: 'soga', n: 'Soga / doble salto 30 s', nivel: 3 },
+  { k: 'jacks', dur: 60, n: 'Jumping jacks 1 min', nivel: 3 }, { k: 'soga', dur: 30, n: 'Soga / doble salto 30 s', nivel: 3 },
 ]
 
 
@@ -245,7 +245,7 @@ export function htmlProtocoloPelvico(v, fecha) {
   if (v.postura) Object.entries(v.postura).forEach(([k, x]) => post.push([`Foto · ${k.replace(/_/g, ' ')}`, x]))
   h += bloque('Postura', filas(post))
   const tareas = PEL_TAREAS.filter(t => v.tareas && v.tareas[t.k]).map(t => { const x = v.tareas[t.k]
-    return [t.n, [x.esc && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : '', x.est && !['—', 'Normal'].includes(x.est) ? x.est.toLowerCase() : ''].filter(Boolean).join(' · ') || 'sin síntomas'] })
+    return [t.n + (x.tiempo != null ? ` (${x.tiempo} s${x.corte ? ', cortó: ' + String(x.corte).toLowerCase() : ''})` : ''), [x.esc && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : '', x.est && !['—', 'Normal'].includes(x.est) ? x.est.toLowerCase() : ''].filter(Boolean).join(' · ') || 'sin síntomas'] })
   h += bloque('Batería de provocación', filas(tareas))
   h += bloque('Tacto (especialista)', filas([['Inspección', v.inspeccion], ['Tono en reposo', v.tono], ['Dolor a la palpación', v.palp_dolor], ['Oxford', v.oxford], ['PERFECT', r.perfect],
     ['POP-Q anterior', v.popq_a], ['POP-Q apical', v.popq_ap], ['POP-Q posterior', v.popq_p], ['Observaciones', v.esp_obs]]))

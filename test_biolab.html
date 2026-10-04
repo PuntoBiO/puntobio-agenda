@@ -1797,7 +1797,7 @@ function renderPlanilla(spec, def) {
       ${spec.necesita ? `<div class="necbox">🧰 <b>Necesitás:</b> ${spec.necesita} · <b>${spec.modoMed}</b></div>` : ''}
       ${aptitud(spec.id) !== 'ok' ? `<div class="necbox" style="background:#fef3c7;border-color:#fcd34d">${ETQ_APT[aptitud(spec.id)]}</div>` : ''}
       <div class="infobox">${def.info}</div>
-      ${def.fotos ? `<div class="btns" style="margin:4px 0 10px">${def.fotos.map(f => `<button class="b pri" data-fgrupo="${f.cfg}">${f.label}</button>`).join('')}</div><div class="fotos" id="plFotos"></div>` : ''}
+      ${def.fotos ? `<div class="btns" style="margin:4px 0 10px">${def.fotos.map(f => `<button class="b pri" data-fgrupo="${f.cfg}">${f.label}</button>`).join('')}</div>` : ''}<div class="fotos" id="plFotos"></div>
       <div style="overflow-x:auto"><table class="rom pl"><tr><th></th><th>${(def.ladosNombres || ['D', 'I'])[0]}</th><th>${(def.ladosNombres || ['D', 'I'])[1]}</th></tr>
         ${def.campos.map(c => {
           const celda = (L) => c.num
@@ -1842,6 +1842,15 @@ function renderPlanilla(spec, def) {
   document.querySelectorAll('.pl [data-crono]').forEach(b => {
     let t0 = null, iv = null, minAvisado = 0
     const lim = parseFloat(b.dataset.limite) || null
+    if (!lim) {   // cronómetro con cámara y captura (planchas, Sorensen, flexores de cuello…)
+      b.onclick = () => abrirTemporizador({ titulo: (def.campos.find(c => b.dataset.crono.startsWith(c.k)) || {}).n || 'Cronómetro',
+        alTerminar: ({ segundos, motivo, fotos }) => {
+          const inp = document.querySelector(`.pl input[data-k="${b.dataset.crono}"]`); inp.value = segundos; vals[b.dataset.crono] = segundos
+          fotos.forEach((f, j) => { window._fotosPl = window._fotosPl || {}; window._fotosPl['crono_' + b.dataset.crono + '_' + j] = { vista: `${(def.campos.find(c => b.dataset.crono.startsWith(c.k)) || {}).n || ''} · ${f.seg} s${motivo ? ' · ' + motivo.toLowerCase() : ''}`, dataUrl: f.dataUrl } })
+          if ($('plFotos')) $('plFotos').innerHTML = Object.values(window._fotosPl || {}).map(f => `<figure><img src="${f.dataUrl}" alt=""><figcaption>${esc(f.vista)}</figcaption></figure>`).join('')
+          recalcular() } })
+      return
+    }
     const parar = () => { clearInterval(iv); const inp = document.querySelector(`.pl input[data-k="${b.dataset.crono}"]`)
       const v = +Math.min((performance.now() - t0) / 1000, lim || Infinity).toFixed(1); t0 = null; beep(800, 500); b.textContent = '▶ Empezar de nuevo'
       inp.value = v; vals[b.dataset.crono] = v; if (lim) decir('Tiempo. Quedate donde estás.'); recalcular() }
@@ -1857,7 +1866,7 @@ function renderPlanilla(spec, def) {
   document.querySelectorAll('.pl [data-mas]').forEach(b => b.onclick = () => {
     const inp = document.querySelector(`.pl input[data-k="${b.dataset.mas}"]`); const v = (parseFloat(inp.value) || 0) + 1
     inp.value = v; vals[b.dataset.mas] = v; beep(1200, 60); recalcular() })
-  const fotosPl = {}
+  const fotosPl = window._fotosPl || {}
   document.querySelectorAll('[data-fgrupo]').forEach(b => b.onclick = () => abrirGoniometro(FOTO[b.dataset.fgrupo], null, (valores, foto) => {
     Object.entries(valores).forEach(([k, v]) => { vals[k] = v; const inp = document.querySelector(`.pl input[data-k="${k}"]`); if (inp) inp.value = v })
     if (foto) { fotosPl[b.dataset.fgrupo] = { vista: b.textContent.replace('📷 ', ''), dataUrl: foto }
@@ -3436,7 +3445,7 @@ function detallePdf(i) {
     if (d.postura) Object.entries(d.postura).forEach(([k, x]) => post.push([`Foto · ${k.replace(/_/g, ' ')}`, fx(x)]))
     sec('Postura', post)
     const tar = PEL_TAREAS.filter(t => d.tareas && d.tareas[t.k]).map(t => { const x = d.tareas[t.k]
-      return [t.n, vac(x.esc) ? '' : x.esc.toLowerCase(), x.pes === 'SI' ? 'sí' : x.pes === 'NO' ? 'no' : '', x.dol === 'SI' ? 'sí' : x.dol === 'NO' ? 'no' : '', vac(x.est) ? '' : x.est.toLowerCase()] })
+      return [t.n + (x.tiempo != null ? ` (${fmt(x.tiempo, 0)} s${x.corte ? ', cortó: ' + x.corte.toLowerCase() : ''})` : ''), vac(x.esc) ? '' : x.esc.toLowerCase(), x.pes === 'SI' ? 'sí' : x.pes === 'NO' ? 'no' : '', x.dol === 'SI' ? 'sí' : x.dol === 'NO' ? 'no' : '', vac(x.est) ? '' : x.est.toLowerCase()] })
     sec('Batería de provocación (en orden)', tar, ['Tarea', 'Escape', 'Pesadez', 'Dolor', 'Estrategia'])
     sec('Tacto (especialista)', [['Inspección', d.inspeccion], ['Tono en reposo', d.tono], ['Dolor a la palpación', d.palp_dolor], ['Oxford modificada', d.oxford], ['PERFECT', r.perfect],
       ['POP-Q anterior', d.popq_a], ['POP-Q apical', d.popq_ap], ['POP-Q posterior', d.popq_p], ['Observaciones', d.esp_obs]])
@@ -3717,6 +3726,71 @@ function renderOsteo() {
   setTimeout(() => cargarUltima('osteo'), 0)
 }
 
+// ============================================================
+// ⏱️ TEMPORIZADOR CON CÁMARA
+// Para cualquier tarea con tiempo: ▶ arranca (cuenta regresiva si tiene duración, o cronómetro si no),
+// saca una CAPTURA sola a mitad de la tarea (y las que quieras con 📸), ⏸ pausa, ⏹ "pasó algo" con el motivo.
+// No se guarda video: solo el tiempo, el motivo y hasta 3 imágenes congeladas (van a la ficha y al PDF).
+// ============================================================
+function abrirTemporizador({ titulo, dur = null, motivos = ['Cansancio / no pudo seguir', 'Dolor', 'Otro'], alTerminar }) {
+  const ov = document.createElement('div'); ov.className = 'gon'
+  ov.innerHTML = `<div class="bar"><h3>⏱️ ${esc(titulo)}</h3>
+      <button class="b pri" id="tPlay">▶ Empezar</button><button class="b" id="tPausa" disabled>⏸ Pausa</button>
+      <button class="b" id="tFoto" disabled>📸 Captura</button><button class="b" id="tPasa" disabled style="background:#fee2e2;border-color:#fca5a5;color:#7f1d1d">⏹ Pasó algo</button>
+      <button class="b" id="tFin">${dur ? 'Cancelar' : '✓ Terminar'}</button></div>
+    <div class="lienzo" style="position:relative">
+      <video id="tVid" playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0f172a"></video>
+      <div id="tReloj" style="position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,.8);color:#fff;font:800 56px Manrope,sans-serif;padding:6px 22px;border-radius:16px">${dur ? fmtReloj(dur) : '0:00'}</div>
+      <div id="tFotos" style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px"></div>
+      <div id="tMot" style="display:none;position:absolute;inset:0;background:rgba(15,23,42,.9);color:#fff;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:14px">
+        <div style="font:800 22px Manrope,sans-serif">¿Qué pasó?</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">${motivos.map(m => `<button class="b pri" data-mot="${esc(m)}" style="font-size:17px;padding:14px 18px">${esc(m)}</button>`).join('')}</div>
+        <button class="b" id="tSigue">Nada, seguir</button></div>
+    </div>`
+  document.body.appendChild(ov)
+  const vid = ov.querySelector('#tVid'), reloj = ov.querySelector('#tReloj')
+  let st = null, iv = null, t0 = null, acum = 0, corriendo = false, autoFoto = false, terminado = false
+  const fotos = []
+  ;(async () => { try { st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false }); vid.srcObject = st; await vid.play() } catch (e) { vid.style.display = 'none' } })()
+  const transcurrido = () => acum + (corriendo ? (performance.now() - t0) / 1000 : 0)
+  const capturar = () => {
+    if (!vid.videoWidth || fotos.length >= 3) return
+    const c = document.createElement('canvas'), k = Math.min(1, 720 / vid.videoWidth); c.width = vid.videoWidth * k; c.height = vid.videoHeight * k
+    const x = c.getContext('2d'); x.drawImage(vid, 0, 0, c.width, c.height)
+    x.fillStyle = 'rgba(15,23,42,.75)'; x.fillRect(0, c.height - 30, c.width, 30); x.fillStyle = '#fff'; x.font = 'bold 16px sans-serif'
+    x.fillText(`${titulo} · ${Math.round(transcurrido())} s`, 10, c.height - 10)
+    fotos.push({ seg: Math.round(transcurrido()), dataUrl: c.toDataURL('image/jpeg', 0.72) }); beep(1400, 60)
+    ov.querySelector('#tFotos').innerHTML = fotos.map(f => `<img src="${f.dataUrl}" style="height:60px;border-radius:6px;border:2px solid #fff">`).join('')
+  }
+  const tic = () => {
+    const t = transcurrido()
+    reloj.textContent = fmtReloj(dur ? Math.max(0, dur - t) : t)
+    if (!autoFoto && t >= (dur ? Math.min(dur / 2, Math.max(2, dur / 2)) : 3)) { autoFoto = true; capturar() }   // captura sola a mitad (o a los 3 s)
+    if (dur && t >= dur) terminar(null)
+  }
+  const cerrar = () => { clearInterval(iv); if (st) st.getTracks().forEach(x => x.stop()); ov.remove() }
+  const terminar = (motivo) => {
+    if (terminado) return; terminado = true
+    if (!fotos.length) capturar()
+    const seg = +Math.min(transcurrido(), dur || Infinity).toFixed(1)
+    beep(motivo ? 400 : 900, 500); if (!motivo && dur) decir('Tiempo.')
+    cerrar(); alTerminar && alTerminar({ segundos: seg, completo: !motivo && (!dur || seg >= dur), motivo, fotos })
+  }
+  ov.querySelector('#tPlay').onclick = async () => {
+    const b = ov.querySelector('#tPlay')
+    if (t0 == null && acum === 0) { b.disabled = true; for (const n of [3, 2, 1]) { reloj.textContent = n; beep(600, 120); await new Promise(r => setTimeout(r, 800)) } decir('Ya'); beep(1000, 300) }
+    t0 = performance.now(); corriendo = true; clearInterval(iv); iv = setInterval(tic, 100)
+    b.disabled = true; ['#tPausa', '#tFoto', '#tPasa'].forEach(q => ov.querySelector(q).disabled = false)
+  }
+  ov.querySelector('#tPausa').onclick = () => { if (!corriendo) return; acum = transcurrido(); corriendo = false; clearInterval(iv); const b = ov.querySelector('#tPlay'); b.disabled = false; b.textContent = '▶ Seguir' }
+  ov.querySelector('#tFoto').onclick = capturar
+  ov.querySelector('#tPasa').onclick = () => { ov.querySelector('#tPausa').onclick(); ov.querySelector('#tMot').style.display = 'flex' }
+  ov.querySelector('#tSigue').onclick = () => { ov.querySelector('#tMot').style.display = 'none'; ov.querySelector('#tPlay').onclick() }
+  ov.querySelectorAll('[data-mot]').forEach(b => b.onclick = () => terminar(b.dataset.mot))
+  ov.querySelector('#tFin').onclick = () => { if (dur) { if (corriendo || acum) { if (confirm('¿Cancelar la tarea? No se guarda el tiempo.')) cerrar() } else cerrar() } else terminar(null) }
+}
+const fmtReloj = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` }
+
 function renderPelvico() {
   const pf = perfilActual() || {}
   const v = { sexo: 'Mujer', etapa: '—', iciq_cuando: [], tareas: {}, pf_ect: {} }
@@ -3781,9 +3855,10 @@ function renderPelvico() {
       </details>
       <h3 style="margin:14px 0 6px">4 · Batería de provocación <small style="font-weight:600;color:var(--dim)">de menos a más presión · siempre con la vejiga en el mismo estado</small></h3>
       <div class="nota">Hacé las tareas en orden. Si aparece un síntoma claro, podés cortar ahí: ese es el umbral. Las tareas exigentes se filtran por el perfil del paciente.</div>
-      <div style="overflow-x:auto"><table class="crit"><tr><th>Tarea</th><th>Escape</th><th>Pesadez</th><th>Dolor</th><th>Estrategia</th></tr>
+      <div style="overflow-x:auto"><table class="crit"><tr><th>Tarea</th><th>⏱</th><th>Escape</th><th>Pesadez</th><th>Dolor</th><th>Estrategia</th></tr>
         ${tareasVisibles().map((t, i) => { const r = v.tareas[t.k] || {}, apt = aptNivel(t.nivel)
           return `<tr class="${apt !== 'ok' ? 'apt-' + apt : ''}"><td><b>${i + 1}.</b> ${t.n}${apt !== 'ok' ? `<small class="aviso" style="display:block;color:#92400e">${ETQ_APT[apt]}</small>` : ''}</td>
+            <td style="white-space:nowrap"><button class="btnfoto" data-timer="${t.k}" title="${t.dur ? 'Temporizador de ' + t.dur + ' s con captura' : 'Cronómetro con captura'}">▶${t.dur ? ' ' + fmtReloj(t.dur) : ''}</button>${r.tiempo != null ? `<small style="display:block;color:${r.corte ? '#b91c1c' : 'var(--dim)'}">${fmt(r.tiempo, 0)} s${r.corte ? ' · ' + esc(r.corte.toLowerCase()) : ''}</small>` : ''}</td>
             <td>${sel('t_' + t.k + '_esc', ['—', 'NO', 'GOTAS', 'CHORRO'], r.esc || '—')}</td><td>${sel('t_' + t.k + '_pes', ['—', 'NO', 'SI'], r.pes || '—')}</td>
             <td>${sel('t_' + t.k + '_dol', ['—', 'NO', 'SI'], r.dol || '—')}</td><td>${sel('t_' + t.k + '_est', ['—', 'Normal', 'Apnea', 'Puja', 'Doming'], r.est || '—')}</td></tr>` }).join('')}
       </table></div>
@@ -3815,6 +3890,17 @@ function renderPelvico() {
     document.querySelectorAll('[data-cuando]').forEach(b => b.onclick = () => { const o = ICIQ_CUANDO[+b.dataset.cuando]
       v.iciq_cuando = v.iciq_cuando.includes(o) ? v.iciq_cuando.filter(x => x !== o) : [...v.iciq_cuando, o]; b.classList.toggle('on'); calcular() })
     if ($('pelTodas')) $('pelTodas').onclick = () => { verTodas = !verTodas; pintar() }
+    document.querySelectorAll('[data-timer]').forEach(b => b.onclick = () => { const t = PEL_TAREAS.find(x => x.k === b.dataset.timer)
+      abrirTemporizador({ titulo: t.n, dur: t.dur || null, motivos: ['Escape de orina', 'Pesadez', 'Dolor', 'Cansancio / no pudo seguir', 'Otro'],
+        alTerminar: ({ segundos, motivo, fotos }) => {
+          const r = v.tareas[t.k] = v.tareas[t.k] || {}
+          r.tiempo = segundos; r.corte = motivo || null
+          if (motivo === 'Escape de orina' && !['GOTAS', 'CHORRO'].includes(r.esc)) r.esc = 'GOTAS'
+          if (motivo === 'Pesadez') r.pes = 'SI'
+          if (motivo === 'Dolor') r.dol = 'SI'
+          if (!motivo) { if (!r.esc || r.esc === '—') r.esc = 'NO'; if (!r.pes || r.pes === '—') r.pes = 'NO'; if (!r.dol || r.dol === '—') r.dol = 'NO' }
+          fotos.forEach((f, j) => { fotosPel['tarea_' + t.k + '_' + j] = { vista: `${t.n} · ${f.seg} s`, dataUrl: f.dataUrl } })
+          pintar() } }) })
     document.querySelectorAll('[data-pfoto]').forEach(b => b.onclick = () => abrirGoniometro(FOTO[b.dataset.pfoto], null, (valores, foto) => {
       v.postura = { ...(v.postura || {}), ...valores }
       if (foto) fotosPel[b.dataset.pfoto] = { vista: b.textContent.replace('📷 ', ''), dataUrl: foto }
@@ -3839,7 +3925,7 @@ function renderPelvico() {
     const sint = (t) => { const x = v.tareas[t.k]; return ['GOTAS', 'CHORRO'].includes(x.esc) || x.pes === 'SI' || x.dol === 'SI' }
     const primera = hechas.find(sint), toleradas = primera ? hechas.indexOf(primera) : hechas.length
     r.tareas_hechas = hechas.length; r.toleradas = toleradas; r.umbral = primera ? primera.n : null
-    if (primera) { const x = v.tareas[primera.k]; h.push(`Umbral de carga: tolera ${toleradas} tarea${toleradas === 1 ? '' : 's'}; síntomas desde "${primera.n}" (${[x.esc !== 'NO' && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : ''].filter(Boolean).join(', ')})`) }
+    if (primera) { const x = v.tareas[primera.k]; h.push(`Umbral de carga: tolera ${toleradas} tarea${toleradas === 1 ? '' : 's'}; síntomas desde "${primera.n}"${x.tiempo != null && x.corte ? ` a los ${fmt(x.tiempo, 0)} s` : ''} (${[x.esc !== 'NO' && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : ''].filter(Boolean).join(', ')})`) }
     else if (hechas.length) h.push(`Sin síntomas en las ${hechas.length} tareas realizadas`)
     const est = {}; hechas.forEach(t => { const e = v.tareas[t.k].est; if (e && !['—', 'Normal'].includes(e)) est[e] = (est[e] || 0) + 1 })
     const pred = Object.entries(est).sort((a, b) => b[1] - a[1])[0]; if (pred) { r.estrategia = pred[0]; h.push(`Estrategia predominante: ${pred[0].toLowerCase()} (${pred[1]} tarea${pred[1] === 1 ? '' : 's'})`) }
