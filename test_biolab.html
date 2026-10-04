@@ -156,6 +156,8 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .nosug{margin-top:18px}.nosug summary{cursor:pointer;font-weight:800;color:var(--dim);margin-bottom:10px}
 .perfil .chips button{display:flex;flex-direction:column;align-items:flex-start;line-height:1.2}
 .tag{display:inline-block;font-size:11px;font-weight:800;padding:2px 7px;border-radius:6px;background:#e0f2fe;color:var(--turq-d)}
+.ubic{margin:10px 0 0;padding:10px 14px;border-radius:12px;font-size:14px;font-weight:600;background:#f1f5f9;color:#334155}
+.ubic.ok{background:#dcfce7;color:#14532d}.ubic.warn{background:#fef3c7;color:#78350f}.ubic.bad{background:#fee2e2;color:#7f1d1d}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -3181,7 +3183,10 @@ function mostrarResultado(html, texto, datos) {
 }
 
 async function guardarResultado() {
-  const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Guardando…'
+  const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Verificando la ubicación…'
+  await verificarUbicacion()
+  if (!puedeEvaluar()) { b.disabled = false; b.textContent = '💾 Guardar en la ficha'; alert('Los tests solo se pueden guardar en PuntoBiO. ' + (ubic.estado === 'fuera' ? `Estás a unos ${ubic.dist} m del centro.` : 'No se pudo confirmar la ubicación.')); return }
+  b.textContent = 'Guardando…'
   const fila = {
     origen: paciente.origen, paciente_id: paciente.id, paciente_nombre: paciente.nombre, paciente_dni: normDni(paciente.dni),
     test: actual.id, valor: datosRes.valor, unidad: datosRes.unidad, detalle: datosRes.detalle,
@@ -4274,6 +4279,97 @@ function pintarPerfil() {
   $('pfAyuda').onchange = (e) => { pf.ayuda = e.target.checked; refrescar() }
 }
 
+// ============================================================
+// 📍 SOLO EN PUNTOBIO: los tests se pueden HACER únicamente dentro del radio del centro (ubicación del
+// iPad o el celu). Afuera se puede ver fichas, tests realizados e informes, pero no evaluar ni guardar.
+// La ubicación del centro la fija Lu o Jime parada en PuntoBiO. Quienes están en "excepciones" evalúan desde cualquier lado.
+// Es una barrera práctica (del navegador), no infalible: alguien con conocimientos técnicos podría falsear la ubicación.
+// ============================================================
+const ADMIN_UBIC = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
+const RADIO_M = 200      // fijo: 200 m alrededor del centro (decisión de Lu, 4/10/26)
+let ubic = { estado: 'cargando', t: 0 }, miEmail = ''
+const distM = (a, b) => { const R = 6371000, r = x => x * Math.PI / 180
+  const dLa = r(b.lat - a.lat), dLo = r(b.lng - a.lng), h = Math.sin(dLa / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLo / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(h)) }
+const posicion = () => new Promise((res, rej) => {
+  if (!navigator.geolocation) return rej(new Error('Este dispositivo no da la ubicación'))
+  navigator.geolocation.getCurrentPosition(p => res({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }), rej, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 })
+})
+async function verificarUbicacion(forzar = false) {
+  if (!forzar && ubic.estado !== 'cargando' && Date.now() - ubic.t < 5 * 60000) return ubic
+  try {
+    if (!miEmail) { const { data } = await supabase.auth.getUser(); miEmail = ((data && data.user && data.user.email) || '').toLowerCase() }
+    const { data: cfg } = await supabase.from('test_biolab_config').select('*').eq('id', 1).maybeSingle()
+    ubic = { estado: 'cargando', t: Date.now(), cfg: cfg || null }
+    if (ADMIN_UBIC.includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }     // Lu y Jime evalúan desde cualquier lugar
+    if (!cfg || !cfg.activo || cfg.lat == null) { ubic.estado = 'inactivo'; return ubic }
+    if ((cfg.emails_excepcion || []).map(x => x.toLowerCase()).includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }
+    const pos = await posicion()
+    const d = distM(pos, cfg), margen = Math.min(pos.acc || 0, 100)
+    Object.assign(ubic, { dist: Math.round(d), acc: Math.round(pos.acc || 0), estado: d - margen <= RADIO_M ? 'ok' : 'fuera' })
+  } catch (e) {
+    ubic.estado = e && e.code === 1 ? 'sinpermiso' : 'error'; ubic.msg = e && e.message
+  }
+  ubic.t = Date.now()
+  return ubic
+}
+const puedeEvaluar = () => ['ok', 'inactivo', 'excepcion'].includes(ubic.estado)
+function cartelUbicacion() {
+  const u = ubic
+  if (u.estado === 'ok') return `<div class="ubic ok">📍 Estás en PuntoBiO: podés evaluar.</div>`
+  if (u.estado === 'excepcion') return `<div class="ubic ok">📍 Tenés permiso para evaluar desde cualquier lugar.${ADMIN_UBIC.includes(miEmail) && !(u.cfg && u.cfg.activo) ? ' El candado para el resto del equipo todavía no está activo: parate en PuntoBiO y fijá la ubicación.' : ''}</div>`
+  if (u.estado === 'inactivo') return ADMIN_UBIC.includes(miEmail) ? `<div class="ubic warn">📍 El candado de ubicación todavía no está activo. Parate en PuntoBiO y tocá <b>Fijar la ubicación de PuntoBiO acá</b>.</div>` : ''
+  if (u.estado === 'cargando') return `<div class="ubic">📍 Verificando la ubicación…</div>`
+  const motivo = u.estado === 'fuera' ? `Estás a unos ${u.dist >= 1000 ? (u.dist / 1000).toFixed(1).replace('.', ',') + ' km' : u.dist + ' m'} del centro.`
+    : u.estado === 'sinpermiso' ? 'No diste permiso de ubicación. En el iPad: Configuración → Safari → Ubicación → Preguntar o Permitir, y recargá.'
+    : 'No se pudo obtener la ubicación (' + esc(u.msg || 'sin señal') + ').'
+  return `<div class="ubic bad">🔒 <b>Los tests solo se pueden hacer en PuntoBiO.</b> ${motivo} Podés ver fichas, tests realizados e informes. <button class="lnk" id="btnReUbic">Volver a verificar</button></div>`
+}
+function panelUbicacionAdmin() {
+  if (!ADMIN_UBIC.includes(miEmail)) return ''
+  const c = (ubic.cfg) || {}
+  return `<details class="infobox" style="margin-top:8px"><summary style="cursor:pointer;font-weight:800">⚙️ Candado de ubicación (solo Lu y Jime)</summary>
+    <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
+      <button class="b pri" id="ubFijar">📍 Fijar la ubicación de PuntoBiO acá</button>
+      <span style="font-weight:700">Radio: ${RADIO_M} m</span>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ubActivo" ${c.activo ? 'checked' : ''}> Candado activo</label>
+    </div>
+    <label style="display:block;margin-top:8px">Además de Lu y Jime, pueden evaluar desde cualquier lugar (mails separados por coma)
+      <input type="text" id="ubExc" value="${esc((c.emails_excepcion || []).join(', '))}" style="width:100%"></label>
+    <div class="btns" style="margin-top:8px"><button class="b" id="ubGuardar">Guardar</button></div>
+    <div class="nota" id="ubNota">${c.lat != null ? `Ubicación fijada (${(+c.lat).toFixed(5)}, ${(+c.lng).toFixed(5)})${c.actualizado_por ? ' por ' + esc(c.actualizado_por.split('@')[0]) : ''}.` : 'Todavía no se fijó la ubicación.'} El GPS del iPad dentro del edificio puede tener 20–100 m de error: por eso el radio.</div>
+  </details>`
+}
+function engancharUbicacion() {
+  if ($('btnReUbic')) $('btnReUbic').onclick = async () => { ubic.estado = 'cargando'; pintarUbic(); await verificarUbicacion(true); pintarUbic() }
+  if ($('ubFijar')) $('ubFijar').onclick = async () => {
+    $('ubNota').textContent = 'Tomando la ubicación… (quedate quieta unos segundos)'
+    try { const p = await posicion()
+      const { error } = await supabase.from('test_biolab_config').update({ lat: p.lat, lng: p.lng, activo: true, radio_m: RADIO_M, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
+      if (error) throw error
+      $('ubNota').textContent = `Listo: ubicación fijada (precisión ±${Math.round(p.acc)} m) y candado activo.`
+      await verificarUbicacion(true); pintarUbic()
+    } catch (e) { $('ubNota').textContent = 'No se pudo: ' + (e.message || e) }
+  }
+  if ($('ubGuardar')) $('ubGuardar').onclick = async () => {
+    const exc = $('ubExc').value.split(',').map(x => x.trim().toLowerCase()).filter(Boolean)
+    const { error } = await supabase.from('test_biolab_config').update({ radio_m: RADIO_M, activo: $('ubActivo').checked, emails_excepcion: exc, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
+    $('ubNota').textContent = error ? 'No se pudo guardar: ' + error.message : 'Guardado.'
+    if (!error) { await verificarUbicacion(true); pintarUbic() }
+  }
+}
+function pintarUbic() {
+  const box = $('ubicBox'); if (!box) return
+  box.innerHTML = cartelUbicacion() + panelUbicacionAdmin(); engancharUbicacion()
+}
+function pantallaBloqueo() {
+  apagarCamara(); det = null
+  $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
+    <div class="panel"><h2>🔒 Test BiOLAB solo en PuntoBiO</h2><div id="ubicBox"></div>
+      <p class="sub" style="margin-top:10px">Las evaluaciones se hacen en el centro. Desde afuera podés ver la ficha del paciente, la lista de tests realizados y los informes.</p></div>`
+  $('btnVolver').onclick = renderCatalogo; pintarUbic()
+}
+
 function renderCatalogo() {
   apagarCamara(); det = null; actual = null; pose = null
   $('app').innerHTML = `
@@ -4281,6 +4377,7 @@ function renderCatalogo() {
       <div><h1>Test BiOLAB</h1><p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p></div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><a class="b" href="manual_test_biolab.pdf" target="_blank" rel="noopener" style="text-decoration:none">📘 Manual</a>
         <button class="b" id="btnHistorial">📋 Tests e informes realizados</button></div></div>
+    <div id="ubicBox"></div>
     <div class="pacbox">
       <label>¿A quién le aplicamos el test?</label>
       <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (paciente.origen !== 'PRUEBA' ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
@@ -4303,6 +4400,7 @@ function renderCatalogo() {
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
   $('btnHistorial').onclick = renderHistorial
+  pintarUbic(); verificarUbicacion().then(pintarUbic)
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m
     document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta() })
   if (paciente) { pintarRuta(); cargarHechosHoy().then(pintarRuta) }
@@ -4327,6 +4425,10 @@ function renderCatalogo() {
 }
 
 function renderTest(id, opts = {}) {
+  if (!puedeEvaluar()) {
+    if (ubic.estado === 'cargando') { verificarUbicacion().then(() => puedeEvaluar() ? renderTest(id, opts) : pantallaBloqueo()); return }
+    return pantallaBloqueo()
+  }
   actual = TESTS.find(t => t.id === id)
   if (!paciente) { renderCatalogo(); return }
   if (actual.sinCamara) { apagarCamara(); det = null; return renderROM(opts) }
@@ -4444,6 +4546,7 @@ function renderTest(id, opts = {}) {
 }
 
 window.addEventListener('pagehide', apagarCamara)
+verificarUbicacion()
 // Abrir directo con un paciente y un test (lo usa la HC de SARKMED: "Hacer / actualizar el protocolo")
 ;(() => {
   const q = new URLSearchParams(location.search)
