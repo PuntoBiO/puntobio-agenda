@@ -746,10 +746,11 @@ function chequearPosicion() {
   const vis = (i) => pose[i].v > 0.5
   const dentro = (i, m = 0.02) => pose[i].x > W * m && pose[i].x < W * (1 - m) && pose[i].y > H * m && pose[i].y < H * (1 - m)
   // de espaldas no se ve la cara: la "cabeza" se controla con hombros y orejas
-  const cabeza = tipo === 'espalda' ? [7, 8, 11, 12].every(i => pose[i].v > 0.3 && dentro(i)) : vis(0) && dentro(0)
+  // (las orejas desde atrás a veces se ven poco: alcanza con los hombros y que quede lugar arriba para la cabeza)
+  const cabeza = tipo === 'espalda' ? ([11, 12].every(i => pose[i].v > 0.5 && dentro(i)) && Math.min(pose[11].y, pose[12].y) > H * 0.1) : vis(0) && dentro(0)
   // pies: de perfil alcanza con ver bien UN pie (el otro queda tapado); de frente o de espaldas, los dos
   const pieOk = (ix, u = 0.5) => ix.every(i => pose[i].v > u && dentro(i))
-  const pieI = [27, 29, 31], pieD = [28, 30, 32]
+  const pieI = tipo === 'espalda' ? [27, 29] : [27, 29, 31], pieD = tipo === 'espalda' ? [28, 30] : [28, 30, 32]   // de espaldas los dedos quedan detrás del talón
   const pies = tipo === 'costado' ? (pieOk(pieI) || pieOk(pieD)) : ((pieOk(pieI) && pieOk(pieD)) || (pieOk(pieI, 0.35) && pieOk(pieD, 0.35)))
   const tronco = [11, 12, 23, 24].every(i => vis(i))
   const piesVis = [...pieI, ...pieD].filter(i => pose[i].v > 0.35)
@@ -1086,7 +1087,7 @@ function chequeoEncuadre(P, W, H, idx, opts = {}) {
   if (!P) { items.push({ ok: false, txt: 'Paciente en cuadro' }); return { ok: false, items, consejo: 'Que el paciente entre en la pantalla' } }
   items.push({ ok: true, txt: 'Paciente en cuadro' })
   // cuerpo entero: alcanza con que se vea completo UN lado (de perfil el otro queda tapado)
-  const ladoA = [0, 12, 24, 26, 28], ladoB = [0, 11, 23, 25, 27], sv = (l) => l.reduce((t, i) => t + ((P[i] && P[i].v) || 0), 0)
+  const ladoA = [12, 24, 26, 28], ladoB = [11, 23, 25, 27], sv = (l) => l.reduce((t, i) => t + ((P[i] && P[i].v) || 0), 0)
   const req = idx || (sv(ladoA) >= sv(ladoB) ? ladoA : ladoB)
   const vis = req.filter(i => P[i] && P[i].v > 0.5 && P[i].x > W * 0.02 && P[i].x < W * 0.98 && P[i].y > H * 0.02 && P[i].y < H * 0.98)
   const todos = vis.length === req.length
@@ -3222,10 +3223,11 @@ const DETECTORES = {
     // desde atrás: retropié (línea talón → tobillo) y pelvis respecto de los pies
     const medirPost = () => {
       const pierna = Math.max((dist(pose[24], pose[28]) + dist(pose[23], pose[27])) / 2, 1)
-      const dD = Math.sign(pose[23].x - pose[24].x) || 1
+      const [D, I] = pose[24].x >= pose[23].x ? [{ c: 24, t: 28, ta: 30 }, { c: 23, t: 27, ta: 29 }] : [{ c: 23, t: 27, ta: 29 }, { c: 24, t: 28, ta: 30 }]
+      const dD = Math.sign(pose[I.c].x - pose[D.c].x) || -1           // hacia adentro de la pierna derecha
       const retro = (ank, heel, dm) => Math.atan2((pose[ank].x - pose[heel].x) * dm, Math.max(pose[heel].y - pose[ank].y, 1)) * 180 / Math.PI
       const cad = mid(pose[23], pose[24]), tob = mid(pose[27], pose[28])
-      return { pierna, rD: retro(28, 30, dD), rI: retro(27, 29, -dD), pelvis: ((cad.x - tob.x) * -dD) / pierna, cadY: cad.y }
+      return { pierna, rD: retro(D.t, D.ta, dD), rI: retro(I.t, I.ta, -dD), pelvis: ((cad.x - tob.x) * -dD) / pierna, cadY: cad.y }
     }
     const vistaId = () => VISTAS[Math.min(d.idx, NV - 1)].id
     const medir = () => vistaId() === 'frente' ? medirFrente() : vistaId() === 'perfil' ? medirCostado() : medirPost()
