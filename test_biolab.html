@@ -209,6 +209,11 @@ button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px
   #caCartel{font-size:17px !important;padding:8px 14px !important}
   #caPreg button{font-size:19px !important;padding:14px 22px !important}
   .ubitip{font-size:12px}
+  .chk{top:44px;left:8px;gap:4px}
+  .chk span.ok{display:none}
+  .dianaBox .txt,.dianaBox .fij{display:none}
+  .consejo{top:auto;bottom:8px;transform:translateX(-50%);font-size:14px;max-width:92%}
+  .hud .pill{font-size:12px;padding:4px 10px}
 }
 /* celular acostado (apaisado): el video manda */
 @media (max-height:500px) and (orientation:landscape){
@@ -643,6 +648,9 @@ async function llenarCamaras() {
   } catch (e) {}
 }
 
+// zoom de la cámara que está prendida (para los consejos): mínimo posible y el actual
+const zoomMin = () => { try { const t = stream && stream.getVideoTracks()[0], c = t.getCapabilities ? t.getCapabilities() : {}; return c.zoom ? c.zoom.min : 1 } catch (e) { return 1 } }
+const zoomActual = () => { try { const t = stream && stream.getVideoTracks()[0], s2 = t.getSettings ? t.getSettings() : {}; return s2.zoom || 1 } catch (e) { return 1 } }
 function configurarZoom(track) {
   const box = $('zoomBox'); if (!box) return
   const cap = track.getCapabilities ? track.getCapabilities() : {}
@@ -739,9 +747,13 @@ function chequearPosicion() {
   const dentro = (i, m = 0.02) => pose[i].x > W * m && pose[i].x < W * (1 - m) && pose[i].y > H * m && pose[i].y < H * (1 - m)
   // de espaldas no se ve la cara: la "cabeza" se controla con hombros y orejas
   const cabeza = tipo === 'espalda' ? [7, 8, 11, 12].every(i => pose[i].v > 0.3 && dentro(i)) : vis(0) && dentro(0)
-  const pies = [27, 28, 29, 30, 31, 32].every(i => vis(i) && dentro(i))
+  // pies: de perfil alcanza con ver bien UN pie (el otro queda tapado); de frente o de espaldas, los dos
+  const pieOk = (ix, u = 0.5) => ix.every(i => pose[i].v > u && dentro(i))
+  const pieI = [27, 29, 31], pieD = [28, 30, 32]
+  const pies = tipo === 'costado' ? (pieOk(pieI) || pieOk(pieD)) : ((pieOk(pieI) && pieOk(pieD)) || (pieOk(pieI, 0.35) && pieOk(pieD, 0.35)))
   const tronco = [11, 12, 23, 24].every(i => vis(i))
-  const yPies = Math.max(...[27, 28, 29, 30, 31, 32].map(i => pose[i].y))
+  const piesVis = [...pieI, ...pieD].filter(i => pose[i].v > 0.35)
+  const yPies = Math.max(...(piesVis.length ? piesVis : [27, 28]).map(i => pose[i].y))
   const yCab = tipo === 'espalda' ? Math.min(pose[11].y, pose[12].y) - dist(mid(pose[11], pose[12]), mid(pose[23], pose[24])) * 0.45 : pose[0].y
   const alto = (yPies - yCab) / H
   const cad = mid(pose[23], pose[24]), hom = mid(pose[11], pose[12])
@@ -752,7 +764,7 @@ function chequearPosicion() {
 
   const items = [], consejos = []
   items.push({ ok: cabeza, txt: 'Cabeza en cuadro' }); if (!cabeza) consejos.push('Se corta la cabeza: alejá el iPad o bajalo un poco')
-  items.push({ ok: pies, txt: 'Pies en cuadro' }); if (!pies) consejos.push('No veo los pies: alejá el iPad o inclinalo hacia abajo')
+  items.push({ ok: pies, txt: 'Pies en cuadro' }); if (!pies) consejos.push(zoomMin() < 1 && zoomActual() > zoomMin() + 0.05 ? 'No veo los pies: bajá el zoom a ' + String(zoomMin()).replace('.', ',') + '× o alejá el iPad' : 'No veo los pies: alejá el iPad (2,5–3 m) o inclinalo hacia abajo')
   const distOk = cabeza && pies && alto >= aMin && alto <= aMax
   items.push({ ok: distOk, txt: 'Distancia' })
   if (cabeza && pies && alto < aMin) consejos.push('Está muy lejos: acercá el iPad')
