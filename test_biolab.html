@@ -148,6 +148,12 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .paso.ok .num{background:#dcfce7;color:#14532d}
 .paso .txt{flex:1;min-width:0}.paso .txt b{display:block;font-size:14px}.paso .txt small{display:block;color:var(--dim);font-size:12px;line-height:1.35}
 .paso .b{padding:8px 12px;font-size:13.5px;white-space:nowrap}
+.tcard.apt-cuidado{border-color:#fcd34d;background:#fffbeb}
+.tcard.apt-no{opacity:.6}
+.tcard .aviso,.paso .aviso{display:block;margin-top:6px;font-size:12px;font-weight:700;color:#92400e}
+.paso.apt-cuidado{border-color:#fcd34d;background:#fffbeb}.paso.apt-no{opacity:.6}
+.nosug{margin-top:18px}.nosug summary{cursor:pointer;font-weight:800;color:var(--dim);margin-bottom:10px}
+.perfil .chips button{display:flex;flex-direction:column;align-items:flex-start;line-height:1.2}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -1774,6 +1780,7 @@ function renderPlanilla(spec, def) {
       <div style="margin:4px 0 6px">${chipPaciente()}</div>
       <div class="ultima" id="ultima"></div>
       ${spec.necesita ? `<div class="necbox">🧰 <b>Necesitás:</b> ${spec.necesita} · <b>${spec.modoMed}</b></div>` : ''}
+      ${aptitud(spec.id) !== 'ok' ? `<div class="necbox" style="background:#fef3c7;border-color:#fcd34d">${ETQ_APT[aptitud(spec.id)]}</div>` : ''}
       <div class="infobox">${def.info}</div>
       ${def.fotos ? `<div class="btns" style="margin:4px 0 10px">${def.fotos.map(f => `<button class="b pri" data-fgrupo="${f.cfg}">${f.label}</button>`).join('')}</div><div class="fotos" id="plFotos"></div>` : ''}
       <div style="overflow-x:auto"><table class="rom pl"><tr><th></th><th>${(def.ladosNombres || ['D', 'I'])[0]}</th><th>${(def.ladosNombres || ['D', 'I'])[1]}</th></tr>
@@ -1794,7 +1801,7 @@ function renderPlanilla(spec, def) {
     const det = { campos: { ...vals }, hallazgos_txt: r.hallazgos || [], observaciones: obs || null }
     if (r.resultado) det.resultado = r.resultado
     if (r.musculos) det.musculos_sobreactivos = r.musculos.sob
-    const sig = (r.siguientes || []).map(([id, por]) => ({ id, por, listo: !!TESTS.find(x => x.id === id) || !!DESTINO[id] }))
+    const sig = (r.siguientes || []).filter(([id]) => aptitud(id) !== 'no').map(([id, por]) => ({ id, por, listo: !!TESTS.find(x => x.id === id) || !!DESTINO[id] }))
     const txt = `${spec.nombre}: ${r.hallazgos && r.hallazgos.length ? r.hallazgos.join('; ') : 'sin hallazgos'}${r.lectura ? ' → ' + r.lectura[1] : ''}${obs ? '. Obs: ' + obs : ''}`
     const fotosGuardar = window._fotosPl ? Object.values(window._fotosPl).map(f => ({ vista: f.vista, dataUrl: f.dataUrl })) : []
     mostrarResultado(`
@@ -2464,7 +2471,7 @@ const DETECTORES = {
         <textarea class="obs" id="ohsObs" placeholder="Observaciones">${esc(d.obs)}</textarea>
         ${comps.length ? `<div class="musc"><div class="sob"><b>MÚSCULOS SOBREACTIVOS</b>${lista(sob)}</div><div class="poc"><b>MÚSCULOS POCO ACTIVOS</b>${lista(poc)}</div></div>` : ''}
         <div class="sigue"><h4>🌳 Próximos tests sugeridos</h4>
-          ${sig.map(t => { const listo = !!TESTS.find(x => x.id === t.id) || !!DESTINO[t.id]
+          ${sig.filter(t => aptitud(t.id) !== 'no').map(t => { const listo = !!TESTS.find(x => x.id === t.id) || !!DESTINO[t.id]
             return `<div class="it"><div>${esc(CATALOGO_MAPA[t.id] || t.id)}<small>porque: ${esc(t.motivos.join(' · '))}</small></div>
               <button data-ir="${t.id}" ${listo ? '' : 'disabled'}>${listo ? 'Hacer ahora →' : 'Próximamente'}</button></div>` }).join('')}
           <div class="nota">Solo aparecen los que hacen falta según lo que salió. Podés hacer cualquier otro desde "Todos los tests".</div></div>`
@@ -3155,6 +3162,7 @@ async function guardarResultado() {
     texto: textoCopiar, manos_libres: !!manosLibres
   }
   // fotos (si el test las sacó): van al bucket privado tests-biolab y en la fila queda la ruta
+  const pf = perfilActual(); if (pf && pf.actividad) fila.detalle = { ...fila.detalle, perfil: { edad: pf.edad, actividad: pf.actividad, ayuda: pf.ayuda } }
   if (datosRes.fotos && datosRes.fotos.length) {
     b.textContent = 'Subiendo fotos…'
     const carpeta = `${paciente.dni || paciente.origen + '-' + paciente.id}/${actual.id}/${Date.now()}`
@@ -3318,6 +3326,35 @@ const RUTAS = {
     { id: 'unipodal', por: 'equilibrio estático en una pierna' }, { id: 'ybalance', por: 'equilibrio dinámico (inestabilidad de tobillo)' },
     { id: 'sidehop', por: 'vuelta al deporte' }, { id: 'hop', por: 'vuelta al deporte' } ] },
 }
+// ============================================================
+// PERFIL DEL PACIENTE: edad + actividad física + uso de ayuda para caminar.
+// Cada test tiene un nivel de exigencia: 1 = lo puede hacer cualquiera · 2 = pide algo de condición física ·
+// 3 = exigente (deportistas). Según el perfil, cada test queda 'ok', 'cuidado' (solo si lo ves capaz, con asistencia)
+// o 'no' (no se sugiere). Nunca se bloquea: el profesional decide y puede abrirlo igual.
+// ============================================================
+const NIVEL = {
+  ohs: 2, rockback: 2, sfma: 2, puente: 2, estocada: 2, fsd: 2, squatmono: 2, ybalance: 2, pushup: 2, tronco: 2,
+  pullup: 3, salto: 3, hop: 3, triplehop: 3, crossover: 3, sidehop: 3, sprint10: 3, ckcuest: 3,
+}
+const perfiles = {}       // por paciente, mientras dura la sesión
+const perfilKey = () => paciente ? (paciente.dni || paciente.origen + '-' + paciente.id) : ''
+function perfilActual() {
+  const k = perfilKey(); if (!k) return null
+  if (!perfiles[k]) perfiles[k] = { edad: paciente.edad ?? null, actividad: null, ayuda: false }
+  return perfiles[k]
+}
+function aptitud(id) {
+  const pf = perfilActual(), n = NIVEL[id] || 1
+  if (!pf || !pf.actividad) return 'ok'
+  const mayor = pf.edad != null && pf.edad >= 65
+  if (pf.ayuda) return n === 1 ? 'ok' : 'no'
+  if (pf.actividad === 'sedentario') return n === 1 ? 'ok' : (n === 2 && !mayor ? 'cuidado' : 'no')
+  if (pf.actividad === 'activo') return n === 1 ? 'ok' : n === 2 ? (mayor ? 'cuidado' : 'ok') : (mayor ? 'no' : 'cuidado')
+  return n === 3 && mayor ? 'cuidado' : 'ok'   // deportista
+}
+const ETQ_APT = { cuidado: '⚠️ Solo si lo ves capaz, con asistencia al lado', no: '⛔ No se sugiere para este perfil' }
+let verOcultos = false
+
 let motivo = null
 let hechosHoy = { tests: new Set(), secs: new Set() }
 async function cargarHechosHoy() {
@@ -3335,16 +3372,58 @@ function pintarRuta() {
   if (!motivo) { box.innerHTML = ''; return }
   const R = RUTAS[motivo]
   const hecho = (p) => p.sec ? hechosHoy.secs.has(p.sec) : hechosHoy.tests.has(p.id)
-  const nHechos = R.pasos.filter(hecho).length
-  box.innerHTML = `<div class="ruta"><h3>${R.n} <small>${nHechos} de ${R.pasos.length} hechos hoy</small></h3>
+  const visibles = R.pasos.map((p, i) => ({ p, i, apt: aptitud(p.id) })).filter(x => x.apt !== 'no' || verOcultos)
+  const ocultos = R.pasos.filter(p => aptitud(p.id) === 'no').length
+  const nHechos = visibles.filter(x => hecho(x.p)).length
+  const pf = perfilActual()
+  const sugerir55 = pf && pf.edad != null && pf.edad >= 60 && motivo !== 'mayor'
+  box.innerHTML = `<div class="ruta"><h3>${R.n} <small>${nHechos} de ${visibles.length} hechos hoy</small></h3>
     <div class="nota" style="margin:0 0 8px">Antes de la ruta: anamnesis y descarte de banderas rojas. Estos tests evalúan calidad de movimiento, no diagnostican.</div>
-    ${R.pasos.map((p, i) => { const t = TESTS.find(x => x.id === p.id), ok = hecho(p)
+    ${sugerir55 ? `<div class="nota c-warn" style="margin:0 0 8px">💡 Por la edad (${pf.edad} años), sumá también la ruta <b>Ingreso +55</b>.</div>` : ''}
+    ${visibles.map(({ p, i, apt }, n) => { const t = TESTS.find(x => x.id === p.id), ok = hecho(p)
       const nombre = p.sec ? `${t.nombre} · ${ROM.find(g => g.sec === p.sec).n}` : t.nombre
-      return `<div class="paso ${ok ? 'ok' : ''}"><span class="num">${ok ? '✓' : i + 1}</span>
-        <div class="txt"><b>${t.ico} ${esc(nombre)}</b><small>${esc(p.por)}${t.necesita ? ' · 🧰 ' + esc(t.necesita) : ''}</small></div>
+      return `<div class="paso ${ok ? 'ok' : ''} ${apt !== 'ok' ? 'apt-' + apt : ''}"><span class="num">${ok ? '✓' : n + 1}</span>
+        <div class="txt"><b>${t.ico} ${esc(nombre)}</b><small>${esc(p.por)}${t.necesita ? ' · 🧰 ' + esc(t.necesita) : ''}</small>${apt !== 'ok' ? `<small class="aviso">${ETQ_APT[apt]}</small>` : ''}</div>
         <button class="b ${ok ? '' : 'pri'}" data-paso="${i}">${ok ? 'Repetir' : 'Hacer →'}</button></div>` }).join('')}
+    ${ocultos ? `<button class="lnk" id="btnOcultos">${verOcultos ? 'Esconder' : 'Mostrar'} ${ocultos} test${ocultos === 1 ? '' : 's'} que no se sugieren para este perfil</button>` : ''}
     <div class="nota">La sentadilla overhead y el rock back te van a sugerir además lo que haga falta según lo que salga.</div></div>`
   box.querySelectorAll('[data-paso]').forEach(b => b.onclick = () => { const p = R.pasos[+b.dataset.paso]; renderTest(p.id, p.sec ? { sec: p.sec } : {}) })
+  if ($('btnOcultos')) $('btnOcultos').onclick = () => { verOcultos = !verOcultos; pintarRuta(); pintarGrid() }
+}
+
+function tarjeta(t) {
+  const apt = paciente ? aptitud(t.id) : 'ok'
+  return `<button class="tcard ${apt !== 'ok' ? 'apt-' + apt : ''}" data-id="${t.id}">
+    <div class="ico">${t.ico}</div><h3>${t.nombre}</h3><p>${t.desc}</p><div class="pos">📱 ${t.pos}</div>${t.modoMed ? `<div class="medi">${t.modoMed}</div>` : ''}${t.necesita ? `<div class="nec">🧰 ${t.necesita}</div>` : ''}${apt !== 'ok' ? `<div class="aviso">${ETQ_APT[apt]}</div>` : ''}
+  </button>`
+}
+function pintarGrid() {
+  const w = $('gridWrap'); if (!w) return
+  const pf = paciente ? perfilActual() : null
+  if (!paciente || !pf || !pf.actividad) {
+    w.innerHTML = `<div class="grid ${paciente ? '' : 'bloq'}">${TESTS.map(tarjeta).join('')}</div>`
+  } else {
+    const grupo = (a) => TESTS.filter(t => aptitud(t.id) === a)
+    const ok = grupo('ok'), cu = grupo('cuidado'), no = grupo('no')
+    w.innerHTML = `<div class="grid">${ok.map(tarjeta).join('')}</div>
+      ${cu.length ? `<h2 style="font-size:16px;margin:18px 0 10px">⚠️ Con cuidado <small style="font-weight:600;color:var(--dim)">solo si lo ves capaz, con asistencia al lado</small></h2><div class="grid">${cu.map(tarjeta).join('')}</div>` : ''}
+      ${no.length ? `<details class="nosug" ${verOcultos ? 'open' : ''}><summary>⛔ ${no.length} tests que no se sugieren para este perfil (tocá para verlos igual)</summary><div class="grid">${no.map(tarjeta).join('')}</div></details>` : ''}`
+  }
+  w.querySelectorAll('.tcard').forEach(b => b.onclick = () => { if (paciente) renderTest(b.dataset.id) })
+}
+function pintarPerfil() {
+  const box = $('perfilBox'); if (!box || !paciente) return
+  const pf = perfilActual()
+  const act = [['sedentario', '🛋️ Sedentario', 'no hace actividad física'], ['activo', '🚶 Activo', 'camina, gimnasio, clases'], ['deportista', '🏃 Deportista', 'entrena o compite']]
+  box.innerHTML = `<div class="row" style="margin:0 0 6px">
+      <label>Edad <input id="pfEdad" type="number" min="1" max="110" value="${pf.edad ?? ''}" style="width:70px"> años</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pfAyuda" ${pf.ayuda ? 'checked' : ''}> Usa bastón o andador / riesgo alto de caídas</label></div>
+    <div class="chips">${act.map(([k, n, d]) => `<button data-act="${k}" class="${pf.actividad === k ? 'on' : ''}" title="${d}">${n} <small style="font-weight:600;opacity:.75">${d}</small></button>`).join('')}</div>
+    ${!pf.actividad ? '<div class="nota">Elegí la actividad física y la lista se ordena sola: arriba lo que puede hacer, y lo exigente aparte.</div>' : ''}`
+  const refrescar = () => { pintarPerfil(); pintarRuta(); pintarGrid() }
+  box.querySelectorAll('[data-act]').forEach(b => b.onclick = () => { pf.actividad = pf.actividad === b.dataset.act ? null : b.dataset.act; refrescar() })
+  $('pfEdad').onchange = (e) => { pf.edad = e.target.value === '' ? null : +e.target.value; refrescar() }
+  $('pfAyuda').onchange = (e) => { pf.ayuda = e.target.checked; refrescar() }
 }
 
 function renderCatalogo() {
@@ -3360,16 +3439,16 @@ function renderCatalogo() {
         <div class="lista" id="listaPac"></div>
         <button class="lnk" id="btnPrueba">Hacer una prueba sin paciente (no se guarda)</button>
       </div>
+      ${paciente ? `<label style="margin-top:14px">Perfil del paciente <small style="font-weight:600;color:var(--dim)">(para sugerir solo los tests que puede hacer)</small></label>
+        <div class="perfil" id="perfilBox"></div>` : ''}
       ${paciente ? `<label style="margin-top:14px">¿Por qué consulta?</label>
         <div class="chips" id="motivos">${Object.entries(RUTAS).map(([k, r]) => `<button data-m="${k}" class="${motivo === k ? 'on' : ''}">${r.n}</button>`).join('')}</div>
         <div id="rutaBox"></div>` : ''}
     </div>
     ${paciente ? '<h2 style="font-size:17px;margin:4px 0 10px">Todos los tests</h2>' : ''}
-    <div class="grid ${paciente ? '' : 'bloq'}" id="gridTests">${TESTS.map(t => `
-      <button class="tcard" data-id="${t.id}">
-        <div class="ico">${t.ico}</div><h3>${t.nombre}</h3><p>${t.desc}</p><div class="pos">📱 ${t.pos}</div>${t.modoMed ? `<div class="medi">${t.modoMed}</div>` : ''}${t.necesita ? `<div class="nec">🧰 ${t.necesita}</div>` : ''}
-      </button>`).join('')}</div>`
-  document.querySelectorAll('.tcard').forEach(b => b.onclick = () => { if (paciente) renderTest(b.dataset.id) })
+    <div id="gridWrap"></div>`
+  pintarGrid()
+  pintarPerfil()
   if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m
@@ -3420,6 +3499,7 @@ function renderTest(id, opts = {}) {
         <h2>${actual.ico} ${actual.nombre}</h2>
         <div style="margin:4px 0 10px">${chipPaciente()}</div>
         ${actual.necesita ? `<div class="necbox">🧰 <b>Necesitás:</b> ${actual.necesita}</div>` : ''}
+        ${aptitud(actual.id) !== 'ok' ? `<div class="necbox" style="background:#fef3c7;border-color:#fcd34d">${ETQ_APT[aptitud(actual.id)]}</div>` : ''}
         <div class="ultima" id="ultima"></div>
         <div class="info">${actual.info}</div>
         <div class="row">
