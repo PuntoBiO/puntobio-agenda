@@ -331,6 +331,10 @@
     <div class="card" id="cardProtocolo" style="display:none">
       <p class="card-title">4 · Protocolo a realizar (según población)</p>
       <div class="hint" style="margin-top:0">Guía de los tests según la población. <b>No hace falta tildar nada:</b> al traer la evaluación de VALD (paso 5) el sistema marca solo lo que se hizo. Si un test <b>no se pudo hacer</b>, elegí el motivo. Los tests manuales (SARC-F, TUG, etc.) se completan acá. El protocolo se guarda solo al crear el informe.</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <button type="button" onclick="traerTestBiolab()" style="padding:7px 12px;border:1px solid #1e9fe0;background:#fff;color:#1e9fe0;border-radius:8px;font-weight:700;cursor:pointer">⬇ Traer de Test BiOLAB</button>
+        <span id="tbEstado" class="hint" style="margin:0">Completa TUG, Gait Speed, 2-Minute Step y SPPB con lo medido en Test BiOLAB (últimos 120 días). Solo llena lo vacío.</span>
+      </div>
       <div id="protocoloPanel" style="margin:10px 0;"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn ghost" id="btnGuardarBorrador" onclick="guardarBorrador()">💾 Guardar borrador</button>
@@ -431,34 +435,100 @@ async function detectarTipoEval() {
     }
   } catch (_) { /* sin tabla todavía: queda en 1ª evaluación */ }
 }
-// ---- Gráfico de líneas en SVG puro (sin librerías) ----
-function svgLineChart(points) {
+// ---- Gráfico de evolución en SVG puro (sin librerías), mismo estilo que Test BiOLAB ----
+// Curva suave celeste con área, puntos blancos (o del color de su semáforo), último punto destacado
+// y chip con el % de cambio entre la primera y la última toma (verde si mejoró, rojo si empeoró).
+// opts.menorMejor = true para asimetrías y tiempos (menos es mejor).
+const COLOR_I = '#14B8C4', COLOR_D = '#F0832A';   // izquierdo turquesa · derecho naranja (igual en todo el Ecosistema)
+let _idCurvaV = 0;
+// Lo último de cada test de Test BiOLAB del paciente (últimos 120 días), por DNI o por su ficha.
+async function tomasTestBiolab() {
+  if (!pacienteSel) return {};
+  const dni = String(pacienteSel.dni || '').replace(/\D/g, '');
+  const origen = pacienteSel.origen === 'sarkmed' ? 'SARKMED' : 'PUNTOBIO';
+  const filtro = [dni ? 'paciente_dni.eq.' + dni : null, 'and(origen.eq.' + origen + ',paciente_id.eq.' + pacienteSel.id + ')'].filter(Boolean).join(',');
+  const desde = new Date(Date.now() - 120 * 86400000).toISOString();
+  const { data, error } = await sb.from('tests_biolab').select('test, valor, unidad, detalle, texto, creado_en').or(filtro).gte('creado_en', desde).order('creado_en', { ascending: false });
+  if (error) throw error;
+  const ult = {}; (data || []).forEach(r => { if (!ult[r.test]) ult[r.test] = r; });
+  return ult;
+}
+async function traerTestBiolab() {
+  const est = document.getElementById('tbEstado');
+  try {
+    est.textContent = 'Buscando en Test BiOLAB…';
+    const u = await tomasTestBiolab();
+    const traidos = [];
+    // marcha: VALD calcula sobre 4 m; si en Test BiOLAB se midió otra distancia, se convierte por la velocidad
+    const segMarcha = u.marcha4 ? (u.marcha4.detalle && u.marcha4.detalle.velocidad_ms ? Math.round(4 / u.marcha4.detalle.velocidad_ms * 100) / 100 : Number(u.marcha4.valor)) : null;
+    (protocoloItems || []).forEach(it => {
+      if (!it.manual || !it.calc) return;
+      const d = calcData[it.id] || {};
+      if (it.calc === 'tug' && u.tug && d.seg == null) { setTug(it.id, String(u.tug.valor)); traidos.push('TUG'); }
+      if (it.calc === 'gait' && segMarcha != null && d.seg == null) { setGait(it.id, String(segMarcha)); traidos.push('Gait Speed'); }
+      if (it.calc === '2step' && u.step2 && d.pasos == null) { set2step(it.id, String(u.step2.valor)); traidos.push('2-Minute Step'); }
+      if (it.calc === 'sppb') {
+        const eq = u.equilibrio && u.equilibrio.detalle;
+        if (eq && d.pj == null) { setSppbVal(it.id, 'pj', String(eq.pies_juntos_s)); setSppbVal(it.id, 'st', String(eq.semitandem_s)); setSppbVal(it.id, 't', String(eq.tandem_s)); traidos.push('SPPB equilibrio'); }
+        if (segMarcha != null && (calcData[it.id] || {}).gait == null) { setSppbVal(it.id, 'gait', String(segMarcha)); traidos.push('SPPB marcha'); }
+        if (u.silla5 && u.silla5.valor != null && (calcData[it.id] || {}).chair == null) { setSppbVal(it.id, 'chair', String(u.silla5.valor)); traidos.push('SPPB silla'); }
+      }
+    });
+    renderChecklist();
+    est.textContent = traidos.length ? ('Traído de Test BiOLAB: ' + [...new Set(traidos)].join(', ') + '.') : 'No había nada nuevo para traer (o esos campos ya tenían valor).';
+  } catch (e) { est.textContent = 'No se pudo leer Test BiOLAB: ' + (e.message || e); }
+}
+
+function svgLineChart(points, opts) {
+  opts = opts || {};
   const pts = (points || []).filter(p => p && p.value != null && !isNaN(Number(p.value)));
   if (pts.length < 2) return '';
-  const fmt = v => (Math.round(Number(v) * 100) / 100);
-  const W = 340, H = 150, padL = 44, padR = 14, padT = 16, padB = 28;
+  const id = 'vc' + (++_idCurvaV);
+  const fmt = v => String(Math.round(Number(v) * 100) / 100).replace('.', ',');
+  const W = 360, H = 176, padL = 40, padR = 16, padT = 40, padB = 28;
   const ys = pts.map(p => Number(p.value));
   let min = Math.min(...ys), max = Math.max(...ys);
   if (min === max) { min -= 1; max += 1; }
-  const rango = max - min; min -= rango * 0.15; max += rango * 0.15;
+  const rango = max - min; min -= rango * 0.18; max += rango * 0.18;
   const plotW = W - padL - padR, plotH = H - padT - padB;
   const X = i => padL + (i / (pts.length - 1)) * plotW;
   const Y = v => padT + plotH - ((Number(v) - min) / (max - min)) * plotH;
-  let path = '';
-  pts.forEach((p, i) => { path += (path ? ' L' : 'M') + X(i).toFixed(1) + ' ' + Y(p.value).toFixed(1); });
+  const P = pts.map((p, i) => [X(i), Y(p.value)]);
+  let path = 'M' + P[0][0].toFixed(1) + ',' + P[0][1].toFixed(1);
+  for (let i = 0; i < P.length - 1; i++) {
+    const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || p2, k = 0.18;
+    path += ' C' + (p1[0] + (p2[0] - p0[0]) * k).toFixed(1) + ',' + (p1[1] + (p2[1] - p0[1]) * k).toFixed(1) + ' '
+      + (p2[0] - (p3[0] - p1[0]) * k).toFixed(1) + ',' + (p2[1] - (p3[1] - p1[1]) * k).toFixed(1) + ' ' + p2[0].toFixed(1) + ',' + p2[1].toFixed(1);
+  }
+  const area = path + ' L' + P[P.length - 1][0].toFixed(1) + ',' + (padT + plotH) + ' L' + P[0][0].toFixed(1) + ',' + (padT + plotH) + ' Z';
   let dots = '', vlab = '', xlab = '';
   pts.forEach((p, i) => {
-    const col = p.color || '#1e9fe0';
-    dots += `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.value).toFixed(1)}" r="4" fill="${col}"/>`;
-    vlab += `<text x="${X(i).toFixed(1)}" y="${(Y(p.value) - 8).toFixed(1)}" font-size="10" text-anchor="middle" fill="#0f172a">${fmt(p.value)}</text>`;
-    xlab += `<text x="${X(i).toFixed(1)}" y="${H - 9}" font-size="9" text-anchor="middle" fill="#64748b">${escapeHtml(p.label || '')}</text>`;
+    const ult = i === pts.length - 1, col = p.color || '#4FA6E3';
+    dots += ult ? `<circle cx="${P[i][0].toFixed(1)}" cy="${P[i][1].toFixed(1)}" r="6" fill="${p.color || COLOR_D}" stroke="#fff" stroke-width="2.4"/>`
+      : `<circle cx="${P[i][0].toFixed(1)}" cy="${P[i][1].toFixed(1)}" r="4.6" fill="#fff" stroke="${col}" stroke-width="2.5"/>`;
+    vlab += `<text x="${P[i][0].toFixed(1)}" y="${(P[i][1] - 10).toFixed(1)}" font-size="10.5" font-weight="800" text-anchor="${i === 0 ? 'start' : ult ? 'end' : 'middle'}" fill="#0B2540">${fmt(p.value)}</text>`;
+    xlab += `<text x="${P[i][0].toFixed(1)}" y="${H - 9}" font-size="10" font-weight="700" text-anchor="${i === 0 ? 'start' : ult ? 'end' : 'middle'}" fill="${ult ? '#0B2540' : '#7B8CA0'}">${escapeHtml(p.label || '')}</text>`;
   });
-  const ejes =
-    `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#e2e8f0"/>` +
-    `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#e2e8f0"/>` +
-    `<text x="6" y="${padT + 8}" font-size="9" fill="#94a3b8">${fmt(max)}</text>` +
-    `<text x="6" y="${padT + plotH}" font-size="9" fill="#94a3b8">${fmt(min)}</text>`;
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;height:auto;">${ejes}<path d="${path}" fill="none" stroke="#1e9fe0" stroke-width="2"/>${dots}${vlab}${xlab}</svg>`;
+  const a0 = ys[0], a1 = ys[ys.length - 1], igual = Math.abs(a1 - a0) < 1e-9;
+  const mejoro = opts.menorMejor ? a1 < a0 : a1 > a0;
+  const pct = Math.abs(a0) > 1e-9 ? (a1 - a0) / Math.abs(a0) * 100 : null;
+  const chipTxt = pct == null ? ((a1 > a0 ? '+' : '') + fmt(a1 - a0)) : ((pct > 0 ? '+' : '') + Math.round(pct) + '%');
+  const chip = `<rect x="${W - padR - 70}" y="6" width="70" height="24" rx="12" fill="${igual ? '#94A3B8' : mejoro ? '#22A06B' : '#DC2626'}"/><text x="${W - padR - 35}" y="22.5" text-anchor="middle" font-size="12" font-weight="800" fill="#fff">${chipTxt}</text>`;
+  const grid = [0.25, 0.5, 0.75].map(k => min + (max - min) * k).map(v => `<line x1="${padL}" x2="${W - padR}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="#E3EDF6" stroke-dasharray="3 4"/><text x="${padL - 6}" y="${(Y(v) + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="#9AABBD">${fmt(v)}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;height:auto;">
+    <defs><linearGradient id="${id}a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4FA6E3" stop-opacity=".28"/><stop offset="1" stop-color="#4FA6E3" stop-opacity="0"/></linearGradient>
+    <linearGradient id="${id}l" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4FA6E3"/><stop offset="1" stop-color="#2F78BE"/></linearGradient></defs>
+    <line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#C9DDED"/>${grid}
+    <path d="${area}" fill="url(#${id}a)"/><path d="${path}" fill="none" stroke="url(#${id}l)" stroke-width="3" stroke-linecap="round"/>${dots}${vlab}${xlab}${chip}</svg>`;
+}
+
+// Izquierdo en turquesa y derecho en naranja también en los textos de los hallazgos (L / R, izquierdo / derecho).
+function colorLados(html) {
+  return String(html)
+    .replace(/\bL (\d[\d.,]*|—)/g, '<b style="color:' + COLOR_I + '">L $1</b>')
+    .replace(/\bR (\d[\d.,]*|—)/g, '<b style="color:' + COLOR_D + '">R $1</b>')
+    .replace(/\b(IZQUIERD[OA]|[Ii]zquierd[oa])\b/g, '<b style="color:' + COLOR_I + '">$1</b>')
+    .replace(/\b(DERECH[OA]|[Dd]erech[oa])\b/g, '<b style="color:' + COLOR_D + '">$1</b>');
 }
 
 async function verEvolucion() {
@@ -507,9 +577,9 @@ async function verEvolucion() {
     `<div style="border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:10px;">
        <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:2px;">${escapeHtml(titulo)} <span style="font-weight:400;color:#64748b;">${escapeHtml(sub)}</span></div>${svg}</div>`;
   const cardsCalc = Object.keys(calcMap).filter(k => calcMap[k].pts.length >= 2)
-    .map(k => card(k, '(' + calcMap[k].unidad + ')', svgLineChart(calcMap[k].pts))).join('');
+    .map(k => card(k, '(' + calcMap[k].unidad + ')', svgLineChart(calcMap[k].pts, { menorMejor: calcMap[k].unidad === 's' }))).join('');
   const cardsAsim = Object.keys(asimMap).filter(k => asimMap[k].pts.length >= 2)
-    .map(k => card(k, '(% asimetría · menor = mejor)', svgLineChart(asimMap[k].pts))).join('');
+    .map(k => card(k, '(% asimetría · menor = mejor)', svgLineChart(asimMap[k].pts, { menorMejor: true }))).join('');
 
   const cuerpo =
     `<div style="font-size:12px;color:#64748b;margin-bottom:10px;">${snaps.length} evaluaciones · ${fechas.join(' → ')}</div>` +
@@ -2236,7 +2306,7 @@ function renderEvaluacion(c, datos) {
     const f = fichaPara(x.nom);
     const iBtn = f ? `<button class="vr-i" onclick="this.closest('.vr-row').classList.toggle('vr-open')" title="¿Qué es?">ⓘ</button>` : '';
     const ficha = f ? `<div class="vr-ficha"><b>${escapeHtml(f.titulo || x.nom)}</b><br><span class="fk">Qué mide:</span> ${escapeHtml(f.que_mide||'')}<br><span class="fk">Normal:</span> ${escapeHtml(f.normal||'')}<br><span class="fk">Qué sería un déficit:</span> ${escapeHtml(f.deficit||'')}<br><span class="fk">Por qué importa:</span> ${escapeHtml(f.por_que_importa||'')}<br><span class="fk">Fuente:</span> ${escapeHtml(f.fuente||'')}</div>` : '';
-    return `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${escapeHtml(x.det)}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span>${iBtn}<button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button>${ficha}</div>`;
+    return `<div class="vr-row${x.excluido ? ' vr-ex' : ''}"><span class="em">${x.em}</span><span class="nom">${escapeHtml(x.nom)}<div class="det">${colorLados(escapeHtml(x.det))}</div></span><span class="vr-fuente">${escapeHtml(x.fuente)}</span>${iBtn}<button class="vr-x" onclick="excluirItem('${sec}',${i})" title="${x.excluido ? 'Volver a incluir' : 'Excluir (mal tomado)'}">${x.excluido ? '↩︎ incluir' : '✕'}</button>${ficha}</div>`;
   };
   // Mantiene el índice original (para que la ✕ excluya el correcto), filtra por predicado.
   const fmtRows = (arr, sec, pred) => (arr || [])
@@ -2367,6 +2437,14 @@ async function generar() {
         .filter(o => !/^\s*INFORME BIOMEC[ÁA]NICO FUNCIONAL/i.test(o.texto || ''))
         .map(o => ({ fecha: (o.creado_en || '').slice(0, 10), autor: o.autor_nombre || '', texto: (o.texto || '').trim() }));
     } catch (_) { /* sin acceso: sigue sin observaciones */ }
+    // Evaluación funcional de Test BiOLAB (cámara): la última toma de cada test de los últimos 120 días entra como
+    // observación para que la IA la tome en cuenta e integre con los datos de VALD.
+    try {
+      const u = await tomasTestBiolab();
+      const lineas = Object.values(u).filter(r => r.texto).map(r => r.texto + ' (' + new Date(r.creado_en).toLocaleDateString('es-AR') + ')');
+      if (lineas.length) observaciones.push({ fecha: new Date().toISOString().slice(0, 10), autor: 'Test BiOLAB (evaluación funcional con cámara)',
+        texto: 'EVALUACIÓN FUNCIONAL MEDIDA EN BiOLAB — tomarla muy en cuenta e integrarla con los datos de VALD: ' + lineas.join(' · ') });
+    } catch (_) { /* sin Test BiOLAB: sigue igual */ }
     // Documentos del paciente: SOLO los que se tildaron en "PDF de la HC que lee la IA".
     // Cada uno viaja con su tipo (MOPLEX = pisada / ESTUDIO = estudio médico) para que la IA sepa cómo usarlo.
     let documentos = [];
