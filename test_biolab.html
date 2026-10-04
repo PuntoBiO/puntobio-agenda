@@ -155,6 +155,7 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .paso.apt-cuidado{border-color:#fcd34d;background:#fffbeb}.paso.apt-no{opacity:.6}
 .nosug{margin-top:18px}.nosug summary{cursor:pointer;font-weight:800;color:var(--dim);margin-bottom:10px}
 .perfil .chips button{display:flex;flex-direction:column;align-items:flex-start;line-height:1.2}
+.tag{display:inline-block;font-size:11px;font-weight:800;padding:2px 7px;border-radius:6px;background:#e0f2fe;color:var(--turq-d)}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -3959,6 +3960,97 @@ function renderPelvico() {
   setTimeout(() => cargarUltima('pelvico'), 0)
 }
 
+// ============================================================
+// 📋 TESTS E INFORMES REALIZADOS — lista general (sin elegir paciente)
+// Tests: agrupados por día y paciente, con acceso directo a la ficha y al informe.
+// Informes: los generados (PDF / Mi Espacio / link), con el estado del link.
+// ============================================================
+async function renderHistorial() {
+  apagarCamara(); det = null; actual = null
+  const hoy = new Date(), hace30 = new Date(Date.now() - 30 * 86400000)
+  const iso = (d) => d.toISOString().slice(0, 10)
+  const f = { desde: iso(hace30), hasta: iso(hoy), test: '', q: '', origen: '', solapa: 'tests' }
+  $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
+    <div class="panel"><h2>📋 Tests e informes realizados</h2>
+      <div class="chips" id="hSol"><button data-s="tests" class="on">Tests realizados</button><button data-s="informes">Informes generados</button></div>
+      <div class="row" style="margin:8px 0;gap:10px;flex-wrap:wrap">
+        <label>Desde <input type="date" id="hDesde" value="${f.desde}"></label>
+        <label>Hasta <input type="date" id="hHasta" value="${f.hasta}"></label>
+        <label id="hTestLbl">Test <select id="hTest"><option value="">Todos</option>${TESTS.map(t => `<option value="${t.id}">${esc(t.nombre)}</option>`).join('')}</select></label>
+        <label>Origen <select id="hOrigen"><option value="">Todos</option><option>PUNTOBIO</option><option>SARKMED</option></select></label>
+        <label style="flex:1;min-width:200px">Paciente <input type="search" id="hQ" placeholder="Nombre o DNI" style="width:100%"></label>
+      </div>
+      <div class="estado" id="estado">Cargando…</div>
+      <div id="hLista"></div></div>`
+  $('btnVolver').onclick = renderCatalogo
+  const abrirPac = (r, destino) => { paciente = { origen: r.origen, id: String(r.paciente_id), nombre: r.paciente_nombre || '', dni: r.paciente_dni || null, edad: null, padrones: [r.origen] }
+    destino === 'informe' ? renderInforme() : renderFicha() }
+  const fechaTxt = (x) => new Date(x).toLocaleDateString('es-AR')
+  const coincide = (r) => !f.q || (r.paciente_nombre || '').toLowerCase().includes(f.q.toLowerCase()) || (r.paciente_dni || '').includes(f.q.replace(/\D/g, '') || '§')
+  async function cargar() {
+    setEstado('Cargando…'); $('hLista').innerHTML = ''
+    const hasta = new Date(f.hasta + 'T23:59:59').toISOString(), desde = new Date(f.desde + 'T00:00:00').toISOString()
+    if (f.solapa === 'tests') {
+      let q = supabase.from('tests_biolab').select('id, origen, paciente_id, paciente_nombre, paciente_dni, test, valor, unidad, detalle, texto, creado_en, creado_por_email')
+        .gte('creado_en', desde).lte('creado_en', hasta).order('creado_en', { ascending: false }).limit(1000)
+      if (f.test) q = q.eq('test', f.test)
+      if (f.origen) q = q.eq('origen', f.origen)
+      const { data, error } = await q
+      if (error) return setEstado('No se pudo leer: ' + error.message, 'err')
+      const filas = (data || []).filter(coincide)
+      if (!filas.length) return setEstado('No hay tests en ese período.', 'warn')
+      // agrupar por día + paciente
+      const grupos = {}
+      filas.forEach(r => { const k = r.creado_en.slice(0, 10) + '|' + (r.paciente_dni || r.origen + '-' + r.paciente_id); (grupos[k] = grupos[k] || []).push(r) })
+      const lista = Object.values(grupos)
+      setEstado(`${filas.length} test${filas.length === 1 ? '' : 's'} · ${lista.length} evaluaci${lista.length === 1 ? 'ón' : 'ones'} en el período`, 'ok')
+      $('hLista').innerHTML = lista.map((g, gi) => { const r0 = g[0]
+        const pros = [...new Set(g.map(r => (r.creado_por_email || '').split('@')[0]).filter(Boolean))].join(', ')
+        return `<details class="infobox" style="margin-bottom:8px"><summary style="cursor:pointer;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <b>${fechaTxt(r0.creado_en)}</b> · <b>${esc(r0.paciente_nombre || '—')}</b> <span class="tag">${r0.origen}</span>
+            <span style="color:var(--dim)">${g.length} test${g.length === 1 ? '' : 's'}: ${g.map(r => (INFO[r.test] || { nombre: r.test }).nombre).join(', ')}${pros ? ' · ' + esc(pros) : ''}</span>
+            <span style="margin-left:auto;display:flex;gap:6px"><button class="b" data-ficha="${gi}">📊 Ficha</button><button class="b pri" data-inf="${gi}">📄 Informe</button></span></summary>
+          <table class="crit">${g.map(r => { const it = itemDeToma(r)
+            return `<tr><td>${new Date(r.creado_en).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</td><td><b>${esc(it.nombre)}</b></td><td>${esc(it.valor)}</td>
+              <td class="${it.nivel === 'ok' ? 'c-ok' : it.nivel === 'bad' ? 'c-bad' : it.nivel ? 'c-warn' : ''}">${esc(it.lectura)}</td><td><small>${esc(r.texto || '')}</small></td></tr>` }).join('')}</table></details>` }).join('')
+      document.querySelectorAll('[data-ficha]').forEach(b => b.onclick = (e) => { e.preventDefault(); abrirPac(lista[+b.dataset.ficha][0], 'ficha') })
+      document.querySelectorAll('[data-inf]').forEach(b => b.onclick = (e) => { e.preventDefault(); abrirPac(lista[+b.dataset.inf][0], 'informe') })
+    } else {
+      let q = supabase.from('tests_biolab_informes').select('id, origen, paciente_id, paciente_nombre, paciente_dni, fecha_desde, fecha_hasta, contenido, token, link_activo, link_vence, publicado_mi_espacio, creado_en, creado_por_email')
+        .gte('creado_en', desde).lte('creado_en', hasta).order('creado_en', { ascending: false }).limit(500)
+      if (f.origen) q = q.eq('origen', f.origen)
+      const { data, error } = await q
+      if (error) return setEstado('No se pudo leer: ' + error.message, 'err')
+      const filas = (data || []).filter(coincide)
+      if (!filas.length) return setEstado('No hay informes en ese período.', 'warn')
+      setEstado(`${filas.length} informe${filas.length === 1 ? '' : 's'} en el período`, 'ok')
+      const vigente = (r) => r.link_activo && new Date(r.link_vence) > new Date()
+      $('hLista').innerHTML = `<div style="overflow-x:auto"><table class="crit"><tr><th>Fecha</th><th>Paciente</th><th>Pruebas</th><th>Dónde está</th><th></th></tr>
+        ${filas.map((r, i) => { const n = (r.contenido && r.contenido.items || []).length
+          const url = `${location.origin}/informe_test.html?t=${r.token}`
+          const estado = [r.publicado_mi_espacio ? '📤 En Mi Espacio' : '', vigente(r) ? `🔗 Link activo (vence ${fechaTxt(r.link_vence)})` : r.link_activo ? '🔗 Link vencido' : '', !r.publicado_mi_espacio && !r.link_activo ? '📄 Solo PDF' : ''].filter(Boolean).join('<br>')
+          return `<tr><td>${fechaTxt(r.creado_en)}<br><small>${esc((r.creado_por_email || '').split('@')[0])}</small></td>
+            <td><b>${esc(r.paciente_nombre || '—')}</b> <span class="tag">${r.origen}</span></td>
+            <td>${n} prueba${n === 1 ? '' : 's'}<br><small>${r.fecha_desde ? fechaTxt(r.fecha_desde + 'T12:00:00') : ''}${r.fecha_hasta && r.fecha_hasta !== r.fecha_desde ? ' a ' + fechaTxt(r.fecha_hasta + 'T12:00:00') : ''}</small></td>
+            <td>${estado}</td>
+            <td style="white-space:nowrap">${vigente(r) ? `<a class="b" href="${url}" target="_blank" rel="noopener" style="text-decoration:none">Abrir</a> <button class="b" data-cop="${i}">Copiar link</button> <button class="b" data-baja="${i}">Desactivar</button>` : ''}
+              <button class="b" data-hficha="${i}">📊 Ficha</button> <button class="b pri" data-hinf="${i}">📄 Rehacer</button></td></tr>` }).join('')}</table></div>`
+      document.querySelectorAll('[data-cop]').forEach(b => b.onclick = async () => { try { await navigator.clipboard.writeText(`${location.origin}/informe_test.html?t=${filas[+b.dataset.cop].token}`); b.textContent = 'Copiado ✓' } catch (e) {} })
+      document.querySelectorAll('[data-baja]').forEach(b => b.onclick = async () => { if (!confirm('¿Desactivar el link? El paciente ya no lo va a poder abrir.')) return
+        const { error } = await supabase.from('tests_biolab_informes').update({ link_activo: false }).eq('id', filas[+b.dataset.baja].id).select('id'); if (error) alert(error.message); else cargar() })
+      document.querySelectorAll('[data-hficha]').forEach(b => b.onclick = () => abrirPac(filas[+b.dataset.hficha], 'ficha'))
+      document.querySelectorAll('[data-hinf]').forEach(b => b.onclick = () => abrirPac(filas[+b.dataset.hinf], 'informe'))
+    }
+  }
+  document.querySelectorAll('#hSol [data-s]').forEach(b => b.onclick = () => { f.solapa = b.dataset.s; document.querySelectorAll('#hSol [data-s]').forEach(x => x.classList.toggle('on', x === b)); $('hTestLbl').style.display = f.solapa === 'tests' ? '' : 'none'; cargar() })
+  $('hDesde').onchange = (e) => { f.desde = e.target.value; cargar() }
+  $('hHasta').onchange = (e) => { f.hasta = e.target.value; cargar() }
+  $('hTest').onchange = (e) => { f.test = e.target.value; cargar() }
+  $('hOrigen').onchange = (e) => { f.origen = e.target.value; cargar() }
+  let tq = null; $('hQ').oninput = (e) => { clearTimeout(tq); tq = setTimeout(() => { f.q = e.target.value.trim(); cargar() }, 300) }
+  cargar()
+}
+
 function renderFicha() {
   apagarCamara(); det = null
   const q = new URLSearchParams({ modo: 'pro', dni: paciente.dni || '', origen: paciente.origen, id: paciente.id, nombre: paciente.nombre || '' })
@@ -4127,8 +4219,9 @@ function pintarPerfil() {
 function renderCatalogo() {
   apagarCamara(); det = null; actual = null; pose = null
   $('app').innerHTML = `
-    <h1>Test BiOLAB</h1>
-    <p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+      <div><h1>Test BiOLAB</h1><p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p></div>
+      <button class="b" id="btnHistorial" style="margin-top:8px">📋 Tests e informes realizados</button></div>
     <div class="pacbox">
       <label>¿A quién le aplicamos el test?</label>
       <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (paciente.origen !== 'PRUEBA' ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
@@ -4150,6 +4243,7 @@ function renderCatalogo() {
   if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
+  $('btnHistorial').onclick = renderHistorial
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m
     document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta() })
   if (paciente) { pintarRuta(); cargarHechosHoy().then(pintarRuta) }
@@ -4293,6 +4387,7 @@ window.addEventListener('pagehide', apagarCamara)
 // Abrir directo con un paciente y un test (lo usa la HC de SARKMED: "Hacer / actualizar el protocolo")
 ;(() => {
   const q = new URLSearchParams(location.search)
+  if (q.get('vista') === 'historial') { renderHistorial(); return }
   if (q.get('origen') && q.get('id')) {
     paciente = { origen: q.get('origen'), id: q.get('id'), nombre: q.get('nombre') || '', dni: (q.get('dni') || '').replace(/\D/g, '') || null,
       edad: q.get('edad') ? +q.get('edad') : null, padrones: [q.get('origen')] }
