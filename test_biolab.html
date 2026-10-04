@@ -1003,11 +1003,13 @@ function abrirGoniometro(cfg, lado, alUsar) {
   const ov = document.createElement('div'); ov.className = 'gon'
   ov.innerHTML = `<div class="bar"><h3>📷 ${esc(cfg.titulo)} ${lado ? '· lado ' + (lado === 'D' ? 'derecho' : 'izquierdo') : ''}</h3>
       ${cfg.modo === 'distancia' ? '<label style="font-size:13px">Regla R1→R2: <input type="number" id="gRef" value="10" step="any"> cm</label>' : ''}
-      <label class="b pri" style="cursor:pointer;margin:0">📷 Sacar / elegir foto<input type="file" accept="image/*" id="gFile" style="display:none"></label>
+      <label class="b pri" style="cursor:pointer;margin:0">📷 Sacar foto<input type="file" accept="image/*" capture="environment" id="gCam" style="display:none"></label>
+      <label class="b" style="cursor:pointer;margin:0">🖼️ Subir de fotos<input type="file" accept="image/*" id="gFile" style="display:none"></label>
       <button class="b pri" id="gUsar" disabled>✓ ${cfg.modo === 'multi' ? 'Usar estas medidas' : 'Usar este valor'}</button><button class="b" id="gCerrar">Cancelar</button></div>
     <div class="ay">${esc(cfg.ayuda || '')} <b>Arrastrá los puntos con el dedo</b> para acomodarlos exacto.</div>
-    <div class="lienzo" id="gLienzo"><div class="vacio" id="gVacio">Tocá <b>&nbsp;📷 Sacar / elegir foto&nbsp;</b> arriba.</div><canvas id="gCan"></canvas><div class="lect" id="gLect" style="display:none"></div></div>`
+    <div class="lienzo" id="gLienzo"><div class="vacio" id="gVacio">Se abre la cámara sola. Si no, tocá <b>&nbsp;📷 Sacar foto&nbsp;</b> o <b>&nbsp;🖼️ Subir de fotos&nbsp;</b> arriba.</div><canvas id="gCan"></canvas><div class="lect" id="gLect" style="display:none"></div></div>`
   document.body.appendChild(ov)
+  if (matchMedia('(pointer: coarse)').matches) { try { ov.querySelector('#gCam').click() } catch (e) {} }
   const can = ov.querySelector('#gCan'), ctx = can.getContext('2d'), lienzo = ov.querySelector('#gLienzo')
   let img = null, pts = [], esc2 = 1, ox = 0, oy = 0, arrastra = -1, valor = null
   const cerrar = () => ov.remove()
@@ -1057,6 +1059,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
     if (img) { esc2 = Math.min(r.width / img.width, r.height / img.height); ox = (r.width - img.width * esc2) / 2; oy = (r.height - img.height * esc2) / 2 }
     dibujar()
   }
+  ov.querySelector('#gCam').onchange = (e) => ov.querySelector('#gFile').onchange(e)
   ov.querySelector('#gFile').onchange = async (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return
     const url = URL.createObjectURL(f); img = new Image()
@@ -4319,13 +4322,23 @@ function tarjeta(t) {
     <div class="ico">${t.ico}</div><h3>${t.nombre}</h3><p>${t.desc}</p><div class="pos">📱 ${t.pos}</div>${t.modoMed ? `<div class="medi">${t.modoMed}</div>` : ''}${t.necesita ? `<div class="nec">🧰 ${t.necesita}</div>` : ''}${apt !== 'ok' ? `<div class="aviso">${ETQ_APT[apt]}</div>` : ''}
   </button>`
 }
+let busqTest = ''
+const sinAcento = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+function coincideTest(t) {
+  const q = sinAcento(busqTest).trim(); if (!q) return true
+  const enRutas = Object.values(RUTAS).filter(r => r.pasos.some(p => p.id === t.id)).map(r => r.n).join(' ')
+  const texto = sinAcento([t.nombre, t.desc, t.pos, t.modoMed, t.necesita, PARA_QUE[t.id], enRutas].join(' '))
+  return q.split(/\s+/).every(pal => texto.includes(pal))
+}
 function pintarGrid() {
   const w = $('gridWrap'); if (!w) return
+  const TESTS_V = TESTS.filter(coincideTest)
+  if (!TESTS_V.length) { w.innerHTML = `<div class="nota">No encontré tests con "${esc(busqTest)}". Probá con otra palabra (ej. rodilla, marcha, salto, postura).</div>`; return }
   const pf = paciente ? perfilActual() : null
   if (!paciente || !pf || !pf.actividad) {
-    w.innerHTML = `<div class="grid ${paciente ? '' : 'bloq'}">${TESTS.map(tarjeta).join('')}</div>`
+    w.innerHTML = `<div class="grid ${paciente ? '' : 'bloq'}">${TESTS_V.map(tarjeta).join('')}</div>`
   } else {
-    const grupo = (a) => TESTS.filter(t => aptitud(t.id) === a)
+    const grupo = (a) => TESTS_V.filter(t => aptitud(t.id) === a)
     const ok = grupo('ok'), cu = grupo('cuidado'), no = grupo('no')
     w.innerHTML = `<div class="grid">${ok.map(tarjeta).join('')}</div>
       ${cu.length ? `<h2 style="font-size:16px;margin:18px 0 10px">⚠️ Con cuidado <small style="font-weight:600;color:var(--dim)">solo si lo ves capaz, con asistencia al lado</small></h2><div class="grid">${cu.map(tarjeta).join('')}</div>` : ''}
@@ -4461,10 +4474,14 @@ function renderCatalogo() {
         <div class="chips" id="motivos">${Object.entries(RUTAS).map(([k, r]) => `<button data-m="${k}" class="${motivo === k ? 'on' : ''}">${r.n}</button>`).join('')}</div>
         <div id="rutaBox"></div>` : ''}
     </div>
-    ${paciente ? '<h2 style="font-size:17px;margin:4px 0 10px">Todos los tests</h2>' : ''}
+    <div class="row" style="align-items:center;gap:10px;margin:4px 0 10px;flex-wrap:wrap">
+      ${paciente ? '<h2 style="font-size:17px;margin:0">Todos los tests</h2>' : ''}
+      <input id="qTest" type="search" placeholder="🔎 Buscar test: nombre, zona o para qué sirve (ej. hombro, equilibrio, salto)" value="${esc(busqTest)}" style="flex:1;min-width:260px;padding:11px 14px;border-radius:12px;border:1.5px solid var(--border);font-size:15px">
+    </div>
     <div id="gridWrap"></div>`
   pintarGrid()
   pintarPerfil()
+  $('qTest').oninput = (e) => { busqTest = e.target.value; pintarGrid() }
   if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
