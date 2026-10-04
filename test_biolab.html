@@ -1036,37 +1036,37 @@ function abrirGoniometro(cfg, lado, alUsar) {
   const ov = document.createElement('div'); ov.className = 'gon'
   ov.innerHTML = `<div class="bar"><h3>📷 ${esc(cfg.titulo)} ${lado ? '· lado ' + (lado === 'D' ? 'derecho' : 'izquierdo') : ''}</h3>
       ${cfg.modo === 'distancia' ? '<label style="font-size:13px">Regla R1→R2: <input type="number" id="gRef" value="10" step="any"> cm</label>' : ''}
-      <label class="b pri" style="cursor:pointer;margin:0">📷 Sacar foto<input type="file" accept="image/*" capture="environment" id="gCam" style="display:none"></label>
+      <button class="b pri" id="gCam">📷 Sacar foto</button>
       <label class="b" style="cursor:pointer;margin:0">🖼️ Subir de fotos<input type="file" accept="image/*" id="gFile" style="display:none"></label>
       <button class="b pri" id="gUsar" disabled>✓ ${cfg.modo === 'multi' ? 'Usar estas medidas' : 'Usar este valor'}</button><button class="b" id="gCerrar">Cancelar</button></div>
     <div class="ay">${esc(cfg.ayuda || '')} <b>Arrastrá los puntos con el dedo</b> para acomodarlos exacto.</div>
-    <div class="lienzo" id="gLienzo"><div class="vacio" id="gVacio">Se abre la cámara sola. Si no, tocá <b>&nbsp;📷 Sacar foto&nbsp;</b> o <b>&nbsp;🖼️ Subir de fotos&nbsp;</b> arriba.</div><canvas id="gCan"></canvas><div class="lect" id="gLect" style="display:none"></div></div>`
+    <div class="lienzo" id="gLienzo"><div class="vacio" id="gVacio">Prendiendo la cámara… Si no se abre, tocá <b>&nbsp;📷 Sacar foto&nbsp;</b> o <b>&nbsp;🖼️ Subir de fotos&nbsp;</b> arriba.</div><canvas id="gCan"></canvas><div class="lect" id="gLect" style="display:none"></div></div>`
   document.body.appendChild(ov)
-  if (matchMedia('(pointer: coarse)').matches) { try { ov.querySelector('#gCam').click() } catch (e) {} }
   const can = ov.querySelector('#gCan'), ctx = can.getContext('2d'), lienzo = ov.querySelector('#gLienzo')
-  let img = null, pts = [], esc2 = 1, ox = 0, oy = 0, arrastra = -1, valor = null
-  const cerrar = () => ov.remove()
+  let img = null, pts = [], esc2 = 1, ox = 0, oy = 0, arrastra = -1, valor = null, camVivo = null
+  const cerrar = () => { if (camVivo) camVivo.parar(); ov.remove() }
   ov.querySelector('#gCerrar').onclick = cerrar
-  const medir = () => {
-    if (pts.length < n) return null
-    if (cfg.modo === 'multi') return cfg.calcular(pts)
+  const medir = (Q = pts) => {
+    if (Q.length < n) return null
+    if (cfg.modo === 'multi') return cfg.calcular(Q)
     const ang = (u, v) => Math.atan2(v.y - u.y, v.x - u.x) * 180 / Math.PI
     if (cfg.modo === 'angulo') {
-      const [a, v, c] = pts, u1 = { x: a.x - v.x, y: a.y - v.y }, u2 = { x: c.x - v.x, y: c.y - v.y }
+      const [a, v, c] = Q, u1 = { x: a.x - v.x, y: a.y - v.y }, u2 = { x: c.x - v.x, y: c.y - v.y }
       const g = Math.acos(Math.max(-1, Math.min(1, (u1.x * u2.x + u1.y * u2.y) / (Math.hypot(u1.x, u1.y) * Math.hypot(u2.x, u2.y) || 1)))) * 180 / Math.PI
       return cfg.conv ? cfg.conv(g) : g
     }
-    if (cfg.modo === 'vertical') { const [a, b] = pts; return Math.atan2(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) * 180 / Math.PI }
-    if (cfg.modo === 'horizontal') { const [a, b] = pts; return Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)) * 180 / Math.PI }
-    if (cfg.modo === 'adams') { const [a, b] = pts, alto = a.y <= b.y ? a : b, enDerImg = alto.x > (a.x + b.x) / 2
+    if (cfg.modo === 'vertical') { const [a, b] = Q; return Math.atan2(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) * 180 / Math.PI }
+    if (cfg.modo === 'horizontal') { const [a, b] = Q; return Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)) * 180 / Math.PI }
+    if (cfg.modo === 'adams') { const [a, b] = Q, alto = a.y <= b.y ? a : b, enDerImg = alto.x > (a.x + b.x) / 2
       cfg._lado = Math.abs(a.y - b.y) < 1 ? '—' : (enDerImg === (cfg._derImg !== 'izq') ? 'Derecho' : 'Izquierdo')
       return Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)) * 180 / Math.PI }
-    if (cfg.modo === 'lineas') { let d = Math.abs(ang(pts[0], pts[1]) - ang(pts[2], pts[3])) % 180; return d > 90 ? 180 - d : d }
-    if (cfg.modo === 'distancia') { const ref = parseFloat(ov.querySelector('#gRef').value) || 0, pr = dist(pts[0], pts[1]); return pr > 0 ? dist(pts[2], pts[3]) * ref / pr : null }
+    if (cfg.modo === 'lineas') { let d = Math.abs(ang(Q[0], Q[1]) - ang(Q[2], Q[3])) % 180; return d > 90 ? 180 - d : d }
+    if (cfg.modo === 'distancia') { const ref = parseFloat(ov.querySelector('#gRef').value) || 0, pr = dist(Q[0], Q[1]); return pr > 0 ? dist(Q[2], Q[3]) * ref / pr : null }
   }
   const dibujar = () => {
     if (!img) return
     ctx.clearRect(0, 0, can.width, can.height); ctx.drawImage(img, ox, oy, img.width * esc2, img.height * esc2)
+    if (pts.length < n) return                              // la foto ya se ve; los puntos llegan enseguida
     const P = pts.map(p => ({ x: ox + p.x * esc2, y: oy + p.y * esc2 }))
     ctx.lineWidth = 4; ctx.strokeStyle = '#22d3ee'
     const linea = (a, b, col) => { ctx.strokeStyle = col; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke() }
@@ -1092,10 +1092,8 @@ function abrirGoniometro(cfg, lado, alUsar) {
     if (img) { esc2 = Math.min(r.width / img.width, r.height / img.height); ox = (r.width - img.width * esc2) / 2; oy = (r.height - img.height * esc2) / 2 }
     dibujar()
   }
-  ov.querySelector('#gCam').onchange = (e) => ov.querySelector('#gFile').onchange(e)
-  ov.querySelector('#gFile').onchange = async (e) => {
-    const f = e.target.files && e.target.files[0]; if (!f) return
-    const url = URL.createObjectURL(f); img = new Image()
+  const cargarURL = (url) => {
+    img = new Image()
     img.onload = async () => {
       ov.querySelector('#gVacio').style.display = 'none'; encajar()
       // puntos por defecto (por si no se detecta el cuerpo) y después intento automático
@@ -1125,7 +1123,14 @@ function abrirGoniometro(cfg, lado, alUsar) {
       }
       if (cfg.modo === 'adams') {
         ov.querySelector('#gLect').style.display = ''; ov.querySelector('#gLect').textContent = 'Leyendo el contorno de la espalda…'
-        try { const r = await adamsAuto(img, W, H, cfg.zona); if (r) { pts = r.pts; cfg._derImg = r.derImg } } catch (er) { console.warn('Adams automático', er) }
+        try {
+          const r = await Promise.race([adamsAuto(img, W, H, cfg.zona), new Promise(res => setTimeout(() => res(null), 8000))])
+          if (r) { pts = r.pts; cfg._derImg = r.derImg; ov.querySelector('#gLect').textContent = 'Giba encontrada ✓' }
+          else {                                                   // plan B: puntos del cuerpo (hombros o caderas)
+            const r2 = (await modeloImagen()).detect(img), L = r2.landmarks && r2.landmarks[0]
+            if (L) { const [a, b] = cfg.zona === 'lum' ? [23, 24] : [11, 12]; pts = [{ x: L[a].x * W, y: L[a].y * H }, { x: L[b].x * W, y: L[b].y * H }].sort((p, q) => p.x - q.x); cfg._derImg = L[12].x > L[11].x ? 'der' : 'izq' }
+          }
+        } catch (er) { console.warn('Adams automático', er) }
         dibujar()
       }
       if (cfg.lm || cfg.lmP || cfg.lmFijos) {
@@ -1145,6 +1150,66 @@ function abrirGoniometro(cfg, lado, alUsar) {
     }
     img.src = url
   }
+  ov.querySelector('#gFile').onchange = (e) => { const f = e.target.files && e.target.files[0]; if (f) { if (camVivo) camVivo.parar(); cargarURL(URL.createObjectURL(f)) } }
+  // ---- CÁMARA EN VIVO CON LAS LÍNEAS DEL TEST: el paciente se mueve y se ven las líneas; "Capturar" congela esa imagen ----
+  const SKEL = [[11, 12], [11, 23], [12, 24], [23, 24], [11, 13], [13, 15], [12, 14], [14, 16], [23, 25], [25, 27], [24, 26], [26, 28], [27, 31], [28, 32], [27, 29], [28, 30], [7, 11], [8, 12]]
+  const idxTest = () => cfg.lm ? cfg.lm(lado || 'D') : cfg.lmFijos ? cfg.lmFijos : cfg.modo === 'adams' ? (cfg.zona === 'lum' ? [23, 24] : [11, 12]) : null
+  const abrirCamVivo = async () => {
+    if (camVivo) return
+    const box = document.createElement('div'); box.style.cssText = 'position:absolute;inset:0;background:#0f172a;z-index:5'
+    box.innerHTML = `<video playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain"></video><canvas style="position:absolute;inset:0;width:100%;height:100%"></canvas>
+      <div class="lect" style="top:12px;bottom:auto">Prendiendo la cámara…</div>
+      <div style="position:absolute;left:0;right:0;bottom:16px;display:flex;gap:12px;justify-content:center">
+        <button class="b pri" data-cap="0" style="font-size:20px;padding:14px 26px">📸 Capturar</button>
+        <button class="b" data-cap="3" style="font-size:18px;padding:14px 20px">⏱ En 3 s</button></div>`
+    lienzo.appendChild(box); ov.querySelector('#gVacio').style.display = 'none'
+    const v = box.querySelector('video'), c = box.querySelector('canvas'), cx = c.getContext('2d'), lect = box.querySelector('.lect')
+    let st = null, vivo = true, ult = -1, ultP = null
+    camVivo = { parar: () => { vivo = false; if (st) st.getTracks().forEach(t => t.stop()); box.remove(); camVivo = null } }
+    const capturar = () => {
+      const k = document.createElement('canvas'); k.width = v.videoWidth; k.height = v.videoHeight; k.getContext('2d').drawImage(v, 0, 0)
+      const url = k.toDataURL('image/jpeg', 0.92); camVivo.parar(); beep(1300, 80); cargarURL(url)
+    }
+    box.querySelectorAll('[data-cap]').forEach(b => b.onclick = async () => {
+      const sg = +b.dataset.cap; for (let t = sg; t > 0; t--) { decir(String(t)); lect.textContent = t; await new Promise(r => setTimeout(r, 900)) }
+      if (vivo) capturar() })
+    const loop = () => {
+      if (!vivo) return
+      if (v.videoWidth && landmarker && v.currentTime !== ult) {
+        ult = v.currentTime
+        const r = c.getBoundingClientRect(); if (c.width !== Math.round(r.width)) { c.width = Math.round(r.width); c.height = Math.round(r.height) }
+        let res = null; try { res = landmarker.detectForVideo(v, performance.now()) } catch (e) {}
+        const W = v.videoWidth, H = v.videoHeight, e2 = Math.min(c.width / W, c.height / H), x0 = (c.width - W * e2) / 2, y0 = (c.height - H * e2) / 2
+        cx.clearRect(0, 0, c.width, c.height)
+        if (res && res.landmarks && res.landmarks[0]) {
+          const P = res.landmarks[0].map(q => ({ x: q.x * W, y: q.y * H, v: q.visibility ?? 1 })); ultP = P
+          const S = (p) => ({ x: x0 + p.x * e2, y: y0 + p.y * e2 })
+          cx.lineWidth = 2.5; cx.strokeStyle = 'rgba(255,255,255,.55)'
+          SKEL.forEach(([a, b]) => { if (P[a].v > 0.4 && P[b].v > 0.4) { const A = S(P[a]), B = S(P[b]); cx.beginPath(); cx.moveTo(A.x, A.y); cx.lineTo(B.x, B.y); cx.stroke() } })
+          const idx = idxTest()
+          if (idx) {
+            const Q = idx.map(i => P[i]), QS = Q.map(S)
+            cx.lineWidth = 6; cx.strokeStyle = '#22d3ee'
+            if (cfg.lineas) cfg.lineas.forEach(([a, b, col]) => { cx.strokeStyle = col || '#22d3ee'; cx.beginPath(); cx.moveTo(QS[a].x, QS[a].y); cx.lineTo(QS[b].x, QS[b].y); cx.stroke() })
+            else { cx.beginPath(); cx.moveTo(QS[0].x, QS[0].y); QS.slice(1).forEach(p => cx.lineTo(p.x, p.y)); cx.stroke() }
+            QS.forEach(p => { cx.fillStyle = '#fff'; cx.beginPath(); cx.arc(p.x, p.y, 8, 0, 7); cx.fill() })
+            let val = null; try { val = Q.length >= n ? medir(Q.slice(0, n).map(q => ({ x: q.x, y: q.y }))) : null } catch (e) {}
+            lect.textContent = val == null ? 'Viendo al paciente ✓' : typeof val === 'object' ? (val.texto || '') : Math.round(val) + '°'
+          } else lect.textContent = 'Viendo al paciente ✓'
+        } else lect.textContent = 'Que se vea el cuerpo en la pantalla'
+      }
+      requestAnimationFrame(loop)
+    }
+    try {
+      await cargarModelo()
+      const base = { width: { ideal: 1920 }, height: { ideal: 1440 } }
+      st = await navigator.mediaDevices.getUserMedia({ audio: false, video: camId ? { ...base, deviceId: { exact: camId } } : { ...base, facingMode: facing } })
+      if (!vivo) { st.getTracks().forEach(t => t.stop()); return }
+      v.srcObject = st; await v.play(); lect.textContent = 'Que se vea el cuerpo en la pantalla'; loop()
+    } catch (e) { lect.textContent = 'No se pudo prender la cámara: ' + (e.message || e) + '. Usá 🖼️ Subir de fotos.' }
+  }
+  ov.querySelector('#gCam').onclick = abrirCamVivo
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) abrirCamVivo()      // se abre sola, con las líneas
   const pos = (ev) => { const r = can.getBoundingClientRect(); return { x: (ev.clientX - r.left - ox) / esc2, y: (ev.clientY - r.top - oy) / esc2 } }
   can.addEventListener('pointerdown', (ev) => { if (!img) return; const p = pos(ev)
     let best = -1, bd = 45 / esc2; pts.forEach((q, i) => { const d0 = Math.hypot(q.x - p.x, q.y - p.y); if (d0 < bd) { bd = d0; best = i } })
@@ -4009,6 +4074,7 @@ function abrirTemporizador({ titulo, dur = null, motivos = ['Cansancio / no pudo
       <button class="b" id="tFin">${dur ? 'Cancelar' : '✓ Terminar'}</button></div>
     <div class="lienzo" style="position:relative">
       <video id="tVid" playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0f172a"></video>
+      <canvas id="tCan" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
       <div id="tReloj" style="position:absolute;top:12px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,.8);color:#fff;font:800 56px Manrope,sans-serif;padding:6px 22px;border-radius:16px">${dur ? fmtReloj(dur) : '0:00'}</div>
       <div id="tFotos" style="position:absolute;bottom:10px;left:10px;display:flex;gap:6px"></div>
       ${vigilar ? '<div id="tVig" style="position:absolute;bottom:12px;right:12px;background:rgba(15,23,42,.8);color:#fff;font:700 15px Manrope,sans-serif;padding:8px 14px;border-radius:12px">Vigila la posición: corta solo si se pierde</div>' : ''}
@@ -4045,21 +4111,41 @@ function abrirTemporizador({ titulo, dur = null, motivos = ['Cansancio / no pudo
     if (vigilar === 'cabeza' && ok(o, h)) return Math.atan2(p[h].y - p[o].y, Math.abs(p[h].x - p[o].x)) * 180 / Math.PI
     return null
   }
+  // ---- líneas en vivo: el esqueleto se dibuja siempre que el paciente esté en cuadro ----
+  const tcan = ov.querySelector('#tCan'), tcx = tcan.getContext('2d')
+  let ultP = null, cuadro = 0, cuadroUsado = 0, abierto = true, devActual = 0
+  const SK = [[11, 12], [11, 23], [12, 24], [23, 24], [11, 13], [13, 15], [12, 14], [14, 16], [23, 25], [25, 27], [24, 26], [26, 28], [27, 31], [28, 32], [7, 11], [8, 12]]
+  const pintarVivo = () => {
+    if (!abierto) return
+    if (landmarker && vid.videoWidth && vid.currentTime !== ultV) {
+      ultV = vid.currentTime
+      let r = null; try { r = landmarker.detectForVideo(vid, performance.now()) } catch (e) {}
+      const rc = tcan.getBoundingClientRect(); if (tcan.width !== Math.round(rc.width)) { tcan.width = Math.round(rc.width); tcan.height = Math.round(rc.height) }
+      tcx.clearRect(0, 0, tcan.width, tcan.height)
+      if (r && r.landmarks && r.landmarks[0]) {
+        ultP = r.landmarks[0].map(q => ({ x: q.x, y: q.y, v: q.visibility ?? 1 })); cuadro++
+        const W = vid.videoWidth, H = vid.videoHeight, e = Math.min(tcan.width / W, tcan.height / H), x0 = (tcan.width - W * e) / 2, y0 = (tcan.height - H * e) / 2
+        const S = (p) => [x0 + p.x * W * e, y0 + p.y * H * e]
+        tcx.lineWidth = 4; tcx.strokeStyle = vigilar ? (devActual > (LIM[vigilar] || 99) * 0.7 ? '#f87171' : '#4ade80') : '#22d3ee'
+        SK.forEach(([a, b]) => { if (ultP[a].v > 0.4 && ultP[b].v > 0.4) { const [ax, ay] = S(ultP[a]), [bx, by] = S(ultP[b]); tcx.beginPath(); tcx.moveTo(ax, ay); tcx.lineTo(bx, by); tcx.stroke() } })
+        ultP.forEach((p, i) => { if (i > 10 && p.v > 0.4) { const [x, y] = S(p); tcx.fillStyle = '#fff'; tcx.beginPath(); tcx.arc(x, y, 5, 0, 7); tcx.fill() } })
+      }
+    }
+    requestAnimationFrame(pintarVivo)
+  }
+  cargarModelo().then(pintarVivo).catch(() => {})
   const vigilarPos = () => {
-    if (!vigilar || !corriendo || !landmarker || !vid.videoWidth || vid.currentTime === ultV) return
-    ultV = vid.currentTime
-    let r; try { r = landmarker.detectForVideo(vid, performance.now()) } catch (e) { return }
-    if (!r.landmarks || !r.landmarks[0]) return
-    const p = r.landmarks[0].map(q => ({ x: q.x, y: q.y, v: q.visibility ?? 1 }))
+    if (!vigilar || !corriendo || !ultP || cuadro === cuadroUsado) return
+    cuadroUsado = cuadro
+    const p = ultP
     const m = medidaPos(p); if (m == null) return
     if (transcurrido() < 2) { refPos.push(m); return }
     if (ref == null) ref = refPos.length ? refPos.slice().sort((a, b) => a - b)[Math.floor(refPos.length / 2)] : m
-    const dev = Math.abs(m - ref)
+    const dev = Math.abs(m - ref); devActual = dev
     fuera = dev > LIM[vigilar] ? fuera + 1 : 0
     const aviso = ov.querySelector('#tVig'); if (aviso) aviso.textContent = dev > LIM[vigilar] * 0.7 ? '⚠️ Cuidado con la posición' : '✓ Posición correcta'
     if (fuera >= 10) terminar('Perdió la posición')
   }
-  if (vigilar && !landmarker) cargarModelo().catch(() => {})
   const tic = () => {
     const t = transcurrido()
     vigilarPos()
@@ -4067,7 +4153,7 @@ function abrirTemporizador({ titulo, dur = null, motivos = ['Cansancio / no pudo
     if (!autoFoto && t >= (dur ? Math.min(dur / 2, Math.max(2, dur / 2)) : 3)) { autoFoto = true; capturar() }   // captura sola a mitad (o a los 3 s)
     if (dur && t >= dur) terminar(null)
   }
-  const cerrar = () => { clearInterval(iv); if (st) st.getTracks().forEach(x => x.stop()); ov.remove() }
+  const cerrar = () => { abierto = false; clearInterval(iv); if (st) st.getTracks().forEach(x => x.stop()); ov.remove() }
   const terminar = (motivo) => {
     if (terminado) return; terminado = true
     if (!fotos.length) capturar()
