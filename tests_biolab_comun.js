@@ -49,7 +49,7 @@ export const LSI_OK = 90   // % — por debajo se marca en rojo (como la planill
 
 // Nombres para el profesional y para el paciente (Mi Espacio), e interpretación clínica
 export const INFO = {
-  ohs:        { ico: '🙌', nombre: 'Sentadilla overhead', pac: 'Calidad de tu sentadilla', pacUnidad: 'ajustes a trabajar' },
+  ohs:        { ico: '🏋️', nombre: 'Sentadilla overhead', pac: 'Calidad de tu sentadilla', pacUnidad: 'ajustes a trabajar' },
   rom:        { ico: '📐', nombre: 'ROM · movilidad analítica', pac: 'Tu movilidad', pacUnidad: '' },
   fsd:        { ico: '🪜', nombre: 'Forward Step Down', pac: 'Control al bajar un escalón', pacUnidad: 'puntos (menos es mejor)' },
   tug:        { ico: '🪑', nombre: 'Timed Up & Go (TUG)', pac: 'Levantarte, caminar y volver a sentarte', pacUnidad: 'segundos' },
