@@ -1706,7 +1706,7 @@ function renderROM(opts = {}) {
     </div>
     <div class="panel evo" id="evoRom" style="display:none"></div>
     <div class="panel evo" id="evo" style="display:none"></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   const num = (x) => x === '' || x == null || isNaN(+x) ? null : +x
   const lado = (k, L) => {
     const it = ROM_ITEMS.find(i => i.k === k)
@@ -2629,7 +2629,7 @@ function renderPlanilla(spec, def) {
       <div class="res" id="res"></div>
     </div>
     <div class="panel evo" id="evo" style="display:none"></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   const recalcular = () => {
     const r = def.evaluar(g)
     const det = { campos: { ...vals }, hallazgos_txt: r.hallazgos || [], observaciones: obs || null }
@@ -2647,7 +2647,7 @@ function renderPlanilla(spec, def) {
         <button data-ir="${t.id}" ${t.listo ? '' : 'disabled'}>${t.listo ? 'Hacer ahora →' : 'Próximamente'}</button></div>`).join('')}</div>` : ''}`,
       txt, { valor: r.valor, unidad: r.unidad, detalle: det, fotos: fotosGuardar.length ? fotosGuardar : undefined })
     document.querySelectorAll('#res [data-ir]').forEach(b => b.onclick = () => { const id = b.dataset.ir
-      DESTINO[id] && !TESTS.find(x => x.id === id) ? renderTest('rom', { sec: DESTINO[id] }) : renderTest(id) })
+      conGuardado(() => DESTINO[id] && !TESTS.find(x => x.id === id) ? renderTest('rom', { sec: DESTINO[id] }) : renderTest(id), true) })
   }
   const aplicarAuto = (keyConLado, v) => {
     const [k, L] = keyConLado.split('_').length > 1 && ['D', 'I'].includes(keyConLado.split('_').pop()) ? [keyConLado.slice(0, -2), keyConLado.slice(-1)] : [keyConLado, null]
@@ -3375,7 +3375,7 @@ const DETECTORES = {
       document.querySelectorAll('.crit select').forEach(sel => sel.onchange = () => { d.f[sel.dataset.k] = sel.value; pintar() })
       $('ohsObs').onchange = (e) => { d.obs = e.target.value; pintar() }
       document.querySelectorAll('[data-ir]').forEach(b => b.onclick = () => { if (b.disabled) return
-        const id = b.dataset.ir; DESTINO[id] && !TESTS.find(x => x.id === id) ? renderTest('rom', { sec: DESTINO[id] }) : renderTest(id) })
+        const id = b.dataset.ir; conGuardado(() => DESTINO[id] && !TESTS.find(x => x.id === id) ? renderTest('rom', { sec: DESTINO[id] }) : renderTest(id), true) })
     }
     // permite cargar a mano sin cámara (por ejemplo, si lo viste a ojo)
     d.manual = () => { d.f = { valgo: 'NO', varo: 'NO', abduccion: 'NO', colapso: 'NO', peso: 'NO', tibia: 'SI', arqueo: 'NO', brazos: 'NO' }; d.idx = NV; pintar() }
@@ -4039,13 +4039,92 @@ const DETECTORES = {
 // PANTALLAS
 // ============================================================
 let textoCopiar = '', datosRes = null
+// el próximo test: primero el que sugiere el árbol (si hay), después el siguiente de la ruta del motivo de consulta
+function siguienteSugerido() {
+  const arbol = [...document.querySelectorAll('#res [data-ir]:not([disabled])')].map(b => b.dataset.ir)[0]
+  if (arbol) return { id: arbol, por: 'lo sugiere el resultado' }
+  if (motivo && RUTAS[motivo]) {
+    const pasos = RUTAS[motivo].pasos, i = pasos.findIndex(p => p.id === actual.id)
+    const sig = pasos.slice(i + 1).find(p => !hechosHoy.tests.has(p.id) && TESTS.some(t => t.id === p.id))
+    if (sig) return { id: sig.id, por: 'sigue en la ruta ' + RUTAS[motivo].n.replace(/^\S+\s/, ''), sec: sig.sec }
+  }
+  return null
+}
+const nombreTest = (id) => (TESTS.find(t => t.id === id) || {}).nombre || id
+// al terminar: se suelta el video de arriba, se va al resultado y aparece el botón del próximo test
+function irAlResultado() {
+  const stg = document.querySelector('.layout > .stage'); if (stg) stg.classList.remove('fija')
+  const tip = $('ubitip'); if (tip) tip.remove()
+  setTimeout(() => { const r = $('res'); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, 150)
+  pintarSiguiente()
+}
+function pintarSiguiente() {
+  const sig = siguienteSugerido(), mando = document.querySelector('#mando .btns')
+  document.querySelectorAll('.btnSig').forEach(b => b.remove())
+  const crear = (cls) => { const b = document.createElement('button'); b.className = 'b pri btnSig ' + (cls || '')
+    b.innerHTML = sig ? `➡️ Siguiente: ${esc(nombreTest(sig.id))}` : '← Volver a todos los tests'
+    b.onclick = () => conGuardado(() => { apagarCamara(); if (sig) renderTest(sig.id, sig.sec ? { sec: sig.sec } : {}); else renderCatalogo() }, true); return b }
+  if (mando) mando.prepend(crear())
+  const rb = $('res') && $('res').querySelector('.btns'); if (rb) { const b = crear(); b.style.marginLeft = 'auto'; rb.appendChild(b) }
+  const ver = document.createElement('button'); ver.className = 'b btnSig'; ver.textContent = '📋 Ver resultado'
+  ver.onclick = () => { const r = $('res'); if (r) r.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
+  if (mando) mando.appendChild(ver)
+}
+// ============================================================
+// QUE NO SE PIERDA NINGÚN TEST: si hay un resultado sin guardar y se sale (volver, otro test, cerrar),
+// pregunta "¿Guardar antes de salir?". El botón ➡️ Siguiente guarda solo, sin preguntar.
+// ============================================================
+let sinGuardar = false, tocado = false
+document.addEventListener('input', (e) => { if (e.target.closest && e.target.closest('#app')) tocado = true }, true)
+document.addEventListener('change', (e) => { if (e.target.closest && e.target.closest('#app')) tocado = true }, true)
+document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('#app button'); if (b && !/btnVolver|btnSig|btnCopiar/.test(b.id + ' ' + b.className)) tocado = true }, true)
+window.addEventListener('beforeunload', (e) => { if (sinGuardar) { e.preventDefault(); e.returnValue = '' } })
+const claveBorr = () => 'testbiolab_borr_' + perfilKey() + '_' + new Date().toISOString().slice(0, 10)
+const leerBorr = () => { try { return JSON.parse(localStorage.getItem(claveBorr()) || '{}') } catch (e) { return {} } }
+function guardarBorrador() {
+  if (!paciente || paciente.origen === 'PRUEBA' || !actual || !datosRes) return
+  const b = leerBorr(), h = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })
+  b[actual.id] = { test: actual.id, datos: datosRes, texto: textoCopiar, hora: h }
+  try { localStorage.setItem(claveBorr(), JSON.stringify(b)) }
+  catch (e) { b[actual.id] = { test: actual.id, datos: { ...datosRes, fotos: undefined }, texto: textoCopiar, hora: h, sinFotos: true }   // sin lugar: se guarda sin las fotos
+    try { localStorage.setItem(claveBorr(), JSON.stringify(b)) } catch (e2) {} }
+}
+function borrarBorrador(id) { const b = leerBorr(); delete b[id]; try { localStorage.setItem(claveBorr(), JSON.stringify(b)) } catch (e) {} }
+function preguntarGuardar() {
+  return new Promise(res => {
+    const ov = document.createElement('div')
+    ov.style.cssText = 'position:fixed;inset:0;z-index:90;background:rgba(15,23,42,.6);display:flex;align-items:center;justify-content:center;padding:16px'
+    ov.innerHTML = `<div style="background:#fff;border-radius:16px;padding:20px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+      <div style="font-size:19px;font-weight:800;margin-bottom:6px">💾 ¿Guardar antes de salir?</div>
+      <div style="font-size:15px;color:#475569;margin-bottom:16px">Este test tiene un resultado que todavía no se guardó en la ficha del paciente.</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="b pri" data-r="g" style="font-size:16px;padding:14px">💾 Guardar y seguir</button>
+        <button class="b" data-r="n" style="font-size:15px;padding:12px;color:#b91c1c">Salir sin guardar</button>
+        <button class="b" data-r="c" style="font-size:15px;padding:12px">Quedarme acá</button></div></div>`
+    document.body.appendChild(ov)
+    ov.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { ov.remove(); res(b.dataset.r) })
+  })
+}
+// envuelve cualquier salida: si hay algo sin guardar, pregunta (o guarda solo si auto = true)
+async function conGuardado(accion, auto = false) {
+  if (sinGuardar && $('btnGuardar') && !$('btnGuardar').disabled) {
+    const r = auto ? 'g' : await preguntarGuardar()
+    if (r === 'c') return
+    if (r === 'g') { const ok = await guardarResultado(); if (!ok) return }
+    if (r === 'n' && actual) borrarBorrador(actual.id)
+  }
+  sinGuardar = false; tocado = false; accion()
+}
 function mostrarResultado(html, texto, datos) {
   textoCopiar = texto; datosRes = datos
   const puedeGuardar = paciente && paciente.origen !== 'PRUEBA' && datos
+  sinGuardar = !!(puedeGuardar && tocado)
+  if (sinGuardar) guardarBorrador()
   $('res').innerHTML = html + `<div class="btns" style="margin-top:12px">
       ${puedeGuardar ? '<button class="b pri" id="btnGuardar">💾 Guardar en la ficha</button>' : ''}
       <button class="b" id="btnCopiar">Copiar resultado</button></div>
     ${paciente && paciente.origen === 'PRUEBA' ? '<div class="nota">Es una prueba sin paciente: no se guarda.</div>' : ''}`
+  if (document.querySelector('.layout > .stage')) setTimeout(irAlResultado, 0)
   $('btnCopiar').onclick = async () => {
     try { await navigator.clipboard.writeText(textoCopiar); $('btnCopiar').textContent = 'Copiado ✓' } catch (e) { $('btnCopiar').textContent = 'No se pudo copiar' }
   }
@@ -4053,9 +4132,9 @@ function mostrarResultado(html, texto, datos) {
 }
 
 async function guardarResultado() {
-  const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Verificando la ubicación…'
+  const b = $('btnGuardar') || { disabled: false, textContent: '' }; b.disabled = true; b.textContent = 'Verificando la ubicación…'
   await verificarUbicacion()
-  if (!puedeEvaluar()) { b.disabled = false; b.textContent = '💾 Guardar en la ficha'; alert('Los tests solo se pueden guardar en PuntoBiO. ' + (ubic.estado === 'fuera' ? `Estás a unos ${ubic.dist} m del centro.` : 'No se pudo confirmar la ubicación.')); return }
+  if (!puedeEvaluar()) { b.disabled = false; b.textContent = '💾 Guardar en la ficha'; alert('Los tests solo se pueden guardar en PuntoBiO. ' + (ubic.estado === 'fuera' ? `Estás a unos ${ubic.dist} m del centro.` : 'No se pudo confirmar la ubicación.')); return false }
   b.textContent = 'Guardando…'
   const fila = {
     origen: paciente.origen, paciente_id: paciente.id, paciente_nombre: paciente.nombre, paciente_dni: normDni(paciente.dni),
@@ -4072,15 +4151,19 @@ async function guardarResultado() {
       const blob = await (await fetch(f.dataUrl)).blob()
       const ruta = `${carpeta}/${f.vista.toLowerCase()}.jpg`
       const up = await supabase.storage.from('tests-biolab').upload(ruta, blob, { contentType: 'image/jpeg', upsert: false })
-      if (up.error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se pudieron subir las fotos: ' + up.error.message, 'err'); return }
+      if (up.error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se pudieron subir las fotos: ' + up.error.message, 'err'); return false }
       rutas.push({ vista: f.vista, ruta })
     }
     fila.detalle = { ...fila.detalle, fotos: rutas }
   }
   const { error } = await supabase.from('tests_biolab').insert(fila)
-  if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se guardó: ' + error.message, 'err'); return }
-  b.textContent = 'Guardado ✓'; setEstado('Resultado guardado en la ficha del paciente', 'ok')
+  if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se guardó: ' + error.message, 'err'); return false }
+  sinGuardar = false; borrarBorrador(actual.id)
+  b.textContent = 'Guardado ✓'; setEstado('Resultado guardado en la ficha del paciente ✓ · tocá ➡️ Siguiente para seguir', 'ok')
+  hechosHoy.tests.add(actual.id)
   cargarUltima(actual.id)
+  if (document.querySelector('.layout > .stage')) { setTimeout(pintarSiguiente, 0); decir('Guardado') }
+  return true
 }
 
 // ============================================================
@@ -4181,7 +4264,7 @@ async function renderInforme() {
       <div style="margin:4px 0 10px">${chipPaciente()}</div>
       <div class="estado" id="estado">Cargando las tomas…</div>
       <div id="infBody"></div></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   const filtro = paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`
   const { data, error } = await supabase.from('tests_biolab').select('id, test, valor, unidad, detalle, texto, creado_en').or(filtro).order('creado_en', { ascending: false }).limit(500)
   if (error) { setEstado('No se pudieron leer las tomas: ' + error.message, 'err'); return }
@@ -4578,7 +4661,7 @@ function renderOsteo() {
       <div class="nota">Lo palpatorio se registra (TART); lo que se puede medir, se mide con foto o video. Al final, el antes / después de la sesión.</div>
       <div id="osBody"></div></div>
     <div class="panel evo" id="evo" style="display:none"></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   pintar()
   setTimeout(() => cargarUltima('osteo'), 0)
 }
@@ -4868,7 +4951,7 @@ function renderPelvico() {
       <div class="nota">Protocolo en 5 partes: anamnesis (se amplía según sexo, edad y etapa) · cuestionarios · evaluación no invasiva · batería de provocación · tacto de la especialista. Datos sensibles: nunca se publican solos en Mi Espacio.</div>
       <div id="pelBody"></div></div>
     <div class="panel evo" id="evo" style="display:none"></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   pintar()
   setTimeout(() => cargarUltima('pelvico'), 0)
 }
@@ -4895,7 +4978,7 @@ async function renderHistorial() {
       </div>
       <div class="estado" id="estado">Cargando…</div>
       <div id="hLista"></div></div>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
   const abrirPac = (r, destino) => { paciente = { origen: r.origen, id: String(r.paciente_id), nombre: r.paciente_nombre || '', dni: r.paciente_dni || null, edad: null, padrones: [r.origen] }
     destino === 'informe' ? renderInforme() : renderFicha() }
   const fechaTxt = (x) => new Date(x).toLocaleDateString('es-AR')
@@ -4969,7 +5052,7 @@ function renderFicha() {
   const q = new URLSearchParams({ modo: 'pro', dni: paciente.dni || '', origen: paciente.origen, id: paciente.id, nombre: paciente.nombre || '' })
   $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
     <iframe class="ficha-funcional" src="ficha_funcional.html?${q}" style="width:100%;height:300px;border:0;display:block" title="Ficha funcional"></iframe>`
-  $('btnVolver').onclick = renderCatalogo
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
 }
 
 // Rutas por motivo de consulta: qué tests y en qué orden. sec = región de la planilla de ROM.
@@ -5046,7 +5129,11 @@ const NIVEL = {
   ohs: 2, rockback: 2, sfma: 2, puente: 2, estocada: 2, fsd: 2, squatmono: 2, ybalance: 2, pushup: 2, tronco: 2,
   pullup: 3, salto: 3, hop: 3, triplehop: 3, crossover: 3, sidehop: 3, sprint10: 3, ckcuest: 3,
 }
-const perfiles = {}       // por paciente, mientras dura la sesión
+const perfiles = (() => { try { return JSON.parse(localStorage.getItem('testbiolab_perfiles') || '{}') } catch (e) { return {} } })()   // por paciente, recordado en el iPad
+const guardarPerfiles = () => { try { localStorage.setItem('testbiolab_perfiles', JSON.stringify(perfiles)) } catch (e) {} }
+const claveMotivoHoy = () => 'testbiolab_motivo_' + perfilKey() + '_' + new Date().toISOString().slice(0, 10)
+const recordarMotivo = () => { try { if (perfilKey()) { if (motivo) localStorage.setItem(claveMotivoHoy(), motivo); else localStorage.removeItem(claveMotivoHoy()) } } catch (e) {} }
+const motivoDeHoy = () => { try { return localStorage.getItem(claveMotivoHoy()) } catch (e) { return null } }
 const perfilKey = () => paciente ? (paciente.dni || paciente.origen + '-' + paciente.id) : ''
 function perfilActual() {
   const k = perfilKey(); if (!k) return null
@@ -5116,14 +5203,41 @@ let verOcultos = false
 let motivo = null
 let hechosHoy = { tests: new Set(), secs: new Set() }
 async function cargarHechosHoy() {
-  hechosHoy = { tests: new Set(), secs: new Set() }
+  hechosHoy = { tests: new Set(), secs: new Set(), lista: [] }
   if (!paciente || paciente.origen === 'PRUEBA') return
   const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
-  const { data } = await supabase.from('tests_biolab').select('test, detalle')
+  const { data } = await supabase.from('tests_biolab').select('test, detalle, creado_en')
     .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
     .gte('creado_en', hoy.toISOString())
+  ;(data || []).slice().sort((a, b) => (a.creado_en || '').localeCompare(b.creado_en || '')).forEach(r => hechosHoy.lista.push({ test: r.test, hora: r.creado_en ? new Date(r.creado_en).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : '' }))
   ;(data || []).forEach(r => { hechosHoy.tests.add(r.test)
     if (r.test === 'rom' && r.detalle && r.detalle.medidas) Object.keys(r.detalle.medidas).forEach(k => { const it = ROM_ITEMS.find(i => i.k === k); if (it) hechosHoy.secs.add(it.sec) }) })
+}
+function pintarReanudar() {
+  const box = $('reanudarBox'); if (!box) return
+  const L = hechosHoy.lista || [], borr = Object.values(leerBorr()).filter(x => !hechosHoy.tests.has(x.test) || true)
+  if (!L.length && !borr.length) { box.innerHTML = ''; return }
+  let sig = null
+  if (motivo && RUTAS[motivo]) sig = RUTAS[motivo].pasos.find(p => !(p.sec ? hechosHoy.secs.has(p.sec) : hechosHoy.tests.has(p.id)) && aptitud(p.id) !== 'no')
+  box.innerHTML = `<div class="ruta" style="border-color:#86efac;background:#f0fdf4;margin-top:12px">
+    <h3>📋 Evaluación de hoy · ${L.length} test${L.length > 1 ? 's' : ''} ya guardado${L.length > 1 ? 's' : ''}</h3>
+    <div class="nota" style="margin:0 0 8px">${L.map(x => `${esc(nombreTest(x.test))} <small>(${x.hora})</small>`).join(' · ')}</div>
+    <div class="nota" style="margin:0 0 10px">Es la misma evaluación: lo que hagas hoy se suma a esto, sale junto en el informe y no hace falta repetir nada.</div>
+    ${borr.length ? `<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:12px;padding:10px 12px;margin:0 0 10px">
+      <b>⚠️ Quedaron sin guardar:</b>${borr.map(x => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        <span>${esc(nombreTest(x.test))} <small>(${x.hora}${x.sinFotos ? ', sin fotos' : ''})</small></span>
+        <button class="b pri" data-bguardar="${x.test}" style="padding:8px 12px">💾 Guardar ahora</button>
+        <button class="b" data-bdesc="${x.test}" style="padding:8px 12px">Descartar</button></div>`).join('')}</div>` : ''}
+    ${sig ? `<button class="b pri" id="btnReanudar">▶ Seguir con: ${esc(nombreTest(sig.id))}${sig.sec ? ' · ' + esc(ROM.find(g => g.sec === sig.sec).n) : ''}</button>`
+      : motivo ? '<div class="nota c-ok">✓ La ruta de hoy está completa. Podés hacer el informe.</div>' : '<div class="nota">Elegí el motivo de consulta para ver con qué seguir.</div>'}</div>`
+  if ($('btnReanudar')) $('btnReanudar').onclick = () => renderTest(sig.id, sig.sec ? { sec: sig.sec } : {})
+  box.querySelectorAll('[data-bguardar]').forEach(b => b.onclick = async () => {
+    const x = leerBorr()[b.dataset.bguardar]; if (!x) return
+    b.disabled = true; b.textContent = 'Guardando…'
+    const antes = actual; actual = TESTS.find(t => t.id === x.test) || { id: x.test }; datosRes = x.datos; textoCopiar = x.texto
+    const ok = await guardarResultado(); actual = antes
+    if (ok) { await cargarHechosHoy(); pintarRuta(); pintarReanudar() } else { b.disabled = false; b.textContent = '💾 Reintentar' } })
+  box.querySelectorAll('[data-bdesc]').forEach(b => b.onclick = () => { if (confirm('¿Descartar este resultado sin guardar?')) { borrarBorrador(b.dataset.bdesc); pintarReanudar() } })
 }
 function pintarRuta() {
   const box = $('rutaBox'); if (!box) return
@@ -5188,7 +5302,7 @@ function pintarPerfil() {
       <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pfAyuda" ${pf.ayuda ? 'checked' : ''}> Usa bastón o andador / riesgo alto de caídas</label></div>
     <div class="chips">${act.map(([k, n, d]) => `<button data-act="${k}" class="${pf.actividad === k ? 'on' : ''}" title="${d}">${n} <small style="font-weight:600;opacity:.75">${d}</small></button>`).join('')}</div>
     ${!pf.actividad ? '<div class="nota">Elegí la actividad física y la lista se ordena sola: arriba lo que puede hacer, y lo exigente aparte.</div>' : ''}`
-  const refrescar = () => { pintarPerfil(); pintarRuta(); pintarGrid() }
+  const refrescar = () => { guardarPerfiles(); pintarPerfil(); pintarRuta(); pintarGrid() }
   box.querySelectorAll('[data-act]').forEach(b => b.onclick = () => { pf.actividad = pf.actividad === b.dataset.act ? null : b.dataset.act; refrescar() })
   $('pfEdad').onchange = (e) => { pf.edad = e.target.value === '' ? null : +e.target.value; refrescar() }
   $('pfAyuda').onchange = (e) => { pf.ayuda = e.target.checked; refrescar() }
@@ -5282,7 +5396,7 @@ function pantallaBloqueo() {
   $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
     <div class="panel"><h2>🔒 Test BiOLAB solo en PuntoBiO</h2><div id="ubicBox"></div>
       <p class="sub" style="margin-top:10px">Las evaluaciones se hacen en el centro. Desde afuera podés ver la ficha del paciente, la lista de tests realizados y los informes.</p></div>`
-  $('btnVolver').onclick = renderCatalogo; pintarUbic()
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo); pintarUbic()
 }
 
 function renderCatalogo() {
@@ -5306,6 +5420,7 @@ function renderCatalogo() {
       ${paciente ? `<label style="margin-top:14px">¿Por qué consulta?</label>
         <div class="chips" id="motivos">${Object.entries(RUTAS).map(([k, r]) => `<button data-m="${k}" class="${motivo === k ? 'on' : ''}">${r.n}</button>`).join('')}</div>
         <div id="rutaBox"></div>` : ''}
+      ${paciente ? '<div id="reanudarBox"></div>' : ''}
     </div>
     <div class="row" style="align-items:center;gap:10px;margin:4px 0 10px;flex-wrap:wrap">
       ${paciente ? '<h2 style="font-size:17px;margin:0">Todos los tests</h2>' : ''}
@@ -5320,9 +5435,10 @@ function renderCatalogo() {
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
   $('btnHistorial').onclick = renderHistorial
   pintarUbic(); verificarUbicacion().then(pintarUbic)
-  document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m
-    document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta() })
-  if (paciente) { pintarRuta(); cargarHechosHoy().then(pintarRuta) }
+  document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m; recordarMotivo()
+    document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta(); pintarReanudar() })
+  if (paciente && paciente.origen !== 'PRUEBA' && !motivo) { const m = motivoDeHoy(); if (m && RUTAS[m]) { motivo = m; document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)) } }
+  if (paciente) { pintarRuta(); cargarHechosHoy().then(() => { pintarRuta(); pintarReanudar() }) }
   $('btnPrueba').onclick = () => { paciente = { origen: 'PRUEBA' }; renderCatalogo() }
   let timer = null
   const q = $('qPac'); if (q && !paciente) q.focus()
@@ -5377,7 +5493,7 @@ function ubicacionHTML(t) {
 function ubicacionCorta(t) { const u = ubicacionDe(t); return `📱 ${esc(u.ipad)}${u.paciente ? ' · 🧍 ' + esc(u.paciente) : ''}` }
 
 function renderTest(id, opts = {}) {
-  resetSeguimiento()
+  resetSeguimiento(); sinGuardar = false; tocado = false
   if (!puedeEvaluar()) {
     if (ubic.estado === 'cargando') { verificarUbicacion().then(() => puedeEvaluar() ? renderTest(id, opts) : pantallaBloqueo()); return }
     return pantallaBloqueo()
@@ -5446,8 +5562,8 @@ function renderTest(id, opts = {}) {
       </div>
     </div>
     <div class="panel evo" id="evo" style="display:none"></div>`
-  $('btnVolver').onclick = renderCatalogo
-  $('btnReiniciar').onclick = () => renderTest(id)
+  $('btnVolver').onclick = () => conGuardado(renderCatalogo)
+  $('btnReiniciar').onclick = () => conGuardado(() => renderTest(id))
   $('selCam').value = facing
   if ($('selAviso')) {
     $('selAviso').value = avisoConteo
