@@ -3184,7 +3184,7 @@ function mostrarResultado(html, texto, datos) {
 
 async function guardarResultado() {
   const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Verificando la ubicación…'
-  await verificarUbicacion()
+  await verificarUbicacion(true)   // fresca: si arrancó en el centro y se fue, no guarda
   if (!puedeEvaluar()) { b.disabled = false; b.textContent = '💾 Guardar en la ficha'; alert('Los tests solo se pueden guardar en PuntoBiO. ' + (ubic.estado === 'fuera' ? `Estás a unos ${ubic.dist} m del centro.` : 'No se pudo confirmar la ubicación.')); return }
   b.textContent = 'Guardando…'
   const fila = {
@@ -4299,10 +4299,12 @@ async function verificarUbicacion(forzar = false) {
   if (!forzar && ubic.estado !== 'cargando' && Date.now() - ubic.t < 5 * 60000) return ubic
   try {
     if (!miEmail) { const { data } = await supabase.auth.getUser(); miEmail = ((data && data.user && data.user.email) || '').toLowerCase() }
-    const { data: cfg } = await supabase.from('test_biolab_config').select('*').eq('id', 1).maybeSingle()
+    const { data: cfg, error: errCfg } = await supabase.from('test_biolab_config').select('*').eq('id', 1).maybeSingle()
+    if (errCfg) throw errCfg
     ubic = { estado: 'cargando', t: Date.now(), cfg: cfg || null }
     if (ADMIN_UBIC.includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }     // Lu y Jime evalúan desde cualquier lugar
-    if (!cfg || !cfg.activo || cfg.lat == null) { ubic.estado = 'inactivo'; return ubic }
+    // 4/10/26: candado SIEMPRE activo. Si el centro todavía no tiene ubicación fijada, NO se evalúa.
+    if (!cfg || cfg.lat == null) { ubic.estado = 'inactivo'; return ubic }
     if ((cfg.emails_excepcion || []).map(x => x.toLowerCase()).includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }
     const pos = await posicion()
     const d = distM(pos, cfg), margen = Math.min(pos.acc || 0, 100)
@@ -4313,14 +4315,16 @@ async function verificarUbicacion(forzar = false) {
   ubic.t = Date.now()
   return ubic
 }
-const puedeEvaluar = () => ['ok', 'inactivo', 'excepcion'].includes(ubic.estado)
+// Solo 'ok' (dentro del radio) o 'excepcion' (Lu, Jime y los mails de excepción). Todo lo demás bloquea:
+// sin permiso, sin señal, error o ubicación del centro sin fijar. Nunca se deja pasar por defecto.
+const puedeEvaluar = () => ['ok', 'excepcion'].includes(ubic.estado)
 function cartelUbicacion() {
   const u = ubic
   if (u.estado === 'ok') return `<div class="ubic ok">📍 Estás en PuntoBiO: podés evaluar.</div>`
-  if (u.estado === 'excepcion') return `<div class="ubic ok">📍 Tenés permiso para evaluar desde cualquier lugar.${ADMIN_UBIC.includes(miEmail) && !(u.cfg && u.cfg.activo) ? ' El candado para el resto del equipo todavía no está activo: parate en PuntoBiO y fijá la ubicación.' : ''}</div>`
-  if (u.estado === 'inactivo') return ADMIN_UBIC.includes(miEmail) ? `<div class="ubic warn">📍 El candado de ubicación todavía no está activo. Parate en PuntoBiO y tocá <b>Fijar la ubicación de PuntoBiO acá</b>.</div>` : ''
+  if (u.estado === 'excepcion') return `<div class="ubic ok">📍 Tenés permiso para evaluar desde cualquier lugar.${ADMIN_UBIC.includes(miEmail) && !(u.cfg && u.cfg.lat != null) ? ' <b>Ojo:</b> todavía no está fijada la ubicación de PuntoBiO, así que el resto del equipo NO puede evaluar. Parate en el centro y tocá <b>Fijar la ubicación de PuntoBiO acá</b>.' : ''}</div>`
   if (u.estado === 'cargando') return `<div class="ubic">📍 Verificando la ubicación…</div>`
-  const motivo = u.estado === 'fuera' ? `Estás a unos ${u.dist >= 1000 ? (u.dist / 1000).toFixed(1).replace('.', ',') + ' km' : u.dist + ' m'} del centro.`
+  const motivo = u.estado === 'inactivo' ? 'Todavía no está fijada la ubicación del centro: avisale a Lu o a Jime.'
+    : u.estado === 'fuera' ? `Estás a unos ${u.dist >= 1000 ? (u.dist / 1000).toFixed(1).replace('.', ',') + ' km' : u.dist + ' m'} del centro.`
     : u.estado === 'sinpermiso' ? 'No diste permiso de ubicación. En el iPad: Configuración → Safari → Ubicación → Preguntar o Permitir, y recargá.'
     : 'No se pudo obtener la ubicación (' + esc(u.msg || 'sin señal') + ').'
   return `<div class="ubic bad">🔒 <b>Los tests solo se pueden hacer en PuntoBiO.</b> ${motivo} Podés ver fichas, tests realizados e informes. <button class="lnk" id="btnReUbic">Volver a verificar</button></div>`
@@ -4332,7 +4336,7 @@ function panelUbicacionAdmin() {
     <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
       <button class="b pri" id="ubFijar">📍 Fijar la ubicación de PuntoBiO acá</button>
       <span style="font-weight:700">Radio: ${RADIO_M} m</span>
-      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ubActivo" ${c.activo ? 'checked' : ''}> Candado activo</label>
+      <span style="font-weight:700">🔒 Candado siempre activo</span>
     </div>
     <label style="display:block;margin-top:8px">Además de Lu y Jime, pueden evaluar desde cualquier lugar (mails separados por coma)
       <input type="text" id="ubExc" value="${esc((c.emails_excepcion || []).join(', '))}" style="width:100%"></label>
@@ -4353,7 +4357,7 @@ function engancharUbicacion() {
   }
   if ($('ubGuardar')) $('ubGuardar').onclick = async () => {
     const exc = $('ubExc').value.split(',').map(x => x.trim().toLowerCase()).filter(Boolean)
-    const { error } = await supabase.from('test_biolab_config').update({ radio_m: RADIO_M, activo: $('ubActivo').checked, emails_excepcion: exc, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
+    const { error } = await supabase.from('test_biolab_config').update({ radio_m: RADIO_M, activo: true, emails_excepcion: exc, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
     $('ubNota').textContent = error ? 'No se pudo guardar: ' + error.message : 'Guardado.'
     if (!error) { await verificarUbicacion(true); pintarUbic() }
   }
