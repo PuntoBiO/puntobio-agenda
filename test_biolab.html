@@ -133,6 +133,13 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .gon .lect{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(15,23,42,.88);border-radius:14px;padding:6px 18px;font-family:'JetBrains Mono',monospace;font-size:34px;font-weight:600;pointer-events:none}
 .gon .vacio{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:30px;color:#94a3b8;font-size:15px}
 .gon input[type=number]{width:70px;font:inherit;padding:6px;border-radius:8px;border:0}
+.pregunta{position:absolute;inset:0;background:rgba(15,23,42,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:16px;z-index:5}
+.pregunta .pq{color:#fff;font-size:26px;font-weight:800;text-align:center}
+.pregunta .pq small{display:block;font-size:14px;font-weight:600;color:#cbd5e1;margin-top:4px}
+.pregunta .pbtns{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
+.pregunta .pbtns button{font:inherit;background:#fff;border:0;border-radius:18px;padding:16px 18px;min-width:150px;font-size:40px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
+.pregunta .pbtns b{font-size:17px;color:#0f172a}.pregunta .pbtns small{font-size:12px;color:#64748b}
+.pregunta .pno{font:inherit;background:transparent;border:1px solid #64748b;color:#cbd5e1;border-radius:10px;padding:8px 14px;cursor:pointer}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -295,6 +302,7 @@ const TESTS = [
         <li>Tocás <b>Empezar</b> → 3-2-1 → <b>sube la cadera con los dos pies</b>. El sistema toma la pelvis como referencia (2 segundos).</li>
         <li>Cuando el iPad dice <b>"ahora estirá la pierna"</b>, extiende la pierna que NO apoya, en línea con el muslo. Arranca el cronómetro.</li>
         <li>Corta solo al llegar al <b>tiempo objetivo</b> (30 s por defecto) o si la pelvis se cae / rota mucho. Si baja antes, tocá <b>"Bajó / cortar"</b>.</li>
+        <li>Al terminar cada pierna, el iPad le <b>pregunta en voz alta dónde lo sintió</b> y aparecen 3 botones grandes (cola · atrás del muslo · cintura): toca el paciente o vos.</li>
         <li>Después, la otra pierna: arranca sola al quedar ubicado.</li>
       </ol>
       <b>Cómo se lee:</b> pelvis horizontal = buen control. Si cae o rota más de 8°, falta control lumbopélvico de ese lado. Preguntale <b>dónde lo siente</b>: glúteo (bien), isquios o lumbares (compensa).<br>
@@ -1649,17 +1657,36 @@ const DETECTORES = {
       setBig(`${fmt(Math.min(t, obj), 1)} / ${obj} s`)
       if (t >= obj) d.cerrar(obj, null)
     }
-    d.cerrar = (t, motivo) => {
+    // Al terminar cada pierna el iPad pregunta en voz alta dónde lo sintió, con 3 botones grandes
+    // sobre la imagen (los puede tocar el paciente desde la colchoneta o el profesional).
+    const preguntarFatiga = (lado) => new Promise((resolver) => {
+      const stage = document.querySelector('.stage'); if (!stage) return resolver('—')
+      const caja = document.createElement('div'); caja.className = 'pregunta'
+      caja.innerHTML = `<div class="pq">¿Dónde lo sentiste más? <small>pierna de apoyo ${lado === 'D' ? 'derecha' : 'izquierda'}</small></div>
+        <div class="pbtns"><button data-r="Glúteos">🍑<b>Cola</b><small>glúteo</small></button>
+          <button data-r="Isquiosurales">🦵<b>Atrás del muslo</b><small>isquios</small></button>
+          <button data-r="Lumbares">🔙<b>Cintura</b><small>lumbar</small></button></div>
+        <button class="pno" data-r="—">No sabe / en ningún lado</button>`
+      stage.appendChild(caja)
+      decir('¿Dónde lo sentiste más? ¿Cola, atrás del muslo o cintura?')
+      let listo = false
+      const fin = (r) => { if (listo) return; listo = true; caja.remove(); beep(1100, 80); resolver(r) }
+      caja.querySelectorAll('[data-r]').forEach(b => b.onclick = () => fin(b.dataset.r))
+      setTimeout(() => fin('—'), 30000)      // si nadie contesta en 30 s, sigue sin marcar
+    })
+    d.cerrar = async (t, motivo) => {
       if (d.fase !== 'midiendo') return
       if (t == null) t = (performance.now() - d.t0) / 1000
-      const L = LADOS[d.idx]; d.fase = 'quieto'; beep(motivo ? 400 : 900, 400)
+      const L = LADOS[d.idx]; d.fase = 'quieto'; beep(motivo ? 400 : 900, 400); setBig('')
       const s = { control: d.maxInc > U.control ? 'NO' : 'SI', fatiga: '—', tiempo: +t.toFixed(1) }
       d.res[L.lado] = { ...s, inclinacion_max: +d.maxInc.toFixed(1), corte: motivo || (t >= objetivo() ? 'llegó al objetivo' : 'cortado a mano') }
       d.sug[L.lado] = { ...s }
+      setEstado(`Apoyo ${L.nombre}: ${fmt(t, 1)} s${motivo ? ' (' + motivo + ')' : ''}. Esperando la respuesta: ¿dónde lo sintió?`, 'warn')
+      d.res[L.lado].fatiga = await preguntarFatiga(L.lado)
       d.idx++
-      if (d.idx < 2) { prox(); setEstado(`Apoyo ${L.nombre} listo: ${fmt(t, 1)} s${motivo ? ' (' + motivo + ')' : ''}. Ahora la otra pierna: arranca sola al quedar ubicado.`, 'ok')
-        setTimeout(() => decir('Bajá y descansá. Ahora la otra pierna.'), 900); setTimeout(() => { if (d.fase === 'quieto' && d.idx < 2) d.armado = true }, 8000) }
-      else { d.autoArmar = false; decir('Listo. Terminamos.'); setEstado('Terminado. Elegí qué grupo se fatiga y revisá la planilla.', 'ok'); $('btnEmpezar').textContent = 'Empezar'; pintar() }
+      if (d.idx < 2) { prox(); setEstado(`Apoyo ${L.nombre} listo. Ahora la otra pierna: arranca sola al quedar ubicado.`, 'ok')
+        setTimeout(() => decir('Descansá. Ahora la otra pierna.'), 600); setTimeout(() => { if (d.fase === 'quieto' && d.idx < 2) d.armado = true }, 7000) }
+      else { d.autoArmar = false; decir('Listo. Terminamos.'); setEstado('Terminado. Revisá la planilla.', 'ok'); $('btnEmpezar').textContent = 'Empezar'; pintar() }
     }
     d.terminar = () => d.cerrar(null, 'cortado a mano')
     const pintar = () => {
