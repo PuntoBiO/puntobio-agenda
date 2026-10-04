@@ -158,6 +158,7 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .tag{display:inline-block;font-size:11px;font-weight:800;padding:2px 7px;border-radius:6px;background:#e0f2fe;color:var(--turq-d)}
 .ubic{margin:10px 0 0;padding:10px 14px;border-radius:12px;font-size:14px;font-weight:600;background:#f1f5f9;color:#334155}
 .ubic.ok{background:#dcfce7;color:#14532d}.ubic.warn{background:#fef3c7;color:#78350f}.ubic.bad{background:#fee2e2;color:#7f1d1d}
+.ladoD{color:#F0832A !important}.ladoI{color:#14B8C4 !important}
 button.lnk{background:none;border:0;color:var(--dim);font:inherit;font-size:13px;text-decoration:underline;cursor:pointer;padding:6px 2px}
 
 .panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px}
@@ -191,7 +192,7 @@ button.b:disabled{opacity:.45;cursor:not-allowed}
 <script type="module">
 import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
-import { EVO, ROM, ROM_ITEMS, LSI_OK, INFO, interpretar, PEL_ANAM, ICIQ_FREC, ICIQ_CANT, ICIQ_CUANDO, SANDVIK_F, SANDVIK_C, PEL_TAREAS, htmlProtocoloPelvico } from './tests_biolab_comun.js'
+import { EVO, ROM, ROM_ITEMS, LSI_OK, INFO, interpretar, PEL_ANAM, ICIQ_FREC, ICIQ_CANT, ICIQ_CUANDO, SANDVIK_F, SANDVIK_C, PEL_TAREAS, htmlProtocoloPelvico, curvaPro, COLOR_I, COLOR_D } from './tests_biolab_comun.js'
 
 // Mismo cliente que app.html, con el lock propio (sin él getSession() se cuelga en el iframe de Safari)
 const supabase = createClient('https://bqpjtoiictnzcasxfucf.supabase.co', 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi', {
@@ -923,6 +924,11 @@ FOTO.eips_pie_0 = fotoEips('Test de flexión DE PIE · erguido', 'pie_0')
 FOTO.eips_pie_1 = fotoEips('Test de flexión DE PIE · en flexión', 'pie_1')
 FOTO.eips_sen_0 = fotoEips('Test de flexión SENTADO · erguido', 'sen_0')
 FOTO.eips_sen_1 = fotoEips('Test de flexión SENTADO · en flexión', 'sen_1')
+const fotoAdams = (zona, n) => ({ titulo: 'Maniobra de Adams · ' + n + ' (automático)', modo: 'adams', zona, nombres: ['Espalda', 'Espalda'],
+  ayuda: 'Paciente inclinado hacia adelante, espalda horizontal y descubierta. iPad derecho, a la ALTURA DE LA ESPALDA y "de canto": ' + (zona === 'lum' ? 'desde ATRÁS del paciente' : 'desde la CABEZA del paciente') + ', que se vea el ancho de la espalda contra un fondo liso. Sacá la foto: el sistema encuentra la giba, traza la línea y mide el ángulo solo. Si hace falta, corré un punto con el dedo.' })
+FOTO.adams_tor = fotoAdams('tor', 'zona torácica')
+FOTO.adams_tl = fotoAdams('tl', 'zona toracolumbar')
+FOTO.adams_lum = fotoAdams('lum', 'zona lumbar')
 FOTO.adams_foto = { titulo: 'Maniobra de Adams · ángulo de la giba', modo: 'horizontal', nombres: ['Lado izquierdo de la espalda', 'Lado derecho de la espalda'],
   ayuda: 'Foto con la espalda "de canto": iPad a la altura de la espalda, mirando desde la cabeza o desde atrás. Marcá un punto a cada lado de la columna, en lo más alto de cada lado, a la altura de la giba. Mide la inclinación de esa línea contra la horizontal (el iPad tiene que estar derecho).' }
 FOTO.alcance_v = { titulo: 'Alcance funcional', modo: 'alcance' }
@@ -938,6 +944,47 @@ async function modeloImagen() {
   const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 1 })
   try { landmarkerImg = await PoseLandmarker.createFromOptions(vision, o('GPU')) } catch (e) { landmarkerImg = await PoseLandmarker.createFromOptions(vision, o('CPU')) }
   return landmarkerImg
+}
+
+// Mismo modelo pero que además devuelve la silueta (máscara de la persona): la usa Adams para leer el contorno de la espalda.
+let landmarkerSeg = null
+async function modeloImagenSeg() {
+  if (landmarkerSeg) return landmarkerSeg
+  const vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm')
+  const o = (delegate) => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task', delegate }, runningMode: 'IMAGE', numPoses: 1, outputSegmentationMasks: true })
+  try { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('GPU')) } catch (e) { landmarkerSeg = await PoseLandmarker.createFromOptions(vision, o('CPU')) }
+  return landmarkerSeg
+}
+// ADAMS AUTOMÁTICO: con la espalda "de canto", el borde de arriba de la silueta es la superficie de la espalda.
+// Busca el punto más alto (la giba) en el ancho del tronco de la zona elegida, toma el punto espejo del otro lado
+// de la columna y mide la inclinación de esa línea (como el escoliómetro). También dice de qué lado está la giba.
+async function adamsAuto(img, W, H, zona) {
+  const r = (await modeloImagenSeg()).detect(img)
+  const m = r.segmentationMasks && r.segmentationMasks[0]; if (!m) return null
+  const mw = m.width, mh = m.height, a = m.getAsFloat32Array()
+  const top = new Array(mw).fill(null)
+  for (let x = 0; x < mw; x++) for (let y = 0; y < mh; y++) if (a[y * mw + x] > 0.5) { top[x] = y; break }
+  try { m.close() } catch (e) {}
+  const L = r.landmarks && r.landmarks[0]
+  let mid, half, derImg = 'der'
+  if (L) {
+    const par = zona === 'lum' ? [23, 24] : zona === 'tl' ? null : [11, 12]
+    const xs = par ? par.map(i => L[i].x * mw) : [L[11].x, L[12].x, L[23].x, L[24].x].map(v => v * mw)
+    mid = xs.reduce((p, c) => p + c, 0) / xs.length
+    half = Math.max(Math.abs(L[11].x - L[12].x), Math.abs(L[23].x - L[24].x)) * mw / 2
+    derImg = L[12].x > L[11].x ? 'der' : 'izq'       // de qué lado de la imagen quedó el lado DERECHO del paciente
+  }
+  if (!L || half < mw * 0.05) {                       // sin puntos del cuerpo: usa el ancho de la silueta
+    const cols = top.map((y, x) => y == null ? null : x).filter(x => x != null); if (!cols.length) return null
+    mid = (cols[0] + cols[cols.length - 1]) / 2; half = (cols[cols.length - 1] - cols[0]) / 2 * 0.7
+  }
+  const minEn = (x0, x1) => { let best = null; for (let x = Math.max(0, Math.round(x0)); x <= Math.min(mw - 1, Math.round(x1)); x++) if (top[x] != null && (best == null || top[x] < best.y)) best = { x, y: top[x] }; return best }
+  const izq = minEn(mid - half * 0.95, mid - half * 0.12), der = minEn(mid + half * 0.12, mid + half * 0.95)
+  if (!izq || !der) return null
+  const apex = izq.y <= der.y ? izq : der, xEsp = 2 * mid - apex.x
+  const esp = minEn(xEsp - half * 0.06, xEsp + half * 0.06) || { x: xEsp, y: (apex === izq ? der : izq).y }
+  const pA = { x: apex.x * W / mw, y: apex.y * H / mh }, pB = { x: esp.x * W / mw, y: esp.y * H / mh }
+  return { pts: pA.x < pB.x ? [pA, pB] : [pB, pA], derImg }
 }
 
 // Goniómetro por foto: sacás o elegís la foto, el sistema pone los puntos, los corrés con el dedo
@@ -969,6 +1016,9 @@ function abrirGoniometro(cfg, lado, alUsar) {
     }
     if (cfg.modo === 'vertical') { const [a, b] = pts; return Math.atan2(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) * 180 / Math.PI }
     if (cfg.modo === 'horizontal') { const [a, b] = pts; return Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)) * 180 / Math.PI }
+    if (cfg.modo === 'adams') { const [a, b] = pts, alto = a.y <= b.y ? a : b, enDerImg = alto.x > (a.x + b.x) / 2
+      cfg._lado = Math.abs(a.y - b.y) < 1 ? '—' : (enDerImg === (cfg._derImg !== 'izq') ? 'Derecho' : 'Izquierdo')
+      return Math.atan2(Math.abs(b.y - a.y), Math.abs(b.x - a.x)) * 180 / Math.PI }
     if (cfg.modo === 'lineas') { let d = Math.abs(ang(pts[0], pts[1]) - ang(pts[2], pts[3])) % 180; return d > 90 ? 180 - d : d }
     if (cfg.modo === 'distancia') { const ref = parseFloat(ov.querySelector('#gRef').value) || 0, pr = dist(pts[0], pts[1]); return pr > 0 ? dist(pts[2], pts[3]) * ref / pr : null }
   }
@@ -982,7 +1032,7 @@ function abrirGoniometro(cfg, lado, alUsar) {
       if (cfg.plomada != null) { ctx.setLineDash([8, 6]); linea({ x: P[cfg.plomada].x, y: 0 }, { x: P[cfg.plomada].x, y: can.height }, '#fbbf24'); ctx.setLineDash([]) }
       if (cfg.horizontales) cfg.horizontales.forEach(i => { ctx.setLineDash([4, 6]); linea({ x: 0, y: P[i].y }, { x: can.width, y: P[i].y }, 'rgba(251,191,36,.6)'); ctx.setLineDash([]) }) }
     else if (cfg.modo === 'angulo') { linea(P[0], P[1], '#22d3ee'); linea(P[1], P[2], '#22d3ee') }
-    else if (cfg.modo === 'vertical' || cfg.modo === 'horizontal') {
+    else if (cfg.modo === 'vertical' || cfg.modo === 'horizontal' || cfg.modo === 'adams') {
       linea(P[0], P[1], '#22d3ee'); ctx.setLineDash([8, 6])
       linea(P[0], cfg.modo === 'vertical' ? { x: P[0].x, y: P[0].y - 220 } : { x: P[0].x + (P[1].x >= P[0].x ? 220 : -220), y: P[0].y }, '#fbbf24'); ctx.setLineDash([])
     } else { linea(P[0], P[1], '#fbbf24'); linea(P[2], P[3], '#22d3ee') }
@@ -1011,6 +1061,11 @@ function abrirGoniometro(cfg, lado, alUsar) {
       if (n === 3) pts = [{ x: W * 0.35, y: H * 0.3 }, { x: W * 0.5, y: H * 0.5 }, { x: W * 0.4, y: H * 0.75 }]
       if (cfg.modo === 'multi') pts = Array.from({ length: n }, (_, i) => ({ x: W * (0.42 + 0.16 * (i % 2)), y: H * (0.1 + 0.8 * i / Math.max(n - 1, 1)) }))
       dibujar()
+      if (cfg.modo === 'adams') {
+        ov.querySelector('#gLect').style.display = ''; ov.querySelector('#gLect').textContent = 'Leyendo el contorno de la espalda…'
+        try { const r = await adamsAuto(img, W, H, cfg.zona); if (r) { pts = r.pts; cfg._derImg = r.derImg } } catch (er) { console.warn('Adams automático', er) }
+        dibujar()
+      }
       if (cfg.lm || cfg.lmP || cfg.lmFijos) {
         ov.querySelector('#gLect').textContent = 'Buscando el cuerpo…'
         try {
@@ -1204,7 +1259,7 @@ function renderROM(opts = {}) {
 
   function pintarTabla() {
     document.querySelectorAll('#chips button').forEach(b => b.classList.toggle('on', secs.has(b.dataset.s)))
-    $('tabRom').innerHTML = `<tr><th>Medida</th><th>D</th><th>I</th><th>LSI</th><th>Referencia</th></tr>` +
+    $('tabRom').innerHTML = `<tr><th>Medida</th><th class="ladoD">D</th><th class="ladoI">I</th><th>LSI</th><th>Referencia</th></tr>` +
       ROM.filter(g => secs.has(g.sec)).map(g => `<tr><td class="sec" colspan="5">${g.n.toUpperCase()}</td></tr>` + g.items.map(it => {
         const celda = (L) => it.calc
           ? `<span class="calc" id="c_${it.k}_${L}">—</span>`
@@ -1267,7 +1322,7 @@ function renderROM(opts = {}) {
     const box = $('evoRom'), conDatos = ROM_ITEMS.filter(it => historial.filter(t => t.m[it.k]).length >= 1)
     if (!conDatos.length) { box.style.display = 'none'; return }
     box.style.display = ''
-    box.innerHTML = `<h3>📈 Evolución por medida</h3><div class="sub2">${esc(paciente.nombre)} · <span class="leg"><b style="background:#334155"></b>Derecha<b style="background:#f59e0b"></b>Izquierda</span></div>
+    box.innerHTML = `<h3>📈 Evolución por medida</h3><div class="sub2">${esc(paciente.nombre)} · <span class="leg"><b style="background:#14B8C4"></b>Izquierda<b style="background:#F0832A"></b>Derecha</span></div>
       <div class="evodi">${conDatos.map(it => `<div class="box"><h5>${it.n}</h5>${curvaDI(historial.filter(t => t.m[it.k]).map(t => ({ f: t.f, D: t.m[it.k].D, I: t.m[it.k].I, lsi: t.m[it.k].lsi })), it)}</div>`).join('')}</div>`
   }
   document.querySelectorAll('#chips button').forEach(b => b.onclick = () => { secs.has(b.dataset.s) ? secs.delete(b.dataset.s) : secs.add(b.dataset.s); pintarTabla() })
@@ -1279,22 +1334,11 @@ function renderROM(opts = {}) {
 
 // curva D / I de una medida (con su referencia si tiene)
 function curvaDI(tomas, it) {
-  const W = 320, H = 150, ml = 32, mr = 10, mt = 14, mb = 22
-  const vals = tomas.flatMap(t => [t.D, t.I]).filter(v => v != null).concat(it.ref ? [it.ref.min ?? it.ref.max] : [])
-  if (!vals.length) return ''
-  let lo = Math.min(...vals), hi = Math.max(...vals); const pad = (hi - lo) * 0.2 || Math.abs(hi) * 0.15 || 5; lo -= pad; hi += pad
-  const t0 = +tomas[0].f, t1 = +tomas[tomas.length - 1].f
-  const X = (f) => ml + (t1 === t0 ? 0.5 : (+f - t0) / (t1 - t0)) * (W - ml - mr)
-  const Y = (v) => mt + (1 - (v - lo) / (hi - lo)) * (H - mt - mb)
-  const serie = (L, col) => { const pts = tomas.filter(t => t[L] != null); if (!pts.length) return ''
-    return `<path d="${pts.map((t, i) => `${i ? 'L' : 'M'}${X(t.f).toFixed(1)},${Y(t[L]).toFixed(1)}`).join(' ')}" fill="none" stroke="${col}" stroke-width="2.5"/>` +
-      pts.map(t => `<circle cx="${X(t.f)}" cy="${Y(t[L])}" r="4" fill="#fff" stroke="${col}" stroke-width="2.5"/><text x="${X(t.f)}" y="${Y(t[L]) - 7}" text-anchor="middle" font-size="10" font-weight="700" fill="${col}">${fmt(t[L], 0)}</text>`).join('') }
-  const refY = it.ref ? (it.ref.min ?? it.ref.max) : null
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">
-    ${refY != null && refY > lo && refY < hi ? `<line x1="${ml}" x2="${W - mr}" y1="${Y(refY)}" y2="${Y(refY)}" stroke="#d97706" stroke-dasharray="5 4"/><text x="${W - mr}" y="${Y(refY) - 3}" text-anchor="end" font-size="9.5" fill="#b45309">${esc(it.ref.txt)}</text>` : ''}
-    ${serie('D', '#334155')}${serie('I', '#f59e0b')}
-    ${tomas.map(t => `<text x="${X(t.f)}" y="${H - 6}" text-anchor="middle" font-size="9.5" fill="#64748b">${t.f.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' })}${t.lsi != null ? ' · ' + fmt(t.lsi, 0) + '%' : ''}</text>`).join('')}
-  </svg>`
+  // izquierdo turquesa, derecho naranja (igual en todo el sistema)
+  return curvaPro({ W: 420, H: 220, dec: 0, series: [
+      { nombre: 'Izquierdo', color: COLOR_I, puntos: tomas.filter(t => t.I != null).map(t => ({ f: t.f, v: t.I })) },
+      { nombre: 'Derecho', color: COLOR_D, puntos: tomas.filter(t => t.D != null).map(t => ({ f: t.f, v: t.D })) }],
+    bandas: it.ref && (it.ref.min ?? it.ref.max) != null ? [{ y: it.ref.min ?? it.ref.max, txt: it.ref.txt }] : [] })
 }
 
 // Squat monopodal (tablas Asinari, págs. 48–52). "apoyo" = lado de la pierna que sostiene.
@@ -1372,16 +1416,16 @@ const PLANILLAS = {
         <li>Espalda <b>descubierta</b>, descalzo, pies juntos y rodillas estiradas.</li>
         <li>Se inclina <b>hacia adelante</b> con los brazos colgando y las palmas juntas, hasta que la espalda quede horizontal, despacio.</li>
         <li>Mirá desde atrás (y desde la cabeza) si un lado de la espalda queda <b>más alto</b> que el otro: la <b>giba</b>. Fijate en la zona <b>torácica</b>, <b>toracolumbar</b> y <b>lumbar</b>.</li>
-        <li>Medí el ángulo de cada zona: con <b>escoliómetro</b> (o la app del celu apoyada sobre la espalda) o con <b>📷 foto</b>: iPad <b>a la altura de la espalda, de frente a la cabeza o desde atrás</b>, que la espalda se vea "de canto"; marcás un punto a cada lado de la columna, en lo más alto de cada lado.</li>
+        <li><b>📷 Automático (recomendado):</b> tocá la cámara de la zona y sacá la foto con el iPad a la altura de la espalda, "de canto" (torácica y toracolumbar desde la cabeza del paciente; lumbar desde atrás), con fondo liso. El sistema encuentra la giba, traza la línea, mide el ángulo y marca solo el lado. Tocás <b>Usar este valor</b> y listo. También se puede cargar a mano con escoliómetro.</li>
         <li>Si hay giba, repetilo <b>sentado</b>: si desaparece, puede venir de una diferencia de largo de piernas.</li>
       </ol>
       <b>Cómo se lee:</b> un ángulo de rotación del tronco (ATR) de <b>5° o más</b> se vigila y de <b>7° o más</b> suele derivarse para radiografía (los cortes varían según la guía). Es un <b>screening</b>: no diagnostica escoliosis, que se confirma con Rx (ángulo de Cobb).`,
     campos: [
-      { k: 'atr_tor', n: 'ATR torácico', num: true, unidad: '°', foto: 'adams_foto' },
+      { k: 'atr_tor', n: 'ATR torácico', num: true, unidad: '°', foto: 'adams_tor', auto: () => { const l = FOTO.adams_tor._lado; FOTO.adams_tor._lado = null; return l ? [['giba_tor', l]] : [] } },
       { k: 'giba_tor', n: 'Giba torácica del lado', ops: ['—', 'Derecho', 'Izquierdo'], def: '—' },
-      { k: 'atr_tl', n: 'ATR toracolumbar', num: true, unidad: '°', foto: 'adams_foto' },
+      { k: 'atr_tl', n: 'ATR toracolumbar', num: true, unidad: '°', foto: 'adams_tl', auto: () => { const l = FOTO.adams_tl._lado; FOTO.adams_tl._lado = null; return l ? [['giba_tl', l]] : [] } },
       { k: 'giba_tl', n: 'Giba toracolumbar del lado', ops: ['—', 'Derecho', 'Izquierdo'], def: '—' },
-      { k: 'atr_lum', n: 'ATR lumbar', num: true, unidad: '°', foto: 'adams_foto' },
+      { k: 'atr_lum', n: 'ATR lumbar', num: true, unidad: '°', foto: 'adams_lum', auto: () => { const l = FOTO.adams_lum._lado; FOTO.adams_lum._lado = null; return l ? [['giba_lum', l]] : [] } },
       { k: 'giba_lum', n: 'Giba lumbar del lado', ops: ['—', 'Derecho', 'Izquierdo'], def: '—' },
       { k: 'sentado', n: 'Sentado, la giba…', ops: ['—', 'Persiste', 'Desaparece'], def: '—' },
       { k: 'dolor', n: 'Dolor al inclinarse', ops: ['NO', 'SI'], def: 'NO' },
@@ -1802,7 +1846,7 @@ function renderPlanilla(spec, def) {
       ${aptitud(spec.id) !== 'ok' ? `<div class="necbox" style="background:#fef3c7;border-color:#fcd34d">${ETQ_APT[aptitud(spec.id)]}</div>` : ''}
       <div class="infobox">${def.info}</div>
       ${def.fotos ? `<div class="btns" style="margin:4px 0 10px">${def.fotos.map(f => `<button class="b pri" data-fgrupo="${f.cfg}">${f.label}</button>`).join('')}</div>` : ''}<div class="fotos" id="plFotos"></div>
-      <div style="overflow-x:auto"><table class="rom pl"><tr><th></th><th>${(def.ladosNombres || ['D', 'I'])[0]}</th><th>${(def.ladosNombres || ['D', 'I'])[1]}</th></tr>
+      <div style="overflow-x:auto"><table class="rom pl"><tr><th></th><th class="${def.ladosNombres ? '' : 'ladoD'}">${(def.ladosNombres || ['D', 'I'])[0]}</th><th class="${def.ladosNombres ? '' : 'ladoI'}">${(def.ladosNombres || ['D', 'I'])[1]}</th></tr>
         ${def.campos.map(c => {
           const celda = (L) => c.num
             ? `<input type="number" inputmode="decimal" step="any" data-k="${clave(c.k, L)}" data-num="1">${c.unidad ? ' <small>' + c.unidad + '</small>' : ''}${c.crono ? `<button class="btnfoto" data-crono="${clave(c.k, L)}" data-limite="${c.limite || ''}" title="Cronómetro">▶ Empezar</button>` : ''}${c.contador ? `<button class="btnfoto" data-mas="${clave(c.k, L)}">+1 vuelta</button>` : ''}${c.vivo ? `<button class="btnfoto" data-vivo="${c.vivo}" data-para="${clave(c.k, L)}" data-lado="${L || 'D'}" title="Medir en vivo: toma el máximo">🎥</button>` : ''}${c.foto ? `<button class="btnfoto" data-foto="${c.foto}" data-para="${clave(c.k, L)}" data-lado="${L || 'D'}" title="Medir con foto">📷</button>` : ''}`
@@ -3184,7 +3228,7 @@ function mostrarResultado(html, texto, datos) {
 
 async function guardarResultado() {
   const b = $('btnGuardar'); b.disabled = true; b.textContent = 'Verificando la ubicación…'
-  await verificarUbicacion(true)   // fresca: si arrancó en el centro y se fue, no guarda
+  await verificarUbicacion()
   if (!puedeEvaluar()) { b.disabled = false; b.textContent = '💾 Guardar en la ficha'; alert('Los tests solo se pueden guardar en PuntoBiO. ' + (ubic.estado === 'fuera' ? `Estás a unos ${ubic.dist} m del centro.` : 'No se pudo confirmar la ubicación.')); return }
   b.textContent = 'Guardando…'
   const fila = {
@@ -3270,29 +3314,8 @@ function tablaTomas(tomas, cfg) {
 }
 
 function curva(tomas, cfg) {
-  const W = 640, H = 240, ml = 52, mr = 36, mt = 22, mb = 34
-  const vals = tomas.map(t => t.v).concat(cfg.bandas.map(b => b.y))
-  let lo = cfg.min != null ? cfg.min : Math.min(...vals), hi = cfg.max != null ? cfg.max : Math.max(...vals)
-  if (cfg.min == null) { const pad = (hi - lo) * 0.15 || Math.abs(hi) * 0.1 || 1; lo -= pad; hi += pad }
-  const t0 = +tomas[0].f, t1 = +tomas[tomas.length - 1].f
-  const X = (f) => ml + (t1 === t0 ? 0.5 : (+f - t0) / (t1 - t0)) * (W - ml - mr)
-  const Y = (v) => mt + (1 - (v - lo) / (hi - lo)) * (H - mt - mb)
-  const c = cambio(tomas[0].v, tomas[tomas.length - 1].v, cfg)
-  const color = c.igual ? '#64748b' : c.mejoro ? '#16a34a' : '#dc2626'
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map(k => lo + (hi - lo) * k)
-  const linea = tomas.map((t, i) => `${i ? 'L' : 'M'}${X(t.f).toFixed(1)},${Y(t.v).toFixed(1)}`).join(' ')
-  const area = `${linea} L${X(tomas[tomas.length - 1].f).toFixed(1)},${H - mb} L${X(tomas[0].f).toFixed(1)},${H - mb} Z`
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Curva de evolución">
-    ${ticks.map(v => `<line x1="${ml}" x2="${W - mr}" y1="${Y(v)}" y2="${Y(v)}" stroke="#eef2f7"/>
-      <text x="${ml - 8}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="#94a3b8" font-family="JetBrains Mono">${fmt(v, cfg.dec === 0 ? 0 : 1)}</text>`).join('')}
-    ${cfg.bandas.filter(b => b.y > lo && b.y < hi).map(b => `<line x1="${ml}" x2="${W - mr}" y1="${Y(b.y)}" y2="${Y(b.y)}" stroke="#d97706" stroke-dasharray="6 5"/>
-      <text x="${(ml + W - mr) / 2}" y="${Y(b.y) + 14}" text-anchor="middle" font-size="11" fill="#b45309" font-weight="700">${b.txt}</text>`).join('')}
-    <path d="${area}" fill="${color}" opacity=".08"/>
-    <path d="${linea}" fill="none" stroke="${color}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
-    ${tomas.map((t, i) => `<circle cx="${X(t.f)}" cy="${Y(t.v)}" r="5.5" fill="#fff" stroke="${color}" stroke-width="3"/>
-      <text x="${X(t.f)}" y="${Y(t.v) - 11}" text-anchor="${i === 0 && tomas.length > 1 ? 'start' : i === tomas.length - 1 && tomas.length > 1 ? 'end' : 'middle'}" font-size="12" font-weight="800" fill="#0f172a">${fmt(t.v, cfg.dec)}</text>
-      <text x="${X(t.f)}" y="${H - 12}" text-anchor="${i === 0 && tomas.length > 1 ? 'start' : i === tomas.length - 1 && tomas.length > 1 ? 'end' : 'middle'}" font-size="11" fill="#64748b">${t.f.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' })}</text>`).join('')}
-  </svg>`
+  return curvaPro({ series: [{ nombre: 'Paciente', puntos: tomas.map(t => ({ f: t.f, v: t.v })) }], bandas: cfg.bandas || [],
+    dec: cfg.dec ?? 1, unidad: cfg.unidad, mejor: cfg.mejor, min: cfg.min ?? null, max: cfg.max ?? null })
 }
 
 // Ficha completa del paciente: la MISMA pantalla que se ve en la HC y en SARKMED
@@ -4299,12 +4322,10 @@ async function verificarUbicacion(forzar = false) {
   if (!forzar && ubic.estado !== 'cargando' && Date.now() - ubic.t < 5 * 60000) return ubic
   try {
     if (!miEmail) { const { data } = await supabase.auth.getUser(); miEmail = ((data && data.user && data.user.email) || '').toLowerCase() }
-    const { data: cfg, error: errCfg } = await supabase.from('test_biolab_config').select('*').eq('id', 1).maybeSingle()
-    if (errCfg) throw errCfg
+    const { data: cfg } = await supabase.from('test_biolab_config').select('*').eq('id', 1).maybeSingle()
     ubic = { estado: 'cargando', t: Date.now(), cfg: cfg || null }
     if (ADMIN_UBIC.includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }     // Lu y Jime evalúan desde cualquier lugar
-    // 4/10/26: candado SIEMPRE activo. Si el centro todavía no tiene ubicación fijada, NO se evalúa.
-    if (!cfg || cfg.lat == null) { ubic.estado = 'inactivo'; return ubic }
+    if (!cfg || !cfg.activo || cfg.lat == null) { ubic.estado = 'inactivo'; return ubic }
     if ((cfg.emails_excepcion || []).map(x => x.toLowerCase()).includes(miEmail)) { ubic.estado = 'excepcion'; return ubic }
     const pos = await posicion()
     const d = distM(pos, cfg), margen = Math.min(pos.acc || 0, 100)
@@ -4315,16 +4336,14 @@ async function verificarUbicacion(forzar = false) {
   ubic.t = Date.now()
   return ubic
 }
-// Solo 'ok' (dentro del radio) o 'excepcion' (Lu, Jime y los mails de excepción). Todo lo demás bloquea:
-// sin permiso, sin señal, error o ubicación del centro sin fijar. Nunca se deja pasar por defecto.
-const puedeEvaluar = () => ['ok', 'excepcion'].includes(ubic.estado)
+const puedeEvaluar = () => ['ok', 'inactivo', 'excepcion'].includes(ubic.estado)
 function cartelUbicacion() {
   const u = ubic
   if (u.estado === 'ok') return `<div class="ubic ok">📍 Estás en PuntoBiO: podés evaluar.</div>`
-  if (u.estado === 'excepcion') return `<div class="ubic ok">📍 Tenés permiso para evaluar desde cualquier lugar.${ADMIN_UBIC.includes(miEmail) && !(u.cfg && u.cfg.lat != null) ? ' <b>Ojo:</b> todavía no está fijada la ubicación de PuntoBiO, así que el resto del equipo NO puede evaluar. Parate en el centro y tocá <b>Fijar la ubicación de PuntoBiO acá</b>.' : ''}</div>`
+  if (u.estado === 'excepcion') return `<div class="ubic ok">📍 Tenés permiso para evaluar desde cualquier lugar.${ADMIN_UBIC.includes(miEmail) && !(u.cfg && u.cfg.activo) ? ' El candado para el resto del equipo todavía no está activo: parate en PuntoBiO y fijá la ubicación.' : ''}</div>`
+  if (u.estado === 'inactivo') return ADMIN_UBIC.includes(miEmail) ? `<div class="ubic warn">📍 El candado de ubicación todavía no está activo. Parate en PuntoBiO y tocá <b>Fijar la ubicación de PuntoBiO acá</b>.</div>` : ''
   if (u.estado === 'cargando') return `<div class="ubic">📍 Verificando la ubicación…</div>`
-  const motivo = u.estado === 'inactivo' ? 'Todavía no está fijada la ubicación del centro: avisale a Lu o a Jime.'
-    : u.estado === 'fuera' ? `Estás a unos ${u.dist >= 1000 ? (u.dist / 1000).toFixed(1).replace('.', ',') + ' km' : u.dist + ' m'} del centro.`
+  const motivo = u.estado === 'fuera' ? `Estás a unos ${u.dist >= 1000 ? (u.dist / 1000).toFixed(1).replace('.', ',') + ' km' : u.dist + ' m'} del centro.`
     : u.estado === 'sinpermiso' ? 'No diste permiso de ubicación. En el iPad: Configuración → Safari → Ubicación → Preguntar o Permitir, y recargá.'
     : 'No se pudo obtener la ubicación (' + esc(u.msg || 'sin señal') + ').'
   return `<div class="ubic bad">🔒 <b>Los tests solo se pueden hacer en PuntoBiO.</b> ${motivo} Podés ver fichas, tests realizados e informes. <button class="lnk" id="btnReUbic">Volver a verificar</button></div>`
@@ -4336,7 +4355,7 @@ function panelUbicacionAdmin() {
     <div class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px">
       <button class="b pri" id="ubFijar">📍 Fijar la ubicación de PuntoBiO acá</button>
       <span style="font-weight:700">Radio: ${RADIO_M} m</span>
-      <span style="font-weight:700">🔒 Candado siempre activo</span>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ubActivo" ${c.activo ? 'checked' : ''}> Candado activo</label>
     </div>
     <label style="display:block;margin-top:8px">Además de Lu y Jime, pueden evaluar desde cualquier lugar (mails separados por coma)
       <input type="text" id="ubExc" value="${esc((c.emails_excepcion || []).join(', '))}" style="width:100%"></label>
@@ -4357,7 +4376,7 @@ function engancharUbicacion() {
   }
   if ($('ubGuardar')) $('ubGuardar').onclick = async () => {
     const exc = $('ubExc').value.split(',').map(x => x.trim().toLowerCase()).filter(Boolean)
-    const { error } = await supabase.from('test_biolab_config').update({ radio_m: RADIO_M, activo: true, emails_excepcion: exc, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
+    const { error } = await supabase.from('test_biolab_config').update({ radio_m: RADIO_M, activo: $('ubActivo').checked, emails_excepcion: exc, actualizado_en: new Date().toISOString(), actualizado_por: miEmail }).eq('id', 1).select('id')
     $('ubNota').textContent = error ? 'No se pudo guardar: ' + error.message : 'Guardado.'
     if (!error) { await verificarUbicacion(true); pintarUbic() }
   }
