@@ -27,6 +27,16 @@ export const EVO = {
   rotoracica: { titulo: 'Rotación torácica · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
   shouldermob:{ titulo: 'Shoulder mobility FMS (peor lado)', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
   puente:     { titulo: 'Puente 1 pierna (lados sin control)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  postural:   { titulo: 'Hallazgos posturales', unidad: 'hallazgos', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, bandas: [] },
+  unipodal:   { titulo: 'Apoyo unipodal (peor lado)', unidad: 's', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 10, txt: '10 s' }] },
+  alcance:    { titulo: 'Alcance funcional', unidad: 'cm', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 15, txt: '15 cm · riesgo alto' }, { y: 25, txt: '25 cm' }] },
+  seismin:    { titulo: '6 minutos de marcha', unidad: 'm', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, bandas: [] },
+  marcha4r:   { titulo: 'Marcha a paso rápido', unidad: 'm/s', mejor: 'mas', dec: 2, val: r => r.detalle && r.detalle.velocidad_ms != null ? +r.detalle.velocidad_ms : null, bandas: [] },
+  sprint10:   { titulo: 'Sprint 10 m', unidad: 's', mejor: 'menos', dec: 2, val: r => r.valor != null ? +r.valor : null, bandas: [] },
+  sidehop:    { titulo: 'Side hop · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
+  crossover:  { titulo: 'Crossover hop · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
+  ckcuest:    { titulo: 'CKCUEST', unidad: 'toques', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [] },
+  aslr:       { titulo: 'ASLR (0 a 10)', unidad: 'puntos', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 10, bandas: [] },
   silla5:     { titulo: 'Silla 5 repeticiones', unidad: 's', mejor: 'menos', dec: 2, val: r => r.valor != null ? +r.valor : null,
                 bandas: [{ y: 11.19, txt: '11,2 s · SPPB 4' }, { y: 16.7, txt: '16,7 s · SPPB 1' }] },
   silla30:    { titulo: 'Silla 30 segundos', unidad: 'repeticiones', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [] },
@@ -87,6 +97,16 @@ export const INFO = {
   rotoracica: { ico: '🔄', nombre: 'Rotación torácica', pac: 'Rotación de tu espalda', pacUnidad: '% de simetría' },
   shouldermob:{ ico: '🤲', nombre: 'Shoulder mobility (FMS)', pac: 'Movilidad de hombros', pacUnidad: 'de 3 puntos' },
   puente:     { ico: '🌉', nombre: 'Puente glúteo 1 pierna', pac: 'Puente a una pierna', pacUnidad: 'lados a trabajar' },
+  postural:   { ico: '🧍‍♂️', nombre: 'Análisis postural', pac: 'Tu postura', pacUnidad: 'puntos a trabajar' },
+  unipodal:   { ico: '🦩', nombre: 'Apoyo unipodal', pac: 'Equilibrio en una pierna', pacUnidad: 'segundos' },
+  alcance:    { ico: '🫳', nombre: 'Alcance funcional', pac: 'Cuánto llegás estirándote', pacUnidad: 'cm' },
+  seismin:    { ico: '🚶‍♀️', nombre: '6 minutos de marcha', pac: 'Lo que caminás en 6 minutos', pacUnidad: 'metros' },
+  marcha4r:   { ico: '🏃‍♀️', nombre: 'Marcha a paso rápido', pac: 'Tu paso rápido', pacUnidad: 'm/s' },
+  sprint10:   { ico: '⚡', nombre: 'Sprint 10 m', pac: 'Tu sprint de 10 m', pacUnidad: 'segundos' },
+  sidehop:    { ico: '↔️', nombre: 'Side hop test', pac: 'Saltos laterales', pacUnidad: '% de simetría' },
+  crossover:  { ico: '⤴️', nombre: 'Crossover hop', pac: 'Saltos cruzados', pacUnidad: '% de simetría' },
+  ckcuest:    { ico: '🤚', nombre: 'CKCUEST', pac: 'Estabilidad de brazos', pacUnidad: 'toques' },
+  aslr:       { ico: '🦵', nombre: 'ASLR', pac: 'Control de pelvis al levantar la pierna', pacUnidad: 'puntos (menos es mejor)' },
   silla5:     { ico: '💺', nombre: 'Silla 5 repeticiones', pac: 'Pararte y sentarte 5 veces', pacUnidad: 'segundos (menos es mejor)' },
   silla30:    { ico: '🪑', nombre: 'Silla 30 segundos', pac: 'Veces que te parás en 30 segundos', pacUnidad: 'repeticiones' },
   pushup:     { ico: '💪', nombre: 'Push ups', pac: 'Flexiones de brazos', pacUnidad: 'repeticiones' },
@@ -102,7 +122,7 @@ export const INFO = {
   dnf:        { ico: '⏱️', nombre: 'Flexores profundos de cuello', pac: 'Resistencia de tu cuello', pacUnidad: 'segundos' },
   estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'equilibrio', 'silla5', 'silla30', 'tug', 'marcha4', 'step2']
+export const ORDEN = ['postural', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {
@@ -113,6 +133,11 @@ export function interpretar(test, v) {
     case 'fsd': return v <= 1 ? ['ok', 'Buena calidad de movimiento'] : v <= 3 ? ['warn', 'Calidad moderada'] : ['bad', 'Calidad pobre']
     case 'equilibrio': return v >= 4 ? ['ok', 'Equilibrio completo'] : v >= 2 ? ['warn', 'Equilibrio parcial'] : ['bad', 'Equilibrio muy limitado']
     case 'ohs': return v === 0 ? ['ok', 'Patrón sin compensaciones'] : v <= 2 ? ['warn', v + ' compensación' + (v === 1 ? '' : 'es')] : ['bad', v + ' compensaciones']
+    case 'unipodal': return v < 10 ? ['warn', 'Menos de 10 s'] : ['ok', 'Equilibrio adecuado']
+    case 'alcance': return v < 15 ? ['bad', 'Riesgo alto de caídas (orientativo)'] : v < 25 ? ['warn', 'Riesgo moderado (orientativo)'] : ['ok', 'Alcance adecuado']
+    case 'sidehop': case 'crossover': return v >= LSI_OK ? ['ok', 'Simétrico'] : ['bad', 'Asimetría']
+    case 'aslr': return v === 0 ? ['ok', 'Sin dificultad'] : v <= 2 ? ['warn', `${v}/10`] : ['bad', `${v}/10`]
+    case 'postural': return v === 0 ? ['ok', 'Sin desvíos relevantes'] : ['warn', v + ' hallazgo' + (v === 1 ? '' : 's')]
     case 'silla5': return v <= 11.19 ? ['ok', 'SPPB silla 4/4'] : v <= 13.69 ? ['ok', 'SPPB silla 3/4'] : v <= 16.69 ? ['warn', 'SPPB silla 2/4'] : ['bad', 'SPPB silla 1/4']
     case 'hop': case 'triplehop': return v >= LSI_OK ? ['ok', 'Simétrico'] : ['bad', 'Asimetría de salto']
     case 'ybalance': return v >= 94 ? ['ok', 'Compuesto en rango'] : ['warn', 'Compuesto bajo']
