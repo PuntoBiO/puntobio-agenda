@@ -255,3 +255,91 @@ export function htmlProtocoloPelvico(v, fecha) {
     ${hall.length ? `<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:8px 12px;margin:8px 0;font-size:13.5px;line-height:1.5"><b>Resumen</b><br>${hall.map(e).join('<br>')}</div>` : ''}
     ${h}${v.obs ? `<div style="font-size:13px"><b>Observaciones:</b> ${e(v.obs)}</div>` : ''}</div>`
 }
+
+// ============================================================
+// CURVA DE EVOLUCIÓN (estilo VALD) — la usan Test BiOLAB, la ficha funcional y Mi Espacio.
+// Colores unificados: IZQUIERDO = turquesa · DERECHO = naranja. Una sola serie: celeste PuntoBiO
+// con el último punto en naranja. Referencias ("esperado") en gris punteado. Chip con el % de cambio.
+// ============================================================
+export const COLOR_I = '#14B8C4'   // izquierdo · turquesa
+export const COLOR_D = '#F0832A'   // derecho · naranja
+let _idCurva = 0
+export function curvaPro({ series, bandas = [], dec = 1, unidad = '', mejor = 'mas', min = null, max = null, W = 640, H = 250, chip = true }) {
+  const ser = (series || []).filter(s => s.puntos && s.puntos.length)
+  if (!ser.length) return ''
+  const id = 'cv' + (++_idCurva)
+  const fx = (v, d = dec) => v == null || isNaN(v) ? '—' : (+v).toFixed(d).replace('.', ',')
+  const una = ser.length === 1
+  const ml = 44, mr = una ? 24 : 136, mt = una ? 46 : 18, mb = 32
+  const todos = ser.flatMap(s => s.puntos)
+  const vals = todos.map(p => p.v).concat(bandas.map(b => b.y))
+  let lo = min != null ? min : Math.min(...vals), hi = max != null ? max : Math.max(...vals)
+  if (min == null) { const pad = (hi - lo) * 0.18 || Math.abs(hi) * 0.12 || 1; lo -= pad; hi += pad }
+  const fechas = [...new Set(todos.map(p => +p.f))].sort((a, b) => a - b)
+  const t0 = fechas[0], t1 = fechas[fechas.length - 1]
+  const X = (f) => ml + (t1 === t0 ? 0.5 : (+f - t0) / (t1 - t0)) * (W - ml - mr)
+  const Y = (v) => mt + (1 - (v - lo) / (hi - lo)) * (H - mt - mb)
+  // curva suave (Catmull-Rom a Bézier)
+  const suave = (P) => {
+    if (P.length === 1) return `M${P[0][0]},${P[0][1]}`
+    let d = `M${P[0][0].toFixed(1)},${P[0][1].toFixed(1)}`
+    for (let i = 0; i < P.length - 1; i++) {
+      const p0 = P[i - 1] || P[i], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2] || p2, k = 0.18
+      const c1 = [p1[0] + (p2[0] - p0[0]) * k, p1[1] + (p2[1] - p0[1]) * k], c2 = [p2[0] - (p3[0] - p1[0]) * k, p2[1] - (p3[1] - p1[1]) * k]
+      d += ` C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`
+    }
+    return d
+  }
+  const grid = [0.25, 0.5, 0.75].map(k => lo + (hi - lo) * k)
+  let out = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;font-family:inherit" role="img" aria-label="Curva de evolución">
+    <defs><linearGradient id="${id}a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4FA6E3" stop-opacity=".28"/><stop offset="1" stop-color="#4FA6E3" stop-opacity="0"/></linearGradient>
+      <linearGradient id="${id}l" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4FA6E3"/><stop offset="1" stop-color="#2F78BE"/></linearGradient></defs>
+    <line x1="${ml}" x2="${W - mr}" y1="${H - mb}" y2="${H - mb}" stroke="#C9DDED"/>
+    ${grid.map(v => `<line x1="${ml}" x2="${W - mr}" y1="${Y(v)}" y2="${Y(v)}" stroke="#E3EDF6" stroke-dasharray="3 4"/><text x="${ml - 8}" y="${Y(v) + 4}" text-anchor="end" font-size="10.5" fill="#9AABBD">${fx(v, Math.max(dec, hi - lo < 1 ? 2 : dec === 0 ? 0 : 1))}</text>`).join('')}
+    ${bandas.filter(b => b.y > lo && b.y < hi).map(b => `<line x1="${ml}" x2="${W - mr}" y1="${Y(b.y)}" y2="${Y(b.y)}" stroke="#B9CFE2" stroke-width="2" stroke-dasharray="5 5"/>
+      <text x="${una ? W - mr - 4 : ml + 4}" y="${Y(b.y) - 6}" text-anchor="${una ? 'end' : 'start'}" font-size="10.5" font-weight="700" fill="#7B8CA0">${b.txt}</text>`).join('')}`
+  ser.forEach((s, si) => {
+    const P = s.puntos.slice().sort((a, b) => +a.f - +b.f).map(p => [X(p.f), Y(p.v), p.v])
+    const col = una ? `url(#${id}l)` : s.color
+    const colPunto = una ? '#4FA6E3' : s.color
+    if (una && P.length > 1) out += `<path d="${suave(P)} L${P[P.length - 1][0].toFixed(1)},${H - mb} L${P[0][0].toFixed(1)},${H - mb} Z" fill="url(#${id}a)"/>`
+    out += `<path d="${suave(P)}" fill="none" stroke="${col}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>`
+    P.forEach((p, i) => {
+      const ult = i === P.length - 1
+      out += ult ? `<circle cx="${p[0]}" cy="${p[1]}" r="6.5" fill="${una ? '#F0832A' : s.color}" stroke="#fff" stroke-width="2.5"/>`
+        : `<circle cx="${p[0]}" cy="${p[1]}" r="5" fill="#fff" stroke="${colPunto}" stroke-width="2.6"/>`
+      if (!una) return
+      const dy = -12
+      out += `<text x="${p[0]}" y="${p[1] + dy}" text-anchor="${i === 0 && P.length > 1 ? 'start' : ult && P.length > 1 ? 'end' : 'middle'}" font-size="11.5" font-weight="800" fill="${una ? '#0B2540' : s.color}">${fx(p[2])}</text>`
+    })
+  })
+  fechas.forEach((f, i) => {
+    const ult = i === fechas.length - 1
+    out += `<text x="${X(f)}" y="${H - 10}" text-anchor="${i === 0 && fechas.length > 1 ? 'start' : ult && fechas.length > 1 ? 'end' : 'middle'}" font-size="11" font-weight="700" fill="${ult ? '#0B2540' : '#7B8CA0'}">${new Date(f).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' })}</text>`
+  })
+  const cambioDe = (s) => {
+    const P = s.puntos.slice().sort((a, b) => +a.f - +b.f); if (P.length < 2) return null
+    const a = P[0].v, b = P[P.length - 1].v
+    const pct = Math.abs(a) > 1e-9 ? (b - a) / Math.abs(a) * 100 : null
+    const igual = Math.abs(b - a) < 1e-9, mejoro = mejor === 'menos' ? b < a : b > a
+    return { bg: igual ? '#94A3B8' : mejoro ? '#22A06B' : '#DC2626', txt: pct == null ? (b > a ? '+' : '') + fx(b - a) : `${pct > 0 ? '+' : ''}${fx(pct, 0)}%`, ult: b }
+  }
+  if (una) {
+    const c = cambioDe(ser[0])
+    if (chip && c) out += `<rect x="${W - mr - 78}" y="8" width="78" height="26" rx="13" fill="${c.bg}"/><text x="${W - mr - 39}" y="25.5" text-anchor="middle" font-size="13" font-weight="800" fill="#fff">${c.txt}</text>`
+    if (bandas.length) out += `<line x1="${ml}" x2="${ml + 18}" y1="20" y2="20" stroke="#4FA6E3" stroke-width="3" stroke-linecap="round"/><text x="${ml + 24}" y="24" font-size="11.5" font-weight="700" fill="#5B6B7F">${ser[0].nombre || 'Paciente'}</text>
+      <line x1="${ml + 110}" x2="${ml + 128}" y1="20" y2="20" stroke="#B9CFE2" stroke-width="3" stroke-dasharray="4 3"/><text x="${ml + 134}" y="24" font-size="11.5" font-weight="700" fill="#5B6B7F">Referencia</text>`
+  } else {
+    // columna derecha: por cada lado, nombre + último valor + chip de cambio
+    const x = W - mr + 16
+    ser.forEach((s, si) => {
+      const c = cambioDe(s), y = 26 + si * 70, ultimo = s.puntos.slice().sort((a, b) => +a.f - +b.f).pop().v
+      out += `<line x1="${x}" x2="${x + 18}" y1="${y}" y2="${y}" stroke="${s.color}" stroke-width="3.5" stroke-linecap="round"/>
+        <text x="${x + 24}" y="${y + 4}" font-size="12" font-weight="800" fill="#0B2540">${s.nombre} · ${fx(ultimo)}</text>`
+      if (chip && c) out += `<rect x="${x}" y="${y + 12}" width="74" height="24" rx="12" fill="${c.bg}"/><text x="${x + 37}" y="${y + 28.5}" text-anchor="middle" font-size="12.5" font-weight="800" fill="#fff">${c.txt}</text>`
+    })
+    if (bandas.length) { const y = 26 + ser.length * 70
+      out += `<line x1="${x}" x2="${x + 18}" y1="${y}" y2="${y}" stroke="#B9CFE2" stroke-width="3" stroke-dasharray="4 3"/><text x="${x + 24}" y="${y + 4}" font-size="11.5" font-weight="700" fill="#5B6B7F">Referencia</text>` }
+  }
+  return out + '</svg>'
+}
