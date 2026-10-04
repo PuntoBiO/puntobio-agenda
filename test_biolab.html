@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Test BiOLAB</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -187,7 +188,7 @@ button.b:disabled{opacity:.45;cursor:not-allowed}
 <script type="module">
 import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
-import { EVO, ROM, ROM_ITEMS, LSI_OK } from './tests_biolab_comun.js'
+import { EVO, ROM, ROM_ITEMS, LSI_OK, INFO, interpretar } from './tests_biolab_comun.js'
 
 // Mismo cliente que app.html, con el lock propio (sin él getSession() se cuelga en el iframe de Safari)
 const supabase = createClient('https://bqpjtoiictnzcasxfucf.supabase.co', 'sb_publishable_yvuXDxrkRrhXwmZBnE_a_Q_zDBz0iDi', {
@@ -323,6 +324,8 @@ const TESTS = [
       <b>Tiempo objetivo:</b> 30 s por lado es un criterio práctico de control para el screening (no es una norma validada). Si querés medir resistencia, subilo y que sostenga hasta no poder: el tiempo queda guardado.` },
   { id:'postural', necesita:'Pared o fondo liso · iPad en trípode, vertical y nivelado · paciente con ropa ajustada o en ropa interior deportiva', modoMed:'📷 Se mide con foto (3 fotos)', ico:'🧍‍♂️', nombre:'Análisis postural (frente · perfil · espalda)', planilla: true,
     desc:'Tres fotos y el sistema mide inclinación de cabeza, hombros y pelvis, rodillas, y la plomada de perfil. Quedan las fotos con las líneas.', pos:'Planilla · 3 fotos' },
+  { id:'pelvico', necesita:'Camilla · carga de 5 kg y mancuernas · cajón o escalón · VALD (DynaMo y ForceDecks para la extensión de rodilla y el IMTP) · apósitos y balanza (pad test) · guantes y lubricante (tacto)', modoMed:'✍️ Protocolo completo (anamnesis, cuestionarios, provocación y tacto)', ico:'🌸', nombre:'Suelo pélvico funcional', custom: true,
+    desc:'Anamnesis que se adapta a la edad y la etapa, ICIQ-SF y Sandvik con puntaje, diástasis, batería de provocación por escalones (con IMTP) y la sección de tacto de la especialista. Da el umbral de carga y la estrategia.', pos:'Protocolo de evaluación' },
   { id:'antropo', necesita:'Cinta métrica inextensible · tallímetro y balanza · lápiz dermográfico · alzas de distintos mm (para el test de alzas) · iPad para la foto (opcional)', modoMed:'📏 Con cinta (alzas con foto)', ico:'📏', nombre:'Antropometría BiOLAB (MMII · MMSS)', planilla: true,
     desc:'Largos real y aparente de miembros inferiores, segmentos, miembros superiores, perímetros por lado y test de alzas. Calcula diferencias y % de asimetría solos.', pos:'Planilla · cinta' },
   { id:'adams', necesita:'Escoliómetro o app de escoliómetro en el celu (opcional) · iPad para la foto · paciente con la espalda descubierta', modoMed:'📷 Se mide con foto (o escoliómetro)', ico:'🙇', nombre:'Maniobra de Adams (escoliosis)', planilla: true,
@@ -3269,6 +3272,338 @@ window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || !e.data || e.data.tipo !== 'ficha-altura') return
   document.querySelectorAll('iframe.ficha-funcional').forEach(f => { if (f.contentWindow === e.source) f.style.height = (e.data.alto + 6) + 'px' })
 })
+// ============================================================
+// 📄 INFORME DE TEST BiOLAB
+// Elegís las tomas (por fecha), escribís la conclusión y sale: PDF · subida a Mi Espacio (PuntoBiO) ·
+// link para que el paciente vea solo las pruebas realizadas. El contenido queda guardado en tests_biolab_informes.
+// ============================================================
+function itemDeToma(r) {
+  const cfg = EVO[r.test] || { val: x => x.valor, dec: 1, unidad: r.unidad }, info = INFO[r.test] || { nombre: r.test }
+  const v = cfg.val(r), lect = interpretar(r.test, v)
+  const det = r.detalle || {}
+  const hall = (det.hallazgos_txt && det.hallazgos_txt.length ? det.hallazgos_txt : [])
+  return { id: r.id, test: r.test, nombre: info.nombre, fecha: r.creado_en.slice(0, 10),
+    valor: v != null && !isNaN(v) ? `${fmt(v, cfg.dec ?? 1)} ${cfg.unidad || r.unidad || ''}`.trim() : '—',
+    lectura: lect ? lect[1] : '', nivel: lect ? lect[0] : '', hallazgos: hall, texto: r.texto || '',
+    musculos_sob: det.musculos_sobreactivos || [], musculos_poc: det.musculos_poco_activos || [] }
+}
+function borradorConclusion(items) {
+  const alterados = items.filter(i => i.nivel === 'warn' || i.nivel === 'bad')
+  const ok = items.filter(i => i.nivel === 'ok')
+  let t = `Se realizaron ${items.length} prueba${items.length === 1 ? '' : 's'} de evaluación funcional.`
+  if (ok.length) t += ` Dentro de lo esperable: ${ok.map(i => i.nombre).join(', ')}.`
+  if (alterados.length) t += ` A trabajar: ${alterados.map(i => `${i.nombre} (${i.lectura.toLowerCase()})`).join('; ')}.`
+  const musc = [...new Set(items.flatMap(i => i.musculos_poc))]
+  if (musc.length) t += ` Grupos musculares a activar: ${musc.slice(0, 8).join(', ')}.`
+  return t
+}
+async function renderInforme() {
+  apagarCamara(); det = null
+  $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
+    <div class="panel"><h2>📄 Informe de evaluación funcional</h2>
+      <div style="margin:4px 0 10px">${chipPaciente()}</div>
+      <div class="estado" id="estado">Cargando las tomas…</div>
+      <div id="infBody"></div></div>`
+  $('btnVolver').onclick = renderCatalogo
+  const filtro = paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`
+  const { data, error } = await supabase.from('tests_biolab').select('id, test, valor, unidad, detalle, texto, creado_en').or(filtro).order('creado_en', { ascending: false }).limit(500)
+  if (error) { setEstado('No se pudieron leer las tomas: ' + error.message, 'err'); return }
+  if (!data || !data.length) { setEstado('Este paciente todavía no tiene tests guardados.', 'warn'); return }
+  const fechas = [...new Set(data.map(r => r.creado_en.slice(0, 10)))]
+  const selF = new Set([fechas[0]]), selT = new Set()
+  let conclusion = '', informeId = null, tokenLink = null
+  const fechaTxt = (f) => new Date(f + 'T12:00:00').toLocaleDateString('es-AR')
+  // por defecto: la última toma de cada test dentro de las fechas elegidas
+  const elegidas = () => { const vistos = new Set(); return data.filter(r => selF.has(r.creado_en.slice(0, 10)) && !vistos.has(r.test) && vistos.add(r.test)) }
+  const reiniciarSel = () => { selT.clear(); elegidas().forEach(r => selT.add(r.id)) }
+  reiniciarSel()
+  const items = () => data.filter(r => selT.has(r.id)).map(itemDeToma)
+  setEstado('Elegí las fechas y las pruebas que van al informe.', 'ok')
+  const pintar = () => {
+    const enFechas = data.filter(r => selF.has(r.creado_en.slice(0, 10)))
+    $('infBody').innerHTML = `
+      <label style="font-weight:800;font-size:14px">Fechas de evaluación</label>
+      <div class="chips">${fechas.map(f => `<button data-f="${f}" class="${selF.has(f) ? 'on' : ''}">${fechaTxt(f)} <small>(${data.filter(r => r.creado_en.startsWith(f)).length})</small></button>`).join('')}</div>
+      <label style="font-weight:800;font-size:14px">Pruebas que entran</label>
+      <table class="crit">${enFechas.map(r => { const it = itemDeToma(r)
+        return `<tr><td><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" data-t="${r.id}" ${selT.has(r.id) ? 'checked' : ''}> ${esc(it.nombre)}</label></td>
+          <td>${esc(it.valor)}</td><td class="${it.nivel === 'ok' ? 'c-ok' : it.nivel === 'bad' ? 'c-bad' : it.nivel ? 'c-warn' : ''}">${esc(it.lectura)}</td><td><small>${fechaTxt(it.fecha)}</small></td></tr>` }).join('')}</table>
+      <label style="font-weight:800;font-size:14px;display:block;margin-top:12px">Conclusión del profesional <button class="lnk" id="btnBorr">Armar borrador con los resultados</button></label>
+      <textarea class="obs" id="infConc" style="min-height:110px" placeholder="Interpretación, objetivos y plan">${esc(conclusion)}</textarea>
+      <div class="btns" style="margin-top:12px">
+        <button class="b pri" id="btnPdf">📄 Descargar PDF</button>
+        ${paciente.origen === 'PUNTOBIO' || (paciente.padrones || []).includes('PUNTOBIO') ? '<button class="b pri" id="btnMiEsp">📤 Subir a Mi Espacio</button>' : ''}
+        <button class="b" id="btnLink">🔗 Link para el paciente</button>
+      </div>
+      <div id="infRes" style="margin-top:12px"></div>
+      <div class="nota">Para el informe general con IA (VALD + estas pruebas): las pruebas guardadas ya las toma la HC de SARKMED al crear el informe; en el informe de PuntoBiO se suman cuando conectemos esa pantalla.</div>`
+    document.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { selF.has(b.dataset.f) ? selF.delete(b.dataset.f) : selF.add(b.dataset.f); if (!selF.size) selF.add(b.dataset.f); reiniciarSel(); pintar() })
+    document.querySelectorAll('[data-t]').forEach(c => c.onchange = () => { c.checked ? selT.add(+c.dataset.t) : selT.delete(+c.dataset.t) })
+    $('infConc').oninput = (e) => { conclusion = e.target.value }
+    $('btnBorr').onclick = () => { conclusion = borradorConclusion(items()); $('infConc').value = conclusion }
+    $('btnPdf').onclick = async () => { const its = items(); if (!its.length) return alert('Elegí al menos una prueba.'); const doc = armarPdf(its, conclusion); doc.save(nombrePdf()); await guardarInforme(its) }
+    if ($('btnMiEsp')) $('btnMiEsp').onclick = () => subirMiEspacio()
+    $('btnLink').onclick = () => crearLink()
+  }
+  const nombrePdf = () => `Evaluacion_funcional_${(paciente.nombre || 'paciente').replace(/[^A-Za-z0-9]+/g, '_')}_${[...selF].sort().pop()}.pdf`
+  const contenido = (its) => ({ paciente: paciente.nombre || '', edad: paciente.edad ?? null, fechas: [...selF].sort(), conclusion: conclusion || '',
+    items: its.map(i => ({ test: i.test, nombre: i.nombre, fecha: i.fecha, valor: i.valor, lectura: i.lectura, nivel: i.nivel, hallazgos: i.hallazgos })) })
+  async function guardarInforme(its, extra = {}) {
+    const fila = { origen: paciente.origen, paciente_id: paciente.id, paciente_dni: paciente.dni || null, paciente_nombre: paciente.nombre || null,
+      fecha_desde: [...selF].sort()[0], fecha_hasta: [...selF].sort().pop(), tomas: its.map(i => i.id), contenido: contenido(its), ...extra }
+    if (informeId) { const { error } = await supabase.from('tests_biolab_informes').update(fila).eq('id', informeId); if (error) console.warn(error); return }
+    const { data: d, error } = await supabase.from('tests_biolab_informes').insert(fila).select('id, token').single()
+    if (error) { $('infRes').innerHTML = `<div class="nota c-bad">No se pudo registrar el informe: ${esc(error.message)}</div>`; return }
+    informeId = d.id; tokenLink = d.token
+  }
+  async function subirMiEspacio() {
+    const its = items(); if (!its.length) return alert('Elegí al menos una prueba.')
+    const personaId = paciente.origen === 'PUNTOBIO' ? paciente.id : null
+    if (!personaId) { $('infRes').innerHTML = '<div class="nota c-warn">Este paciente no tiene ficha de PuntoBiO: usá el link.</div>'; return }
+    const b = $('btnMiEsp'); b.disabled = true; b.textContent = 'Subiendo…'
+    try {
+      const blob = armarPdf(its, conclusion).output('blob')
+      const path = `hc/testbiolab-${personaId}/evaluacion-funcional-${Date.now()}.pdf`
+      const up = await supabase.storage.from('hc-adjuntos').upload(path, blob, { contentType: 'application/pdf', upsert: false })
+      if (up.error) throw up.error
+      const { data: u } = await supabase.auth.getUser()
+      const fechaCorta = new Date([...selF].sort().pop() + 'T12:00:00').toLocaleDateString('es-AR')
+      const ins = await supabase.from('hc_adjuntos').insert({ persona_id: +personaId, historia_id: null, storage_path: path, nombre_original: nombrePdf(),
+        titulo: 'Evaluación funcional · ' + fechaCorta, tipo_mime: 'application/pdf', tamano_bytes: blob.size, autor_email: u && u.user ? u.user.email : null,
+        subido_por_alumno: false, visible_alumno: true, fecha_estudio: [...selF].sort().pop() }).select('id').single()
+      if (ins.error) throw ins.error
+      await guardarInforme(its, { hc_adjunto_id: String(ins.data.id), publicado_mi_espacio: true })
+      b.textContent = '✓ En Mi Espacio'
+      $('infRes').innerHTML = '<div class="nota c-ok">Listo: el paciente lo ve en Mi Espacio, en "Evaluaciones Biolab", y queda en su HC.</div>'
+    } catch (e) { b.disabled = false; b.textContent = '📤 Subir a Mi Espacio'; $('infRes').innerHTML = `<div class="nota c-bad">No se pudo subir: ${esc(e.message || e)}</div>` }
+  }
+  async function crearLink() {
+    const its = items(); if (!its.length) return alert('Elegí al menos una prueba.')
+    await guardarInforme(its, { link_activo: true })
+    if (!tokenLink) return
+    const url = `${location.origin}/informe_test.html?t=${tokenLink}`
+    const msg = `Hola${paciente.nombre ? ' ' + paciente.nombre.split(' ').slice(-1)[0] : ''}! Te compartimos los resultados de tu evaluación funcional en PuntoBiO: ${url}`
+    $('infRes').innerHTML = `<div class="necbox">🔗 <b>Link del paciente</b> (solo muestra las pruebas de este informe; vence en 90 días):<br>
+      <input value="${esc(url)}" readonly style="width:100%;font:inherit;padding:8px;margin:6px 0;border:1px solid var(--border);border-radius:8px">
+      <div class="btns"><button class="b" id="btnCopLink">Copiar link</button><a class="b pri" style="text-decoration:none" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">Enviar por WhatsApp</a>
+      <button class="b" id="btnBajaLink">Desactivar link</button></div></div>`
+    $('btnCopLink').onclick = async () => { try { await navigator.clipboard.writeText(url); $('btnCopLink').textContent = 'Copiado ✓' } catch (e) {} }
+    $('btnBajaLink').onclick = async () => { const { error } = await supabase.from('tests_biolab_informes').update({ link_activo: false }).eq('id', informeId).select('id'); $('infRes').innerHTML = error ? `<div class="nota c-bad">${esc(error.message)}</div>` : '<div class="nota">Link desactivado: ya no se puede abrir.</div>' }
+  }
+  pintar()
+}
+
+// PDF con jsPDF (solo texto, sin emojis: la fuente estándar no los tiene)
+function armarPdf(its, conclusion) {
+  const { jsPDF } = window.jspdf
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' }), W = 210, M = 16
+  let y = 18
+  const salto = (h) => { if (y + h > 282) { doc.addPage(); y = 18 } }
+  const txt = (t, size = 10, estilo = 'normal', color = [15, 23, 42]) => { doc.setFont('helvetica', estilo); doc.setFontSize(size); doc.setTextColor(...color)
+    const lineas = doc.splitTextToSize(String(t || ''), W - 2 * M); salto(lineas.length * size * 0.45); doc.text(lineas, M, y); y += lineas.length * size * 0.45 + 1.5 }
+  doc.setFillColor(30, 159, 224); doc.rect(0, 0, W, 10, 'F')
+  txt('PuntoBiO · BiOLAB', 9, 'bold', [12, 123, 184])
+  y += 2; txt('Informe de evaluación funcional', 18, 'bold')
+  const fechas = [...new Set(its.map(i => i.fecha))].sort().map(f => new Date(f + 'T12:00:00').toLocaleDateString('es-AR'))
+  txt(`Paciente: ${paciente.nombre || '—'}${paciente.dni ? ' · DNI ' + paciente.dni : ''}${paciente.edad != null ? ' · ' + paciente.edad + ' años' : ''}`, 10.5, 'normal', [51, 65, 85])
+  txt(`Fecha${fechas.length > 1 ? 's' : ''} de evaluación: ${fechas.join(', ')}`, 10.5, 'normal', [51, 65, 85])
+  y += 3
+  its.forEach(i => {
+    salto(18); doc.setDrawColor(226, 232, 240); doc.line(M, y - 2, W - M, y - 2); y += 2
+    txt(i.nombre, 12, 'bold')
+    const col = i.nivel === 'ok' ? [21, 128, 61] : i.nivel === 'bad' ? [185, 28, 28] : i.nivel ? [180, 83, 9] : [51, 65, 85]
+    txt(`Resultado: ${i.valor}${i.lectura && i.lectura !== i.valor ? '  ·  ' + i.lectura : ''}`, 10.5, 'bold', col)
+    if (i.texto) txt(i.texto.replace(/[\u{1F000}-\u{1FAFF}\u{2190}-\u{2BFF}\u{FE0F}\u{200D}]/gu, ''), 9.5, 'normal', [71, 85, 105])
+  })
+  if ((conclusion || '').trim()) { y += 4; salto(20); txt('Conclusión', 13, 'bold'); txt(conclusion, 10.5) }
+  y += 6; txt('Las pruebas de este informe evalúan calidad de movimiento y capacidad funcional; no constituyen un diagnóstico médico.', 8.5, 'italic', [100, 116, 139])
+  const pags = doc.getNumberOfPages()
+  for (let k = 1; k <= pags; k++) { doc.setPage(k); doc.setFontSize(8); doc.setTextColor(148, 163, 184); doc.text(`PuntoBiO · Libertad 1549, Córdoba · página ${k} de ${pags}`, M, 292) }
+  return doc
+}
+
+// ============================================================
+// 🌸 SUELO PÉLVICO FUNCIONAL — protocolo en una sola pantalla
+// Anamnesis (se amplía según sexo, edad y etapa), cuestionarios con puntaje, diástasis, batería de provocación
+// por escalones (filtrada por el perfil del paciente) y la sección de tacto de la especialista.
+// ============================================================
+const PEL_ANAM = [
+  { sec: 'Contexto', campos: [
+    { k: 'sexo', n: 'Sexo', t: 'ops', ops: ['Mujer', 'Hombre'], def: 'Mujer' },
+    { k: 'etapa', n: 'Etapa', t: 'ops', ops: ['—', 'Embarazo', 'Posparto (menos de 1 año)', 'Perimenopausia / menopausia', 'Ninguna en particular'], si: c => c.sexo === 'Mujer' },
+    { k: 'motivo', n: 'Motivo de consulta', t: 'txt' } ] },
+  { sec: 'Antecedentes gineco-obstétricos', si: c => c.sexo === 'Mujer', campos: [
+    { k: 'gestas', n: 'Embarazos', t: 'num' }, { k: 'partos_vag', n: 'Partos vaginales', t: 'num' }, { k: 'cesareas', n: 'Cesáreas', t: 'num' },
+    { k: 'instrumental', n: 'Parto instrumental (fórceps / ventosa)', t: 'sino' }, { k: 'desgarro', n: 'Desgarro o episiotomía', t: 'ops', ops: ['—', 'No', 'Episiotomía', 'Desgarro grado 1–2', 'Desgarro grado 3–4'] },
+    { k: 'peso_bebe', n: 'Bebé de más de 4 kg', t: 'sino' }, { k: 'ultimo_parto', n: 'Fecha del último parto', t: 'txt' },
+    { k: 'lactancia', n: 'Lactancia actual', t: 'sino', si: c => c.etapa.startsWith('Posparto') },
+    { k: 'semanas', n: 'Semanas de embarazo', t: 'num', si: c => c.etapa === 'Embarazo' },
+    { k: 'thr', n: 'Terapia hormonal', t: 'sino', si: c => c.etapa.startsWith('Perimeno') },
+    { k: 'sequedad', n: 'Sequedad / síntomas genitourinarios', t: 'sino', si: c => c.etapa.startsWith('Perimeno') || (c.edad || 0) >= 45 } ] },
+  { sec: 'Antecedentes urológicos y quirúrgicos', campos: [
+    { k: 'prostatectomia', n: 'Prostatectomía u otra cirugía de próstata', t: 'sino', si: c => c.sexo === 'Hombre' },
+    { k: 'cirugias', n: 'Cirugías pélvicas o abdominales', t: 'txt' }, { k: 'itu', n: 'Infecciones urinarias recurrentes', t: 'sino' } ] },
+  { sec: 'Síntomas', campos: [
+    { k: 'iu_esfuerzo', n: 'Escape de orina al toser, estornudar, saltar o hacer fuerza', t: 'sino' },
+    { k: 'iu_urgencia', n: 'Escape con urgencia (no llega al baño)', t: 'sino' }, { k: 'urgencia', n: 'Urgencia miccional', t: 'sino' },
+    { k: 'frecuencia', n: 'Veces que orina de día', t: 'num' }, { k: 'nocturia', n: 'Veces que se levanta a orinar de noche', t: 'num' },
+    { k: 'vaciado', n: 'Sensación de vaciado incompleto / chorro débil', t: 'sino' },
+    { k: 'if_heces', n: 'Escape de heces', t: 'sino' }, { k: 'if_gases', n: 'Escape de gases', t: 'sino' },
+    { k: 'bulto', n: 'Sensación de peso o bulto', t: 'sino' }, { k: 'dolor_pel', n: 'Dolor pélvico', t: 'sino' },
+    { k: 'dispareunia', n: 'Dolor en las relaciones', t: 'sino' },
+    { k: 'caida_urg', n: 'Se apura o se cayó yendo al baño', t: 'sino', si: c => (c.edad || 0) >= 65 } ] },
+  { sec: 'Intestino y hábitos', campos: [
+    { k: 'constipacion', n: 'Constipación / esfuerzo al evacuar', t: 'sino' }, { k: 'bristol', n: 'Escala de Bristol habitual', t: 'ops', ops: ['—', '1', '2', '3', '4', '5', '6', '7'] },
+    { k: 'liquidos', n: 'Litros de líquido por día', t: 'num' }, { k: 'cafeina', n: 'Tazas de café o mate por día', t: 'num' },
+    { k: 'deporte', n: 'Deporte o entrenamiento', t: 'txt' }, { k: 'impacto', n: 'Hace deporte de impacto o fuerza', t: 'sino' },
+    { k: 'perdida_entreno', n: 'Pierde al entrenar (saltos, soga, carrera, cargas)', t: 'sino', si: c => c.perfil !== 'sedentario' },
+    { k: 'quiere_correr', n: 'Quiere volver a correr / al impacto', t: 'sino', si: c => c.etapa.startsWith('Posparto') } ] },
+  { sec: 'Banderas de derivación', campos: [
+    { k: 'rf_sangre', n: 'Sangre en la orina', t: 'sino' }, { k: 'rf_retencion', n: 'No puede orinar / retención', t: 'sino' },
+    { k: 'rf_dolor', n: 'Dolor intenso o que no cede', t: 'sino' }, { k: 'rf_neuro', n: 'Adormecimiento en la zona genital / perineal o de piernas', t: 'sino' },
+    { k: 'rf_bulto', n: 'Bulto visible fuera de la vagina', t: 'sino', si: c => c.sexo === 'Mujer' } ] },
+]
+// ICIQ-SF (puntaje 0 a 21) · Sandvik (frecuencia × cantidad) · pad test
+const ICIQ_FREC = [['Nunca', 0], ['Una vez por semana o menos', 1], ['2 o 3 veces por semana', 2], ['Una vez al día', 3], ['Varias veces al día', 4], ['Continuamente', 5]]
+const ICIQ_CANT = [['Nada', 0], ['Muy poca cantidad', 2], ['Cantidad moderada', 4], ['Mucha cantidad', 6]]
+const ICIQ_CUANDO = ['Nunca', 'Antes de llegar al baño', 'Al toser o estornudar', 'Mientras duerme', 'Al hacer actividad física / ejercicio', 'Al terminar de orinar y vestirse', 'Sin motivo evidente', 'De forma continua']
+const SANDVIK_F = [['—', 0], ['Menos de una vez al mes', 1], ['Algunas veces al mes', 2], ['Algunas veces por semana', 3], ['Todos los días y/o noches', 4]]
+const SANDVIK_C = [['—', 0], ['Gotas', 1], ['Pequeñas cantidades', 2], ['Más', 3]]
+// Batería de provocación: de menos a más presión. nivel = exigencia (se filtra por el perfil del paciente)
+const PEL_TAREAS = [
+  { k: 'tos', n: 'Tos fuerte ×3, de pie', nivel: 1 }, { k: 'silla', n: 'Pararse de la silla ×5', nivel: 1 },
+  { k: 'levantar', n: 'Levantar 5 kg del piso', nivel: 1 }, { k: 'caminar', n: 'Caminar rápido 1 min', nivel: 1 }, { k: 'escalon', n: 'Subir y bajar un escalón ×10', nivel: 1 },
+  { k: 'cuadriceps', n: 'Extensión de rodilla isométrica máxima, sentada (DynaMo)', nivel: 2 }, { k: 'overhead', n: 'Sostener carga por encima de la cabeza 20 s', nivel: 2 },
+  { k: 'sentadilla', n: 'Sentadilla con carga ×10', nivel: 2 }, { k: 'plancha', n: 'Plancha frontal (hasta 30 s)', nivel: 2 },
+  { k: 'imtp', n: 'Tirón de medio muslo máximo (IMTP · ForceDecks)', nivel: 3 }, { k: 'trote', n: 'Trote en el lugar 1 min', nivel: 3 },
+  { k: 'saltos', n: 'Saltos en el lugar ×10', nivel: 3 }, { k: 'saltos1', n: 'Saltos a una pierna ×10 por lado', nivel: 3 },
+  { k: 'jacks', n: 'Jumping jacks 1 min', nivel: 3 }, { k: 'soga', n: 'Soga / doble salto 30 s', nivel: 3 },
+]
+
+function renderPelvico() {
+  const pf = perfilActual() || {}
+  const v = { sexo: 'Mujer', etapa: '—', iciq_cuando: [], tareas: {}, pf_ect: {} }
+  let verTodas = false
+  const ctx = () => ({ sexo: v.sexo, etapa: v.etapa || '—', edad: pf.edad ?? paciente.edad ?? null, perfil: pf.actividad })
+  const sel = (k, ops, val) => `<select data-pk="${k}">${ops.map(o => `<option ${String(val ?? '') === String(o) ? 'selected' : ''}>${o}</option>`).join('')}</select>`
+  const campo = (c) => {
+    const val = v[c.k]
+    const inp = c.t === 'sino' ? sel(c.k, ['—', 'NO', 'SI'], val ?? '—') : c.t === 'ops' ? sel(c.k, c.ops, val ?? c.def ?? c.ops[0])
+      : c.t === 'num' ? `<input type="number" step="any" data-pk="${c.k}" value="${val ?? ''}" style="width:90px">`
+      : `<input type="text" data-pk="${c.k}" value="${esc(val ?? '')}" style="width:100%;min-width:220px">`
+    return `<tr><td>${c.n}</td><td>${inp}</td></tr>`
+  }
+  const tareasVisibles = () => PEL_TAREAS.filter(t => verTodas || aptNivel(t.nivel) !== 'no')
+  const pintar = () => {
+    const c = ctx()
+    const anam = PEL_ANAM.filter(sx => !sx.si || sx.si(c)).map((sx, i) => {
+      const cs = sx.campos.filter(f => !f.si || f.si(c)); if (!cs.length) return ''
+      return `<details class="infobox" ${i < 2 ? 'open' : ''}><summary style="cursor:pointer;font-weight:800">${sx.sec}</summary><table class="crit">${cs.map(campo).join('')}</table></details>` }).join('')
+    const ocultas = PEL_TAREAS.length - PEL_TAREAS.filter(t => aptNivel(t.nivel) !== 'no').length
+    $('pelBody').innerHTML = `
+      <h3 style="margin:14px 0 6px">1 · Anamnesis</h3>${anam}
+      <h3 style="margin:14px 0 6px">2 · Cuestionarios</h3>
+      <details class="infobox" open><summary style="cursor:pointer;font-weight:800">ICIQ-SF (pérdida de orina en las últimas 4 semanas)</summary><table class="crit">
+        <tr><td>¿Con qué frecuencia pierde orina?</td><td>${sel('iciq_f', ICIQ_FREC.map(x => x[0]), v.iciq_f || 'Nunca')}</td></tr>
+        <tr><td>¿Cuánta orina cree que pierde habitualmente?</td><td>${sel('iciq_c', ICIQ_CANT.map(x => x[0]), v.iciq_c || 'Nada')}</td></tr>
+        <tr><td>¿Cuánto afecta su vida diaria? (0 = nada · 10 = mucho)</td><td>${sel('iciq_i', ['0','1','2','3','4','5','6','7','8','9','10'], v.iciq_i ?? '0')}</td></tr>
+        <tr><td>¿Cuándo pierde orina? (no suma puntos)</td><td><div class="chips">${ICIQ_CUANDO.map((o, i) => `<button data-cuando="${i}" class="${v.iciq_cuando.includes(o) ? 'on' : ''}">${o}</button>`).join('')}</div></td></tr></table></details>
+      <details class="infobox"><summary style="cursor:pointer;font-weight:800">Índice de Sandvik y pad test</summary><table class="crit">
+        <tr><td>Sandvik · frecuencia</td><td>${sel('sv_f', SANDVIK_F.map(x => x[0]), v.sv_f || '—')}</td></tr>
+        <tr><td>Sandvik · cantidad</td><td>${sel('sv_c', SANDVIK_C.map(x => x[0]), v.sv_c || '—')}</td></tr>
+        <tr><td>Pad test 1 hora · gramos ganados por el apósito</td><td><input type="number" step="0.1" data-pk="pad_g" value="${v.pad_g ?? ''}" style="width:90px"> g</td></tr></table></details>
+      <h3 style="margin:14px 0 6px">3 · Evaluación no invasiva</h3>
+      <details class="infobox" open><summary style="cursor:pointer;font-weight:800">Diástasis de rectos (distancia entre los rectos, en cm o traveses de dedo)</summary><table class="crit">
+        <tr><th></th><th>Reposo</th><th>Curl-up</th></tr>
+        ${[['sup', '4,5 cm arriba del ombligo'], ['umb', 'En el ombligo'], ['inf', '4,5 cm abajo del ombligo']].map(([k, n]) => `<tr><td>${n}</td>
+          <td><input type="number" step="0.1" data-pk="dr_${k}_r" value="${v['dr_' + k + '_r'] ?? ''}" style="width:80px"></td>
+          <td><input type="number" step="0.1" data-pk="dr_${k}_c" value="${v['dr_' + k + '_c'] ?? ''}" style="width:80px"></td></tr>`).join('')}
+        <tr><td>Abombamiento (doming) al hacer fuerza</td><td colspan="2">${sel('doming', ['—', 'NO', 'SI'], v.doming || '—')}</td></tr>
+        <tr><td>Patrón respiratorio</td><td colspan="2">${sel('respiracion', ['—', 'Costodiafragmático (360°)', 'Apical / torácico alto', 'Abdominal con empuje', 'Apnea al esfuerzo'], v.respiracion || '—')}</td></tr></table></details>
+      <h3 style="margin:14px 0 6px">4 · Batería de provocación <small style="font-weight:600;color:var(--dim)">de menos a más presión · siempre con la vejiga en el mismo estado</small></h3>
+      <div class="nota">Hacé las tareas en orden. Si aparece un síntoma claro, podés cortar ahí: ese es el umbral. Las tareas exigentes se filtran por el perfil del paciente.</div>
+      <div style="overflow-x:auto"><table class="crit"><tr><th>Tarea</th><th>Escape</th><th>Pesadez</th><th>Dolor</th><th>Estrategia</th></tr>
+        ${tareasVisibles().map((t, i) => { const r = v.tareas[t.k] || {}, apt = aptNivel(t.nivel)
+          return `<tr class="${apt !== 'ok' ? 'apt-' + apt : ''}"><td><b>${i + 1}.</b> ${t.n}${apt !== 'ok' ? `<small class="aviso" style="display:block;color:#92400e">${ETQ_APT[apt]}</small>` : ''}</td>
+            <td>${sel('t_' + t.k + '_esc', ['—', 'NO', 'GOTAS', 'CHORRO'], r.esc || '—')}</td><td>${sel('t_' + t.k + '_pes', ['—', 'NO', 'SI'], r.pes || '—')}</td>
+            <td>${sel('t_' + t.k + '_dol', ['—', 'NO', 'SI'], r.dol || '—')}</td><td>${sel('t_' + t.k + '_est', ['—', 'Normal', 'Apnea', 'Puja', 'Doming'], r.est || '—')}</td></tr>` }).join('')}
+      </table></div>
+      ${ocultas ? `<button class="lnk" id="pelTodas">${verTodas ? 'Esconder' : 'Mostrar'} ${ocultas} tarea${ocultas === 1 ? '' : 's'} que no se sugieren para este perfil</button>` : ''}
+      <h3 style="margin:14px 0 6px">5 · Evaluación de la especialista (tacto)</h3>
+      <details class="infobox"><summary style="cursor:pointer;font-weight:800">Inspección, tacto, PERFECT y POP-Q</summary><table class="crit">
+        <tr><td>Inspección</td><td><input type="text" data-pk="inspeccion" value="${esc(v.inspeccion || '')}" style="width:100%"></td></tr>
+        <tr><td>Tono en reposo</td><td>${sel('tono', ['—', 'Hipotónico', 'Normal', 'Hipertónico'], v.tono || '—')}</td></tr>
+        <tr><td>Dolor a la palpación (puntos)</td><td><input type="text" data-pk="palp_dolor" value="${esc(v.palp_dolor || '')}" style="width:100%"></td></tr>
+        <tr><td>Oxford modificada (P · fuerza)</td><td>${sel('oxford', ['—', '0', '1', '2', '3', '4', '5'], v.oxford || '—')}</td></tr>
+        <tr><td>E · resistencia (segundos sostenidos, hasta 10)</td><td><input type="number" data-pk="pf_e" value="${v.pf_e ?? ''}" style="width:80px"></td></tr>
+        <tr><td>R · repeticiones de la contracción sostenida (hasta 10)</td><td><input type="number" data-pk="pf_r" value="${v.pf_r ?? ''}" style="width:80px"></td></tr>
+        <tr><td>F · contracciones rápidas (hasta 10)</td><td><input type="number" data-pk="pf_f" value="${v.pf_f ?? ''}" style="width:80px"></td></tr>
+        <tr><td>E · elevación de la pared posterior</td><td>${sel('pf_elev', ['—', 'NO', 'SI'], v.pf_elev || '—')}</td></tr>
+        <tr><td>C · co-contracción del transverso</td><td>${sel('pf_cc', ['—', 'NO', 'SI'], v.pf_cc || '—')}</td></tr>
+        <tr><td>T · contrae antes de toser (timing)</td><td>${sel('pf_t', ['—', 'NO', 'SI'], v.pf_t || '—')}</td></tr>
+        ${v.sexo === 'Mujer' ? `<tr><td>POP-Q · compartimento anterior</td><td>${sel('popq_a', ['—', '0', 'I', 'II', 'III', 'IV'], v.popq_a || '—')}</td></tr>
+        <tr><td>POP-Q · apical</td><td>${sel('popq_ap', ['—', '0', 'I', 'II', 'III', 'IV'], v.popq_ap || '—')}</td></tr>
+        <tr><td>POP-Q · posterior</td><td>${sel('popq_p', ['—', '0', 'I', 'II', 'III', 'IV'], v.popq_p || '—')}</td></tr>` : ''}
+        <tr><td>Observaciones de la especialista</td><td><input type="text" data-pk="esp_obs" value="${esc(v.esp_obs || '')}" style="width:100%"></td></tr></table></details>
+      <textarea class="obs" id="pelObs" placeholder="Observaciones generales">${esc(v.obs || '')}</textarea>
+      <div class="estado" id="estado">Completá lo que evaluaste: lo vacío no se cuenta.</div>
+      <div class="res" id="res"></div>`
+    document.querySelectorAll('#pelBody [data-pk]').forEach(el => el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      const k = el.dataset.pk, val = el.type === 'number' ? (el.value === '' ? null : +el.value) : el.value
+      const m = k.match(/^t_(.+)_(esc|pes|dol|est)$/)
+      if (m) { v.tareas[m[1]] = v.tareas[m[1]] || {}; v.tareas[m[1]][m[2]] = val } else v[k] = val
+      if (k === 'sexo' || k === 'etapa') pintar(); else calcular() }))
+    document.querySelectorAll('[data-cuando]').forEach(b => b.onclick = () => { const o = ICIQ_CUANDO[+b.dataset.cuando]
+      v.iciq_cuando = v.iciq_cuando.includes(o) ? v.iciq_cuando.filter(x => x !== o) : [...v.iciq_cuando, o]; b.classList.toggle('on'); calcular() })
+    if ($('pelTodas')) $('pelTodas').onclick = () => { verTodas = !verTodas; pintar() }
+    $('pelObs').oninput = (e) => { v.obs = e.target.value; calcular() }
+    calcular()
+  }
+  const calcular = () => {
+    const h = [], r = {}
+    const iciq = (ICIQ_FREC.find(x => x[0] === v.iciq_f) || [0, 0])[1] + (ICIQ_CANT.find(x => x[0] === v.iciq_c) || [0, 0])[1] + (+v.iciq_i || 0)
+    r.iciq = iciq; r.iciq_grado = iciq === 0 ? 'sin pérdidas' : iciq <= 5 ? 'leve' : iciq <= 12 ? 'moderada' : iciq <= 18 ? 'severa' : 'muy severa'
+    if (iciq > 0) h.push(`ICIQ-SF ${iciq}/21 (${r.iciq_grado})${v.iciq_cuando.length ? ': ' + v.iciq_cuando.join(', ').toLowerCase() : ''}`)
+    const svF = (SANDVIK_F.find(x => x[0] === v.sv_f) || [0, 0])[1], svC = (SANDVIK_C.find(x => x[0] === v.sv_c) || [0, 0])[1]
+    if (svF && svC) { r.sandvik = svF * svC; r.sandvik_grado = r.sandvik <= 2 ? 'leve' : r.sandvik <= 6 ? 'moderada' : r.sandvik <= 9 ? 'severa' : 'muy severa'; h.push(`Sandvik ${r.sandvik} (${r.sandvik_grado})`) }
+    if (v.pad_g != null) { r.pad = v.pad_g <= 1 ? 'seco (≤ 1 g)' : v.pad_g < 10 ? 'leve' : v.pad_g < 50 ? 'moderada' : 'severa'; if (v.pad_g > 1) h.push(`Pad test ${fmt(v.pad_g, 1)} g (${r.pad})`) }
+    const umb = v.dr_umb_r, cu = v.dr_umb_c
+    if ((umb != null && umb > 2) || (cu != null && cu > 2)) h.push(`Diástasis en el ombligo (${fmt(umb, 1)} en reposo · ${fmt(cu, 1)} en curl-up)`)
+    if (v.doming === 'SI') h.push('Abombamiento abdominal al esfuerzo')
+    if (v.respiracion && !['—', 'Costodiafragmático (360°)'].includes(v.respiracion)) h.push(`Patrón respiratorio: ${v.respiracion.toLowerCase()}`)
+    // umbral de carga: primera tarea (en orden) con escape, pesadez o dolor
+    const hechas = PEL_TAREAS.filter(t => { const x = v.tareas[t.k]; return x && (['NO', 'GOTAS', 'CHORRO'].includes(x.esc) || ['NO', 'SI'].includes(x.pes) || ['NO', 'SI'].includes(x.dol)) })
+    const sint = (t) => { const x = v.tareas[t.k]; return ['GOTAS', 'CHORRO'].includes(x.esc) || x.pes === 'SI' || x.dol === 'SI' }
+    const primera = hechas.find(sint), toleradas = primera ? hechas.indexOf(primera) : hechas.length
+    r.tareas_hechas = hechas.length; r.toleradas = toleradas; r.umbral = primera ? primera.n : null
+    if (primera) { const x = v.tareas[primera.k]; h.push(`Umbral de carga: tolera ${toleradas} tarea${toleradas === 1 ? '' : 's'}; síntomas desde "${primera.n}" (${[x.esc !== 'NO' && x.esc !== '—' ? 'escape ' + x.esc.toLowerCase() : '', x.pes === 'SI' ? 'pesadez' : '', x.dol === 'SI' ? 'dolor' : ''].filter(Boolean).join(', ')})`) }
+    else if (hechas.length) h.push(`Sin síntomas en las ${hechas.length} tareas realizadas`)
+    const est = {}; hechas.forEach(t => { const e = v.tareas[t.k].est; if (e && !['—', 'Normal'].includes(e)) est[e] = (est[e] || 0) + 1 })
+    const pred = Object.entries(est).sort((a, b) => b[1] - a[1])[0]; if (pred) { r.estrategia = pred[0]; h.push(`Estrategia predominante: ${pred[0].toLowerCase()} (${pred[1]} tarea${pred[1] === 1 ? '' : 's'})`) }
+    if (v.oxford && v.oxford !== '—') { r.perfect = `P${v.oxford} E${v.pf_e ?? '-'} R${v.pf_r ?? '-'} F${v.pf_f ?? '-'}${v.pf_elev === 'SI' ? ' E' : ''}${v.pf_cc === 'SI' ? ' C' : ''}${v.pf_t === 'SI' ? ' T' : ''}`; h.push(`Tacto: Oxford ${v.oxford}/5 · PERFECT ${r.perfect}${v.tono && v.tono !== '—' ? ' · tono ' + v.tono.toLowerCase() : ''}`) }
+    ;[['popq_a', 'anterior'], ['popq_ap', 'apical'], ['popq_p', 'posterior']].forEach(([k, n]) => { if (v[k] && !['—', '0'].includes(v[k])) h.push(`POP-Q ${n}: estadio ${v[k]}`) })
+    const rf = ['rf_sangre', 'rf_retencion', 'rf_dolor', 'rf_neuro', 'rf_bulto'].filter(k => v[k] === 'SI')
+    const nombresRf = { rf_sangre: 'sangre en la orina', rf_retencion: 'retención', rf_dolor: 'dolor intenso', rf_neuro: 'síntomas neurológicos', rf_bulto: 'bulto visible' }
+    const html = `
+      ${rf.length ? `<div class="necbox" style="background:#fee2e2;border-color:#fca5a5;color:#7f1d1d">🚩 <b>Derivar al médico:</b> ${rf.map(k => nombresRf[k]).join(', ')}</div>` : ''}
+      <div class="val">${hechas.length ? `${toleradas} <span style="font-size:16px">de ${hechas.length} tareas sin síntomas</span>` : '—'}</div>
+      <div class="interp ${primera ? 'c-warn' : hechas.length ? 'c-ok' : ''}">${primera ? `Umbral: "${esc(primera.n)}"` : hechas.length ? 'Tolera toda la batería realizada' : 'Cargá la batería de provocación'}</div>
+      ${h.length ? `<div class="nota">${h.map(esc).join('<br>')}</div>` : ''}`
+    mostrarResultado(html, `Suelo pélvico: ${h.join(' · ') || 'sin hallazgos'}${v.obs ? '. Obs: ' + v.obs : ''}`,
+      { valor: hechas.length ? toleradas : null, unidad: 'tareas sin síntomas', detalle: { ...v, resultados: r, banderas: rf, hallazgos_txt: h } })
+  }
+  $('app').innerHTML = `<button class="back" id="btnVolver">← Todos los tests</button>
+    <div class="panel"><h2>🌸 Suelo pélvico funcional</h2><div style="margin:4px 0 6px">${chipPaciente()}</div>
+      <div class="ultima" id="ultima"></div>
+      <div class="necbox">🧰 <b>Necesitás:</b> ${actual.necesita}</div>
+      <div class="nota">Protocolo en 5 partes: anamnesis (se amplía según sexo, edad y etapa) · cuestionarios · evaluación no invasiva · batería de provocación · tacto de la especialista. Datos sensibles: nunca se publican solos en Mi Espacio.</div>
+      <div id="pelBody"></div></div>
+    <div class="panel evo" id="evo" style="display:none"></div>`
+  $('btnVolver').onclick = renderCatalogo
+  pintar()
+  setTimeout(() => cargarUltima('pelvico'), 0)
+}
+
 function renderFicha() {
   apagarCamara(); det = null
   const q = new URLSearchParams({ modo: 'pro', dni: paciente.dni || '', origen: paciente.origen, id: paciente.id, nombre: paciente.nombre || '' })
@@ -3280,6 +3615,9 @@ function renderFicha() {
 // Rutas por motivo de consulta: qué tests y en qué orden. sec = región de la planilla de ROM.
 // Primero va SIEMPRE la anamnesis y el descarte de banderas rojas (esto evalúa calidad de movimiento, no diagnostica).
 const RUTAS = {
+  pelvico:  { n: '🌸 Suelo pélvico', pasos: [
+    { id: 'pelvico', por: 'anamnesis, cuestionarios, provocación por escalones y tacto' }, { id: 'aslr', por: 'control lumbopélvico con compresión' },
+    { id: 'postural', por: 'postura de perfil (presiones)' }, { id: 'tug', por: 'si es mayor: movilidad para llegar al baño' } ] },
   deportista: { n: '🏃 Deportista / vuelta al deporte', pasos: [
     { id: 'ohs', por: 'patrón global' }, { id: 'squatmono', por: 'control en una pierna' }, { id: 'ybalance', por: 'control dinámico' },
     { id: 'salto', por: 'potencia horizontal' }, { id: 'hop', por: 'simetría de salto (LSI)' }, { id: 'triplehop', por: 'simetría de salto (LSI)' },
@@ -3343,8 +3681,9 @@ function perfilActual() {
   if (!perfiles[k]) perfiles[k] = { edad: paciente.edad ?? null, actividad: null, ayuda: false }
   return perfiles[k]
 }
-function aptitud(id) {
-  const pf = perfilActual(), n = NIVEL[id] || 1
+function aptitud(id) { return aptNivel(NIVEL[id] || 1) }
+function aptNivel(n) {
+  const pf = perfilActual()
   if (!pf || !pf.actividad) return 'ok'
   const mayor = pf.edad != null && pf.edad >= 65
   if (pf.ayuda) return n === 1 ? 'ok' : 'no'
@@ -3433,7 +3772,7 @@ function renderCatalogo() {
     <p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p>
     <div class="pacbox">
       <label>¿A quién le aplicamos el test?</label>
-      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (paciente.origen !== 'PRUEBA' ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button>' : '') : ''}</div>
+      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (paciente.origen !== 'PRUEBA' ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
       <div id="pacBus" style="${paciente ? 'display:none' : ''}">
         <input id="qPac" type="search" placeholder="Nombre o DNI (busca en PuntoBiO y SARKMED)" autocomplete="off">
         <div class="lista" id="listaPac"></div>
@@ -3451,6 +3790,7 @@ function renderCatalogo() {
   pintarPerfil()
   if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
+  if ($('btnInforme')) $('btnInforme').onclick = renderInforme
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m
     document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta() })
   if (paciente) { pintarRuta(); cargarHechosHoy().then(pintarRuta) }
@@ -3479,6 +3819,7 @@ function renderTest(id, opts = {}) {
   if (!paciente) { renderCatalogo(); return }
   if (actual.sinCamara) { apagarCamara(); det = null; return renderROM(opts) }
   if (actual.planilla) { apagarCamara(); det = null; return renderPlanilla(actual, PLANILLAS[id]) }
+  if (actual.id === 'pelvico') { apagarCamara(); det = null; return renderPelvico() }
   det = DETECTORES[id]()
   setTimeout(() => cargarUltima(id), 0)
   $('app').innerHTML = `
