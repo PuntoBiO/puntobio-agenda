@@ -19,6 +19,15 @@ export const EVO = {
   fsd:        { titulo: 'Forward Step Down (peor pierna)', unidad: 'puntos', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 6,
                 bandas: [{ y: 1.5, txt: 'hasta 1 · buena' }, { y: 3.5, txt: '4 o más · pobre' }] },
   equilibrio: { titulo: 'Equilibrio SPPB', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => +r.valor, bandas: [], min: 0, max: 4 },
+  squatmono:  { titulo: 'Squat monopodal (peor lado)', unidad: 'compensaciones', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 4, bandas: [] },
+  rockback:   { titulo: 'Rock back (fallas)', unidad: 'fallas', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 3, bandas: [] },
+  thomas:     { titulo: 'Thomas (lados positivos)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  hallux:     { titulo: 'Windlass (pies sin activar)', unidad: 'pies', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  wallangel:  { titulo: 'Wall angel (fallas)', unidad: 'fallas', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 4, bandas: [] },
+  rotoracica: { titulo: 'Rotación torácica · LSI', unidad: '%', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 90, txt: '90% · simetría' }] },
+  shouldermob:{ titulo: 'Shoulder mobility FMS (peor lado)', unidad: 'puntos', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 3, bandas: [] },
+  puente:     { titulo: 'Puente 1 pierna (lados sin control)', unidad: 'lados', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 2, bandas: [] },
+  estocada:   { titulo: 'Estocada con cambio (fallas)', unidad: 'fallas', mejor: 'menos', dec: 0, val: r => +r.valor, min: 0, max: 4, bandas: [] },
 }
 
 // ROM · movilidad analítica
@@ -56,8 +65,17 @@ export const INFO = {
   marcha4:    { ico: '🚶', nombre: 'Marcha 4 metros', pac: 'Tu velocidad al caminar', pacUnidad: 'm/s' },
   step2:      { ico: '🦵', nombre: '2-Minute Step Test', pac: 'Marcha en el lugar (2 minutos)', pacUnidad: 'pasos' },
   equilibrio: { ico: '🧍', nombre: 'Equilibrio SPPB', pac: 'Tu equilibrio', pacUnidad: 'de 4 puntos' },
+  squatmono:  { ico: '🦩', nombre: 'Squat monopodal', pac: 'Sentadilla a una pierna', pacUnidad: 'ajustes a trabajar' },
+  rockback:   { ico: '🐈', nombre: 'Rock back', pac: 'Movilidad en cuadrupedia', pacUnidad: 'ajustes a trabajar' },
+  thomas:     { ico: '🛏️', nombre: 'Test de Thomas', pac: 'Flexibilidad de cadera', pacUnidad: 'lados a trabajar' },
+  hallux:     { ico: '🦶', nombre: 'Hallux / Jack test', pac: 'Funcionamiento del pie', pacUnidad: 'pies a trabajar' },
+  wallangel:  { ico: '🧱', nombre: 'Wall angel', pac: 'Movilidad de hombros contra la pared', pacUnidad: 'ajustes a trabajar' },
+  rotoracica: { ico: '🔄', nombre: 'Rotación torácica', pac: 'Rotación de tu espalda', pacUnidad: '% de simetría' },
+  shouldermob:{ ico: '🤲', nombre: 'Shoulder mobility (FMS)', pac: 'Movilidad de hombros', pacUnidad: 'de 3 puntos' },
+  puente:     { ico: '🌉', nombre: 'Puente glúteo 1 pierna', pac: 'Puente a una pierna', pacUnidad: 'lados a trabajar' },
+  estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['ohs', 'rom', 'fsd', 'equilibrio', 'tug', 'marcha4', 'step2']
+export const ORDEN = ['ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'equilibrio', 'tug', 'marcha4', 'step2']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {
@@ -68,7 +86,10 @@ export function interpretar(test, v) {
     case 'fsd': return v <= 1 ? ['ok', 'Buena calidad de movimiento'] : v <= 3 ? ['warn', 'Calidad moderada'] : ['bad', 'Calidad pobre']
     case 'equilibrio': return v >= 4 ? ['ok', 'Equilibrio completo'] : v >= 2 ? ['warn', 'Equilibrio parcial'] : ['bad', 'Equilibrio muy limitado']
     case 'ohs': return v === 0 ? ['ok', 'Patrón sin compensaciones'] : v <= 2 ? ['warn', v + ' compensación' + (v === 1 ? '' : 'es')] : ['bad', v + ' compensaciones']
-    case 'rom': return v >= LSI_OK ? ['ok', 'Sin asimetrías relevantes'] : ['bad', 'Asimetría (LSI < ' + LSI_OK + '%)']
+    case 'rom': case 'rotoracica': return v >= LSI_OK ? ['ok', 'Sin asimetrías relevantes'] : ['bad', 'Asimetría (LSI < ' + LSI_OK + '%)']
+    case 'shouldermob': return v === 3 ? ['ok', 'Movilidad completa'] : v === 2 ? ['warn', 'Movilidad aceptable'] : v === 0 ? ['bad', 'Dolor en el despeje'] : ['bad', 'Movilidad limitada']
+    case 'squatmono': case 'rockback': case 'thomas': case 'hallux': case 'wallangel': case 'puente': case 'estocada':
+      return v === 0 ? ['ok', 'Sin hallazgos'] : ['warn', v + ' hallazgo' + (v === 1 ? '' : 's')]
     default: return null
   }
 }
