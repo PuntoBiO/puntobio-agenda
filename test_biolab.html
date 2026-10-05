@@ -312,7 +312,8 @@ const normDni = (d) => { const x = String(d ?? '').replace(/\D/g, ''); return x 
 const etiquetas = (p) => (p.padrones || [p.origen]).map(o => `<em>${o === 'SARKMED' ? 'SARKMED' : 'PuntoBiO'}</em>`).join('')
 function chipPaciente() {
   if (!paciente) return ''
-  if (paciente.origen === 'PRUEBA') return `<span class="pac prueba">🧪 Prueba sin paciente · no se guarda</span>`
+  if ((paciente.origen === 'PRUEBA' && !paciente.demo)) return `<span class="pac prueba">🧪 Prueba sin paciente · no se guarda</span>`
+  if (paciente.demo) return `<span class="pac prueba">${esc(paciente.nombre)} · ${esc(paciente.pat || '')} · <b>se guarda como PRUEBA</b></span>`
   return `<span class="pac">👤 ${esc(paciente.nombre)}${paciente.dni ? ' · DNI ' + esc(paciente.dni) : ''}${paciente.edad != null ? ' · ' + paciente.edad + ' años' : ''} ${etiquetas(paciente)}</span>`
 }
 
@@ -1795,7 +1796,7 @@ function renderROM(opts = {}) {
       txt, { valor: minLsi != null ? +minLsi.toFixed(1) : null, unidad: '% LSI', detalle })
   }
   async function cargarHistorial() {
-    if (!paciente || paciente.origen === 'PRUEBA') return
+    if (!paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
     const { data } = await supabase.from('tests_biolab').select('detalle, creado_en')
       .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
       .eq('test', 'rom').order('creado_en', { ascending: true })
@@ -2899,8 +2900,9 @@ function renderPlanilla(spec, def) {
   ;(async () => {                                            // completa solo lo que ya se sabe del paciente (se puede cambiar)
     const poner = (k, v) => { if (v == null || v === '' || !def.campos.some(c => c.k === k) || (vals[k] != null && vals[k] !== '—' && vals[k] !== '')) return
       vals[k] = v; const el = document.querySelector(`.pl [data-k="${k}"]`); if (el) el.value = v }
-    const pf = paciente && paciente.origen !== 'PRUEBA' ? perfilActual() : null
+    const pf = paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo) ? perfilActual() : null
     if (pf && pf.edad) poner('edad', pf.edad)
+    if (paciente && paciente.sexo) poner('sexo', paciente.sexo)
     try {
       if (paciente && paciente.dni) {
         const { data } = await supabase.from('tests_biolab').select('detalle, creado_en').eq('paciente_dni', normDni(paciente.dni)).order('creado_en', { ascending: false }).limit(30)
@@ -4305,7 +4307,7 @@ window.addEventListener('beforeunload', (e) => { if (sinGuardar) { e.preventDefa
 const claveProg = (id) => 'testbiolab_prog_' + perfilKey() + '_' + new Date().toISOString().slice(0, 10) + '_' + (id || (actual && actual.id))
 const CAMPOS_PROG = ['idx', 'f', 'sug', 'res', 'med', 'medFrente', 'medCostado', 'medPosterior', 'fotos', 'obs']
 function guardarProgreso(d) {
-  if (!paciente || paciente.origen === 'PRUEBA' || !actual) return
+  if (!paciente || (paciente.origen === 'PRUEBA' && !paciente.demo) || !actual) return
   const snap = {}; CAMPOS_PROG.forEach(k => { if (d[k] !== undefined) snap[k] = d[k] })
   try { localStorage.setItem(claveProg(), JSON.stringify(snap)) } catch (e) { delete snap.fotos; try { localStorage.setItem(claveProg(), JSON.stringify(snap)) } catch (e2) {} }
 }
@@ -4327,7 +4329,7 @@ function ofrecerRetomar(id) {
 const claveBorr = () => 'testbiolab_borr_' + perfilKey() + '_' + new Date().toISOString().slice(0, 10)
 const leerBorr = () => { try { return JSON.parse(localStorage.getItem(claveBorr()) || '{}') } catch (e) { return {} } }
 function guardarBorrador() {
-  if (!paciente || paciente.origen === 'PRUEBA' || !actual || !datosRes) return
+  if (!paciente || (paciente.origen === 'PRUEBA' && !paciente.demo) || !actual || !datosRes) return
   const b = leerBorr(), h = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })
   b[actual.id] = { test: actual.id, datos: datosRes, texto: textoCopiar, hora: h }
   try { localStorage.setItem(claveBorr(), JSON.stringify(b)) }
@@ -4362,13 +4364,13 @@ async function conGuardado(accion, auto = false) {
 }
 function mostrarResultado(html, texto, datos) {
   textoCopiar = texto; datosRes = datos
-  const puedeGuardar = paciente && paciente.origen !== 'PRUEBA' && datos
+  const puedeGuardar = paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo) && datos
   sinGuardar = !!(puedeGuardar && tocado)
   if (sinGuardar) guardarBorrador()
   $('res').innerHTML = html + `<div class="btns" style="margin-top:12px">
       ${puedeGuardar ? '<button class="b pri" id="btnGuardar">💾 Guardar en la ficha</button>' : ''}
       <button class="b" id="btnCopiar">Copiar resultado</button></div>
-    ${paciente && paciente.origen === 'PRUEBA' ? '<div class="nota">Es una prueba sin paciente: no se guarda.</div>' : ''}`
+    ${paciente && (paciente.origen === 'PRUEBA' && !paciente.demo) ? '<div class="nota">Es una prueba sin paciente: no se guarda.</div>' : ''}`
   if (document.querySelector('.layout > .stage')) setTimeout(() => { const be = $('btnEmpezar'); if (be && /·/.test(be.textContent)) return; irAlResultado() }, 60)   // si quedan vistas/piernas, sigue en la cámara
   $('btnCopiar').onclick = async () => {
     try { await navigator.clipboard.writeText(textoCopiar); $('btnCopiar').textContent = 'Copiado ✓' } catch (e) { $('btnCopiar').textContent = 'No se pudo copiar' }
@@ -4420,7 +4422,7 @@ async function cargarUltima(testId) { return cargarEvolucion(testId) }
 
 async function cargarEvolucion(testId) {
   const ult = $('ultima'), box = $('evo')
-  if (!ult || !paciente || paciente.origen === 'PRUEBA') return
+  if (!ult || !paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
   const { data, error } = await supabase.from('tests_biolab').select('valor, unidad, detalle, creado_en')
     // por DNI junta las tomas de la persona venga de PuntoBiO o de SARKMED; sin DNI, por su ficha
     .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
@@ -5223,7 +5225,7 @@ async function renderHistorial() {
         <label>Desde <input type="date" id="hDesde" value="${f.desde}"></label>
         <label>Hasta <input type="date" id="hHasta" value="${f.hasta}"></label>
         <label id="hTestLbl">Test <select id="hTest"><option value="">Todos</option>${TESTS.map(t => `<option value="${t.id}">${esc(t.nombre)}</option>`).join('')}</select></label>
-        <label>Origen <select id="hOrigen"><option value="">Todos</option><option>PUNTOBIO</option><option>SARKMED</option></select></label>
+        <label>Origen <select id="hOrigen"><option value="">Todos</option><option>PUNTOBIO</option><option>SARKMED</option><option value="PRUEBA">🧪 Perfiles de prueba</option></select></label>
         <label style="flex:1;min-width:200px">Paciente <input type="search" id="hQ" placeholder="Nombre o DNI" style="width:100%"></label>
       </div>
       <div class="estado" id="estado">Cargando…</div>
@@ -5457,6 +5459,42 @@ const PARA_QUE = {
 "pelvico": "Saber hasta qué esfuerzo el piso pélvico aguanta sin síntomas y por qué falla (respiración, postura, fuerza), para armar el tratamiento y ver si el umbral sube.",
 "osteo": "Ordenar la evaluación osteopática y mostrar con números si la sesión sirvió ese mismo día (antes / después)."
 }
+// ============================================================
+// PERFILES DE PRUEBA: pacientes inventados para probar todos los tests. SE GUARDAN (origen PRUEBA, DNI 9900xxxx),
+// salen en la ficha, el historial y los informes marcados como 🧪 PRUEBA, y no se mezclan con pacientes reales.
+// ============================================================
+const PERFILES_PRUEBA = [
+  { n: 'Martina', edad: 9,  sexo: 'Mujer',  act: 'activo',      ayuda: false, ruta: 'general',    pat: 'Niña sana, chequeo general' },
+  { n: 'Tomás',   edad: 14, sexo: 'Hombre', act: 'deportista',  ayuda: false, ruta: 'deportista', pat: 'Fútbol, dolor de rodilla (Osgood)' },
+  { n: 'Ana',     edad: 16, sexo: 'Mujer',  act: 'activo',      ayuda: false, ruta: 'dorsal',     pat: 'Escoliosis (control con Adams)' },
+  { n: 'Sofía',   edad: 20, sexo: 'Mujer',  act: 'deportista',  ayuda: false, ruta: 'tobillo',    pat: 'Esguince de tobillo a repetición' },
+  { n: 'Lucas',   edad: 25, sexo: 'Hombre', act: 'deportista',  ayuda: false, ruta: 'rodilla',    pat: 'Postoperatorio de LCA (vuelta al rugby)' },
+  { n: 'Valentina', edad: 32, sexo: 'Mujer', act: 'sedentario', ayuda: false, ruta: 'lumbar',     pat: 'Lumbalgia, trabajo de oficina' },
+  { n: 'Pablo',   edad: 35, sexo: 'Hombre', act: 'activo',      ayuda: false, ruta: 'cervical',   pat: 'Cervicalgia, muchas horas de computadora' },
+  { n: 'Martín',  edad: 38, sexo: 'Hombre', act: 'activo',      ayuda: false, ruta: 'hombro',     pat: 'Dolor de hombro (pádel)' },
+  { n: 'Carolina', edad: 45, sexo: 'Mujer', act: 'activo',      ayuda: false, ruta: 'pelvico',    pat: 'Posparto, escapes al saltar' },
+  { n: 'Diego',   edad: 52, sexo: 'Hombre', act: 'sedentario',  ayuda: false, ruta: 'lumbar',     pat: 'Sobrepeso, lumbalgia crónica' },
+  { n: 'Laura',   edad: 58, sexo: 'Mujer',  act: 'activo',      ayuda: false, ruta: 'cadera',     pat: 'Dolor de cadera (tendinopatía glútea)' },
+  { n: 'Graciela', edad: 63, sexo: 'Mujer', act: 'activo',      ayuda: false, ruta: 'rodilla',    pat: 'Artrosis de rodilla' },
+  { n: 'Roberto', edad: 68, sexo: 'Hombre', act: 'sedentario',  ayuda: false, ruta: 'mayor',      pat: 'Dos caídas en el último año' },
+  { n: 'Elena',   edad: 77, sexo: 'Mujer',  act: 'sedentario',  ayuda: true,  ruta: 'mayor',      pat: 'Sarcopenia, camina con bastón' },
+  { n: 'Héctor',  edad: 84, sexo: 'Hombre', act: 'sedentario',  ayuda: true,  ruta: 'mayor',      pat: 'Fragilidad, usa andador' },
+  { n: 'Mónica',  edad: 55, sexo: 'Mujer',  act: 'activo',      ayuda: false, ruta: 'osteo',      pat: 'Consulta de osteopatía (dolor sacroilíaco)' },
+]
+function elegirPerfilPrueba(i) {
+  const p = PERFILES_PRUEBA[i], dni = '9900' + String(i + 1).padStart(4, '0')
+  paciente = { origen: 'PRUEBA', demo: true, id: 'prueba-' + (i + 1), dni, nombre: `🧪 PRUEBA · ${p.n} (${p.edad})`, edad: p.edad, sexo: p.sexo, pat: p.pat }
+  const k = perfilKey(); perfiles[k] = { edad: p.edad, actividad: p.act, ayuda: p.ayuda }; guardarPerfiles()
+  motivo = p.ruta; recordarMotivo()
+  renderCatalogo()
+}
+function htmlPerfilesPrueba() {
+  const grupo = (t, f) => `<div style="margin:10px 0 4px;font-weight:800;color:#475569">${t}</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px">${PERFILES_PRUEBA.map((p, i) => [p, i]).filter(([p]) => f(p.edad)).map(([p, i]) => `
+    <button class="b" data-pp="${i}" style="text-align:left;padding:10px 12px;line-height:1.35"><b>🧪 ${esc(p.n)} · ${p.edad} años</b> <small>${p.sexo === 'Mujer' ? '♀' : '♂'} ${p.act}${p.ayuda ? ' · bastón/andador' : ''}</small><br><small style="color:#64748b">${esc(p.pat)}</small></button>`).join('')}</div>`
+  return `<div id="ppBox" style="display:none;margin-top:10px;background:#f8fafc;border:1px dashed #94a3b8;border-radius:14px;padding:12px">
+    <b>🧪 Perfiles de prueba</b> <small style="color:#64748b">— pacientes inventados para probar los tests. Se guardan aparte (marcados PRUEBA), no hace falta buscarlos en la HC.</small>
+    ${grupo('Chicos y adolescentes', e => e < 18)}${grupo('Adultos', e => e >= 18 && e < 60)}${grupo('Mayores de 60', e => e >= 60)}</div>`
+}
 // MODO TV: se activa desde el INICIO de Test BiOLAB y queda puesto para toda la sesión (todos los tests),
 // hasta que se apaga. Esconde el menú del Ecosistema y, dentro de cada test, el video ocupa toda la pantalla.
 let modoTV = (() => { try { return localStorage.getItem('testbiolab_modo_tv') === '1' } catch (e) { return false } })()
@@ -5490,7 +5528,7 @@ let motivo = null
 let hechosHoy = { tests: new Set(), secs: new Set() }
 async function cargarHechosHoy() {
   hechosHoy = { tests: new Set(), secs: new Set(), lista: [] }
-  if (!paciente || paciente.origen === 'PRUEBA') return
+  if (!paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
   const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
   const { data } = await supabase.from('tests_biolab').select('test, detalle, creado_en')
     .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
@@ -5697,11 +5735,13 @@ function renderCatalogo() {
     <div id="ubicBox"></div>
     <div class="pacbox">
       <label>¿A quién le aplicamos el test?</label>
-      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (paciente.origen !== 'PRUEBA' ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
+      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (!(paciente.origen === 'PRUEBA' && !paciente.demo) ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
       <div id="pacBus" style="${paciente ? 'display:none' : ''}">
         <input id="qPac" type="search" placeholder="Nombre o DNI (busca en PuntoBiO y SARKMED)" autocomplete="off">
         <div class="lista" id="listaPac"></div>
-        <button class="lnk" id="btnPrueba">Hacer una prueba sin paciente (no se guarda)</button>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px"><button class="lnk" id="btnPerfilesPrueba">🧪 Elegir un perfil de prueba (se guarda aparte)</button>
+        <button class="lnk" id="btnPrueba">Hacer una prueba sin paciente (no se guarda)</button></div>
+        ${htmlPerfilesPrueba()}
       </div>
       ${paciente ? `<label style="margin-top:14px">Perfil del paciente <small style="font-weight:600;color:var(--dim)">(para sugerir solo los tests que puede hacer)</small></label>
         <div class="perfil" id="perfilBox"></div>` : ''}
@@ -5725,9 +5765,11 @@ function renderCatalogo() {
   pintarUbic(); verificarUbicacion().then(pintarUbic)
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m; recordarMotivo()
     document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)); pintarRuta(); pintarReanudar() })
-  if (paciente && paciente.origen !== 'PRUEBA' && !motivo) { const m = motivoDeHoy(); if (m && RUTAS[m]) { motivo = m; document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)) } }
+  if (paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo) && !motivo) { const m = motivoDeHoy(); if (m && RUTAS[m]) { motivo = m; document.querySelectorAll('#motivos [data-m]').forEach(x => x.classList.toggle('on', x.dataset.m === motivo)) } }
   if (paciente) { pintarRuta(); cargarHechosHoy().then(() => { pintarRuta(); pintarReanudar() }) }
   $('btnPrueba').onclick = () => { paciente = { origen: 'PRUEBA' }; renderCatalogo() }
+  if ($('btnPerfilesPrueba')) $('btnPerfilesPrueba').onclick = () => { const b = $('ppBox'); b.style.display = b.style.display === 'none' ? '' : 'none' }
+  document.querySelectorAll('[data-pp]').forEach(b => b.onclick = () => elegirPerfilPrueba(+b.dataset.pp))
   let timer = null
   const q = $('qPac'); if (q && !paciente) q.focus()
   q.oninput = () => {
@@ -5768,7 +5810,7 @@ function crearAvisos(alCortar, onAviso) {
 // 60 a 74 años → 2/3 · 75 o más, o con bastón / andador → la mitad. Siempre se puede cambiar a mano.
 // Los tests con tiempo NORMADO (SPPB, silla 30 s, 2 minutos de marcha, 6 minutos) NO se tocan: sus valores de
 // referencia ya son para adultos mayores y si se acortan dejan de poder compararse.
-function factorEdad() { const pf = paciente && paciente.origen !== 'PRUEBA' ? perfilActual() : null
+function factorEdad() { const pf = paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo) ? perfilActual() : null
   if (!pf || pf.edad == null) return 1
   return pf.ayuda || pf.edad >= 75 ? 0.5 : pf.edad >= 60 ? 2 / 3 : 1 }
 const durEdad = (seg) => Math.max(5, Math.round(seg * factorEdad() / 5) * 5)
