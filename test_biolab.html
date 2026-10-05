@@ -4267,7 +4267,7 @@ function siguienteSugerido() {
   const arbol = [...document.querySelectorAll('#res [data-ir]:not([disabled])')].map(b => b.dataset.ir)[0]
   if (arbol) return { id: arbol, por: 'lo sugiere el resultado' }
   if (motivo && RUTAS[motivo]) {
-    const pasos = RUTAS[motivo].pasos, i = pasos.findIndex(p => p.id === actual.id)
+    const pasos = pasosActivos(), i = pasos.findIndex(p => p.id === actual.id)
     const sig = pasos.slice(i + 1).find(p => !hechosHoy.tests.has(p.id) && TESTS.some(t => t.id === p.id))
     if (sig) return { id: sig.id, por: 'sigue en la ruta ' + RUTAS[motivo].n.replace(/^\S+\s/, ''), sec: sig.sec }
   }
@@ -5482,6 +5482,7 @@ const PERFILES_PRUEBA = [
   { n: 'Mónica',  edad: 55, sexo: 'Mujer',  act: 'activo',      ayuda: false, ruta: 'osteo',      pat: 'Consulta de osteopatía (dolor sacroilíaco)' },
 ]
 function elegirPerfilPrueba(i) {
+  bateria = null
   const p = PERFILES_PRUEBA[i], dni = '9900' + String(i + 1).padStart(4, '0')
   paciente = { origen: 'PRUEBA', demo: true, id: 'prueba-' + (i + 1), dni, nombre: `🧪 PRUEBA · ${p.n} (${p.edad})`, edad: p.edad, sexo: p.sexo, pat: p.pat }
   const k = perfilKey(); perfiles[k] = { edad: p.edad, actividad: p.act, ayuda: p.ayuda }; guardarPerfiles()
@@ -5529,11 +5530,12 @@ let hechosHoy = { tests: new Set(), secs: new Set() }
 async function cargarHechosHoy() {
   hechosHoy = { tests: new Set(), secs: new Set(), lista: [] }
   if (!paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
-  const hoy = new Date(); hoy.setHours(0, 0, 0, 0)
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0); hoy.setDate(hoy.getDate() - (EVAL_DIAS - 1))   // evaluación en curso: últimos 30 días
   const { data } = await supabase.from('tests_biolab').select('test, detalle, creado_en')
     .or(paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`)
     .gte('creado_en', hoy.toISOString())
-  ;(data || []).slice().sort((a, b) => (a.creado_en || '').localeCompare(b.creado_en || '')).forEach(r => hechosHoy.lista.push({ test: r.test, hora: r.creado_en ? new Date(r.creado_en).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : '' }))
+  ;(data || []).slice().sort((a, b) => (a.creado_en || '').localeCompare(b.creado_en || '')).forEach(r => { const d = r.creado_en ? new Date(r.creado_en) : null, esHoy = d && d.toDateString() === new Date().toDateString()
+    hechosHoy.lista.push({ test: r.test, hora: !d ? '' : esHoy ? 'hoy ' + d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString('es-AR', { day: 'numeric', month: 'numeric' }) }) })
   ;(data || []).forEach(r => { hechosHoy.tests.add(r.test)
     if (r.test === 'rom' && r.detalle && r.detalle.medidas) Object.keys(r.detalle.medidas).forEach(k => { const it = ROM_ITEMS.find(i => i.k === k); if (it) hechosHoy.secs.add(it.sec) }) })
 }
@@ -5542,18 +5544,18 @@ function pintarReanudar() {
   const L = hechosHoy.lista || [], borr = Object.values(leerBorr()).filter(x => !hechosHoy.tests.has(x.test) || true)
   if (!L.length && !borr.length) { box.innerHTML = ''; return }
   let sig = null
-  if (motivo && RUTAS[motivo]) sig = RUTAS[motivo].pasos.find(p => !(p.sec ? hechosHoy.secs.has(p.sec) : hechosHoy.tests.has(p.id)) && aptitud(p.id) !== 'no')
+  if (motivo && RUTAS[motivo]) sig = pasosActivos().find(p => !(p.sec ? hechosHoy.secs.has(p.sec) : hechosHoy.tests.has(p.id)) && aptitud(p.id) !== 'no')
   box.innerHTML = `<div class="ruta" style="border-color:#86efac;background:#f0fdf4;margin-top:12px">
-    <h3>📋 Evaluación de hoy · ${L.length} test${L.length > 1 ? 's' : ''} ya guardado${L.length > 1 ? 's' : ''}</h3>
+    <h3>📋 Evaluación en curso · ${L.length} test${L.length > 1 ? 's' : ''} guardado${L.length > 1 ? 's' : ''} (últimos ${EVAL_DIAS} días)</h3>
     <div class="nota" style="margin:0 0 8px">${L.map(x => `${esc(nombreTest(x.test))} <small>(${x.hora})</small>`).join(' · ')}</div>
-    <div class="nota" style="margin:0 0 10px">Es la misma evaluación: lo que hagas hoy se suma a esto, sale junto en el informe y no hace falta repetir nada.</div>
+    <div class="nota" style="margin:0 0 10px">Es la misma evaluación: lo que hagas hoy se suma a esto y no hace falta repetir nada. Ideal: un test por sesión.</div>
     ${borr.length ? `<div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:12px;padding:10px 12px;margin:0 0 10px">
       <b>⚠️ Quedaron sin guardar:</b>${borr.map(x => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <span>${esc(nombreTest(x.test))} <small>(${x.hora}${x.sinFotos ? ', sin fotos' : ''})</small></span>
         <button class="b pri" data-bguardar="${x.test}" style="padding:8px 12px">💾 Guardar ahora</button>
         <button class="b" data-bdesc="${x.test}" style="padding:8px 12px">Descartar</button></div>`).join('')}</div>` : ''}
-    ${sig ? `<button class="b pri" id="btnReanudar">▶ Seguir con: ${esc(nombreTest(sig.id))}${sig.sec ? ' · ' + esc(ROM.find(g => g.sec === sig.sec).n) : ''}</button>`
-      : motivo ? '<div class="nota c-ok">✓ La ruta de hoy está completa. Podés hacer el informe.</div>' : '<div class="nota">Elegí el motivo de consulta para ver con qué seguir.</div>'}</div>`
+    ${sig ? `<button class="b pri" id="btnReanudar">▶ Test de hoy: ${esc(nombreTest(sig.id))}${sig.sec ? ' · ' + esc(ROM.find(g => g.sec === sig.sec).n) : ''}</button>`
+      : motivo ? '<div class="nota c-ok">✓ La ruta está completa. Podés hacer el informe.</div>' : '<div class="nota">Elegí el motivo de consulta para ver con qué seguir.</div>'}</div>`
   if ($('btnReanudar')) $('btnReanudar').onclick = () => renderTest(sig.id, sig.sec ? { sec: sig.sec } : {})
   box.querySelectorAll('[data-bguardar]').forEach(b => b.onclick = async () => {
     const x = leerBorr()[b.dataset.bguardar]; if (!x) return
@@ -5563,27 +5565,93 @@ function pintarReanudar() {
     if (ok) { await cargarHechosHoy(); pintarRuta(); pintarReanudar() } else { b.disabled = false; b.textContent = '💾 Reintentar' } })
   box.querySelectorAll('[data-bdesc]').forEach(b => b.onclick = () => { if (confirm('¿Descartar este resultado sin guardar?')) { borrarBorrador(b.dataset.bdesc); pintarReanudar() } })
 }
+// ============================================================
+// BATERÍAS: la puerta de entrada del inicio. Primero QUÉ vamos a hacer (batería), después la ZONA (si corresponde).
+// ============================================================
+const BATERIAS = [
+  { k: 'ingreso', ico: '⚡', n: 'Ingreso Fisio', d: 'Express · ~10 min · los 3 tests clave de la zona', zona: true, modo: 'express' },
+  { k: 'full', ico: '📋', n: 'Batería full', d: 'Completa · de a un test por sesión (30 días)', zona: true, modo: 'completa' },
+  { k: 'reeval', ico: '🔁', n: 'Reevaluación', d: 'Repite los tests del ingreso · ~10 min', zona: true, modo: 'express' },
+  { k: 'mayor', ico: '👵', n: 'Ingreso +55 / SARKMED', d: 'SPPB, TUG, marcha, equilibrio · ~15–25 min', motivo: 'mayor', modo: 'completa' },
+  { k: 'pelvico', ico: '🌸', n: 'Suelo pélvico', d: 'Sesión exclusiva · ~50 min', motivo: 'pelvico', modo: 'completa' },
+  { k: 'osteo', ico: '🤲', n: 'Osteopatía', d: 'Express ~35 min · completa ~50–60 min', motivo: 'osteo', modo: 'express' },
+  { k: 'deportista', ico: '🏃', n: 'Deportista / vuelta al deporte', d: 'Saltos, hops, sprint, tronco · express ~10 min', motivo: 'deportista', modo: 'express' },
+]
+const ZONAS_BAT = ['lumbar', 'cadera', 'rodilla', 'tobillo', 'dorsal', 'hombro', 'cervical', 'general']
+let bateria = null, verTodos = false
+const claveBat = () => 'testbiolab_bateria_' + perfilKey() + '_' + new Date().toISOString().slice(0, 10)
+function elegirBateria(k) {
+  const B = BATERIAS.find(b => b.k === k); bateria = bateria === k ? null : k
+  try { if (bateria) localStorage.setItem(claveBat(), bateria); else localStorage.removeItem(claveBat()) } catch (e) {}
+  if (bateria) { modoRuta = B.modo; try { localStorage.setItem('testbiolab_modo_ruta', modoRuta) } catch (e) {}
+    if (B.motivo) motivo = B.motivo; else if (!ZONAS_BAT.includes(motivo)) motivo = null
+    recordarMotivo() }
+  pintarBaterias(); pintarRuta(); pintarReanudar()
+}
+function pintarBaterias() {
+  const box = $('bateriasBox'); if (!box) return
+  const B = BATERIAS.find(b => b.k === bateria)
+  box.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">${BATERIAS.map(b => `
+      <button class="b ${bateria === b.k ? 'pri' : ''}" data-bat="${b.k}" style="text-align:left;padding:12px 14px;line-height:1.35;border-radius:14px">
+        <span style="font-size:22px">${b.ico}</span> <b style="font-size:16px">${b.n}</b><br><small style="opacity:.8">${b.d}</small></button>`).join('')}</div>
+    ${B && B.zona ? `<label style="margin-top:12px">¿Qué zona?</label>
+      <div class="chips" id="motivos">${ZONAS_BAT.map(k => `<button data-m="${k}" class="${motivo === k ? 'on' : ''}">${RUTAS[k].n}</button>`).join('')}</div>` : ''}
+    ${B && B.k === 'reeval' ? '<div class="nota" style="margin-top:6px">🔁 Repetí los mismos tests del ingreso: en la ficha se ven las curvas de evolución y el % de cambio.</div>' : ''}`
+  box.querySelectorAll('[data-bat]').forEach(b => b.onclick = () => elegirBateria(b.dataset.bat))
+  box.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m; recordarMotivo(); pintarBaterias(); pintarRuta(); pintarReanudar() })
+}
+// ============================================================
+// RUTA EXPRESS (~10 min, para el ingreso de fisio) y RUTA COMPLETA. La evaluación queda "en curso" 30 días:
+// se puede ir completando de a un test por sesión ("test de hoy") y todo suma a la misma evaluación.
+// Suelo pélvico es siempre completa (sesión exclusiva, ~50 min). Osteopatía express ~35 min.
+// ============================================================
+const EVAL_DIAS = 30
+const TIEMPO = { ohs: 4, adams: 3, rockback: 3, antropo: 9, thomas: 5, rom: 4, rotoracica: 3, sfma: 5, aslr: 3, puente: 5, tronco: 15, estocada: 3,
+  squatmono: 3, fsd: 3, unipodal: 2, tug: 2, marcha4: 2, equilibrio: 2, silla5: 1, silla30: 1, marcha4r: 1, alcance: 2, step2: 3, seismin: 8, ybalance: 6,
+  salto: 3, hop: 3, triplehop: 3, sidehop: 2, crossover: 3, sprint10: 3, pushup: 2, ckcuest: 2, pullup: 2, escalon: 5, postural: 4, shouldermob: 2,
+  wallangel: 3, cva: 2, rotcerv: 3, dnf: 3, hallux: 3, osteo: 25, pelvico: 40 }
+const EXPRESS = {
+  lumbar: ['ohs', 'aslr', 'puente'], rodilla: ['ohs', 'squatmono', 'fsd'], cadera: ['ohs', 'thomas', 'squatmono'],
+  tobillo: ['ohs', 'rom/tobillo', 'unipodal'], hombro: ['ohs', 'shouldermob', 'wallangel'], cervical: ['cva', 'dnf', 'rotcerv'],
+  dorsal: ['ohs', 'rotoracica', 'adams'], general: ['ohs', 'squatmono', 'rockback'], deportista: ['ohs', 'squatmono', 'hop'],
+  mayor: ['equilibrio', 'marcha4', 'silla5', 'tug'], osteo: ['osteo', 'postural', 'sfma'],
+}
+let modoRuta = (() => { try { return localStorage.getItem('testbiolab_modo_ruta') || 'express' } catch (e) { return 'express' } })()
+const tieneExpress = (m) => !!EXPRESS[m]
+function pasosActivos(m = motivo) {
+  const R = RUTAS[m]; if (!R) return []
+  if (modoRuta !== 'express' || !tieneExpress(m)) return R.pasos
+  return EXPRESS[m].map(x => { const [id, sec] = x.split('/'); return R.pasos.find(p => p.id === id && (!sec || p.sec === sec)) || { id, sec, por: 'clave para el ingreso' } })
+}
+const minutosDe = (pasos) => pasos.reduce((t, p) => t + (TIEMPO[p.id] || 3), 0)
 function pintarRuta() {
   const box = $('rutaBox'); if (!box) return
   if (!motivo) { box.innerHTML = ''; return }
-  const R = RUTAS[motivo]
+  const R = RUTAS[motivo], PASOS = pasosActivos()
   const hecho = (p) => p.sec ? hechosHoy.secs.has(p.sec) : hechosHoy.tests.has(p.id)
-  const visibles = R.pasos.map((p, i) => ({ p, i, apt: aptitud(p.id) })).filter(x => x.apt !== 'no' || verOcultos)
-  const ocultos = R.pasos.filter(p => aptitud(p.id) === 'no').length
+  const visibles = PASOS.map((p, i) => ({ p, i, apt: aptitud(p.id) })).filter(x => x.apt !== 'no' || verOcultos)
+  const ocultos = PASOS.filter(p => aptitud(p.id) === 'no').length
+  const minFalta = minutosDe(visibles.filter(x => !hecho(x.p)).map(x => x.p))
+  const minExp = tieneExpress(motivo) ? minutosDe(EXPRESS[motivo].map(x => ({ id: x.split('/')[0] }))) : 0
+  const minComp = minutosDe(R.pasos.filter(p => aptitud(p.id) !== 'no'))
   const nHechos = visibles.filter(x => hecho(x.p)).length
   const pf = perfilActual()
   const sugerir55 = pf && pf.edad != null && pf.edad >= 60 && motivo !== 'mayor'
-  box.innerHTML = `<div class="ruta"><h3>${R.n} <small>${nHechos} de ${visibles.length} hechos hoy</small></h3>
+  box.innerHTML = `<div class="ruta"><h3>${R.n} <small>${nHechos} de ${visibles.length} hechos (evaluación en curso, ${EVAL_DIAS} días)${minFalta ? ` · faltan ~${minFalta} min` : ''}</small></h3>
+    ${tieneExpress(motivo) ? `<div class="chips" style="margin:0 0 8px"><button data-modo="express" class="${modoRuta === 'express' ? 'on' : ''}">⚡ Express <small style="font-weight:600;opacity:.75">~${minExp} min · ingreso</small></button><button data-modo="completa" class="${modoRuta !== 'express' ? 'on' : ''}">📋 Completa <small style="font-weight:600;opacity:.75">~${minComp} min · de a un test por sesión</small></button></div>`
+      : motivo === 'pelvico' ? '<div class="nota c-ok" style="margin:0 0 8px">🌸 Sesión exclusiva de evaluación de suelo pélvico: ~50 min.</div>' : ''}
+    ${modoRuta === 'express' && tieneExpress(motivo) ? '<div class="nota" style="margin:0 0 8px">⚡ Los tests que más información dan para el ingreso. El resto lo sugiere el resultado si algo sale alterado, o se completa de a uno por sesión con la ruta completa.</div>' : '<div class="nota" style="margin:0 0 8px">Se puede hacer <b>de a un test por sesión</b> (el "test de hoy"): todo lo de los últimos 30 días suma a la misma evaluación.</div>'}
     <div class="nota" style="margin:0 0 8px">Antes de la ruta: anamnesis y descarte de banderas rojas. Estos tests evalúan calidad de movimiento, no diagnostican.</div>
     ${sugerir55 ? `<div class="nota c-warn" style="margin:0 0 8px">💡 Por la edad (${pf.edad} años), sumá también la ruta <b>Ingreso +55</b>.</div>` : ''}
     ${visibles.map(({ p, i, apt }, n) => { const t = TESTS.find(x => x.id === p.id), ok = hecho(p)
       const nombre = p.sec ? `${t.nombre} · ${ROM.find(g => g.sec === p.sec).n}` : t.nombre
       return `<div class="paso ${ok ? 'ok' : ''} ${apt !== 'ok' ? 'apt-' + apt : ''}"><span class="num">${ok ? '✓' : n + 1}</span>
-        <div class="txt"><b>${t.ico} ${esc(nombre)}</b><small>${esc(p.por)}${t.necesita ? ' · 🧰 ' + esc(t.necesita) : ''}</small>${apt !== 'ok' ? `<small class="aviso">${ETQ_APT[apt]}</small>` : ''}</div>
+        <div class="txt"><b>${t.ico} ${esc(nombre)} <small style="font-weight:600;color:#64748b">~${TIEMPO[p.id] || 3} min</small></b><small>${esc(p.por)}${t.necesita ? ' · 🧰 ' + esc(t.necesita) : ''}</small>${apt !== 'ok' ? `<small class="aviso">${ETQ_APT[apt]}</small>` : ''}</div>
         <button class="b ${ok ? '' : 'pri'}" data-paso="${i}">${ok ? 'Repetir' : 'Hacer →'}</button></div>` }).join('')}
     ${ocultos ? `<button class="lnk" id="btnOcultos">${verOcultos ? 'Esconder' : 'Mostrar'} ${ocultos} test${ocultos === 1 ? '' : 's'} que no se sugieren para este perfil</button>` : ''}
     <div class="nota">La sentadilla overhead y el rock back te van a sugerir además lo que haga falta según lo que salga.</div></div>`
-  box.querySelectorAll('[data-paso]').forEach(b => b.onclick = () => { const p = R.pasos[+b.dataset.paso]; renderTest(p.id, p.sec ? { sec: p.sec } : {}) })
+  box.querySelectorAll('[data-paso]').forEach(b => b.onclick = () => { const p = PASOS[+b.dataset.paso]; renderTest(p.id, p.sec ? { sec: p.sec } : {}) })
+  box.querySelectorAll('[data-modo]').forEach(b => b.onclick = () => { modoRuta = b.dataset.modo; try { localStorage.setItem('testbiolab_modo_ruta', modoRuta) } catch (e) {} pintarRuta(); pintarReanudar() })
   if ($('btnOcultos')) $('btnOcultos').onclick = () => { verOcultos = !verOcultos; pintarRuta(); pintarGrid() }
 }
 
@@ -5745,20 +5813,24 @@ function renderCatalogo() {
       </div>
       ${paciente ? `<label style="margin-top:14px">Perfil del paciente <small style="font-weight:600;color:var(--dim)">(para sugerir solo los tests que puede hacer)</small></label>
         <div class="perfil" id="perfilBox"></div>` : ''}
-      ${paciente ? `<label style="margin-top:14px">¿Por qué consulta?</label>
-        <div class="chips" id="motivos">${Object.entries(RUTAS).map(([k, r]) => `<button data-m="${k}" class="${motivo === k ? 'on' : ''}">${r.n}</button>`).join('')}</div>
+      ${paciente ? `<label style="margin-top:14px">¿Qué vamos a hacer?</label>
+        <div id="bateriasBox"></div>
         <div id="rutaBox"></div>` : ''}
       ${paciente ? '<div id="reanudarBox"></div>' : ''}
     </div>
     <div class="row" style="align-items:center;gap:10px;margin:4px 0 10px;flex-wrap:wrap">
-      ${paciente ? '<h2 style="font-size:17px;margin:0">Todos los tests</h2>' : ''}
+      ${paciente ? `<button class="b" id="btnTodos" style="font-weight:800">${verTodos || busqTest ? '▾' : '▸'} Todos los tests (${TESTS.length})</button>` : ''}
       <input id="qTest" type="search" placeholder="🔎 Buscar test: nombre, zona o para qué sirve (ej. hombro, equilibrio, salto)" value="${esc(busqTest)}" style="flex:1;min-width:260px;padding:11px 14px;border-radius:12px;border:1.5px solid var(--border);font-size:15px">
     </div>
-    <div id="gridWrap"></div>`
+    <div id="gridWrap" style="${paciente && !verTodos && !busqTest ? 'display:none' : ''}"></div>`
   pintarGrid()
   pintarPerfil()
-  $('qTest').oninput = (e) => { busqTest = e.target.value; pintarGrid() }
-  if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; renderCatalogo() }
+  if (paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo)) { try { const bk = localStorage.getItem(claveBat()); if (bk && !bateria) bateria = bk } catch (e) {} }
+  if (!bateria && motivo) { const b = BATERIAS.find(x => x.motivo === motivo); bateria = b ? b.k : (ZONAS_BAT.includes(motivo) ? (modoRuta === 'express' ? 'ingreso' : 'full') : null) }
+  pintarBaterias()
+  if ($('btnTodos')) $('btnTodos').onclick = () => { verTodos = !verTodos; $('gridWrap').style.display = verTodos ? '' : 'none'; $('btnTodos').textContent = `${verTodos ? '▾' : '▸'} Todos los tests (${TESTS.length})` }
+  $('qTest').oninput = (e) => { busqTest = e.target.value; if ($('gridWrap')) $('gridWrap').style.display = ''; pintarGrid() }
+  if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; bateria = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
   $('btnHistorial').onclick = renderHistorial
