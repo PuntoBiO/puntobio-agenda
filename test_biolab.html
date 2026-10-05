@@ -5803,7 +5803,7 @@ function renderCatalogo() {
     <div id="ubicBox"></div>
     <div class="pacbox">
       <label>¿A quién le aplicamos el test?</label>
-      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (!(paciente.origen === 'PRUEBA' && !paciente.demo) ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') : ''}</div>
+      <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (!(paciente.origen === 'PRUEBA' && !paciente.demo) ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') + ' <button class="lnk" id="btnEntrenar" style="font-weight:800;color:var(--turq-d)">🏋️ Entrenar</button>' : ''}</div>
       <div id="pacBus" style="${paciente ? 'display:none' : ''}">
         <input id="qPac" type="search" placeholder="Nombre o DNI (busca en PuntoBiO y SARKMED)" autocomplete="off">
         <div class="lista" id="listaPac"></div>
@@ -5833,6 +5833,7 @@ function renderCatalogo() {
   if ($('btnCambiar')) $('btnCambiar').onclick = () => { paciente = null; motivo = null; bateria = null; renderCatalogo() }
   if ($('btnFicha')) $('btnFicha').onclick = renderFicha
   if ($('btnInforme')) $('btnInforme').onclick = renderInforme
+  if ($('btnEntrenar')) $('btnEntrenar').onclick = renderEntreno
   $('btnHistorial').onclick = renderHistorial
   pintarUbic(); verificarUbicacion().then(pintarUbic)
   document.querySelectorAll('#motivos [data-m]').forEach(b => b.onclick = () => { motivo = motivo === b.dataset.m ? null : b.dataset.m; recordarMotivo()
@@ -6056,6 +6057,513 @@ function renderTest(id, opts = {}) {
     det.tap(x)
   })
 }
+
+// ============================================================
+// ENTRENAR: programa de ejercicios con conteo por cámara (Fase 1) y
+// sugerido a partir de los tests del paciente (Fase 3).
+// - El conteo usa la misma cámara, detector, calibrador, diana y avisos que los tests.
+// - Cuenta solo las repeticiones VÁLIDAS (llegan a la profundidad / rango pedido); las otras se muestran aparte.
+// - La sugerencia sale de REGLAS_ENTRENO (datos, en código) leyendo la última toma de cada test (120 días)
+//   con interpretar() de tests_biolab_comun.js: la misma lectura que la ficha. El profe confirma con un toque.
+// - Entrenar NO tiene candado de ubicación (el candado es solo para evaluar).
+// - Se guarda en la tabla entrenos_biolab (misma forma y mismos permisos que tests_biolab, por DNI).
+// - Los CORTES de cada conteo (entra / sale / objetivo) están en CONTEO_ENTRENO: si alguno cuenta de más o de menos
+//   después de probar, se ajusta ahí.
+// ============================================================
+const PROF_ENTRENO = { Parcial: 0.15, Media: 0.25, Profunda: 0.38 }   // bajada de la cadera / largo de pierna
+const EJERCICIOS = {
+  sentadilla:        { n: 'Sentadilla', ico: '🏋️', tipo: 'reps', med: 'baja', enc: 'frente', nivel: 1, prof: 'Media', como: 'De frente al iPad, pies al ancho de hombros. Bajar y subir controlado.' },
+  sentadilla_cajon:  { n: 'Sentadilla a cajón', ico: '📦', tipo: 'reps', med: 'baja', enc: 'frente', nivel: 1, prof: 'Media', como: 'De frente al iPad. Bajar hasta rozar el cajón o la silla y subir sin impulso.' },
+  sentadilla_banda:  { n: 'Sentadilla con banda en rodillas', ico: '🟢', tipo: 'reps', med: 'baja', enc: 'frente', nivel: 2, prof: 'Media', como: 'Banda arriba de las rodillas: empujar hacia afuera en toda la bajada. De frente al iPad.' },
+  sit_to_stand:      { n: 'Sentarse y pararse', ico: '🪑', tipo: 'reps', med: 'sentado', enc: 'costado', nivel: 1, como: 'Silla firme sin apoyabrazos, de costado al iPad, brazos cruzados. Pararse completo y volver a sentarse.' },
+  estocada:          { n: 'Estocada alternada', ico: '🤺', tipo: 'reps', med: 'estocada', enc: 'frente', nivel: 2, lados: 'auto', como: 'De frente al iPad. Alternar piernas: la cámara cuenta cada lado. Las repeticiones son POR LADO.' },
+  step_down:         { n: 'Step down (bajada controlada)', ico: '🪜', tipo: 'reps', med: 'baja', enc: 'frente', nivel: 2, lados: true, prof: 'Parcial', como: 'Parado con una pierna sobre el cajón, bajar el otro talón hasta rozar el piso y volver. De frente al iPad.' },
+  step_up:           { n: 'Subida al cajón', ico: '⬆️', tipo: 'reps', med: 'sube', enc: 'costado', nivel: 1, lados: true, como: 'De costado al iPad. Subir con la pierna indicada hasta estirar la cadera arriba del cajón y bajar.' },
+  talones:           { n: 'Elevación de talones', ico: '🦶', tipo: 'reps', med: 'talon', enc: 'costado', nivel: 1, como: 'De costado al iPad, con apoyo en la pared si hace falta. Subir alto y bajar lento.' },
+  talones_exc:       { n: 'Talones excéntricos (bajada lenta)', ico: '🦶', tipo: 'reps', med: 'talon', enc: 'costado', nivel: 2, lados: true, como: 'Subir con las dos piernas y bajar en 3 segundos con la pierna indicada. De costado al iPad.' },
+  puente:            { n: 'Puente glúteo', ico: '🌉', tipo: 'reps', med: 'puente', enc: 'acostado', nivel: 1, como: 'Boca arriba, rodillas flexionadas. iPad de costado, a la altura del piso. Subir la cadera hasta alinear rodilla, cadera y hombro.' },
+  puente_uni:        { n: 'Puente a una pierna', ico: '🌉', tipo: 'reps', med: 'puente', enc: 'acostado', nivel: 2, lados: true, como: 'Igual que el puente, apoyando solo la pierna indicada. iPad de costado, a la altura del piso.' },
+  plancha:           { n: 'Plancha', ico: '🧱', tipo: 'tiempo', med: 'linea', enc: 'acostado', nivel: 2, como: 'De costado al iPad. Cuenta solo el tiempo con el cuerpo alineado (hombro, cadera y tobillo).' },
+  plancha_lateral:   { n: 'Plancha lateral', ico: '🧱', tipo: 'tiempo', med: 'linea', enc: 'acostado', nivel: 2, lados: true, como: 'iPad de frente al paciente. Cuenta solo el tiempo con hombro, cadera y tobillo alineados.' },
+  unipodal:          { n: 'Apoyo en una pierna', ico: '🦩', tipo: 'tiempo', med: 'unipodal', enc: 'frente', nivel: 1, lados: true, como: 'De frente al iPad, cerca de una pared. Cuenta solo el tiempo con el pie levantado.' },
+  tandem:            { n: 'Parado en tándem', ico: '👣', tipo: 'tiempo', med: 'presente', enc: 'frente', nivel: 1, como: 'Un pie delante del otro, talón contra punta, cerca de una pared. De frente al iPad.' },
+  dead_bug:          { n: 'Dead bug', ico: '🪲', tipo: 'reps', med: null, nivel: 1, como: 'Conteo a mano con el botón +1 (la cámara no lo cuenta).' },
+  bird_dog:          { n: 'Bird dog', ico: '🐕', tipo: 'reps', med: null, nivel: 1, como: 'Conteo a mano con el botón +1 (la cámara no lo cuenta).' },
+  movilidad_tobillo: { n: 'Rodilla a la pared (movilidad de tobillo)', ico: '🧱', tipo: 'reps', med: null, nivel: 1, lados: true, como: 'Llevar la rodilla a la pared sin levantar el talón. Conteo a mano con +1.' },
+  wall_slides:       { n: 'Wall slides', ico: '🙌', tipo: 'reps', med: null, nivel: 1, como: 'Espalda y brazos contra la pared, deslizar hacia arriba. Conteo a mano con +1.' },
+  rock_back:         { n: 'Rock back', ico: '🔙', tipo: 'reps', med: null, nivel: 1, como: 'En cuadrupedia, llevar la cola a los talones con la columna neutra. Conteo a mano con +1.' },
+  saltos:            { n: 'Progresión de saltos', ico: '🦘', tipo: 'reps', med: null, nivel: 3, como: 'Bipodal → una pierna, aterrizaje controlado. Conteo a mano con +1.' },
+}
+const NIVEL_TXT = { 1: '', 2: 'pide algo de condición física', 3: 'exigente' }
+
+// CORTES DE CONTEO (normalizados por el largo de pierna o de muslo, así no dependen de la distancia al iPad).
+// entra = empieza la repetición · sale = terminó y vuelve · objetivo = mínimo para que cuente como VÁLIDA.
+const CONTEO_ENTRENO = {
+  baja:     { vis: [23, 24, 27, 28], entra: 0.10, sale: 0.05 },               // objetivo = profundidad elegida
+  estocada: { vis: [23, 24, 25, 26, 27, 28], entra: 0.10, sale: 0.05, objetivo: 0.15 },
+  sentado:  { entra: 0.35, sale: 0.15, objetivo: 0.60 },
+  sube:     { entra: 0.12, sale: 0.04, objetivo: 0.15 },
+  talon:    { entra: 0.035, sale: 0.012, objetivo: 0.05 },
+  puente:   { entra: 0.25, sale: 0.08, objetivo: 0.45 },
+}
+
+// FASE 3: hallazgo de un test → ejercicios sugeridos. Es DATOS: para cambiar el mapa clínico se toca acá.
+// La lectura del test es la de interpretar() (la misma de la ficha); silla 30 s y el lunge tienen su propia regla.
+const malDe = (test, v) => { const r = interpretar(test, v); return !!(r && r[0] !== 'ok') }
+const RJ_SILLA30 = [[60, 12], [65, 11], [70, 10], [75, 10], [80, 9], [85, 8], [90, 4]]   // Rikli y Jones, límite inferior (tabla de mujeres: la más baja)
+const REGLAS_ENTRENO = [
+  { tests: ['silla5', 'tug'], si: (r) => malDe(r.test, +r.valor), motivo: 'fuerza funcional de piernas', ej: ['sit_to_stand', 'sentadilla_cajon'] },
+  { tests: ['silla30'], si: (r) => { const e = (perfilActual() || {}).edad ?? (paciente && paciente.edad); if (e == null || e < 60) return false; const f = RJ_SILLA30.filter(([d]) => e >= d).pop(); return f && +r.valor < f[1] },
+    motivo: 'fuerza funcional de piernas (debajo de lo esperado para la edad)', ej: ['sit_to_stand', 'sentadilla_cajon'] },
+  { tests: ['equilibrio', 'unipodal', 'alcance'], si: (r) => malDe(r.test, +r.valor), motivo: 'equilibrio', ej: ['tandem', 'unipodal', 'talones'] },
+  { tests: ['squatmono', 'fsd', 'estocada'], si: (r) => malDe(r.test, +r.valor), motivo: 'control de rodilla y cadera en apoyo de una pierna', ej: ['sentadilla_banda', 'step_down', 'puente_uni'] },
+  { tests: ['rom'], si: (r) => { const m = r.detalle && r.detalle.medidas && r.detalle.medidas.lunge_g, it = ROM_ITEMS.find(i => i.k === 'lunge_g')
+      if (!m) return false; const bajo = it && it.ref && ['D', 'I'].some(L => m[L] != null && m[L] < it.ref.min); return bajo || (m.lsi != null && m.lsi < LSI_OK) },
+    motivo: 'dorsiflexión de tobillo (lunge)', ej: ['movilidad_tobillo', 'talones_exc'] },
+  { tests: ['puente'], si: (r) => malDe(r.test, +r.valor), motivo: 'control de pelvis en el puente', ej: ['puente', 'puente_uni'] },
+  { tests: ['tronco', 'aslr'], si: (r) => malDe(r.test, +r.valor), motivo: 'control y resistencia de tronco', ej: ['plancha', 'plancha_lateral', 'dead_bug', 'bird_dog'] },
+  { tests: ['ohs', 'rockback'], si: (r) => malDe(r.test, +r.valor), motivo: 'patrón de sentadilla', ej: ['sentadilla_cajon', 'rock_back'] },
+  { tests: ['wallangel', 'shouldermob'], si: (r) => malDe(r.test, +r.valor), motivo: 'movilidad de hombros y torácica', ej: ['wall_slides'] },
+  { tests: ['hop', 'triplehop', 'sidehop', 'crossover'], si: (r) => malDe(r.test, +r.valor), motivo: 'asimetría de salto', ej: ['estocada', 'step_up', 'saltos'] },
+]
+
+// Dosis base según el perfil del paciente (el profe la cambia antes de empezar)
+function dosisBase() {
+  const pf = paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo) ? perfilActual() : null
+  const mayor = pf && pf.edad != null && pf.edad >= 65
+  if (pf && (pf.ayuda || pf.actividad === 'sedentario' || mayor)) return { series: 2, reps: 8, seg: 20 }
+  if (pf && pf.actividad === 'deportista') return { series: 3, reps: 12, seg: 45 }
+  return { series: 3, reps: 10, seg: 30 }
+}
+const itemNuevo = (id) => { const e = EJERCICIOS[id], d = dosisBase(); return { id, series: d.series, reps: d.reps, seg: d.seg, prof: e.prof || null } }
+
+let ENTR = null   // { prog:[items], descanso, sug:[...], pasos:[], k, res:[], timer, video, ... }
+const pacReal = () => paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo)
+const filtroPac = () => paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`
+
+async function sugerirEntreno() {
+  if (!pacReal()) return { sug: [], leidos: 0 }
+  const desde = new Date(Date.now() - 120 * 864e5).toISOString()
+  const { data, error } = await supabase.from('tests_biolab').select('test, valor, detalle, creado_en')
+    .or(filtroPac()).gte('creado_en', desde).order('creado_en', { ascending: false })
+  if (error) throw error
+  const ultima = new Map(); (data || []).forEach(r => { if (!ultima.has(r.test)) ultima.set(r.test, r) })
+  const porEj = new Map()
+  REGLAS_ENTRENO.forEach(rg => rg.tests.forEach(t => {
+    const r = ultima.get(t); if (!r) return
+    let dispara = false; try { dispara = rg.si(r) } catch (e) {}
+    if (!dispara) return
+    const lect = interpretar(t, +r.valor), nombreT = (TESTS.find(x => x.id === t) || {}).nombre || t
+    const porque = `${nombreT}${lect ? ': ' + lect[1].toLowerCase() : ''} (${new Date(r.creado_en).toLocaleDateString('es-AR')})`
+    rg.ej.forEach(id => { if (!EJERCICIOS[id]) return
+      const x = porEj.get(id) || { id, motivos: new Set(), porque: new Set() }; x.motivos.add(rg.motivo); x.porque.add(porque); porEj.set(id, x) })
+  }))
+  const sug = [...porEj.values()].map(x => ({ id: x.id, motivos: [...x.motivos], porque: [...x.porque], apt: aptNivel(EJERCICIOS[x.id].nivel || 1) }))
+  return { sug, leidos: ultima.size }
+}
+
+async function ultimoProgramaEntreno() {
+  if (!pacReal()) return null
+  const { data } = await supabase.from('entrenos_biolab').select('detalle, creado_en').or(filtroPac()).order('creado_en', { ascending: false }).limit(1)
+  const r = data && data[0]; return r && r.detalle && r.detalle.programa ? { prog: r.detalle.programa, fecha: r.creado_en } : null
+}
+
+// ---------- PANTALLA 1: armar el programa ----------
+async function renderEntreno() {
+  setTimeout(aplicarModoTV, 0)
+  apagarCamara(); det = null; actual = null; pose = null; manosLibres = false
+  if (!paciente) { renderCatalogo(); return }
+  if (!ENTR || ENTR.pacKey !== perfilKey()) ENTR = { pacKey: perfilKey(), prog: [], descanso: 60, sug: null, sugElegidos: new Set(), ultimo: undefined }
+  const opcionesEj = Object.entries(EJERCICIOS).map(([id, e]) => `<option value="${id}">${e.ico} ${esc(e.n)}${e.med ? '' : ' (conteo a mano)'}</option>`).join('')
+  $('app').innerHTML = `
+    <button class="back" id="btnVolverEnt">← Test BiOLAB</button>
+    <h1>🏋️ Entrenar</h1>
+    <p class="sub">Programa con conteo por cámara: cuenta solo las repeticiones válidas. ${chipPaciente()}</p>
+    <div class="panel" style="margin-bottom:14px"><h2 style="margin-top:0">🧭 Sugerido por sus tests</h2><div id="sugBox"><div class="nota">Leyendo sus tests de los últimos 120 días…</div></div></div>
+    <div class="panel" style="margin-bottom:14px">
+      <h2 style="margin-top:0">📋 Programa de hoy</h2>
+      <div id="ultBox"></div>
+      <div id="progBox"></div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px">
+        <select id="selEjNuevo" style="padding:10px;border-radius:10px;border:1.5px solid var(--border);font-size:15px">${opcionesEj}</select>
+        <button class="b" id="btnAgregarEj">➕ Agregar</button>
+        <label style="margin-left:auto">Descanso entre series <select id="selDescanso">${[30, 45, 60, 90, 120].map(s => `<option value="${s}" ${ENTR.descanso === s ? 'selected' : ''}>${s} s</option>`).join('')}</select></label>
+      </div>
+      <div class="btns" style="margin-top:14px"><button class="b pri" id="btnEmpezarProg" style="font-size:17px;padding:12px 22px">▶ Empezar el programa</button></div>
+      ${pacReal() ? '' : '<div class="nota">Es una prueba sin paciente: se puede entrenar, pero no se guarda.</div>'}
+    </div>`
+  $('btnVolverEnt').onclick = renderCatalogo
+  $('btnAgregarEj').onclick = () => { ENTR.prog.push(itemNuevo($('selEjNuevo').value)); pintarProgEntreno() }
+  $('selDescanso').onchange = (e) => { ENTR.descanso = +e.target.value }
+  $('btnEmpezarProg').onclick = () => { if (!ENTR.prog.length) { alert('Agregá al menos un ejercicio (o tildá los sugeridos).'); return } empezarSesionEntreno() }
+  pintarProgEntreno()
+  // último programa guardado
+  if (ENTR.ultimo === undefined) { try { ENTR.ultimo = await ultimoProgramaEntreno() } catch (e) { ENTR.ultimo = null } }
+  if ($('ultBox') && ENTR.ultimo) {
+    $('ultBox').innerHTML = `<div class="necbox" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">🔁 Último programa: ${ENTR.ultimo.prog.map(i => esc((EJERCICIOS[i.id] || {}).n || i.id)).join(', ')} · ${new Date(ENTR.ultimo.fecha).toLocaleDateString('es-AR')}
+      <button class="b" id="btnRepetirProg">Repetir ese programa</button></div>`
+    $('btnRepetirProg').onclick = () => { ENTR.prog = ENTR.ultimo.prog.filter(i => EJERCICIOS[i.id]).map(i => ({ ...i })); pintarProgEntreno() }
+  }
+  // sugerencia (fase 3)
+  if (!ENTR.sug) {
+    try { ENTR.sug = await sugerirEntreno() } catch (e) { if ($('sugBox')) $('sugBox').innerHTML = `<div class="nota c-bad">No se pudieron leer sus tests: ${esc(e.message || e)}</div>`; return }
+    ENTR.sug.sug.forEach(s => { if (s.apt === 'ok') ENTR.sugElegidos.add(s.id) })
+  }
+  pintarSugEntreno()
+}
+
+function pintarSugEntreno() {
+  const box = $('sugBox'); if (!box) return
+  const S = ENTR.sug
+  if (!pacReal()) { box.innerHTML = '<div class="nota">Elegí un paciente para que sus tests sugieran los ejercicios.</div>'; return }
+  if (!S.leidos) { box.innerHTML = '<div class="nota">No tiene tests en los últimos 120 días. Armá el programa a mano abajo.</div>'; return }
+  if (!S.sug.length) { box.innerHTML = `<div class="nota">Leí ${S.leidos} test${S.leidos === 1 ? '' : 's'} y no hay hallazgos que pidan ejercicios del mapa. Armá el programa a mano abajo.</div>`; return }
+  const fila = (s) => { const e = EJERCICIOS[s.id]
+    return `<label class="paso" style="cursor:pointer;align-items:flex-start"><input type="checkbox" data-sug="${s.id}" ${ENTR.sugElegidos.has(s.id) ? 'checked' : ''} style="width:22px;height:22px;margin-top:3px">
+      <div class="txt"><b>${e.ico} ${esc(e.n)} ${s.apt === 'cuidado' ? '<span class="tag" style="background:#fef3c7;color:#92400e">con cuidado</span>' : ''}${e.med ? '' : ' <span class="tag">conteo a mano</span>'}</b>
+      <small>Por: ${s.motivos.map(esc).join(' · ')}</small><small>Según: ${s.porque.map(esc).join(' · ')}</small></div></label>` }
+  const aptos = S.sug.filter(s => s.apt !== 'no'), noSug = S.sug.filter(s => s.apt === 'no')
+  box.innerHTML = `${aptos.map(fila).join('')}
+    ${noSug.length ? `<details class="nosug"><summary>No sugeridos para su perfil (${noSug.length})</summary>${noSug.map(fila).join('')}</details>` : ''}
+    <div class="btns" style="margin-top:10px"><button class="b pri" id="btnUsarSug">✓ Usar los tildados en el programa</button></div>
+    <div class="nota">El sistema propone según la última toma de cada test; vos decidís. La dosis sale del perfil del paciente y se cambia abajo.</div>`
+  box.querySelectorAll('[data-sug]').forEach(c => c.onchange = () => { c.checked ? ENTR.sugElegidos.add(c.dataset.sug) : ENTR.sugElegidos.delete(c.dataset.sug) })
+  $('btnUsarSug').onclick = () => {
+    const ya = new Set(ENTR.prog.map(i => i.id))
+    S.sug.forEach(s => { if (ENTR.sugElegidos.has(s.id) && !ya.has(s.id)) ENTR.prog.push({ ...itemNuevo(s.id), sugerido: s.motivos }) })
+    pintarProgEntreno(); $('progBox').scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
+function pintarProgEntreno() {
+  const box = $('progBox'); if (!box) return
+  if (!ENTR.prog.length) { box.innerHTML = '<div class="nota">Todavía no hay ejercicios. Tildá los sugeridos o agregá desde la lista.</div>'; return }
+  const num = (i, k, paso, min) => `<span style="display:inline-flex;align-items:center;gap:4px"><button class="b" data-i="${i}" data-k="${k}" data-d="-${paso}" style="padding:4px 10px">−</button><b class="mono" style="min-width:30px;text-align:center">${ENTR.prog[i][k]}</b><button class="b" data-i="${i}" data-k="${k}" data-d="${paso}" style="padding:4px 10px">+</button></span>`
+  box.innerHTML = ENTR.prog.map((it, i) => { const e = EJERCICIOS[it.id]
+    return `<div class="paso" style="flex-wrap:wrap;gap:10px">
+      <div class="num">${i + 1}</div>
+      <div class="txt" style="min-width:180px"><b>${e.ico} ${esc(e.n)}</b><small>${esc(e.como)}</small>${it.sugerido ? `<small style="color:var(--turq-d)">Sugerido por: ${it.sugerido.map(esc).join(' · ')}</small>` : ''}</div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <span>Series ${num(i, 'series', 1, 1)}</span>
+        ${e.tipo === 'tiempo' ? `<span>Segundos ${num(i, 'seg', 5, 5)}</span>` : `<span>${e.lados ? 'Reps por lado' : 'Reps'} ${num(i, 'reps', 1, 1)}</span>`}
+        ${e.prof ? `<label>Profundidad <select data-prof="${i}">${Object.keys(PROF_ENTRENO).map(p => `<option ${it.prof === p ? 'selected' : ''}>${p}</option>`).join('')}</select></label>` : ''}
+        <button class="lnk" data-quitar="${i}">Quitar</button>
+      </div></div>` }).join('')
+  box.querySelectorAll('[data-k]').forEach(b => b.onclick = () => { const it = ENTR.prog[+b.dataset.i], k = b.dataset.k, d = +b.dataset.d
+    it[k] = Math.max(k === 'seg' ? 5 : 1, it[k] + d); pintarProgEntreno() })
+  box.querySelectorAll('[data-prof]').forEach(s => s.onchange = () => { ENTR.prog[+s.dataset.prof].prof = s.value })
+  box.querySelectorAll('[data-quitar]').forEach(b => b.onclick = () => { ENTR.prog.splice(+b.dataset.quitar, 1); pintarProgEntreno() })
+}
+
+// ---------- GRABACIÓN de la serie (para volver a verla; no se guarda en ningún lado) ----------
+let recEnt = null, recTrozos = []
+function grabarInicio() {
+  try {
+    if (!stream || !window.MediaRecorder) return
+    const tipo = ['video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t))
+    recEnt = new MediaRecorder(stream, tipo ? { mimeType: tipo } : undefined); recTrozos = []
+    recEnt.ondataavailable = (e) => { if (e.data && e.data.size) recTrozos.push(e.data) }
+    recEnt.start(1000)
+  } catch (e) { recEnt = null }
+}
+function grabarFin() {
+  return new Promise((res) => {
+    try {
+      if (!recEnt || recEnt.state === 'inactive') { res(null); return }
+      const r = recEnt; r.onstop = () => res(recTrozos.length ? new Blob(recTrozos, { type: r.mimeType || 'video/mp4' }) : null); r.stop()
+    } catch (e) { res(null) }
+  })
+}
+
+// ---------- PANTALLA 2: la sesión con la cámara ----------
+function pasosDeProg(prog) {
+  const pasos = []
+  prog.forEach((it, ix) => { const e = EJERCICIOS[it.id]
+    for (let s = 1; s <= it.series; s++) {
+      if (e.lados === true) ['D', 'I'].forEach(L => pasos.push({ ix, serie: s, lado: L }))
+      else pasos.push({ ix, serie: s, lado: null })
+    } })
+  return pasos
+}
+const nombrePaso = (p) => { const it = ENTR.prog[p.ix], e = EJERCICIOS[it.id]
+  return `${e.n} · serie ${p.serie} de ${it.series}${p.lado ? ' · ' + (p.lado === 'D' ? 'derecha' : 'izquierda') : ''}` }
+const metaPaso = (p) => { const it = ENTR.prog[p.ix], e = EJERCICIOS[it.id]; return e.tipo === 'tiempo' ? it.seg : e.lados === 'auto' ? it.reps * 2 : it.reps }
+
+function empezarSesionEntreno() {
+  setTimeout(aplicarModoTV, 0)
+  resetSeguimiento()
+  ENTR.pasos = pasosDeProg(ENTR.prog); ENTR.k = 0; ENTR.res = []; ENTR.inicio = new Date().toISOString()
+  if (ENTR.video) { try { URL.revokeObjectURL(ENTR.video) } catch (e) {} ENTR.video = null }
+  $('app').innerHTML = `
+    <button class="back" id="btnSalirSesion">← Programa</button>
+    <div class="layout">
+      <div class="stage">
+        <div class="empty" id="vempty">📱 iPad o celu en el trípode, vertical. Tocá <b>Preparar cámara</b>.</div>
+        <div class="vbox" id="vbox" style="display:none">
+          <video id="video" playsinline muted></video>
+          <canvas id="canvas"></canvas>
+          <div class="hud"><span class="pill" id="pill">—</span></div>
+          <div class="chk" id="chk"></div>
+          <div class="consejo" id="consejo"></div>
+          <div class="big" id="big"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2 id="entTitulo">🏋️ Entrenar</h2>
+        <div style="margin:4px 0 10px">${chipPaciente()}</div>
+        <div class="necbox" id="entComo"></div>
+        <div class="row">
+          <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
+          <label id="zoomBox" style="display:none">Zoom <input id="zoom" type="range" style="width:110px;vertical-align:middle"> <span id="zoomVal" class="mono"></span></label>
+          <label>Aviso al contar <select id="selAviso"><option value="pitido">Pitido</option><option value="voz">Decir el número</option><option value="silencio">Silencio</option></select></label>
+        </div>
+        <div class="mando" id="mando"><div class="estado" id="estado">Tocá Preparar cámara.</div>
+          <div class="btns">
+            <button class="b pri" id="btnPreparar">Preparar cámara</button>
+            <button class="b pri" id="btnEmpezar" disabled>Empezar</button>
+            <button class="b pri" id="btnMas1" style="display:none;font-size:22px;padding:10px 26px">+1</button>
+            <button class="b" id="btnMenos1" style="display:none">−1</button>
+            <button class="b dan" id="btnTerminarSerie" disabled>Terminar serie</button>
+            <button class="b" id="btnSaltarDesc" style="display:none">⏭ Saltar descanso</button>
+            <button class="b" id="btnVerSerie" style="display:none">▶ Ver la última serie</button>
+            <button class="b btnModoTV" onclick="alternarModoTV()">${modoTV ? '✕ Salir del modo TV' : '📺 Modo TV'}</button>
+          </div>
+          <button class="lnk" id="btnForzar" style="display:none">Empezar sin verificar la posición</button>
+          <button class="lnk" id="btnSaltarPaso">Saltear este ejercicio</button>
+        </div>
+        <div class="res" id="entLista"></div>
+        <div id="verSerieBox"></div>
+      </div>
+    </div>`
+  $('btnSalirSesion').onclick = () => { if (ENTR.res.length && !confirm('¿Salir? Se pierde lo hecho en esta sesión.')) return; cortarDescanso(); manosLibres = false; renderEntreno() }
+  $('selCam').value = facing
+  $('selAviso').value = avisoConteo
+  $('selAviso').onchange = (e) => { avisoConteo = e.target.value; try { localStorage.setItem('testbiolab_aviso', avisoConteo) } catch (er) {}
+    if (avisoConteo === 'voz') decir('uno'); else if (avisoConteo === 'pitido') beep(1200, 60) }
+  $('selCam').onchange = async (e) => { const val = e.target.value
+    if (val === 'environment' || val === 'user') { facing = val; camId = '' } else { const c = camaras[parseInt(val)]; if (c) camId = c.deviceId }
+    try { localStorage.setItem('testbiolab_cam', camId) } catch (er) {}
+    if (stream) await prenderCamara() }
+  $('btnPreparar').onclick = async () => {
+    beep(1, 1); if (avisoConteo === 'voz') decir(' ')
+    $('btnPreparar').disabled = true
+    try {
+      await cargarModelo(); await prenderCamara()
+      const stg = document.querySelector('.layout > .stage'); if (stg) { stg.classList.add('fija'); stg.scrollIntoView({ block: 'start', behavior: 'smooth' }) }
+      $('btnPreparar').textContent = 'Cámara lista'; $('btnTerminarSerie').disabled = false; $('btnForzar').style.display = ''
+      if (det && det.init) det.init()
+    } catch (e) { console.error(e); $('btnPreparar').disabled = false
+      setEstado(e && e.name === 'NotAllowedError' ? 'El navegador no dio permiso para la cámara. Habilitalo en Ajustes de Safari → Cámara para puntobio.com.ar.' : 'No se pudo prender la cámara o el detector: ' + (e && e.message ? e.message : e), 'err') }
+  }
+  const arrancar = () => { cortarDescanso(); manosLibres = false; if (det) { det.armado = false; det.empezar() } }
+  $('btnEmpezar').onclick = arrancar
+  $('btnForzar').onclick = arrancar
+  $('btnTerminarSerie').onclick = () => { if (det && det.terminar) det.terminar() }
+  $('btnSaltarDesc').onclick = () => { if (ENTR.timer) finDescanso() }
+  $('btnMas1').onclick = () => det && det.mas && det.mas(1)
+  $('btnMenos1').onclick = () => det && det.mas && det.mas(-1)
+  $('btnSaltarPaso').onclick = () => { if (!confirm('¿Saltear lo que queda de este ejercicio?')) return
+    cortarDescanso(); const ix = ENTR.pasos[ENTR.k].ix; while (ENTR.k < ENTR.pasos.length && ENTR.pasos[ENTR.k].ix === ix) ENTR.k++; prepararPaso(true) }
+  $('btnVerSerie').onclick = () => { const b = $('verSerieBox'); if (!ENTR.video) return
+    b.innerHTML = `<div class="necbox" style="margin-top:12px"><b>▶ Última serie</b> <button class="lnk" id="btnCerrarVer">cerrar</button><video src="${ENTR.video}" controls playsinline style="width:100%;border-radius:10px;margin-top:6px"></video></div>`
+    $('btnCerrarVer').onclick = () => { b.innerHTML = '' } }
+  prepararPaso(false)
+}
+
+function pintarListaEntreno() {
+  const box = $('entLista'); if (!box) return
+  box.innerHTML = '<b>Programa</b>' + ENTR.prog.map((it, ix) => { const e = EJERCICIOS[it.id]
+    const ps = ENTR.pasos.filter(p => p.ix === ix), hechos = ENTR.res.filter(r => r.ix === ix).length
+    const enCurso = ENTR.pasos[ENTR.k] && ENTR.pasos[ENTR.k].ix === ix
+    return `<div style="padding:6px 0;${enCurso ? 'font-weight:800;color:var(--turq-d)' : ''}">${hechos >= ps.length ? '✅' : enCurso ? '▶️' : '○'} ${e.ico} ${esc(e.n)} <small style="color:var(--dim)">${hechos}/${ps.length}</small></div>` }).join('')
+}
+
+function prepararPaso(conDescanso) {
+  if (ENTR.k >= ENTR.pasos.length) { cortarDescanso(); renderCierreEntreno(); return }
+  const p = ENTR.pasos[ENTR.k], it = ENTR.prog[p.ix], e = EJERCICIOS[it.id]
+  actual = { id: 'entreno', ico: e.ico, nombre: e.n, encuadre: e.med ? e.enc : 'lineas' }
+  det = detectorEntreno(p)
+  posOkFrames = 0; posOk = false
+  $('entTitulo').textContent = `${e.ico} ${nombrePaso(p)}`
+  $('entComo').innerHTML = `<b>Cómo:</b> ${esc(e.como)}${p.lado ? `<br><b>Pierna: ${p.lado === 'D' ? 'DERECHA' : 'IZQUIERDA'}</b>` : ''}
+    <br><b>Meta:</b> ${metaPaso(p)} ${e.tipo === 'tiempo' ? 'segundos válidos' : e.lados === 'auto' ? `repeticiones (${it.reps} por lado)` : 'repeticiones válidas'}${it.prof ? ` · profundidad ${it.prof}` : ''}`
+  $('btnMas1').style.display = e.med ? 'none' : ''; $('btnMenos1').style.display = e.med ? 'none' : ''
+  pintarListaEntreno()
+  if (conDescanso) empezarDescanso(ENTR.descanso, p)
+  else { setBig(''); if ($('btnPreparar').disabled && det.init) det.init() }
+}
+
+function empezarDescanso(seg, p) {
+  cortarDescanso()
+  let n = seg
+  $('btnSaltarDesc').style.display = ''
+  decir(`Descanso. Después: ${nombrePaso(p).split(' · serie')[0]}${p.lado ? (p.lado === 'D' ? ', derecha' : ', izquierda') : ''}`)
+  setEstado(`Descanso ${seg} s. Mientras, ubicate para: ${nombrePaso(p)}`, 'warn'); setBig(`⏸ ${n}`)
+  ENTR.timer = setInterval(() => {
+    n--; setBig(`⏸ ${n}`)
+    if (n <= 3 && n > 0) beep(600, 100)
+    if (n <= 0) finDescanso()
+  }, 1000)
+}
+function cortarDescanso() { if (ENTR && ENTR.timer) { clearInterval(ENTR.timer); ENTR.timer = null } if ($('btnSaltarDesc')) $('btnSaltarDesc').style.display = 'none' }
+function finDescanso() {
+  cortarDescanso(); setBig('')
+  if (!det) return
+  // arranca solo cuando la posición queda en verde (como el manos libres de los tests)
+  manosLibres = true; armadoFrames = 0; ultimoConsejo = ''; tUltimoConsejo = 0; det.armado = true
+  setEstado('Ubicate en posición: arranca solo cuando todo esté en verde (o tocá Empezar).', 'warn')
+}
+
+function detectorEntreno(p) {
+  const it = ENTR.prog[p.ix], e = EJERCICIOS[it.id], C = CONTEO_ENTRENO[e.med] || {}
+  const meta = metaPaso(p), objetivo = e.med === 'baja' ? PROF_ENTRENO[it.prof || 'Media'] : C.objetivo
+  const d = { fase: 'listo', encuadre: e.med ? e.enc : 'lineas', lineas: e.med ? undefined : [0, 1], validas: 0, malas: 0, lado: { D: 0, I: 0 }, seg: 0, dentro: false, pico: 0 }
+  d.init = () => setEstado(e.med ? `Ubicá al paciente y tocá Empezar. ${e.como}` : 'Conteo a mano: tocá Empezar y después +1 en cada repetición.', 'ok')
+  const L2 = () => ladoCam([12, 24, 26, 28, 30], [11, 23, 25, 27, 29])
+  const pierna = () => Math.max((dist(pose[24], pose[28]) + dist(pose[23], pose[27])) / 2, 1)
+  // muestra cruda según el tipo de conteo
+  const medir = () => {
+    if (e.med === 'baja' || e.med === 'estocada') { if (!visible(...C.vis)) return null; return { y: mid(pose[23], pose[24]).y, norm: pierna() } }
+    if (e.med === 'sentado' || e.med === 'puente') { const s = L2(), [h, k] = s === 'D' ? [24, 26] : [23, 25]; if (!visible(h, k)) return null; return { y: pose[h].y, norm: Math.max(dist(pose[h], pose[k]), 1) } }
+    if (e.med === 'sube') { const s = L2(), [h, a] = s === 'D' ? [24, 28] : [23, 27]; if (!visible(h, a)) return null; return { y: pose[h].y, norm: Math.max(dist(pose[h], pose[a]), 1) } }
+    if (e.med === 'talon') { const s = L2(), [h, a, t] = s === 'D' ? [24, 28, 30] : [23, 27, 29]; if (!visible(h, a, t)) return null; return { y: pose[t].y, norm: Math.max(dist(pose[h], pose[a]), 1) } }
+    return null
+  }
+  // valor de la repetición: cuánto bajó (baja/estocada) o cuánto subió (el resto), normalizado
+  const valor = (m) => (e.med === 'baja' || e.med === 'estocada') ? (m.y - d.base.y) / d.base.norm : (d.base.y - m.y) / d.base.norm
+  // tiempo: ¿la posición está bien en este cuadro?
+  const postOk = () => {
+    if (!pose) return false
+    if (e.med === 'linea') { const s = L2(), [sh, h, a] = s === 'D' ? [12, 24, 28] : [11, 23, 27]; return visible(sh, h, a) && angulo3(pose[sh], pose[h], pose[a]) >= 160 }
+    if (e.med === 'unipodal') return visible(27, 28) && Math.abs(pose[27].y - pose[28].y) / pierna() > 0.05
+    if (e.med === 'presente') return visible(23, 24, 27, 28)
+    return false
+  }
+  d.empezar = async () => {
+    if (['calibrando', 'cuenta', 'midiendo'].includes(d.fase)) return
+    cortarDescanso(); $('verSerieBox') && ($('verSerieBox').innerHTML = '')
+    d.validas = 0; d.malas = 0; d.lado = { D: 0, I: 0 }; d.seg = 0; d.dentro = false; d.pico = 0; d.muestras = []; d.base = null
+    if (e.tipo === 'reps' && e.med) { d.fase = 'calibrando'; setEstado('Quieto en la posición inicial: midiendo…', 'warn'); return }
+    d.fase = 'cuenta'; await cuentaRegresiva(); d.arrancar()
+  }
+  d.arrancar = () => {
+    d.fase = 'midiendo'; d.t0 = performance.now(); d.tPrev = d.t0; d.tFuera = 0; d.tAviso = 0
+    grabarInicio(); $('btnTerminarSerie').disabled = false
+    setEstado(e.tipo === 'tiempo' ? `Sostené: cuenta solo con la posición correcta (meta ${meta} s)` : e.med ? `Contando: meta ${meta}` : 'Tocá +1 en cada repetición', 'ok')
+    setBig(e.tipo === 'tiempo' ? `0 / ${meta} s` : `0 / ${meta}`)
+  }
+  d.frame = async (now) => {
+    if (d.fase === 'calibrando') {
+      const m = medir(); if (!m) return
+      d.muestras.push(m)
+      if (d.muestras.length >= 14) {
+        const av = (k) => d.muestras.reduce((s, x) => s + x[k], 0) / d.muestras.length
+        d.base = { y: av('y'), norm: av('norm') }
+        d.fase = 'cuenta'; await cuentaRegresiva(); d.arrancar()
+      }
+      return
+    }
+    if (d.fase !== 'midiendo') return
+    if (e.tipo === 'tiempo') {
+      const dt = (now - d.tPrev) / 1000; d.tPrev = now
+      if (postOk()) { d.seg += dt; d.tFuera = 0 }
+      else { d.tFuera += dt; if (d.tFuera > 1.5 && now - d.tAviso > 3000) { d.tAviso = now; beep(300, 250); if (avisoConteo !== 'silencio') decir('Corregí la posición') } }
+      const s = Math.floor(d.seg)
+      if (s !== d.ultS) { d.ultS = s; if (s > 0 && s % 10 === 0 && avisoConteo === 'voz') decir(s) }
+      setBig(`${s} / ${meta} s`)
+      if (d.seg >= meta) d.cerrar()
+      return
+    }
+    if (!e.med) return
+    const m = medir(); if (!m) return
+    const v = valor(m)
+    if (!d.dentro && v > C.entra) { d.dentro = true; d.pico = v; d.ladoRep = null }
+    if (d.dentro) {
+      if (v > d.pico) { d.pico = v; if (e.med === 'estocada' && visible(25, 26)) d.ladoRep = pose[26].y < pose[25].y ? 'D' : 'I' }
+      if (v < C.sale) {
+        d.dentro = false
+        if (d.pico >= objetivo) { d.validas++; if (d.ladoRep) d.lado[d.ladoRep]++; avisarConteo(d.validas) }
+        else { d.malas++; beep(260, 220) }
+        setEstado(`Válidas ${d.validas} de ${meta}${d.malas ? ` · ${d.malas} no válida${d.malas === 1 ? '' : 's'} (no llegó al rango)` : ''}${e.lados === 'auto' ? ` · D ${d.lado.D} · I ${d.lado.I}` : ''}`, d.malas ? 'warn' : 'ok')
+        if (d.validas >= meta) { d.cerrar(); return }
+      }
+    }
+    setBig(`${d.validas} / ${meta}`)
+  }
+  d.mas = (n) => { if (d.fase !== 'midiendo' || e.med) return; d.validas = Math.max(0, d.validas + n); if (n > 0) avisarConteo(d.validas); setBig(`${d.validas} / ${meta}`); if (d.validas >= meta) d.cerrar() }
+  // línea objetivo: "hasta acá" (verde punteada)
+  d.dibujar = (ctx, s) => {
+    if (!d.base || objetivo == null || !e.med || e.tipo !== 'reps') return
+    const y = (e.med === 'baja' || e.med === 'estocada') ? d.base.y + objetivo * d.base.norm : d.base.y - objetivo * d.base.norm
+    ctx.setLineDash([14 * s, 10 * s]); ctx.lineWidth = 4 * s; ctx.strokeStyle = 'rgba(34,197,94,.9)'
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(ctx.canvas.width, y); ctx.stroke(); ctx.setLineDash([])
+    ctx.fillStyle = 'rgba(34,197,94,.95)'; ctx.font = `bold ${20 * s}px Manrope`; ctx.fillText('HASTA ACÁ', 10 * s, y - 8 * s)
+  }
+  d.cerrar = async () => {
+    if (d.fase !== 'midiendo') return
+    d.fase = 'fin'; beep(900, 450)
+    const blob = await grabarFin()
+    if (blob) { if (ENTR.video) { try { URL.revokeObjectURL(ENTR.video) } catch (er) {} } ENTR.video = URL.createObjectURL(blob); $('btnVerSerie').style.display = '' }
+    ENTR.res.push({ ix: p.ix, id: it.id, serie: p.serie, lado: p.lado, meta, tipo: e.tipo, validas: e.tipo === 'reps' ? d.validas : null, no_validas: e.tipo === 'reps' && e.med ? d.malas : null,
+      por_lado: e.lados === 'auto' ? { ...d.lado } : null, segundos: e.tipo === 'tiempo' ? +d.seg.toFixed(1) : null, conteo: e.med ? 'camara' : 'manual', prof: it.prof || null })
+    const okTxt = e.tipo === 'tiempo' ? `${Math.floor(d.seg)} s de ${meta}` : `${d.validas} de ${meta}${d.malas ? ` (${d.malas} no válidas)` : ''}`
+    if (avisoConteo !== 'silencio') decir('Serie lista')
+    setEstado(`Serie lista: ${okTxt}`, 'ok')
+    ENTR.k++
+    if (ENTR.k >= ENTR.pasos.length) { setTimeout(() => prepararPaso(false), 900); return }
+    prepararPaso(true)
+  }
+  d.terminar = () => { if (d.fase === 'midiendo') d.cerrar(); else if (['calibrando', 'cuenta'].includes(d.fase)) { d.fase = 'listo'; setEstado('Cancelado. Tocá Empezar.', 'warn'); setBig('') } }
+  return d
+}
+
+// ---------- PANTALLA 3: cierre, Borg y dolor, guardar ----------
+function renderCierreEntreno() {
+  apagarCamara(); det = null; actual = null; pose = null; manosLibres = false
+  const resumen = ENTR.prog.map((it, ix) => { const e = EJERCICIOS[it.id], rs = ENTR.res.filter(r => r.ix === ix)
+    if (!rs.length) return { it, e, txt: 'no se hizo' }
+    if (e.tipo === 'tiempo') { const s = rs.reduce((a, r) => a + (r.segundos || 0), 0), m = rs.reduce((a, r) => a + r.meta, 0); return { it, e, txt: `${Math.round(s)} s válidos de ${m} s (${rs.length} serie${rs.length === 1 ? '' : 's'})` } }
+    const v = rs.reduce((a, r) => a + (r.validas || 0), 0), m = rs.reduce((a, r) => a + r.meta, 0), nv = rs.reduce((a, r) => a + (r.no_validas || 0), 0)
+    const pl = e.lados === 'auto' ? ` · D ${rs.reduce((a, r) => a + (r.por_lado ? r.por_lado.D : 0), 0)} / I ${rs.reduce((a, r) => a + (r.por_lado ? r.por_lado.I : 0), 0)}` : ''
+    const porL = e.lados === true ? ` · D ${rs.filter(r => r.lado === 'D').reduce((a, r) => a + (r.validas || 0), 0)} / I ${rs.filter(r => r.lado === 'I').reduce((a, r) => a + (r.validas || 0), 0)}` : ''
+    return { it, e, txt: `${v} válidas de ${m}${nv ? ` · ${nv} no válidas` : ''}${pl}${porL}${e.med ? '' : ' (conteo a mano)'}` } })
+  const escala = (k) => `<div class="chips" data-escala="${k}">${Array.from({ length: 11 }, (_, n) => `<button data-v="${n}">${n}</button>`).join('')}</div>`
+  $('app').innerHTML = `
+    <h1>✅ Programa terminado</h1><p class="sub">${chipPaciente()}</p>
+    <div class="panel" style="margin-bottom:14px"><table style="width:100%;border-collapse:collapse">${resumen.map(r => `<tr><td style="padding:8px 4px;border-bottom:1px solid var(--border)">${r.e.ico} <b>${esc(r.e.n)}</b> <small style="color:var(--dim)">${r.it.series}×${r.e.tipo === 'tiempo' ? r.it.seg + ' s' : r.it.reps}${r.e.lados ? ' por lado' : ''}</small></td><td style="padding:8px 4px;border-bottom:1px solid var(--border);text-align:right">${esc(r.txt)}</td></tr>`).join('')}</table></div>
+    <div class="panel" style="margin-bottom:14px">
+      <label><b>¿Qué tan difícil fue? (0 = nada · 10 = máximo)</b></label>${escala('borg')}
+      <label><b>¿Dolor? (0 = nada · 10 = máximo)</b></label>${escala('dolor')}
+      <input id="dolorZona" placeholder="Zona del dolor (si hubo)" style="width:100%;padding:10px;border-radius:10px;border:1.5px solid var(--border);font-size:15px;margin-bottom:8px">
+      <textarea id="entObs" placeholder="Observaciones del profesional (opcional)" style="width:100%;min-height:70px;padding:10px;border-radius:10px;border:1.5px solid var(--border);font:inherit"></textarea>
+      <div class="btns" style="margin-top:12px">
+        ${pacReal() ? '<button class="b pri" id="btnGuardarEnt">💾 Guardar en la ficha</button>' : '<div class="nota">Es una prueba sin paciente: no se guarda.</div>'}
+        <button class="b" id="btnOtraVez">🔁 Volver al programa</button>
+        <button class="b" id="btnFinEnt">← Test BiOLAB</button>
+      </div></div>`
+  const val = { borg: null, dolor: null }
+  document.querySelectorAll('[data-escala]').forEach(g => g.querySelectorAll('button').forEach(b => b.onclick = () => {
+    val[g.dataset.escala] = +b.dataset.v; g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)) }))
+  $('btnOtraVez').onclick = renderEntreno
+  $('btnFinEnt').onclick = renderCatalogo
+  if ($('btnGuardarEnt')) $('btnGuardarEnt').onclick = async () => {
+    const b = $('btnGuardarEnt'); b.disabled = true; b.textContent = 'Guardando…'
+    const pf = perfilActual(), totalV = ENTR.res.reduce((a, r) => a + (r.validas || 0), 0)
+    const fila = {
+      origen: paciente.origen, paciente_id: paciente.id, paciente_nombre: paciente.nombre, paciente_dni: normDni(paciente.dni),
+      test: 'entreno', valor: totalV, unidad: 'repeticiones válidas',
+      detalle: { programa: ENTR.prog, descanso_s: ENTR.descanso, resultado: ENTR.res, inicio: ENTR.inicio, borg: val.borg, dolor: val.dolor,
+        dolor_zona: $('dolorZona').value.trim() || null, observaciones: $('entObs').value.trim() || null,
+        sugerido_por: [...new Set(ENTR.prog.flatMap(i => i.sugerido || []))], perfil: pf ? { edad: pf.edad, actividad: pf.actividad, ayuda: pf.ayuda } : null },
+      texto: 'Entrenamiento: ' + resumen.map(r => `${r.e.n} ${r.txt}`).join(' · ') + (val.borg != null ? ` · Borg ${val.borg}` : '') + (val.dolor ? ` · dolor ${val.dolor}` : ''),
+      manos_libres: false
+    }
+    const { error } = await supabase.from('entrenos_biolab').insert(fila)
+    if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; alert('No se guardó: ' + error.message); return }
+    b.textContent = 'Guardado ✓'; ENTR.ultimo = undefined
+  }
+}
+window.renderEntreno = renderEntreno
 
 window.addEventListener('pagehide', apagarCamara)
 verificarUbicacion()
