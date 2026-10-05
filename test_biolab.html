@@ -6274,12 +6274,133 @@ async function subirDemo(id, file) {
 }
 const puedeSubirDemo = () => ADMIN_UBIC.includes(miEmail)
 
+// ---------- DEMO GRABADA EN EL MOMENTO (el profe explica y graba con la misma cámara) ----------
+// Queda como demo de ESTA sesión (en el iPad). Opcional: guardarla en la BIBLIOTECA (permanente, para cualquier
+// paciente) en tests-biolab/demos/biblioteca/<ejercicio>/. Lu y Jime pueden marcar una como demo OFICIAL.
+let recDemo = null, demoTrozos = [], demoAudio = null, demoT0 = 0, demoTimer = null
+const DEMO_MAX_S = 20        // una demo dura como máximo 20 segundos (decisión de Lu)
+const DEMO_BPS = 1500000     // ~1,5 Mbps: 20 s ≈ 4 MB, alcanza para ver el ejercicio
+const extDe = (tipo) => /webm/i.test(tipo || '') ? 'webm' : 'mp4'
+const ocupadoSerie = () => det && ['calibrando', 'cuenta', 'midiendo'].includes(det.fase)
+async function grabarDemoInicio(id) {
+  if (!stream) { alert('Primero tocá Preparar cámara.'); return }
+  if (ocupadoSerie()) { alert('Terminá la serie antes de grabar la demo.'); return }
+  if (!window.MediaRecorder) { alert('Este dispositivo no permite grabar video desde el navegador.'); return }
+  cortarDescanso(); manosLibres = false; if (det) det.armado = false     // que no arranque una serie sola mientras se graba
+  const tracks = [...stream.getVideoTracks()]
+  if (!$('chkAudioDemo') || $('chkAudioDemo').checked) {
+    try { demoAudio = await navigator.mediaDevices.getUserMedia({ audio: true }); tracks.push(...demoAudio.getAudioTracks()) }
+    catch (e) { demoAudio = null; setEstado('No hay permiso de micrófono: la demo se graba sin sonido.', 'warn') }
+  }
+  const tipo = ['video/mp4', 'video/webm'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t))
+  try { recDemo = new MediaRecorder(new MediaStream(tracks), { ...(tipo ? { mimeType: tipo } : {}), videoBitsPerSecond: DEMO_BPS, audioBitsPerSecond: 64000 }) }
+  catch (e) { if (demoAudio) { demoAudio.getTracks().forEach(t => t.stop()); demoAudio = null } alert('No se pudo grabar: ' + (e.message || e)); return }
+  demoTrozos = []; recDemo.ondataavailable = (e) => { if (e.data && e.data.size) demoTrozos.push(e.data) }
+  recDemo.start(1000); ENTR.grabandoDemo = id; demoT0 = performance.now(); beep(1000, 150)
+  setEstado(`🔴 Grabando la demo de ${EJERCICIOS[id].n}. Explicá y mostrá el ejercicio: corta sola a los 20 s.`, 'warn')
+  demoTimer = setInterval(() => { if ((performance.now() - demoT0) / 1000 >= DEMO_MAX_S) grabarDemoFin(); else pintarGrabDemo() }, 1000)
+  pintarGrabDemo()
+}
+async function grabarDemoFin() {
+  if (!recDemo) return
+  const r = recDemo, id = ENTR.grabandoDemo; recDemo = null; clearInterval(demoTimer); demoTimer = null
+  const blob = await new Promise(res => { r.onstop = () => res(new Blob(demoTrozos, { type: r.mimeType || 'video/mp4' })); try { r.stop() } catch (e) { res(null) } })
+  if (demoAudio) { demoAudio.getTracks().forEach(t => t.stop()); demoAudio = null }
+  ENTR.grabandoDemo = null; beep(700, 150)
+  if (blob && blob.size) {
+    const viejo = ENTR.demoSes[id]; if (viejo) { try { URL.revokeObjectURL(viejo.url) } catch (e) {} }
+    ENTR.demoSes[id] = { url: URL.createObjectURL(blob), blob, tipo: blob.type || 'video/mp4', ruta: null }
+    setEstado(`Demo de ${EJERCICIOS[id].n} lista para esta sesión ✓`, 'ok')
+  }
+  pintarGrabDemo(); pintarDemoPaso()
+}
+async function guardarDemoBiblioteca(id) {
+  const D = ENTR.demoSes[id]; if (!D || D.ruta) return
+  const quien = (miEmail || 'equipo').split('@')[0].replace(/[^a-z0-9._-]/gi, '')
+  const ruta = `demos/biblioteca/${id}/${Date.now()}_${quien}.${extDe(D.tipo)}`
+  const { error } = await supabase.storage.from('tests-biolab').upload(ruta, D.blob, { contentType: D.tipo, upsert: false })
+  if (error) throw error
+  D.ruta = ruta; if (BIBLIO) BIBLIO.delete(id)
+}
+async function oficializarDemo(id, ruta) {
+  const destino = `demos/${id}.${ruta.split('.').pop()}`
+  await cargarDemos()
+  const viejo = DEMOS.get(id); if (viejo) await supabase.storage.from('tests-biolab').remove([viejo])
+  const { error } = await supabase.storage.from('tests-biolab').copy(ruta, destino)
+  if (error) throw error
+  DEMOS.set(id, destino)
+}
+// Biblioteca de un ejercicio (videos guardados por el equipo)
+let BIBLIO = new Map()
+async function cargarBiblio(id) {
+  if (BIBLIO.has(id)) return BIBLIO.get(id)
+  const { data } = await supabase.storage.from('tests-biolab').list(`demos/biblioteca/${id}`, { limit: 100, sortBy: { column: 'name', order: 'desc' } })
+  const lista = (data || []).filter(f => /\.(mp4|webm|mov)$/i.test(f.name)).map(f => { const [ts, quien] = f.name.replace(/\.[^.]+$/, '').split('_')
+    return { ruta: `demos/biblioteca/${id}/${f.name}`, fecha: +ts ? new Date(+ts) : null, quien: quien || '' } })
+  BIBLIO.set(id, lista); return lista
+}
+async function verBiblio(id, cont) {
+  if (!cont) return
+  cont.innerHTML = '<div class="nota">Cargando la biblioteca…</div>'
+  const L = await cargarBiblio(id)
+  if (!L.length) { cont.innerHTML = '<div class="nota">Todavía no hay videos guardados de este ejercicio. Se graban desde la sesión (🎥 Grabar demo).</div>'; return }
+  cont.innerHTML = `<div class="necbox" style="margin-top:8px"><b>📚 Biblioteca · ${esc(EJERCICIOS[id].n)}</b> <button class="lnk" data-cerrar>cerrar</button>
+    ${L.map((v, k) => `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:4px 0">${v.fecha ? v.fecha.toLocaleDateString('es-AR') : ''} · ${esc(v.quien)}
+      <button class="lnk" data-play="${k}">▶ Ver</button>${puedeSubirDemo() ? `<button class="lnk" data-ofi="${k}">⭐ Usar como demo oficial</button>` : ''}</div>`).join('')}
+    <div data-vid></div></div>`
+  cont.querySelector('[data-cerrar]').onclick = () => { cont.innerHTML = '' }
+  cont.querySelectorAll('[data-play]').forEach(b => b.onclick = async () => {
+    const { data, error } = await supabase.storage.from('tests-biolab').createSignedUrl(L[+b.dataset.play].ruta, 3600)
+    cont.querySelector('[data-vid]').innerHTML = error ? `<div class="nota c-bad">${esc(error.message)}</div>` : `<video src="${data.signedUrl}" controls autoplay playsinline style="width:100%;max-height:60vh;border-radius:10px;margin-top:6px;background:#000"></video>` })
+  cont.querySelectorAll('[data-ofi]').forEach(b => b.onclick = async () => {
+    b.textContent = '⏳'; try { await oficializarDemo(id, L[+b.dataset.ofi].ruta); b.textContent = '⭐ Es la oficial ✓'; pintarProgEntreno() } catch (e) { b.textContent = '⭐ Usar como demo oficial'; alert('No se pudo: ' + (e.message || e)) } })
+}
+// Panel de grabación en la sesión: elegís el ejercicio (uno o todos los del programa, antes de empezar)
+function pintarGrabDemo() {
+  const box = $('entGrabBox'); if (!box || !ENTR.pasos) return
+  const ids = [...new Set(ENTR.prog.map(i => i.id))], pasoAct = ENTR.pasos[ENTR.k]
+  if (!ENTR.demoSel || !ids.includes(ENTR.demoSel)) ENTR.demoSel = pasoAct ? ENTR.prog[pasoAct.ix].id : ids[0]
+  const id = ENTR.grabandoDemo || ENTR.demoSel, D = ENTR.demoSes[id]
+  if (ENTR.grabandoDemo) {
+    const s = Math.floor((performance.now() - demoT0) / 1000)
+    box.innerHTML = `<div class="necbox" style="border-color:#fca5a5;background:#fef2f2"><b>🔴 Grabando · ${esc(EJERCICIOS[id].n)} · quedan ${Math.max(0, DEMO_MAX_S - s)} s</b> <small>(máx. ${DEMO_MAX_S} s)</small>
+      <div class="btns" style="margin-top:6px"><button class="b dan" id="btnDemoFin">⏹ Terminar grabación</button></div></div>`
+    $('btnDemoFin').onclick = grabarDemoFin; return
+  }
+  const hechas = ids.filter(x => ENTR.demoSes[x]).length
+  box.innerHTML = `<details class="necbox" ${ENTR.grabAbierto ? 'open' : ''} id="grabDet"><summary style="cursor:pointer;font-weight:800">🎥 Grabar demo mientras explicás ${hechas ? `<span class="tag">${hechas} de ${ids.length} grabadas hoy</span>` : ''}</summary>
+    <div class="row" style="margin-top:8px;gap:10px;flex-wrap:wrap;align-items:center">
+      <select id="selDemoEj">${ids.map(x => `<option value="${x}" ${x === id ? 'selected' : ''}>${ENTR.demoSes[x] ? '✅' : '○'} ${EJERCICIOS[x].ico} ${esc(EJERCICIOS[x].n)}</option>`).join('')}</select>
+      <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="chkAudioDemo" ${ENTR.audioDemo === false ? '' : 'checked'}> Con sonido (tu explicación)</label></div>
+    <div class="btns" style="margin-top:8px"><button class="b pri" id="btnDemoIni">🎥 ${D ? 'Volver a grabar' : 'Grabar demo'}</button>
+      ${D ? `<button class="b" id="btnDemoVer">▶ Ver</button>${D.ruta ? '<span class="tag" style="align-self:center">💾 En la biblioteca</span>' : '<button class="b" id="btnDemoGuardar">💾 Guardar en la biblioteca</button>'}<button class="b" id="btnDemoBorrar">🗑 Descartar</button>` : ''}</div>
+    <div class="nota">Queda como demo de esta sesión. "Guardar en la biblioteca" la deja para siempre, disponible en este ejercicio para cualquier paciente.</div>
+    <div id="demoVivoBox"></div></details>`
+  $('grabDet').ontoggle = () => { ENTR.grabAbierto = $('grabDet').open }
+  $('selDemoEj').onchange = (e) => { ENTR.demoSel = e.target.value; pintarGrabDemo() }
+  $('chkAudioDemo').onchange = (e) => { ENTR.audioDemo = e.target.checked }
+  $('btnDemoIni').onclick = () => grabarDemoInicio(id)
+  if ($('btnDemoVer')) $('btnDemoVer').onclick = () => { $('demoVivoBox').innerHTML = `<video src="${D.url}" controls autoplay playsinline style="width:100%;max-height:60vh;border-radius:10px;margin-top:6px;background:#000"></video>` }
+  if ($('btnDemoGuardar')) $('btnDemoGuardar').onclick = async () => { const b = $('btnDemoGuardar'); b.disabled = true; b.textContent = 'Subiendo…'
+    try { await guardarDemoBiblioteca(id); pintarGrabDemo(); setEstado('Demo guardada en la biblioteca ✓', 'ok')
+      if (puedeSubirDemo() && confirm('¿Usarla también como demo OFICIAL de este ejercicio?')) { await oficializarDemo(id, ENTR.demoSes[id].ruta); setEstado('Demo guardada y marcada como oficial ✓', 'ok') } }
+    catch (e) { b.disabled = false; b.textContent = '💾 Guardar en la biblioteca'; alert('No se pudo guardar: ' + (e.message || e)) } }
+  if ($('btnDemoBorrar')) $('btnDemoBorrar').onclick = () => { try { URL.revokeObjectURL(D.url) } catch (e) {} delete ENTR.demoSes[id]; pintarGrabDemo(); pintarDemoPaso() }
+}
+// Demo del ejercicio en curso: primero la grabada hoy; si no, la oficial
+function pintarDemoPaso() {
+  const box = $('entDemo'); if (!box || !ENTR.pasos || !ENTR.pasos[ENTR.k]) return
+  const id = ENTR.prog[ENTR.pasos[ENTR.k].ix].id, hoy = ENTR.demoSes[id], ofi = DEMOS && DEMOS.get(id)
+  box.innerHTML = hoy || ofi ? `<button class="lnk" id="btnDemoSes">🎬 Ver ${hoy ? 'la demo de hoy' : 'el video demo'}</button><div id="demoSesBox"></div>` : ''
+  if ($('btnDemoSes')) $('btnDemoSes').onclick = () => { if (hoy) $('demoSesBox').innerHTML = `<div class="necbox" style="margin-top:8px"><video src="${hoy.url}" controls autoplay playsinline style="width:100%;max-height:60vh;border-radius:10px;background:#000"></video></div>`; else verDemo(id, $('demoSesBox')) }
+}
+
 // ---------- PANTALLA 1: armar el programa ----------
 async function renderEntreno() {
   setTimeout(aplicarModoTV, 0)
   apagarCamara(); det = null; actual = null; pose = null; manosLibres = false
   if (!paciente) { renderCatalogo(); return }
-  if (!ENTR || ENTR.pacKey !== perfilKey()) ENTR = { pacKey: perfilKey(), prog: [], descanso: 60, sug: null, sugElegidos: new Set(), sesiones: undefined, evoEj: null }
+  if (!ENTR || ENTR.pacKey !== perfilKey()) ENTR = { pacKey: perfilKey(), prog: [], descanso: 60, sug: null, sugElegidos: new Set(), sesiones: undefined, evoEj: null, demoSes: {} }
   const opcionesEj = GRUPOS_EJ.map(g => `<optgroup label="${g}">${Object.entries(EJERCICIOS).filter(([, e]) => e.g === g)
     .map(([id, e]) => `<option value="${id}">${e.ico} ${esc(e.n)}${e.med ? '' : ' (conteo a mano)'}</option>`).join('')}</optgroup>`).join('')
   $('app').innerHTML = `
@@ -6369,7 +6490,7 @@ function pintarProgEntreno() {
     return `<div class="paso" style="flex-wrap:wrap;gap:10px">
       <div class="num">${i + 1}</div>
       <div class="txt" style="min-width:180px"><b>${e.ico} ${esc(e.n)}</b><small>${esc(e.como)}</small>${it.sugerido ? `<small style="color:var(--turq-d)">Por: ${it.sugerido.map(esc).join(' · ')}</small>` : ''}
-        <span style="display:flex;gap:10px;flex-wrap:wrap">${demo ? `<button class="lnk" data-demo="${it.id}" data-i="${i}">🎬 Ver demo</button>` : ''}${puedeSubirDemo() ? `<label class="lnk" style="cursor:pointer">⬆️ ${demo ? 'Cambiar' : 'Subir'} demo<input type="file" accept="video/*" data-subir="${it.id}" style="display:none"></label>` : ''}</span>
+        <span style="display:flex;gap:10px;flex-wrap:wrap">${demo ? `<button class="lnk" data-demo="${it.id}" data-i="${i}">🎬 Ver demo</button>` : ''}${puedeSubirDemo() ? `<label class="lnk" style="cursor:pointer">⬆️ ${demo ? 'Cambiar' : 'Subir'} demo<input type="file" accept="video/*" data-subir="${it.id}" style="display:none"></label>` : ''}<button class="lnk" data-biblio="${it.id}" data-i="${i}">📚 Biblioteca</button></span>
         <div id="demoBox${i}"></div></div>
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <span>Series ${num(i, 'series', 1)}</span>
@@ -6384,9 +6505,12 @@ function pintarProgEntreno() {
   box.querySelectorAll('[data-tempo]').forEach(s => s.onchange = () => { ENTR.prog[+s.dataset.tempo].tempo = +s.value })
   box.querySelectorAll('[data-quitar]').forEach(b => b.onclick = () => { ENTR.prog.splice(+b.dataset.quitar, 1); pintarProgEntreno() })
   box.querySelectorAll('[data-demo]').forEach(b => b.onclick = () => verDemo(b.dataset.demo, $('demoBox' + b.dataset.i)))
+  box.querySelectorAll('[data-biblio]').forEach(b => b.onclick = () => verBiblio(b.dataset.biblio, $('demoBox' + b.dataset.i)))
   box.querySelectorAll('[data-subir]').forEach(inp => inp.onchange = async () => {
     const f = inp.files && inp.files[0]; if (!f) return
-    if (f.size > 50 * 1024 * 1024) { alert('El video pesa más de 50 MB. Grabalo más corto (10-20 segundos alcanzan).'); return }
+    const dur = await new Promise(res => { const v = document.createElement('video'); v.preload = 'metadata'; v.onloadedmetadata = () => { res(v.duration); URL.revokeObjectURL(v.src) }; v.onerror = () => res(null); v.src = URL.createObjectURL(f) })
+    if (dur != null && isFinite(dur) && dur > DEMO_MAX_S + 1) { alert(`El video dura ${Math.round(dur)} s. Una demo puede durar como máximo ${DEMO_MAX_S} s: recortalo en Fotos (Editar) y volvé a subirlo.`); inp.value = ''; return }
+    if (f.size > 50 * 1024 * 1024) { alert('El video pesa más de 50 MB. Grabalo de nuevo o recortalo.'); inp.value = ''; return }
     const lab = inp.parentElement; lab.firstChild.textContent = '⏳ Subiendo… '
     try { await subirDemo(inp.dataset.subir, f); pintarProgEntreno() }
     catch (e) { alert('No se pudo subir el video: ' + (e.message || e)); pintarProgEntreno() }
@@ -6481,6 +6605,7 @@ function empezarSesionEntreno() {
         <div style="margin:4px 0 10px">${chipPaciente()}</div>
         <div class="necbox" id="entComo"></div>
         <div id="entDemo"></div>
+        <div id="entGrabBox" style="margin:8px 0"></div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
           <label id="zoomBox" style="display:none">Zoom <input id="zoom" type="range" style="width:110px;vertical-align:middle"> <span id="zoomVal" class="mono"></span></label>
@@ -6504,7 +6629,7 @@ function empezarSesionEntreno() {
         <div id="verSerieBox"></div>
       </div>
     </div>`
-  $('btnSalirSesion').onclick = () => { if (ENTR.res.length && !confirm('¿Salir? Se pierde lo hecho en esta sesión.')) return; cortarDescanso(); manosLibres = false; renderEntreno() }
+  $('btnSalirSesion').onclick = async () => { if (ENTR.res.length && !confirm('¿Salir? Se pierde lo hecho en esta sesión.')) return; if (recDemo) await grabarDemoFin(); cortarDescanso(); manosLibres = false; renderEntreno() }
   $('selCam').value = facing
   $('selAviso').value = avisoConteo
   $('selAviso').onchange = (e) => { avisoConteo = e.target.value; try { localStorage.setItem('testbiolab_aviso', avisoConteo) } catch (er) {}
@@ -6556,8 +6681,8 @@ function prepararPaso(conDescanso) {
   $('entTitulo').textContent = `${e.ico} ${nombrePaso(p)}`
   $('entComo').innerHTML = `<b>Cómo:</b> ${esc(e.como)}${p.lado ? `<br><b style="color:${p.lado === 'D' ? COLOR_D : COLOR_I}">Pierna / lado: ${p.lado === 'D' ? 'DERECHA' : 'IZQUIERDA'}</b>` : ''}
     <br><b>Meta:</b> ${metaPaso(p)} ${e.tipo === 'tiempo' ? 'segundos válidos' : e.lados === 'auto' ? `repeticiones (${it.reps} por lado)` : 'repeticiones válidas'}${it.prof ? ` · profundidad ${it.prof}` : ''}${it.tempo ? ` · bajada en ${it.tempo} s` : ''}`
-  $('entDemo').innerHTML = DEMOS && DEMOS.get(it.id) ? '<button class="lnk" id="btnDemoSes">🎬 Ver el video demo</button><div id="demoSesBox"></div>' : ''
-  if ($('btnDemoSes')) $('btnDemoSes').onclick = () => verDemo(it.id, $('demoSesBox'))
+  pintarDemoPaso()
+  if (!ENTR.grabandoDemo) { ENTR.demoSel = it.id; pintarGrabDemo() }
   $('btnMas1').style.display = e.med ? 'none' : ''; $('btnMenos1').style.display = e.med ? 'none' : ''
   pintarListaEntreno()
   if (conDescanso) empezarDescanso(ENTR.descanso, p)
@@ -6645,6 +6770,7 @@ function detectorEntreno(p) {
   }
   d.empezar = async () => {
     if (['calibrando', 'cuenta', 'midiendo'].includes(d.fase)) return
+    if (recDemo) { setEstado('Terminá la grabación de la demo antes de empezar la serie.', 'warn'); return }
     cortarDescanso(); $('verSerieBox') && ($('verSerieBox').innerHTML = '')
     Object.assign(d, { tMov: null, validas: 0, malas: 0, rapidas: 0, lado: { D: 0, I: 0 }, seg: 0, dentro: false, pico: 0, muestras: [], base: null,
       valgo: 0, valgoL: { D: 0, I: 0 }, cadera: 0, picos: [], picosL: { D: [], I: [] }, sideR: { D: { dentro: false, pico: 0 }, I: { dentro: false, pico: 0 } } })
