@@ -5794,15 +5794,16 @@ function pantallaBloqueo() {
 function renderCatalogo() {
   setTimeout(aplicarModoTV, 0)
   apagarCamara(); det = null; actual = null; pose = null
+  if (modoEntreno && paciente) { renderEntreno(); return }
   $('app').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
-      <div><h1>Test BiOLAB</h1><p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p></div>
+      <div>${modoEntreno ? '<h1>🏋️ Entrenamiento LAB</h1><p class="sub">Programa de ejercicios con conteo por cámara. Elegí quién entrena.</p>' : '<h1>Test BiOLAB</h1><p class="sub">Tests con la cámara del iPad. Primero elegí el paciente, después el test.</p>'}</div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><a class="b" href="manual_test_biolab.pdf" onclick="abrirManual(event)" target="_blank" rel="noopener" style="text-decoration:none">📘 Manual</a>
         <button class="b btnModoTV" onclick="alternarModoTV()">${modoTV ? '✕ Salir del modo TV' : '📺 Modo TV'}</button>
         <button class="b" id="btnHistorial">📋 Tests e informes realizados</button></div></div>
     <div id="ubicBox"></div>
     <div class="pacbox">
-      <label>¿A quién le aplicamos el test?</label>
+      <label>${modoEntreno ? '¿Quién entrena?' : '¿A quién le aplicamos el test?'}</label>
       <div id="pacSel">${paciente ? chipPaciente() + ' <button class="lnk" id="btnCambiar">Cambiar</button>' + (!(paciente.origen === 'PRUEBA' && !paciente.demo) ? ' <button class="lnk" id="btnFicha">📊 Ver ficha completa</button> <button class="lnk" id="btnInforme">📄 Hacer informe</button>' : '') + ' <button class="lnk" id="btnEntrenar" style="font-weight:800;color:var(--turq-d)">🏋️ Entrenar</button>' : ''}</div>
       <div id="pacBus" style="${paciente ? 'display:none' : ''}">
         <input id="qPac" type="search" placeholder="Nombre o DNI (busca en PuntoBiO y SARKMED)" autocomplete="off">
@@ -5823,6 +5824,7 @@ function renderCatalogo() {
       <input id="qTest" type="search" placeholder="🔎 Buscar test: nombre, zona o para qué sirve (ej. hombro, equilibrio, salto)" value="${esc(busqTest)}" style="flex:1;min-width:260px;padding:11px 14px;border-radius:12px;border:1.5px solid var(--border);font-size:15px">
     </div>
     <div id="gridWrap" style="${paciente && !verTodos && !busqTest ? 'display:none' : ''}"></div>`
+  if (modoEntreno) { ['ubicBox', 'gridWrap', 'btnHistorial'].forEach(i => { if ($(i)) $(i).style.display = 'none' }); if ($('qTest')) $('qTest').parentElement.style.display = 'none' }
   pintarGrid()
   pintarPerfil()
   if (paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo)) { try { const bk = localStorage.getItem(claveBat()); if (bk && !bateria) bateria = bk } catch (e) {} }
@@ -6137,6 +6139,7 @@ function dosisBase() {
 }
 const itemNuevo = (id) => { const e = EJERCICIOS[id], d = dosisBase(); return { id, series: d.series, reps: d.reps, seg: d.seg, prof: e.prof || null } }
 
+let modoEntreno = false   // true cuando se abre desde el menú "Entrenamiento LAB" (?vista=entreno)
 let ENTR = null   // { prog:[items], descanso, sug:[...], pasos:[], k, res:[], timer, video, ... }
 const pacReal = () => paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo)
 const filtroPac = () => paciente.dni ? `paciente_dni.eq.${paciente.dni},and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})` : `and(origen.eq.${paciente.origen},paciente_id.eq.${paciente.id})`
@@ -6176,9 +6179,10 @@ async function renderEntreno() {
   if (!ENTR || ENTR.pacKey !== perfilKey()) ENTR = { pacKey: perfilKey(), prog: [], descanso: 60, sug: null, sugElegidos: new Set(), ultimo: undefined }
   const opcionesEj = Object.entries(EJERCICIOS).map(([id, e]) => `<option value="${id}">${e.ico} ${esc(e.n)}${e.med ? '' : ' (conteo a mano)'}</option>`).join('')
   $('app').innerHTML = `
-    <button class="back" id="btnVolverEnt">← Test BiOLAB</button>
-    <h1>🏋️ Entrenar</h1>
+    <button class="back" id="btnVolverEnt">${modoEntreno ? '← Cambiar paciente' : '← Test BiOLAB'}</button>
+    <h1>🏋️ ${modoEntreno ? 'Entrenamiento LAB' : 'Entrenar'}</h1>
     <p class="sub">Programa con conteo por cámara: cuenta solo las repeticiones válidas. ${chipPaciente()}</p>
+    ${pacReal() ? '<div class="panel" style="margin-bottom:14px"><label><b>Perfil del paciente</b> <small style="font-weight:600;color:var(--dim)">(define la dosis y qué ejercicios se sugieren)</small></label><div class="perfil" id="perfilBox"></div></div>' : ''}
     <div class="panel" style="margin-bottom:14px"><h2 style="margin-top:0">🧭 Sugerido por sus tests</h2><div id="sugBox"><div class="nota">Leyendo sus tests de los últimos 120 días…</div></div></div>
     <div class="panel" style="margin-bottom:14px">
       <h2 style="margin-top:0">📋 Programa de hoy</h2>
@@ -6192,7 +6196,9 @@ async function renderEntreno() {
       <div class="btns" style="margin-top:14px"><button class="b pri" id="btnEmpezarProg" style="font-size:17px;padding:12px 22px">▶ Empezar el programa</button></div>
       ${pacReal() ? '' : '<div class="nota">Es una prueba sin paciente: se puede entrenar, pero no se guarda.</div>'}
     </div>`
-  $('btnVolverEnt').onclick = renderCatalogo
+  $('btnVolverEnt').onclick = () => { if (modoEntreno) { paciente = null; ENTR = null } renderCatalogo() }
+  pintarPerfil()
+  if ($('perfilBox')) { const ref = () => setTimeout(() => { if (ENTR && ENTR.sug) pintarSugEntreno() }, 0); $('perfilBox').addEventListener('click', ref); $('perfilBox').addEventListener('change', ref) }
   $('btnAgregarEj').onclick = () => { ENTR.prog.push(itemNuevo($('selEjNuevo').value)); pintarProgEntreno() }
   $('selDescanso').onchange = (e) => { ENTR.descanso = +e.target.value }
   $('btnEmpezarProg').onclick = () => { if (!ENTR.prog.length) { alert('Agregá al menos un ejercicio (o tildá los sugeridos).'); return } empezarSesionEntreno() }
@@ -6215,6 +6221,7 @@ async function renderEntreno() {
 function pintarSugEntreno() {
   const box = $('sugBox'); if (!box) return
   const S = ENTR.sug
+  if (S && S.sug) S.sug.forEach(s => { s.apt = aptNivel(EJERCICIOS[s.id].nivel || 1) })
   if (!pacReal()) { box.innerHTML = '<div class="nota">Elegí un paciente para que sus tests sugieran los ejercicios.</div>'; return }
   if (!S.leidos) { box.innerHTML = '<div class="nota">No tiene tests en los últimos 120 días. Armá el programa a mano abajo.</div>'; return }
   if (!S.sug.length) { box.innerHTML = `<div class="nota">Leí ${S.leidos} test${S.leidos === 1 ? '' : 's'} y no hay hallazgos que pidan ejercicios del mapa. Armá el programa a mano abajo.</div>`; return }
@@ -6539,13 +6546,13 @@ function renderCierreEntreno() {
       <div class="btns" style="margin-top:12px">
         ${pacReal() ? '<button class="b pri" id="btnGuardarEnt">💾 Guardar en la ficha</button>' : '<div class="nota">Es una prueba sin paciente: no se guarda.</div>'}
         <button class="b" id="btnOtraVez">🔁 Volver al programa</button>
-        <button class="b" id="btnFinEnt">← Test BiOLAB</button>
+        <button class="b" id="btnFinEnt">${modoEntreno ? '← Otro paciente' : '← Test BiOLAB'}</button>
       </div></div>`
   const val = { borg: null, dolor: null }
   document.querySelectorAll('[data-escala]').forEach(g => g.querySelectorAll('button').forEach(b => b.onclick = () => {
     val[g.dataset.escala] = +b.dataset.v; g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)) }))
   $('btnOtraVez').onclick = renderEntreno
-  $('btnFinEnt').onclick = renderCatalogo
+  $('btnFinEnt').onclick = () => { if (modoEntreno) { paciente = null; ENTR = null } renderCatalogo() }
   if ($('btnGuardarEnt')) $('btnGuardarEnt').onclick = async () => {
     const b = $('btnGuardarEnt'); b.disabled = true; b.textContent = 'Guardando…'
     const pf = perfilActual(), totalV = ENTR.res.reduce((a, r) => a + (r.validas || 0), 0)
@@ -6571,6 +6578,7 @@ verificarUbicacion()
 ;(() => {
   const q = new URLSearchParams(location.search)
   if (q.get('vista') === 'historial') { renderHistorial(); return }
+  if (q.get('vista') === 'entreno') modoEntreno = true
   if (q.get('origen') && q.get('id')) {
     paciente = { origen: q.get('origen'), id: q.get('id'), nombre: q.get('nombre') || '', dni: (q.get('dni') || '').replace(/\D/g, '') || null,
       edad: q.get('edad') ? +q.get('edad') : null, padrones: [q.get('origen')] }
