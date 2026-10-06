@@ -2517,28 +2517,54 @@ function pintarAdjuntos(historiaId, personaId) {
   // Los profes a sueldo ven los adjuntos pero NO pueden subir (lectura pura).
   if (esProfeSoloLectura()) { zona.innerHTML = ''; return; }
   zona.innerHTML = `
-    <div class="adj-drop" id="adjDrop">📎 Tocá acá para subir un archivo (RX, estudio, PDF, foto…)</div>
-    <input type="file" id="adjFile" style="display:none;" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx">`;
+    <div class="adj-drop" id="adjDrop">📎 Tocá acá para subir archivos (RX, estudios, PDF, fotos…) — podés elegir varios juntos o arrastrarlos acá</div>
+    <input type="file" id="adjFile" multiple style="display:none;" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.doc,.docx,.xls,.xlsx">`;
   const drop = document.getElementById('adjDrop');
   const file = document.getElementById('adjFile');
   drop.onclick = () => file.click();
-  file.onchange = () => { if (file.files[0]) subirAdjunto(historiaId, personaId, file.files[0]); };
+  // 06/10/2026: subida MÚLTIPLE (antes se subía de a uno). También se pueden arrastrar varios a la zona.
+  file.onchange = () => { if (file.files && file.files.length) subirAdjuntos(historiaId, personaId, Array.from(file.files)); };
+  drop.ondragover = (e) => { e.preventDefault(); drop.style.outline = '2px dashed #0ea5e9'; };
+  drop.ondragleave = () => { drop.style.outline = ''; };
+  drop.ondrop = (e) => {
+    e.preventDefault(); drop.style.outline = '';
+    const lista = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (lista.length) subirAdjuntos(historiaId, personaId, lista);
+  };
 }
 
-async function subirAdjunto(historiaId, personaId, archivo) {
+// Sube varios archivos uno detrás de otro, con progreso. Si alguno falla, sigue con el resto
+// y al final avisa cuáles no se subieron (antes un error cortaba todo con un alert).
+async function subirAdjuntos(historiaId, personaId, archivos) {
   if (esProfeSoloLectura()) return;
   if (!usuarioActual) { alert('Iniciá sesión para subir archivos.'); return; }
-  // Límite de tamaño defensivo (20 MB)
-  if (archivo.size > 20 * 1024 * 1024) { alert('El archivo es muy grande (máx 20 MB).'); return; }
-
   const drop = document.getElementById('adjDrop');
-  drop.classList.add('uploading');
-  drop.textContent = '⏳ Subiendo ' + archivo.name + '…';
+  if (drop) drop.classList.add('uploading');
+  const fallidos = [];
+  let ok = 0;
+  for (let i = 0; i < archivos.length; i++) {
+    const archivo = archivos[i];
+    if (drop) drop.textContent = '⏳ Subiendo ' + (archivos.length > 1 ? (i + 1) + ' de ' + archivos.length + ': ' : '') + archivo.name + '…';
+    try {
+      await subirAdjunto(historiaId, personaId, archivo, i);
+      ok++;
+    } catch (e) {
+      fallidos.push(archivo.name + ' (' + (e && e.message ? e.message : e) + ')');
+    }
+  }
+  pintarAdjuntos(historiaId, personaId);
+  if (ok) showToast('✓ ' + (ok === 1 ? 'Archivo subido' : ok + ' archivos subidos'));
+  if (fallidos.length) alert('No se pudieron subir:\n• ' + fallidos.join('\n• '));
+}
 
-  try {
-    // Nombre limpio y único dentro del bucket: hc/<id>/<timestamp>-<nombre>
+// Sube UN archivo y lo registra en hc_adjuntos. Tira error si falla (lo maneja subirAdjuntos).
+async function subirAdjunto(historiaId, personaId, archivo, idx) {
+  // Límite de tamaño defensivo (20 MB)
+  if (archivo.size > 20 * 1024 * 1024) throw new Error('muy grande, máx 20 MB');
+  {
+    // Nombre limpio y único dentro del bucket: hc/<id>/<timestamp>-<nombre> (+ índice para que dos del mismo lote no choquen)
     const limpio = archivo.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const path = `hc/${historiaId}/${Date.now()}-${limpio}`;
+    const path = `hc/${historiaId}/${Date.now()}${idx ? '-' + idx : ''}-${limpio}`;
 
     const { error: upErr } = await sb.storage.from(ADJ_BUCKET)
       .upload(path, archivo, { upsert: false, contentType: archivo.type || undefined });
@@ -2558,11 +2584,6 @@ async function subirAdjunto(historiaId, personaId, archivo) {
     const { data, error } = await sb.from('hc_adjuntos').insert(fila).select().single();
     if (error) throw error;
     adjActual.push(data);
-    pintarAdjuntos(historiaId, personaId);
-    showToast('✓ Archivo subido');
-  } catch (e) {
-    alert('Error al subir: ' + e.message);
-    if (drop) { drop.classList.remove('uploading'); drop.textContent = '📎 Tocá acá para subir un archivo (RX, estudio, PDF, foto…)'; }
   }
 }
 
@@ -3720,7 +3741,10 @@ async function generarPDF(conWhatsApp = false) {
     if (hc.peso && hc.altura) {
       const peso = Number(hc.peso);
       const alturaM = Number(hc.altura) < 3 ? Number(hc.altura) : Number(hc.altura) / 100; // detecta metros o cm
-      const imc = alturaM > 0 ? peso / (alturaM * alturaM) : null;
+      // FIX 06/10/2026 (caso Ambar Arce): el IMC se clasifica con el MISMO valor que se muestra (1 decimal).
+      // Antes se mostraba 18,5 pero se clasificaba con 18,46 -> "Bajo peso": el PDF se contradecía.
+      const imcCrudo = alturaM > 0 ? peso / (alturaM * alturaM) : null;
+      const imc = imcCrudo !== null ? Math.round(imcCrudo * 10) / 10 : null;
       const grasa = (hc.grasa_corporal !== null && hc.grasa_corporal !== undefined && hc.grasa_corporal !== '') ? Number(hc.grasa_corporal) : null;
       let edad = null;
       if (persona && persona.fecha_nacimiento) {
@@ -3738,7 +3762,9 @@ async function generarPDF(conWhatsApp = false) {
 
       // Cajitas resumen: Peso / Talla / IMC / % Grasa
       checkPage(44);
-      const cajas = [['Peso', num1(peso) + ' kg'], ['Talla', num1(alturaM) + ' m'], ['IMC', imc ? num1(imc) : '—']];
+      // Talla con 2 decimales: con 1 decimal 1,57 m se mostraba "1,6 m" y el IMC no cerraba con la cuenta.
+      const num2 = (n) => (Math.round(n * 100) / 100).toFixed(2).replace('.', ',');
+      const cajas = [['Peso', num1(peso) + ' kg'], ['Talla', num2(alturaM) + ' m'], ['IMC', imc ? num1(imc) : '—']];
       if (grasa !== null) cajas.push(['% Grasa', num1(grasa) + ' %']);
       const cajaW = (CONTENT_W - 8 * (cajas.length - 1)) / cajas.length;
       cajas.forEach((c, i) => {
@@ -3761,6 +3787,16 @@ async function generarPDF(conWhatsApp = false) {
         ['35,0 - 39,9', 'Obesidad grado 2', 'Obesidad', [255, 152, 0], imc !== null && imc >= 35 && imc < 40],
         ['>= 40', 'Obesidad grado 3', 'Obesidad', [244, 67, 54], imc !== null && imc >= 40],
       ];
+      // MENORES DE 18: la tabla de adultos de la OMS NO aplica. En chicos y adolescentes el IMC se interpreta
+      // con las curvas de IMC para la edad y el sexo (OMS 5-19 años). No se clasifica con la tabla de adultos.
+      if (edad !== null && edad < 18) {
+        checkPage(40);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...GRIS);
+        doc.text('Clasificación del IMC', MARGIN, y); y += 12;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...NEGRO);
+        const lineasMenor = doc.splitTextToSize('Paciente menor de 18 años: la clasificación de IMC de adultos (OMS) no corresponde. El IMC se interpreta con las curvas de IMC para la edad y el sexo (OMS, 5 a 19 años).', CONTENT_W);
+        doc.text(lineasMenor, MARGIN, y); y += lineasMenor.length * 11 + 8;
+      } else {
       checkPage(18 + filasIMC.length * 15);
       doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...GRIS);
       doc.text('Clasificación del IMC (OMS)', MARGIN, y); y += 10;
@@ -3777,6 +3813,7 @@ async function generarPDF(conWhatsApp = false) {
         y += rh;
       });
       y += 12;
+      } // fin tabla de adultos
 
       // Resultado de % de grasa de la persona (compacto, debajo del IMC)
       if (grasa !== null) {
