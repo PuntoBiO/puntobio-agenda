@@ -2542,7 +2542,10 @@ async function generar() {
       edad: body.paciente.edad,
       snapshot: { calculadoras: calculadorasSnap, hallazgos: sinExcluidos },
     };
-    ultimoCuerpoIA = JSON.stringify(body);
+    // FIX 06/10/2026 (caso Ambar Arce): el control de números NO puede incluir los PDF en base64.
+    // Antes los incluía, y el base64 tiene dígitos por todos lados ("12", "102"…): casi cualquier
+    // número del informe "aparecía" en los datos y el control daba ✅ aunque estuviera mal.
+    ultimoCuerpoIA = JSON.stringify({ ...body, documentos: (body.documentos || []).map(d => ({ tipo: d.tipo, nombre: d.nombre })) });
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY, 'content-type': 'application/json' },
@@ -2552,6 +2555,13 @@ async function generar() {
     let out; try { out = JSON.parse(txt); } catch { out = { borrador: txt }; }
     if (!resp.ok || out.error) throw new Error(out.error || ('HTTP ' + resp.status));
     mostrarBorradores(out.informe || '', out.nota || '');
+    // Si los PDF fallaron, el informe salió SIN percentiles VALD Hub ni pisada: avisar (antes era silencioso).
+    if (out.sin_documentos) {
+      const av = document.createElement('div');
+      av.style.cssText = 'margin-bottom:10px; padding:10px 12px; border-radius:10px; font-size:13px; background:#fee2e2; color:#991b1b;';
+      av.textContent = '⛔ Los PDF adjuntos no se pudieron enviar: este informe salió SIN percentiles VALD Hub y SIN pisada MOPLEX. Conviene volver a generarlo.';
+      cont.prepend(av);
+    }
   } catch (e) {
     cont.innerHTML = '<div class="hint">⚠️ ' + escapeHtml(String(e && e.message ? e.message : e)) + '</div>';
   } finally {
