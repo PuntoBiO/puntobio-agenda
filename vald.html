@@ -396,7 +396,8 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
-let ultimoTextoDocs = '';   // texto de los PDF adjuntos (MOPLEX, estudios) para el control de números
+let ultimoTextoDocs = '';
+let ultimoTextoEstudios = '';   // 07/10/2026: texto de las conclusiones de los estudios adjuntos (para precauciones)   // texto de los PDF adjuntos (MOPLEX, estudios) para el control de números
 let ultimoCuerpoIA = '';
 let modoSoloDatos = false;   // 07/10/2026: "Datos para revisión" arma los datos del informe sin llamar a la IA     // lo que se le mandó a la IA (para el control de números)
 let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
@@ -2744,15 +2745,29 @@ async function generar() {
       // 07/10/2026: el control de números también conoce los valores de la pisada (MOPLEX) y demás PDF:
       // antes marcaba en amarillo 764, 664, 1468… porque venían del PDF y no de los datos VALD.
       ultimoTextoDocs = '';
+      ultimoTextoEstudios = '';
       for (const d of quedan) {
+        let t = '';
         try {
           const pj = await cargarPdfJs();
           const pdf = await pj.getDocument({ data: b64ABytes(d.base64) }).promise;
           for (let i = 1; i <= pdf.numPages; i++) {
             const tc = await (await pdf.getPage(i)).getTextContent();
-            ultimoTextoDocs += ' ' + tc.items.map(x => x.str).join(' ');
+            t += ' ' + tc.items.map(x => x.str).join(' ');
           }
         } catch (_) { /* si no se puede leer, el control queda como antes para ese PDF */ }
+        ultimoTextoDocs += ' ' + t;
+        // 07/10/2026: de los ESTUDIOS (ecocardiograma, resonancia...) viaja solo el TEXTO de la conclusión
+        // (mucho más barato que el PDF). Si el PDF es una foto/escaneo sin texto, viaja el PDF.
+        if (d.tipo === 'ESTUDIO') {
+          const limpio = t.replace(/\s+/g, ' ').trim();
+          if (limpio.length > 80) {
+            const m = limpio.search(/(conclusi[oó]n|impresi[oó]n diagn[oó]stica|diagn[oó]stico|comentario)\s*:?/i);
+            const trozo = m >= 0 ? limpio.slice(m, m + 1500) : limpio.slice(0, 2000);
+            ultimoTextoEstudios += '\n[ESTUDIO: ' + d.nombre + ']\n' + trozo + '\n';
+            d.con_texto = true;
+          }
+        }
       }
       if (normasPdf.length) sinExcluidos.percentiles = normasPdf;
     }
@@ -2827,6 +2842,7 @@ async function generar() {
     // FIX 06/10/2026 (caso Ambar Arce): el control de números NO puede incluir los PDF en base64.
     // Antes los incluía, y el base64 tiene dígitos por todos lados ("12", "102"…): casi cualquier
     // número del informe "aparecía" en los datos y el control daba ✅ aunque estuviera mal.
+    body.texto_estudios = ultimoTextoEstudios;   // 07/10/2026: precauciones de los estudios (solo texto)
     body.texto_pdfs = ultimoTextoDocs;   // 07/10/2026: la pisada la arma el código desde el texto del estudio MOPLEX
     ultimoCuerpoIA = JSON.stringify({ ...body, documentos: (body.documentos || []).map(d => ({ tipo: d.tipo, nombre: d.nombre })) });
     if (modoSoloDatos) {
