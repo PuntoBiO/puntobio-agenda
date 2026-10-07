@@ -421,6 +421,11 @@ tbody tr:last-child td { border-bottom: 0; }
         </select>
       </div>
 
+      <div class="form-field span-2" id="nuevo-regalo-field" style="display:none;">
+        <label class="form-label">🎁 Regalo para <span style="color:var(--text-faint);font-weight:400;text-transform:none;letter-spacing:0;">— opcional: si el paciente regala el masaje o el pack y paga él, el nombre de quien lo recibe</span></label>
+        <input type="text" id="nuevo-regalo-para" class="form-input" maxlength="80" placeholder="Ej: María García (mamá de Viki)" autocomplete="off">
+      </div>
+
       <div class="form-field span-2" id="nuevo-eval-moplex-field" style="display:none;">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;">
           <input type="checkbox" id="chk-eval-con-moplex" onchange="toggleEvalConMoplex()" style="width:15px;height:15px;cursor:pointer;">
@@ -618,6 +623,11 @@ tbody tr:last-child td { border-bottom: 0; }
           <option value="Baja">Baja</option>
           <option value="Cancelado">Cancelado</option>
         </select>
+      </div>
+
+      <div class="form-field span-2" id="ed-regalo-field" style="display:none;">
+        <label class="form-label">🎁 Regalo para <span style="color:var(--text-faint);font-weight:400;text-transform:none;letter-spacing:0;">— quién recibe el masaje (vacío = es para el titular)</span></label>
+        <input type="text" id="ed-regalo-para" class="form-input" maxlength="80" autocomplete="off">
       </div>
 
       <div class="form-field span-2">
@@ -1001,7 +1011,7 @@ function obtenerFiltrados() {
 
     // Search
     if (q) {
-      const haystack = normalizar(`${persona} ${t.id} ${t.practica_codigo} ${pInfo.label}`)
+      const haystack = normalizar(`${persona} ${t.id} ${t.practica_codigo} ${pInfo.label} ${t.regalo_para || ''}`)
       if (!haystack.includes(q)) return false
     }
     // Área
@@ -1062,7 +1072,7 @@ function renderTabla() {
     return `
       <tr onclick="verDetalle(${t.id})">
         <td><span class="cell-id">#${t.id}</span></td>
-        <td class="cell-paciente">${persona}</td>
+        <td class="cell-paciente">${persona}${(t.regalo_para || '').trim() ? `<div style="font-size:11px;color:var(--text-faint);margin-top:2px;">🎁 para ${String(t.regalo_para).replace(/</g, '&lt;')}</div>` : ''}</td>
         <td>${pInfo.label}<div style="font-size:11px;color:var(--text-faint);margin-top:2px;">${t.practica_codigo || '—'}</div></td>
         <td>${badgeArea(pInfo.area)}</td>
         <td>${badgeEstado(t)}</td>
@@ -1154,6 +1164,7 @@ window.verDetalle = async function(ttoId) {
     ['Obra Social', t.obra_social || '—'],
     ['Sesiones totales', sesTotal || '—'],
     ['Sesiones realizadas', `<strong style="color:var(--turquoise);">${sesReal}</strong> de ${sesTotal || '—'} <span style="color:var(--text-faint);">· quedan ${sesRestantes}</span>`],
+    ...((t.regalo_para || '').trim() ? [['🎁 Regalo para', `<strong>${String(t.regalo_para).replace(/</g, '&lt;')}</strong>`]] : []),
     ['Diagnóstico', t.diagnostico ? `<strong>${t.diagnostico}</strong>` : '<span style="color:var(--text-faint);">— sin completar (editá para agregarlo)</span>'],
     ['Valor sesión', fmt(t.valor_sesion)],
     ['Fecha de alta', fmtFecha(t.fecha_alta)],
@@ -1544,6 +1555,9 @@ window.abrirEditar = function() {
   $('ed-estado').value = t.estado || 'Pendiente'
   $('ed-diagnostico').value = t.diagnostico || ''
   $('ed-observaciones').value = t.observaciones || ''
+  const esMaso = String(t.practica_codigo || '').startsWith('MASAJES')
+  if ($('ed-regalo-field')) $('ed-regalo-field').style.display = esMaso ? '' : 'none'
+  if ($('ed-regalo-para')) $('ed-regalo-para').value = t.regalo_para || ''
   toggleObraSocial('ed-modalidad', 'ed-obra-field')
   ajustarTiposCobroPorPractica(t.practica_codigo, 'ed-tipo-cobro')
   actualizarPreviaCobro('ed-tipo-cobro', 'ed-cobro-previa')
@@ -1583,6 +1597,11 @@ window.guardarEdicion = async function() {
     estado: $('ed-estado').value,
     diagnostico: ($('ed-diagnostico')?.value || '').trim() || null,
     observaciones: $('ed-observaciones').value.trim() || null,
+  }
+  // 🎁 Regalo para: solo en masajes (y solo si cambió, para no tocar la columna de más).
+  if (String(t.practica_codigo || '').startsWith('MASAJES')) {
+    const rp = ($('ed-regalo-para')?.value || '').trim() || null
+    if (rp !== ((t.regalo_para || '').trim() || null)) payload.regalo_para = rp
   }
 
   try {
@@ -1663,6 +1682,8 @@ window.abrirNuevo = function() {
   const eb = $('nuevo-eval-moplex-box'); if (eb) eb.style.display = 'none'
   const es = $('sel-eval-moplex-consulta'); if (es) es.value = ''
   const ef = $('nuevo-eval-moplex-field'); if (ef) ef.style.display = 'none'
+  if ($('nuevo-regalo-para')) $('nuevo-regalo-para').value = ''
+  toggleRegaloPara()
   poblarPracticasSelect()
   autocompletarPrecioNuevo() // pre-carga el valor por sesión de la práctica/modalidad por defecto
   $('modal-nuevo').classList.add('is-open')
@@ -1791,6 +1812,15 @@ function sincronizarSesionesFormato(){
   recalcularTotal()
 }
 
+// 🎁 Regalo para (07/10/2026): solo en masoterapia.
+function toggleRegaloPara(){
+  const box = $('nuevo-regalo-field')
+  if (!box) return
+  const aplica = $('nuevo-area')?.value === 'masoterapia'
+  box.style.display = aplica ? '' : 'none'
+  if (!aplica && $('nuevo-regalo-para')) $('nuevo-regalo-para').value = ''
+}
+
 // La práctica que se GUARDA: si el formato es pack, va MASAJES_PAK.
 function practicaAGuardar(){
   const cod = $('nuevo-practica')?.value
@@ -1898,7 +1928,7 @@ window.onMoplexConsultaChange = function() {
   $('nuevo-total').value = precio
 }
 
-$('nuevo-area').addEventListener('change', () => { poblarPracticasSelect(); toggleEvalConMoplexField(); ajustarTiposCobroPorArea('nuevo-area', 'nuevo-tipo-cobro'); autocompletarPrecioNuevo() })
+$('nuevo-area').addEventListener('change', () => { toggleRegaloPara(); poblarPracticasSelect(); toggleEvalConMoplexField(); ajustarTiposCobroPorArea('nuevo-area', 'nuevo-tipo-cobro'); autocompletarPrecioNuevo() })
 
 window.recalcularTotal = function() {
   const ses = Number($('nuevo-sesiones').value) || 0
@@ -1950,6 +1980,10 @@ window.crearTratamiento = async function() {
     estado: 'Pendiente',
     fecha_alta: (($('nuevo-fecha-alta')?.value || '').trim()) || new Date().toISOString().slice(0, 10),
   }
+
+  // 🎁 Regalo para: solo se manda si se completó.
+  const regaloParaNuevo = ($('nuevo-regalo-para')?.value || '').trim()
+  if (regaloParaNuevo && String(practicaCod || '').startsWith('MASAJES')) payload.regalo_para = regaloParaNuevo
 
   // REGALOS Y CORTESÍA: el paciente no paga nada, así que el tratamiento nace
   // SALDADO. Si no, quedaría con saldo pendiente y la persona aparecería

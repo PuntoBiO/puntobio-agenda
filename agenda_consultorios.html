@@ -813,6 +813,19 @@ const MAP_PRACTICA_TARIFARIO = {
   TERAP_MANUAL: 'TERAPIA_MANUAL'
 };
 
+// Código con el que se GUARDA un tratamiento (el mismo de tratamientos.html y de la
+// FK tratamientos_practica_codigo_fkey). OJO: no es igual al del tarifario
+// (TERAP_MANUAL acá, TERAPIA_MANUAL allá), por eso es un mapa aparte.
+const PRACTICA_A_CODIGO_TTO = {
+  FISIO: 'FISIO',
+  FISIO_PQ: 'FISIO_PQ',
+  OSTEOPATIA: 'OSTEO',
+  DLM: 'DRENAJE',
+  PUNCION_SECA: 'PUNC_SECA',
+  SUELO_PELVICO: 'SUELO_PEL',
+  TERAP_MANUAL: 'TERAP_MANUAL'
+};
+
 // Mapeo: cualquier código de práctica (corto o largo) → clase CSS de color.
 // Necesario porque los tratamientos guardan códigos cortos (OSTEO, DRENAJE...)
 // pero el CSS usa nombres largos (p-osteopatia, p-dlm...). Sin esto, los turnos
@@ -1635,9 +1648,10 @@ async function loadTratamientosPersona(personaId, practicaCodigo) {
   // mientras que la agenda usa códigos largos (OSTEOPATIA, PUNCION_SECA, DLM, etc.)
   // Buscamos por AMBOS códigos para que aparezcan los ttos creados desde cualquier lugar.
   const codigoAlt = MAP_PRACTICA_TARIFARIO[practicaCodigo]; // ej OSTEOPATIA -> OSTEO
-  const codigosBusqueda = codigoAlt && codigoAlt !== practicaCodigo
-    ? [practicaCodigo, codigoAlt]
-    : [practicaCodigo];
+  const codigosBusqueda = [...new Set([
+    practicaCodigo, codigoAlt, PRACTICA_A_CODIGO_TTO[practicaCodigo],
+    ...(practicaCodigo === 'MASAJES' ? ['MASAJES_EYC', 'MASAJES_CC', 'MASAJES_PAK'] : [])
+  ].filter(Boolean))];
 
   // 1) Traemos TODOS los tratamientos del paciente con esa práctica (sin filtrar por estado)
   const { data: ttos, error } = await supa
@@ -2700,9 +2714,18 @@ async function onCrearTratamiento() {
     const prefix = PRACTICA_PREFIX[practica] || practica.slice(0,4);
     const ts = new Date();
     const codigoId = `${prefix}${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}${pad(ts.getHours())}${pad(ts.getMinutes())}`;
+    // FIX 07/10/2026: la agenda usa códigos largos (OSTEOPATIA, SUELO_PELVICO, DLM,
+    // PUNCION_SECA) pero tratamientos.practica_codigo tiene una FK a las prácticas con
+    // los códigos CORTOS que usa tratamientos.html (OSTEO, SUELO_PEL, DRENAJE, PUNC_SECA).
+    // Guardar el largo rebotaba con "violates foreign key constraint
+    // tratamientos_practica_codigo_fkey". Se guarda siempre el código del módulo
+    // Tratamientos; la búsqueda (loadTratamientosPersona) ya mira los dos.
+    const codigoTto = (practica === 'MASAJES')
+      ? (document.getElementById('ct_tipo_masaje')?.value || 'MASAJES_EYC')
+      : (PRACTICA_A_CODIGO_TTO[practica] || practica);
     const payload = {
       persona_id: parseInt(personaId, 10),
-      practica_codigo: practica,
+      practica_codigo: codigoTto,
       codigo_id: codigoId,
       fecha_alta: toISODate(new Date()),
       total_sesiones: totalSes,
@@ -2712,6 +2735,11 @@ async function onCrearTratamiento() {
       estado: 'ACTIVO'
     };
     if (obraSocial) payload.obra_social = obraSocial;
+    // 07/10/2026 (misma regla que tratamientos.html): regalo / cortesía nacen saldados.
+    if (['REGALO_CUMPLE', 'REGALO_CENTRO', 'CORTESIA'].includes(tipoCobro)) {
+      payload.total_abonado = totalSes * valor;
+      payload.estado = 'SALDADO';
+    }
     const { data, error } = await supa.from('tratamientos').insert([payload]).select().single();
     if (error) throw error;
     document.getElementById('inlineCrearTratamiento').style.display = 'none';
