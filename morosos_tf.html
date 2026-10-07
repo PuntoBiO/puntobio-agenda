@@ -682,6 +682,26 @@
       : `Total a cobrar: ${fmt(cuota)}  (solo cuota — el saldo queda pendiente)`;
   }
 
+  // RED DE SEGURIDAD (07/10/2026, espejo de administracion_terapia_fisica.html):
+  // al cobrar un puente de cambio de fecha, el mes de transición queda CERRADO.
+  async function asegurarCierrePuente(inscId, d) {
+    try {
+      if (!d || !d.mes || !['puente_fecha', 'mixto'].includes(d.concepto)) return;
+      if (d.concepto === 'mixto' && !(d.venc || '').includes('->')) return;
+      const { data: ya, error: eYa } = await supa.from('pagos_tf').select('id')
+        .eq('inscripcion_id', inscId).eq('mes_imputado', d.mes).eq('tipo_cobro', 'CORTESIA')
+        .ilike('observaciones', 'CIERRE ciclo por cambio de fecha%').limit(1);
+      if (eYa) { console.warn('No se pudo verificar el cierre del puente:', eYa.message); return; }
+      if (ya && ya.length) return;
+      const { error: eC } = await supa.from('pagos_tf').insert({
+        inscripcion_id: inscId, mes_imputado: d.mes, fecha: new Date().toISOString().slice(0, 10),
+        importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+        observaciones: `CIERRE ciclo por cambio de fecha (${d.venc ? 'día ' + d.venc.replace('->', '→') : 'puente'}) · cuota reemplazada por puente · al cobrar el puente`
+      });
+      if (eC) mostrarToast(`⚠️ El puente se cobró, pero no se pudo cerrar ${d.mes}: ${eC.message}`, 'error');
+    } catch (e) { console.warn('asegurarCierrePuente:', e); }
+  }
+
   window.abrirCobro = function(inscripcionId) {
     const c = window._morososCache[inscripcionId];
     if (!c) return;
@@ -794,6 +814,7 @@
         if (eS) {
           mostrarToast('La cuota se cobró, pero el saldo por cambio falló: ' + eS.message + ' — cobralo desde la ficha en Administración.', 'error');
         } else {
+          await asegurarCierrePuente(c.id, d);
           const obsLimpia = (c.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
           await supa.from('inscripciones_tf').update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() }).eq('id', c.id);
           msgSaldo = ` + saldo ${fmt(d.importe)}`;

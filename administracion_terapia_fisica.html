@@ -861,6 +861,35 @@
   </div>
 </div>
 
+<!-- MODAL CERRAR MES (07/10/2026) — solo Lu y Jime -->
+<div class="modal-backdrop" id="modalCerrarMes">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title" style="color:#0f766e;">🧹 Cerrar mes (sin cobrar)</span>
+      <button class="modal-close" onclick="cerrarModal('modalCerrarMes')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info" id="cmInfo"></div>
+      <div class="modal-info" style="border-left-color:#0f766e;background:#f0fdfa;">
+        Deja el mes elegido <strong>saldado sin cobrar nada</strong> (no entra plata a la caja). Sirve para la deuda que no es real: por ejemplo el mes que reemplazó un proporcional por cambio de fecha. Queda registrado quién lo cerró y por qué.
+      </div>
+      <div class="form-group"><label>Mes a cerrar</label><div id="cmMeses" style="display:flex;flex-direction:column;gap:6px;"><span style="color:var(--text-dim)">⟳ Cargando…</span></div></div>
+      <div class="form-group"><label>Motivo</label>
+        <select id="cmMotivo" onchange="document.getElementById('cmOtroWrap').style.display = this.value === 'OTRO' ? '' : 'none'">
+          <option value="FECHA">Reemplazado por proporcional de cambio de fecha</option>
+          <option value="BON">Mes bonificado (cambio desde plan BON)</option>
+          <option value="OTRO">Otro (escribirlo)</option>
+        </select>
+      </div>
+      <div class="form-group" id="cmOtroWrap" style="display:none;"><label>Detalle (obligatorio)</label><input type="text" id="cmOtro" maxlength="120" placeholder="Por qué se cierra este mes"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal btn-cancelar" onclick="cerrarModal('modalCerrarMes')">Cancelar</button>
+      <button class="btn-modal" style="background:#0f766e;color:#fff;" id="btnConfirmarCerrarMes" onclick="confirmarCerrarMes()">Cerrar mes</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modalReactivar">
   <div class="modal modal-md">
     <div class="modal-header">
@@ -1949,6 +1978,8 @@ async function abrirModalVer() {
     acc += `<button class="btn-modal" style="background:#f59e0b;color:#fff;" onclick="cobrarSaldoCambioFecha()">💵 Cobrar saldo (${fmt$(_deuda.importe)})</button>`;
   }
   acc += btn('editar', '✏️ Editar', 'var(--bg-hover)', 'var(--text)');
+  // 🧹 Cerrar mes (07/10/2026): deuda fantasma resuelta desde la pantalla, sin SQL. Solo Lu y Jime.
+  if (esActivo && puedeReactivarLimpio()) acc += btn('cerrarmes', '🧹 Cerrar mes', '#ccfbf1', '#0f766e');
   if (esActivo) acc += '<div style="flex-basis:100%;height:0"></div>'; // salto: arriba Cobrar/Excepción/Editar, abajo el resto
   acc += btn('ficha', '📅 Horarios', 'var(--bg-hover)', 'var(--text)');
   acc += btn('bitacora', '📋 Bitácora', 'var(--bg-hover)', 'var(--text)');
@@ -1975,6 +2006,99 @@ window.accionDesdeFicha = (accion) => {
   else if (accion === 'reactivar') abrirModalReactivar();
   else if (accion === 'baja') abrirModalBaja();
   else if (accion === 'excepcion') abrirExcepcion();
+  else if (accion === 'cerrarmes') abrirCerrarMes();
+};
+
+// ===== 🧹 CERRAR MES (07/10/2026, pedido de Lu tras el caso Lara Borràs) =====
+// Graba una CORTESIA $0 imputada al mes elegido: fn_deuda_mes_tf la toma como
+// mes saldado. Es lo mismo que antes había que hacer por SQL. No entra plata a
+// la caja. Solo Lu y Jime (PERM_REACTIVAR_LIMPIO). Con motivo "cambio de fecha"
+// usa el texto canónico 'CIERRE ciclo por cambio de fecha' → la red de seguridad
+// del cobro del puente lo reconoce y la lista de cobros lo oculta.
+let cmMesesInfo = [];
+function cmMesMenos(mes, n) {
+  let [y, m] = mes.split('-').map(Number);
+  m -= n; while (m <= 0) { m += 12; y--; }
+  return `${y}-${String(m).padStart(2, '0')}`;
+}
+window.abrirCerrarMes = abrirCerrarMes;
+async function abrirCerrarMes() {
+  if (!puedeReactivarLimpio()) { toast('Solo Lu y Jime pueden cerrar meses.', true); return; }
+  const p = alumnoActivo && alumnoActivo.persona;
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  $('#cmInfo').innerHTML = `<strong>${p.nombre}</strong> · ${i.plan} · vence día ${i.dia_vencimiento}`;
+  $('#cmMotivo').value = 'FECHA'; $('#cmOtro').value = ''; $('#cmOtroWrap').style.display = 'none';
+  $('#cmMeses').innerHTML = '<span style="color:var(--text-dim)">⟳ Cargando…</span>';
+  $('#modalCerrarMes').classList.add('activo');
+  const meses = [3, 2, 1, 0].map(n => cmMesMenos(MES_ACTUAL, n));
+  const pagosI = pagosPorInsc[i.id] || [];
+  cmMesesInfo = await Promise.all(meses.map(async mes => {
+    let debe = null;
+    try {
+      const { data } = await sb.rpc('fn_estado_cuenta', { p_persona_id: p.id, p_mes: mes });
+      const fila = (data || []).find(r => r.inscripcion_id === i.id);
+      if (fila) debe = Number(fila.debe_mes_vencido || 0) + Number(fila.por_vencer || 0);
+    } catch (e) { console.warn('cerrar mes / estado de cuenta', mes, e); }
+    const cerrado = pagosI.some(pg => pg.mes_imputado === mes && pg.tipo_cobro === 'CORTESIA');
+    return { mes, debe, cerrado };
+  }));
+  // Por defecto se marca el mes más viejo que debe y no está cerrado.
+  const sugerido = (cmMesesInfo.find(x => !x.cerrado && (x.debe || 0) > 0) || {}).mes;
+  $('#cmMeses').innerHTML = cmMesesInfo.map(x => {
+    const estado = x.cerrado ? '<span style="color:var(--text-dim)">ya tiene un cierre o cortesía</span>'
+      : (x.debe == null ? '<span style="color:var(--text-dim)">sin datos</span>'
+      : (x.debe > 0 ? `<span style="color:var(--rojo);font-weight:600">figura debiendo ${fmt$(x.debe)}</span>` : '<span style="color:var(--verde)">al día</span>'));
+    return `<label style="display:flex;align-items:center;gap:8px;cursor:${x.cerrado ? 'not-allowed' : 'pointer'};opacity:${x.cerrado ? .55 : 1};font-size:13px;text-transform:none;letter-spacing:0;">
+      <input type="radio" name="cmMes" value="${x.mes}" ${x.cerrado ? 'disabled' : ''} ${x.mes === sugerido ? 'checked' : ''} style="width:16px;height:16px;">
+      <strong>${nombreMes(x.mes)}</strong> · ${estado}</label>`;
+  }).join('');
+}
+window.confirmarCerrarMes = async function() {
+  if (!puedeReactivarLimpio()) { toast('Solo Lu y Jime pueden cerrar meses.', true); return; }
+  const p = alumnoActivo && alumnoActivo.persona;
+  const i = alumnoActivo && alumnoActivo.inscripcion;
+  if (!i) { toast('No hay inscripción activa.', true); return; }
+  const sel = document.querySelector('input[name="cmMes"]:checked');
+  if (!sel) { toast('Elegí el mes a cerrar.', true); return; }
+  const mes = sel.value;
+  const motivo = $('#cmMotivo').value;
+  const otro = ($('#cmOtro').value || '').trim();
+  if (motivo === 'OTRO' && !otro) { toast('Escribí el motivo.', true); return; }
+  const quien = usuarioNombre || usuarioEmail || 'admin';
+  const obs = motivo === 'FECHA'
+    ? `CIERRE ciclo por cambio de fecha (manual desde la ficha · ${quien}) · cuota reemplazada por puente`
+    : motivo === 'BON'
+      ? `CIERRE mes bonificado (manual desde la ficha · ${quien}) · sin cuota ese mes`
+      : `CIERRE mes manual (${quien}) · ${otro}`;
+  if (!confirm(`Cerrar ${nombreMes(mes)} de ${p.nombre} SIN cobrar.
+
+Motivo: ${obs}
+
+¿Confirmás?`)) return;
+  const btn = $('#btnConfirmarCerrarMes'); btn.disabled = true; btn.textContent = 'Guardando...';
+  try {
+    // Idempotente: se vuelve a mirar la base (no el cache) antes de grabar.
+    const { data: ya, error: eYa } = await sb.from('pagos_tf').select('id')
+      .eq('inscripcion_id', i.id).eq('mes_imputado', mes).eq('tipo_cobro', 'CORTESIA').limit(1);
+    if (eYa) throw eYa;
+    if (ya && ya.length) { toast(`${nombreMes(mes)} ya tenía un cierre o cortesía. No se grabó nada.`, true); cerrarModal('modalCerrarMes'); return; }
+    const { data: ins, error } = await sb.from('pagos_tf').insert({
+      inscripcion_id: i.id, mes_imputado: mes, fecha: HOY.toISOString().split('T')[0],
+      importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+      observaciones: obs, cargado_por: usuarioId
+    }).select('id');
+    if (error) throw error;
+    if (!ins || !ins.length) throw new Error('La base no grabó la fila (permisos).');
+    toast(`✓ ${nombreMes(mes)} cerrado para ${p.nombre}`);
+    cerrarModal('modalCerrarMes');
+    await cargarTodo();
+  } catch (e) {
+    console.error(e);
+    toast('Error al cerrar el mes: ' + (e.message || e), true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Cerrar mes';
+  }
 };
 
 // ===== EXCEPCIÓN / PRÓRROGA DE PAGO =====
@@ -2553,6 +2677,31 @@ function deudaCambioDe(inscripcion) {
 }
 
 // Nombre humano del saldo según su origen (ficha, botones, mini-modal y modal Cobrar).
+// RED DE SEGURIDAD (07/10/2026, caso Lara Borràs #1568): al cobrar un puente de
+// cambio de fecha, se asegura que el mes de transición tenga su CIERRE. El cierre
+// lo debería haber grabado el cambio de fecha, pero si ese insert fallaba solo
+// quedaba un console.warn y el mes viejo seguía apareciendo como deuda (a Lara le
+// reclamaba septiembre aunque el puente ya lo reemplazaba). Lee de la BASE (no del
+// cache) y es idempotente. Solo para conceptos que traen cambio de fecha.
+async function asegurarCierrePuente(inscId, d) {
+  try {
+    if (!d || !d.mes || !['puente_fecha', 'mixto'].includes(d.concepto)) return;
+    if (d.concepto === 'mixto' && !(d.venc || '').includes('->')) return;
+    const { data: ya, error: eYa } = await sb.from('pagos_tf').select('id')
+      .eq('inscripcion_id', inscId).eq('mes_imputado', d.mes).eq('tipo_cobro', 'CORTESIA')
+      .ilike('observaciones', 'CIERRE ciclo por cambio de fecha%').limit(1);
+    if (eYa) { console.warn('No se pudo verificar el cierre del puente:', eYa.message); return; }
+    if (ya && ya.length) return;
+    const { error: eC } = await sb.from('pagos_tf').insert({
+      inscripcion_id: inscId, mes_imputado: d.mes, fecha: HOY.toISOString().split('T')[0],
+      importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+      observaciones: `CIERRE ciclo por cambio de fecha (${d.venc ? 'día ' + d.venc.replace('->', '→') : 'puente'}) · cuota reemplazada por puente · al cobrar el puente`,
+      cargado_por: usuarioId
+    });
+    if (eC) toast(`⚠️ El puente se cobró, pero no se pudo cerrar ${d.mes}: ${eC.message}. Avisale a Lu.`, true);
+  } catch (e) { console.warn('asegurarCierrePuente:', e); }
+}
+
 function etiquetaSaldoCambio(d) {
   if (!d) return 'saldo por cambio';
   if (d.concepto === 'proporcional_plan') return 'proporcional por cambio de plan';
@@ -2619,6 +2768,7 @@ window.confirmarCobrarSaldo = async () => {
       cargado_por: usuarioId
     });
     if (e1) throw e1;
+    await asegurarCierrePuente(i.id, d);
     const obsLimpia = (i.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
     const { error: e2 } = await sb.from('inscripciones_tf')
       .update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() })
@@ -4549,7 +4699,11 @@ window.confirmarCambioPlan = async () => {
             observaciones: `CIERRE ciclo por cambio de fecha (día ${diaViejoFecha||'—'}→${r.diaNuevo}) · cuota reemplazada por puente`,
             cargado_por: usuarioId
           });
-          if (eCierre) console.warn('No se pudo cerrar el mes de transición:', eCierre.message);
+          if (eCierre) {
+            console.warn('No se pudo cerrar el mes de transición:', eCierre.message);
+            // 07/10/2026: antes quedaba solo en consola (así pasó lo de Lara Borràs).
+            alert(`⚠️ El día de pago se cambió, pero NO se pudo cerrar ${mesCierre} (${eCierre.message}).\n\nSi no se arregla, ${mesCierre} va a aparecer como deuda. Avisale a Lu.`);
+          }
         }
       }
       // Histórico: registrar el cambio de fecha (no rompe si la tabla no existe)
@@ -4795,9 +4949,32 @@ window.confirmarCambioPlan = async () => {
 
     // MODO AMBOS: además del plan, mover el día de vencimiento (el puente ya se cobró junto)
     if (cpModo === 'ambos' && cpFechaCache && cpFechaCache.diaNuevo) {
+      const diaViejoAmbos = i.dia_vencimiento;
       const { error: eVenc } = await sb.from('inscripciones_tf')
         .update({ dia_vencimiento: cpFechaCache.diaNuevo }).eq('id', i.id);
       if (eVenc) throw eVenc;
+      // FIX 07/10/2026: el modo Ambos movía el día pero NO cerraba el mes de
+      // transición (el modo Solo fecha sí). fn_estado_cuenta reevalúa ese mes con
+      // el día NUEVO y lo reclamaba como deuda aunque el puente ya lo reemplazó.
+      // Mismo cierre, idempotente.
+      if ((cpFechaCache.importe || 0) > 0) {
+        const mesCierreA = cpFechaCache.mes || MES_ACTUAL;
+        const yaCerradoA = (pagosPorInsc[i.id] || []).some(pg =>
+          pg.mes_imputado === mesCierreA && pg.tipo_cobro === 'CORTESIA' &&
+          /CIERRE ciclo por cambio de fecha/i.test(pg.observaciones || ''));
+        if (!yaCerradoA) {
+          const { error: eCierreA } = await sb.from('pagos_tf').insert({
+            inscripcion_id: i.id, mes_imputado: mesCierreA, fecha: HOY.toISOString().split('T')[0],
+            importe: 0, medio: 'TRANSFERENCIA', tipo_cobro: 'CORTESIA',
+            observaciones: `CIERRE ciclo por cambio de fecha (día ${diaViejoAmbos||'—'}→${cpFechaCache.diaNuevo}) · cuota reemplazada por puente`,
+            cargado_por: usuarioId
+          });
+          if (eCierreA) {
+            console.warn('No se pudo cerrar el mes de transición (ambos):', eCierreA.message);
+            alert(`⚠️ El plan y el día se cambiaron, pero NO se pudo cerrar ${mesCierreA} (${eCierreA.message}).\n\nSi no se arregla, ${mesCierreA} va a aparecer como deuda. Avisale a Lu.`);
+          }
+        }
+      }
     }
 
     let msg = `✓ Cambio programado: ${i.plan}→${planNuevo} desde ${nombreMes(mesQueViene)}`;
@@ -5170,6 +5347,7 @@ window.confirmarCobro = async () => {
           console.warn('No se pudo cobrar el puente:', ep.message);
           toast('La cuota se cobró, pero el puente falló: ' + ep.message + ' — cobralo con "Cobrar saldo".', true);
         } else {
+          await asegurarCierrePuente(insc.id, d);
           const obsLimpia = (insc.observaciones || '').replace(/\s*\[DEUDA_CAMBIO[^\]]*\]/g, '').trim();
           await sb.from('inscripciones_tf').update({ observaciones: obsLimpia, actualizado_en: new Date().toISOString() }).eq('id', insc.id);
           msgPuente = ` + puente ${fmt$(d.importe)}`;
