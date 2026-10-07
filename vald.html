@@ -1883,6 +1883,8 @@ function sentidoMetrica(prueba, metrica, unidadApi) {
     const un = /area|ellipse/.test(m) ? 'mm²' : (/velocity/.test(m) ? 'mm/s' : (/excursion/.test(m) ? 'mm' : '°'));
     return { tipo: 'oscilacion', unidad: u(un), prueba: prueba };
   }
+  // 07/10/2026: alturas, profundidades y distancias son centímetros, no grados (salía "42,3°" de altura de salto).
+  if (/height|depth|distance|displacement/.test(m) && !/flexion|tilt|angle/.test(m)) return { tipo: 'longitud', unidad: 'cm' };
   return { tipo: 'rom', unidad: u('°'), conSigno: /flexion/.test(m) };
 }
 // Devuelve el texto de lateralidad YA resuelto para la IA.
@@ -1905,6 +1907,7 @@ function ladoClinico(sent, L, R) {
     return ` · un lado en flexión y otro en EXTENSIÓN (negativo = extensión) · no atribuir restricción`;
   }
   if (sent.tipo === 'rom') return ` · lado con MENOR valor: ${L < R ? 'IZQUIERDO' : 'DERECHO'}`;
+  if (sent.tipo === 'longitud') return ` · lado con MENOR valor: ${L < R ? 'IZQUIERDO' : 'DERECHO'}`;
   return '';
 }
 
@@ -2180,6 +2183,12 @@ function pintarEvaluacion(datos, normas) {
       // 06/10/2026: COLAPSO MEDIAL. Valgo, rotación interna y aducción de cadera en carga: MÁS valor = MÁS colapso.
       // El lado lo resuelve el código (antes decía "lado con MENOR valor" y la IA invertía la lateralidad).
       const esColapso = !esDyn && /valgus|hip internal rotation|hip adduction/i.test(m.metrica || '');
+      const difColapso = (m.izquierda != null && m.derecha != null) ? Math.abs(Math.abs(m.izquierda) - Math.abs(m.derecha)) : null;
+      if (esColapso && /valgus/i.test(m.metrica || '') && difColapso != null && difColapso < 3) {
+        movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `L ${m.izquierda} / R ${m.derecha}° · diferencia ${Math.round(difColapso * 10) / 10}°: menor a 3°, NO es colapso de un lado (no nombrarlo como hallazgo)`, fuente: fte, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
+        valgosPorPrueba.push({ prueba: p.prueba, L: m.izquierda, R: m.derecha });
+        continue;
+      }
       if (esColapso && m.izquierda != null && m.derecha != null && m.izquierda !== m.derecha) {
         sufLado = ` · métrica de COLAPSO MEDIAL (más valor = más colapso) · lado con MÁS colapso medial: ${Math.abs(m.izquierda) > Math.abs(m.derecha) ? 'IZQUIERDO' : 'DERECHO'}`;
       }
@@ -2193,7 +2202,16 @@ function pintarEvaluacion(datos, normas) {
         movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `L ${m.izquierda} / R ${m.derecha}° · diferencia ${difG}° · ángulos menores a 5°: NO informar asimetría en porcentaje ni presentarlo como hallazgo${sufUni}`, fuente: fte, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
         continue;
       }
-      const asimTxt = (sent.unidad === '°' && difG != null) ? `diferencia ${difG}° (${m.asimetria_pct}% asim)` : `${m.asimetria_pct}% asim`;
+      let asimTxt = (sent.unidad === '°' && difG != null) ? `diferencia ${difG}° (${m.asimetria_pct}% asim)` : `${m.asimetria_pct}% asim`;
+      // 07/10/2026: inclinación lateral de pelvis/tronco con signo opuesto entre lados = se inclina hacia lados distintos.
+      // El % (145%, 138%) no significa nada: se compara la MAGNITUD y se dice en qué apoyo se inclina más.
+      if (/lateral (tilt|flexion)/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null && m.izquierda * m.derecha < 0) {
+        const aL = Math.abs(m.izquierda), aR = Math.abs(m.derecha);
+        asimTxt = `inclinación hacia lados opuestos (el signo indica la dirección) · magnitud L ${aL}° / R ${aR}° · diferencia ${Math.round(Math.abs(aL - aR) * 10) / 10}° · NO informar asimetría en %`;
+        sufLado = ` · MAYOR inclinación lateral apoyando el ${aL > aR ? 'IZQUIERDO' : 'DERECHO'}`;
+      } else if (/lateral (tilt|flexion)/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null && m.izquierda !== m.derecha) {
+        sufLado = ` · MAYOR inclinación lateral apoyando el ${Math.abs(m.izquierda) > Math.abs(m.derecha) ? 'IZQUIERDO' : 'DERECHO'}`;
+      }
       movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${asimTxt} · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}${sufUni}${txtNorma}`, fuente: nHT ? (nHT.fuente_norma || fteLSI) : fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
     }
   }
