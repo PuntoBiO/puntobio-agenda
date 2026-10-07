@@ -395,6 +395,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
+let ultimoTextoDocs = '';   // texto de los PDF adjuntos (MOPLEX, estudios) para el control de números
 let ultimoCuerpoIA = '';     // lo que se le mandó a la IA (para el control de números)
 let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
 let tipoEval = 'primera';   // 'primera' | 'reeval' — lo elige el usuario (autodetectado al seleccionar paciente)
@@ -2724,6 +2725,19 @@ async function generar() {
         toast('⚠️ No pude leer los percentiles de ' + d.nombre + ': va el PDF a la IA (revisar percentiles a mano).');
       }
       documentos.length = 0; documentos.push(...quedan);
+      // 07/10/2026: el control de números también conoce los valores de la pisada (MOPLEX) y demás PDF:
+      // antes marcaba en amarillo 764, 664, 1468… porque venían del PDF y no de los datos VALD.
+      ultimoTextoDocs = '';
+      for (const d of quedan) {
+        try {
+          const pj = await cargarPdfJs();
+          const pdf = await pj.getDocument({ data: b64ABytes(d.base64) }).promise;
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const tc = await (await pdf.getPage(i)).getTextContent();
+            ultimoTextoDocs += ' ' + tc.items.map(x => x.str).join(' ');
+          }
+        } catch (_) { /* si no se puede leer, el control queda como antes para ese PDF */ }
+      }
       if (normasPdf.length) sinExcluidos.percentiles = normasPdf;
     }
     // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
@@ -2909,6 +2923,7 @@ function controlNumeros(informe, nota) {
     [a, Math.round(a), Math.round(a * 10) / 10, Math.round(a * 100) / 100].forEach(v => permitidos.add(String(v)));
   };
   (ultimoCuerpoIA.match(/-?\d+(?:[.,]\d+)?/g) || []).forEach(t => addNum(Number(norm(t))));
+  (ultimoTextoDocs.match(/-?\d+(?:[.,]\d+)?/g) || []).forEach(t => addNum(Number(norm(t))));
   // Referencias fijas del informe (no son mediciones)
   ['0.5', '0.6', '0.47', '0.8', '16', '18', '65', '100'].forEach(v => permitidos.add(v));
   const texto = [informe || '', nota || ''].join('\n')
