@@ -5127,7 +5127,11 @@ window.eliminarInscTF = async () => {
   const btn = document.getElementById('btnEliminarInsc');
   if (btn) { btn.disabled = true; btn.textContent = 'Eliminando...'; }
   try {
-    const hoyISO = new Date().toISOString().split('T')[0];
+    const hoyISO = _isoLocal(new Date());
+    // 07/10/2026: antes se BORRABAN las filas de turno_alumnos y el alumno desaparecía
+    // de todas las agendas viejas. Ahora se cierran guardando el último día (ayer),
+    // igual que una baja normal: el lugar se libera y la historia queda.
+    const turnosLib = await cerrarTurnosDeBaja(p.id, hoyISO);
     const { error: errInsc } = await sb.from('inscripciones_tf').update({
       estado: 'BAJA',
       fecha_baja: hoyISO,
@@ -5135,10 +5139,6 @@ window.eliminarInscTF = async () => {
       actualizado_en: new Date().toISOString()
     }).eq('id', i.id);
     if (errInsc) throw errInsc;
-    // Liberar turnos
-    const { count: turnosLib } = await sb.from('turno_alumnos')
-      .delete({ count: 'exact' })
-      .eq('persona_id', p.id);
     toast(`✓ Inscripción de ${p.nombre} eliminada${turnosLib ? `. Se liberaron ${turnosLib} turnos.` : '.'}`);
     cerrarModal('modalEditar');
     await cargarTodo();
@@ -5764,7 +5764,7 @@ async function guardarTurnosWiz() {
   const idsParaActualizar = (existentes || []).map(r => r.id);
   if (idsParaActualizar.length) {
     const { error: errUpd } = await sb.from('turno_alumnos')
-      .update({ activo: true, fecha_desde: fechaDesde })
+      .update({ activo: true, fecha_desde: fechaDesde, fecha_hasta: null, pendiente_fijo: false })
       .in('id', idsParaActualizar);
     if (errUpd) throw errUpd;
   }
@@ -6040,6 +6040,20 @@ window.guardarEditarPago = async () => {
   }
 };
 
+// ===== CIERRE DE TURNOS FIJOS EN UNA BAJA (07/10/2026) =====
+// Se cierran PRIMERO los turnos fijos y DESPUÉS se marca la inscripción como BAJA.
+// Antes era al revés: si algo en la base apaga los turnos al pasar la inscripción
+// a BAJA, cuando se buscaban los turnos activos ya no quedaba ninguno, nunca se
+// guardaba el último día (fecha_hasta) y el alumno desaparecía también de las
+// agendas viejas (caso Mariela Rivarosa, baja de octubre 2026).
+// El último día es AYER: hoy ya no figura y hasta ayer queda toda su historia.
+async function cerrarTurnosDeBaja(personaId, hoyISO) {
+  const { data: activos, error } = await sb.from('turno_alumnos')
+    .select('id').eq('persona_id', personaId).eq('activo', true);
+  if (error) throw error;
+  return await sellarVentanas((activos || []).map(f => f.id), _diaAnterior(hoyISO), true);
+}
+
 // ===== MODAL BAJA (reuso con liberación de turnos) =====
 function abrirModalBaja() {
   const f = alumnoActivo;
@@ -6070,7 +6084,14 @@ window.confirmarBaja = async () => {
   const btn = $('#btnConfirmarBaja');
   btn.disabled = true; btn.textContent = 'Procesando...';
   try {
-    const hoyISO = HOY.toISOString().split('T')[0];
+    // Fecha LOCAL (no UTC): de noche toISOString() ya da el día siguiente.
+    const hoyISO = _isoLocal(new Date());
+    // 1) Primero cerrar los turnos fijos guardando el último día (ayer).
+    //    Sellado SEGURO: conserva la ventana de vigencia (historia en las agendas viejas
+    //    y recuperatorios si reactiva) y cancela limpio los cambios programados que nunca
+    //    llegaron a arrancar (sin ventanas imposibles).
+    const cantTurnos = await cerrarTurnosDeBaja(alumnoActivo.persona.id, hoyISO);
+    // 2) Después marcar la inscripción como BAJA
     const { error: errIns } = await sb.from('inscripciones_tf').update({
       estado: 'BAJA',
       fecha_baja: hoyISO,
@@ -6078,16 +6099,6 @@ window.confirmarBaja = async () => {
       actualizado_en: new Date().toISOString()
     }).eq('id', alumnoActivo.inscripcion.id);
     if (errIns) throw errIns;
-
-    // Liberar turnos — sellado SEGURO: conserva la ventana de vigencia por si reactiva
-    // por el camino "conserva recuperatorios", y cancela limpio los cambios programados
-    // que nunca llegaron a arrancar (sin ventanas imposibles).
-    const { data: turnosLib, error: errTur } = await sb.from('turno_alumnos')
-      .select('id')
-      .eq('persona_id', alumnoActivo.persona.id)
-      .eq('activo', true);
-    if (errTur) throw errTur;
-    const cantTurnos = await sellarVentanas((turnosLib || []).map(f => f.id), _diaAnterior(hoyISO), true);
     toast(`✓ Baja registrada. ${cantTurnos} turno(s) liberado(s)`);
     cerrarModal('modalBaja');
     await cargarTodo();
