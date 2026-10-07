@@ -612,6 +612,7 @@ function copiarDiagNormas() {
     forceDecks: { resultKeys: d.fdResultKeys || null, defKeys: d.fdDefKeys || null, sample: d.fdSample || null },
     dynamo: { keys: d.dynKeys || null, summaryKeys: d.dynSummaryKeys || null, sample: d.dynSample || null },
     humanTrak: d.htSample || null,   // 06/10/2026: estructura cruda de HumanTrak (para elegir la misma repetición que el PDF)
+    dynamoRatios: d.dynRatios || null,   // 06/10/2026: ratios que calcula VALD en DynaMo
   };
   const texto = JSON.stringify(info, null, 2);
   const ok = () => toast('Diagnóstico copiado. Pegámelo en el chat.');
@@ -2160,7 +2161,7 @@ function pintarEvaluacion(datos, normas) {
         // Sin asimetría ni norma cargada: NO se puede afirmar que es normal → informativo (⚪), con su unidad real.
         cnt('⚪'); conteo.vigilar++;
         const notaSigno = (sent.conSigno && m.valor < 0) ? ' (negativo = EXTENSIÓN)' : '';
-        movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor} ${sent.unidad}${notaSigno} · sin norma cargada en el sistema: NO afirmar que es normal`, fuente: fte, valor: m.valor, unidad: sent.unidad, cat: 'Movilidad' });
+        movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `${m.valor} ${sent.unidad}${notaSigno} · valor informativo: dar solo el dato, sin calificarlo`, fuente: fte, valor: m.valor, unidad: sent.unidad, cat: 'Movilidad' });
         continue;
       }
       let c = colorAsim(m.asimetria_pct);
@@ -2267,6 +2268,21 @@ function pintarEvaluacion(datos, normas) {
     }
   }
 
+  // ---- RATIOS DE VALD (DynaMo) tal cual los calcula VALD ----
+  for (const g of (datos.ratiosDynamo || [])) {
+    const lista = Array.isArray(g.ratios) ? g.ratios : Object.entries(g.ratios).map(([k, v]) => (v && typeof v === 'object') ? { name: k, ...v } : { name: k, value: v });
+    for (const r of lista) {
+      if (!r || typeof r !== 'object') continue;
+      const nom = r.name || r.ratioName || r.ratioType || r.type || r.description || 'ratio';
+      const val = r.value ?? r.ratio ?? r.valueRatio ?? r.valuePercentage ?? r.percentage;
+      if (val == null) continue;
+      const lado = r.laterality ? (/left/i.test(r.laterality) ? ' · izquierdo' : (/right/i.test(r.laterality) ? ' · derecho' : '')) : '';
+      fuerza.push({ em: '⚪', esRatio: true, nom: `Ratio VALD · ${g.test} · ${nom}${lado}`, det: `${Math.round(Number(val) * 100) / 100} (calculado por VALD)`, fuente: 'VALD DynaMo', cat: 'Fuerza' });
+    }
+  }
+  // 06/10/2026: los RATIOS van SIEMPRE al informe (los médicos los miran). Se marcan acá, en un solo lugar.
+  const RX_RATIO = /ratio|\brsi\b|rsi-mod|\bdsi\b|h:q|:concentric|ft:ct/i;
+  for (const arr of [fuerza, forceDecks, movilidad]) for (const x of arr) if (RX_RATIO.test(x.nom || '')) x.esRatio = true;
   return { fuerza, forceDecks, movilidad, postura: datos.postura, conteo };
 }
 
@@ -2385,6 +2401,11 @@ function renderEvaluacion(c, datos) {
   </div>
   <div class="hint" style="margin:-4px 0 6px;">Arriba lo que se mira (🟢🟡🔴). Lo gris (informativo) está abajo en "Vigilar". ⭐ = métrica clave · ⓘ = qué significa · ✕ = excluir test mal tomado.</div>`;
 
+  // ── RATIOS: siempre visibles y siempre al informe ──
+  {
+    const rat = [...(c.fuerza || []), ...(c.forceDecks || []), ...(c.movilidad || [])].filter(x => x.esRatio && !x.excluido);
+    if (rat.length) html += `<div class="vr-section"><h4>Ratios (van siempre al informe)</h4>${rat.map(x => `<div class="det" style="font-size:12px; margin:2px 0;">${x.em} <b>${escapeHtml(x.nom)}</b> — ${escapeHtml(x.det)}</div>`).join('')}</div>`;
+  }
   // ── ARRIBA: solo lo graduado (lo que realmente mirás) ──
   const secs = [['fuerza','Fuerza · DynaMo'], ['forceDecks','ForceDecks'], ['movilidad','Movilidad · HumanTrak (Primary)']];
   for (const [sec, titulo] of secs) {
@@ -2525,6 +2546,7 @@ async function generar() {
       movilidad: (col.movilidad || []).filter(x => !x.excluido),
       postura: col.postura,
     };
+    sinExcluidos.ratios = [...sinExcluidos.fuerza, ...sinExcluidos.forceDecks, ...sinExcluidos.movilidad].filter(x => x.esRatio);
     // Calculadoras clínicas + tests manuales cargados (SARC-F, SPPB, TUG, Gait, 2-Min Step, Ishii, etc.).
     // Antes se guardaban en la HC pero NO viajaban a la IA: ahora se suman al prompt ya calculados.
     const calculadoras = (protocoloItems || [])
