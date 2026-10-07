@@ -262,6 +262,23 @@
         </div>
       </div>
 
+      <!-- 07/10/2026: frecuencia semanal y reparto entre entrenamiento y kinefilaxia (va al informe y a la nota del profe) -->
+      <div class="pob-field" style="margin-top:12px;">
+        <label>Frecuencia semanal en PuntoBiO</label>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+          <select id="f_frec" onchange="sincFrec('total')" style="min-width:150px;">
+            <option value="">— (sin definir)</option>
+            <option value="1">1 por semana</option><option value="2">2 por semana</option><option value="3">3 por semana</option>
+            <option value="4">4 por semana</option><option value="5">5 por semana</option>
+          </select>
+          <span style="font-size:13px; color:#475569;">Entrenamiento</span>
+          <select id="f_frec_ent" onchange="sincFrec('ent')"><option value="">—</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select>
+          <span style="font-size:13px; color:#475569;">Kinefilaxia</span>
+          <select id="f_frec_kine" onchange="sincFrec('kine')"><option value="">—</option><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select>
+        </div>
+        <div class="pob-sub" id="f_frec_aviso">Cuántas clases por semana y cómo se reparten. Va a las recomendaciones del informe y a la nota del profe.</div>
+      </div>
+
       <div style="margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:2px 16px;">
         <label class="pob-check"><input type="checkbox" id="f_banderas"> Banderas rojas (dolor agudo / signos médicos)</label>
         <label class="pob-check"><input type="checkbox" id="f_fragil"> Signos de fragilidad</label>
@@ -919,6 +936,7 @@ function seleccionar(p) {
   // El padrón de SARKMED sí guarda el sexo: lo autocompletamos.
   const selSexo = document.getElementById('f_sexo');
   if (selSexo) selSexo.value = (p.sexo === 'F' || p.sexo === 'M') ? p.sexo : '';
+  ['f_frec', 'f_frec_ent', 'f_frec_kine'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });   // frecuencia: por paciente
   ultimaClasificacion = null;
   document.getElementById('pobResult').style.display = 'none';
   document.getElementById('btnGuardarPob').style.display = 'none';
@@ -2803,6 +2821,7 @@ async function generar() {
         sexo: sexoPac,
         poblacion: (ultimaClasificacion && ultimaClasificacion.resultado && ultimaClasificacion.resultado.poblacion) || null,
         motivo: document.getElementById('valdMotivo').value.trim(),
+        frecuencia: leerFrecuencia(),   // 07/10/2026: clases por semana (entrenamiento / kinefilaxia)
         postqx: (() => { const q = leerPostqx(); return (q && (q.tipo || q.fecha)) ? q : null; })(),
         protocolo: protocoloItems.length ? {
           realizados: protocoloItems.filter(it => tildados[it.id]).map(it => it.label + (it.fueraProtocolo ? ' (fuera del protocolo)' : '')),
@@ -3223,6 +3242,8 @@ async function autocompletarIngresoDesdeHC(p) {
     previo = data && data[0] && data[0].ingreso;
   } catch (_) {}
   if (pacienteSel !== p) return;   // se cambió de paciente mientras cargaba
+  // FRECUENCIA SEMANAL: la de la evaluación BiOLAB anterior (si no se cargó a mano)
+  if (previo && previo.frecuencia_semanal && !document.getElementById('f_frec').value) ponerFrecuencia(previo.frecuencia_semanal);
 
   // SEXO: padrón → evaluación BiOLAB anterior
   const selSexo = document.getElementById('f_sexo');
@@ -3279,8 +3300,41 @@ async function autocompletarIngresoDesdeHC(p) {
   box.style.display = 'block';
 }
 
+// 07/10/2026: frecuencia semanal (total) y reparto entrenamiento / kinefilaxia; se completan entre sí
+function sincFrec(origen) {
+  const t = document.getElementById('f_frec'), e = document.getElementById('f_frec_ent'), k = document.getElementById('f_frec_kine');
+  const av = document.getElementById('f_frec_aviso');
+  const T = t.value === '' ? null : Number(t.value), Ev = e.value === '' ? null : Number(e.value), Kv = k.value === '' ? null : Number(k.value);
+  if (origen === 'total' && T != null) {
+    if (Ev == null && Kv == null) { e.value = String(T); k.value = '0'; }
+    else if (Ev != null && Ev <= T) k.value = String(T - Ev);
+    else if (Kv != null && Kv <= T) e.value = String(T - Kv);
+    else { e.value = String(T); k.value = '0'; }
+  } else if (origen === 'ent' && Ev != null) {
+    if (T != null && Ev <= T) k.value = String(T - Ev); else if (T == null) { t.value = String(Math.min(5, Ev + (Kv || 0))); if (Kv == null) k.value = '0'; }
+  } else if (origen === 'kine' && Kv != null) {
+    if (T != null && Kv <= T) e.value = String(T - Kv); else if (T == null) { t.value = String(Math.min(5, Kv + (Ev || 0))); if (Ev == null) e.value = '0'; }
+  }
+  const f = leerFrecuencia();
+  if (av) {
+    const mal = f && f.entrenamiento + f.kinefilaxia !== f.total;
+    av.style.color = mal ? '#b91c1c' : '';
+    av.textContent = mal ? '⚠️ Entrenamiento + kinefilaxia no suma el total por semana.' : 'Cuántas clases por semana y cómo se reparten. Va a las recomendaciones del informe y a la nota del profe.';
+  }
+}
+function leerFrecuencia() {
+  const g = (id) => { const el = document.getElementById(id); return el && el.value !== '' ? Number(el.value) : null; };
+  const total = g('f_frec'); if (!total) return null;
+  return { total, entrenamiento: g('f_frec_ent') ?? total, kinefilaxia: g('f_frec_kine') ?? 0 };
+}
+function ponerFrecuencia(f) {
+  if (!f || !f.total) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = String(v); };
+  set('f_frec', f.total); set('f_frec_ent', f.entrenamiento); set('f_frec_kine', f.kinefilaxia);
+}
 function leerIngreso() {
   return {
+    frecuencia_semanal: leerFrecuencia(),
     edad: Number(document.getElementById('f_edad').value) || 0,
     sexo: (document.getElementById('f_sexo') && document.getElementById('f_sexo').value) || null,
     banderas_rojas: chk('f_banderas'),
@@ -3452,6 +3506,7 @@ function retomarBorrador() {
   if (b.ingreso && b.ingreso.edad != null) {
     const fe = document.getElementById('f_edad'); if (fe) fe.value = b.ingreso.edad;
   }
+  if (b.ingreso && b.ingreso.frecuencia_semanal) ponerFrecuencia(b.ingreso.frecuencia_semanal);
   const box = document.getElementById('pobResult');
   if (box) {
     box.innerHTML = '<span class="pob-badge" style="background:' + (COLOR_POB[b.poblacion] || '#334155') + '">'
