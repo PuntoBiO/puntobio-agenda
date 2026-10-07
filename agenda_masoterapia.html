@@ -853,7 +853,7 @@ async function calcularOrdinalesYTratamientos() {
   // Carga tratamientos
   try {
     const { data: ttoData, error: e1 } = await supa.from('tratamientos')
-      .select('id, codigo_id, practica_codigo, total_sesiones, persona_id, valor_sesion, total_abonado, tipo_cobro')
+      .select('id, codigo_id, practica_codigo, total_sesiones, persona_id, valor_sesion, total_abonado, tipo_cobro, regalo_para')
       .in('id', trataIds);
     if (e1) throw e1;
     tratamientosCache.clear();
@@ -1137,6 +1137,14 @@ function renderWeek(container) {
   }
 }
 
+// Beneficiario de un turno: el cargado en el turno; si no hay, el "Regalo para" del tratamiento.
+function beneficiarioDeTurno(t) {
+  const propio = (t.beneficiario_nombre || '').trim();
+  if (propio) return propio;
+  const tto = t.tratamiento_id ? tratamientosCache.get(t.tratamiento_id) : null;
+  return (tto && tto.regalo_para ? String(tto.regalo_para).trim() : '');
+}
+
 function renderTurno(t) {
   const TIPOS_MASAJE_LABEL = { MASAJES_EYC:'EyC', MASAJES_CC:'CC', MASAJES_PAK:'PAK', MASAJES_R:'Regalo', MASAJES_CERO:'Sin cargo' };
   const tipoLabel = t.tipo_masaje || TIPOS_MASAJE_LABEL[t.practica_codigo] || t.practica_codigo || 'Masaje';
@@ -1148,9 +1156,11 @@ function renderTurno(t) {
   const titular = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
   // Si hay beneficiario distinto, mostrar "Beneficiario (TitularPrimerNombre)"
   let nombreMostrar = titular;
-  if (t.beneficiario_nombre && t.beneficiario_nombre.trim()) {
+  // 07/10/2026: si el turno no tiene beneficiario propio, se usa el "Regalo para" del tratamiento.
+  const benefTurno = beneficiarioDeTurno(t);
+  if (benefTurno) {
     const titularCorto = String(titular).split(/\s+/)[0]; // primer nombre/palabra
-    nombreMostrar = `${t.beneficiario_nombre} (${titularCorto})`;
+    nombreMostrar = `${benefTurno} (${titularCorto})`;
   }
   // Sesión X/total (solo si hay tratamiento con >1 sesión y conocemos el ordinal)
   let sesionTxt = '';
@@ -1649,6 +1659,9 @@ async function refrescarTratamientos(personaId, practica) {
   sel.appendChild(oNuevo);
   sel.disabled = false;
   if (tratamientosPersona.length > 0) sel.value = tratamientosPersona[0].id;
+  // 07/10/2026: la preselección no dispara 'change' → sin esto el beneficiario
+  // ("Regalo para" del tratamiento) no se completaba al elegir el paciente.
+  actualizarVisibilidadBeneficiario();
   sel.onchange = async () => {
     if (sel.value === '__NUEVO__') {
       sel.value = '';
@@ -2058,7 +2071,8 @@ function onTurnoClick(turnoId) {
   if (!t) return;
   const persona = personas.find(p => p.id===t.persona_id);
   const titular = t.paciente_nombre || (persona ? persona.nombre : `#${t.persona_id}`);
-  const tieneBenef = !!(t.beneficiario_nombre && t.beneficiario_nombre.trim());
+  const benefModal = beneficiarioDeTurno(t);
+  const tieneBenef = !!benefModal;
   const TIPOS_MASAJE_LABEL = { MASAJES_EYC:'Espalda y Cuello (EyC)', MASAJES_CC:'Cuerpo Completo (CC)', MASAJES_PAK:'Pack 4 masajes (Pak)', MASAJES_R:'Regalo', MASAJES_CERO:'Sin cargo' };
   const practicaLabel = TIPOS_MASAJE_LABEL[t.practica_codigo] || REGLAS_PRACTICA[normalizarPracticaParaRegla(t.practica_codigo)]?.label || t.practica_codigo;
   // Sesión X de N (si tiene tratamiento con más de 1 sesión)
@@ -2072,7 +2086,7 @@ function onTurnoClick(turnoId) {
   }
   // Si hay beneficiario distinto, mostrar dos filas: Beneficiario + Titular del Pack
   const pacienteRows = tieneBenef
-    ? `<div class="label">🎁 Beneficiario</div><div class="value" style="font-weight:700;color:var(--accent)">${escapeHtml(t.beneficiario_nombre)}</div>
+    ? `<div class="label">🎁 Beneficiario</div><div class="value" style="font-weight:700;color:var(--accent)">${escapeHtml(benefModal)}</div>
        <div class="label">Titular Pack</div><div class="value">${escapeHtml(titular)}</div>
        <div class="label">DNI titular</div><div class="value">${escapeHtml((persona&&persona.dni)||'—')}</div>`
     : `<div class="label">Paciente</div><div class="value">${escapeHtml(titular)}</div>
