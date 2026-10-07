@@ -373,6 +373,7 @@
         <div id="valdPdfs" style="margin:4px 0 10px;"></div>
         <button class="btn ghost" id="btnFinalizarEval" onclick="finalizarEvaluacion()" style="display:none; margin-right:8px;">✅ Finalizar evaluación</button>
         <button class="btn" id="btnGenIA" onclick="generar()" disabled>📋 Crear informe</button>
+        <button type="button" class="btn ghost" onclick="copiarDatosSoporte()" style="margin-left:8px; font-size:12.5px;" title="Junta los datos que usa el informe, sin llamar a la IA">🧾 Datos para revisión</button>
         <div id="valdBorrador" style="margin-top:10px;"></div>
       </div>
     </div>
@@ -396,7 +397,8 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { lo
 let pacienteSel = null;
 let borradorActual = null;  // borrador guardado encontrado para el paciente seleccionado
 let ultimoTextoDocs = '';   // texto de los PDF adjuntos (MOPLEX, estudios) para el control de números
-let ultimoCuerpoIA = '';     // lo que se le mandó a la IA (para el control de números)
+let ultimoCuerpoIA = '';
+let modoSoloDatos = false;   // 07/10/2026: "Datos para revisión" arma los datos del informe sin llamar a la IA     // lo que se le mandó a la IA (para el control de números)
 let ultimaGeneracion = null; // datos medidos de la última generación (para snapshot de evolución)
 let tipoEval = 'primera';   // 'primera' | 'reeval' — lo elige el usuario (autodetectado al seleccionar paciente)
 
@@ -2585,6 +2587,11 @@ async function extraerNormasVALD(pdfjsLib, bytes) {
   return out;
 }
 
+async function copiarDatosSoporte() {
+  modoSoloDatos = true;
+  try { await generar(); } finally { modoSoloDatos = false; }
+}
+
 async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
   const candadoHub = motivoSinHub();
@@ -2812,6 +2819,24 @@ async function generar() {
     // Antes los incluía, y el base64 tiene dígitos por todos lados ("12", "102"…): casi cualquier
     // número del informe "aparecía" en los datos y el control daba ✅ aunque estuviera mal.
     ultimoCuerpoIA = JSON.stringify({ ...body, documentos: (body.documentos || []).map(d => ({ tipo: d.tipo, nombre: d.nombre })) });
+    if (modoSoloDatos) {
+      cont.innerHTML = '<div class="hint" style="margin-bottom:6px;">Datos que usa el informe (sin IA). Tocá <b>Descargar</b> y mandá el archivo.</div>' +
+        '<button type="button" class="btn" id="btnBajarDatos">⬇️ Descargar datos</button> <button type="button" class="btn ghost" id="btnCopiarDatos">📋 Copiar</button>' +
+        '<textarea id="valdDatosTxt" readonly style="width:100%; height:120px; margin-top:8px; font-size:11px;"></textarea>';
+      const txtDatos = JSON.stringify({ ...JSON.parse(ultimoCuerpoIA), texto_pdfs: ultimoTextoDocs }, null, 1);
+      document.getElementById('valdDatosTxt').value = txtDatos;
+      document.getElementById('btnBajarDatos').onclick = () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([txtDatos], { type: 'text/plain' }));
+        a.download = 'datos_informe_' + String((pacienteSel && (pacienteSel.apellido || pacienteSel.nombre)) || 'paciente').replace(/\s+/g, '_') + '.txt';
+        document.body.appendChild(a); a.click(); a.remove();
+      };
+      document.getElementById('btnCopiarDatos').onclick = async () => {
+        try { await navigator.clipboard.writeText(txtDatos); toast('Copiado.'); }
+        catch (_) { const ta = document.getElementById('valdDatosTxt'); ta.select(); document.execCommand('copy'); toast('Copiado.'); }
+      };
+      return;
+    }
     const resp = await fetch(SUPABASE_URL + '/functions/v1/informe-biolab', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'apikey': SUPABASE_KEY, 'content-type': 'application/json' },
