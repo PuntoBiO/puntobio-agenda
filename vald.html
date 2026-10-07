@@ -2129,6 +2129,7 @@ function pintarEvaluacion(datos, normas) {
   // MOVILIDAD (solo Primary o magnitud real ≥10 → evita ruido de valores chicos; el ROM de DynaMo siempre entra)
   const movilidad = [];
   const valgosPorPrueba = [];   // 06/10/2026: para el resumen de valgo calculado por el sistema
+  const caderaPorPrueba = [];  // 07/10/2026: rotación interna / aducción de cadera en carga, con su lado, para el resumen de colapso medial
   for (const p of (datos.movilidad || [])) {
     const esDyn = p.origen === 'DynaMo';
     const fte = esDyn ? 'DynaMo (ROM)' : 'HumanTrak';
@@ -2204,6 +2205,8 @@ function pintarEvaluacion(datos, normas) {
         sufLado = ` · métrica de COLAPSO MEDIAL (más valor = más colapso) · lado con MÁS colapso medial: ${Math.abs(m.izquierda) > Math.abs(m.derecha) ? 'IZQUIERDO' : 'DERECHO'}`;
       }
       if (/valgus/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null) valgosPorPrueba.push({ prueba: p.prueba, L: m.izquierda, R: m.derecha });
+      if (esColapso && /hip internal rotation|hip adduction/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null)
+        caderaPorPrueba.push({ prueba: p.prueba, comp: /internal rotation/i.test(m.metrica) ? 'rotación interna de cadera' : 'aducción de cadera', L: m.izquierda, R: m.derecha });
       // Pruebas unipodales: cada valor es del lado que APOYA (no del lado hacia el que se inclina el tronco).
       const sufUni = esUnipodal ? ' · prueba unipodal: L = apoyo/pierna IZQUIERDA, R = apoyo/pierna DERECHA (un valor del lado L se mide apoyando el izquierdo)' : '';
       // Ángulos chicos: el % de asimetría exagera (5° vs 1° = 80%). Se informa la diferencia en grados.
@@ -2239,6 +2242,22 @@ function pintarEvaluacion(datos, normas) {
     if (par.length) partes.push('diferencia menor a 3° en: ' + par.map(fmt).join('; '));
     movilidad.unshift({ em: der.length || izq.length ? '🟡' : '🟢', nom: 'RESUMEN DE VALGO DINÁMICO (calculado por el sistema)',
       det: partes.join(' · ') + ' · Copiar esta lista tal cual: no sumar pruebas que no figuren, no contar rotación/aducción de cadera ni flexión de rodilla como valgo. Valores = promedio de las repeticiones.',
+      fuente: 'sistema', cat: 'Movilidad' });
+  }
+
+  // ---- 07/10/2026: RESUMEN DE COLAPSO MEDIAL DE CADERA (rotación interna / aducción), cada prueba con SU lado ----
+  // Antes la IA juntaba todo del lado derecho aunque en alguna prueba el mayor fuera el izquierdo.
+  if (caderaPorPrueba.length) {
+    const fmt = v => `${v.prueba.replace(/\s*\(TT_[^)]*\)/, '')}: ${v.comp} (L ${v.L}° / R ${v.R}°)`;
+    const der = caderaPorPrueba.filter(v => Math.abs(v.R) - Math.abs(v.L) >= 3);
+    const izq = caderaPorPrueba.filter(v => Math.abs(v.L) - Math.abs(v.R) >= 3);
+    const par = caderaPorPrueba.filter(v => Math.abs(Math.abs(v.R) - Math.abs(v.L)) < 3);
+    const partes = [];
+    if (der.length) partes.push('MAYOR del lado DERECHO en: ' + der.map(fmt).join('; '));
+    if (izq.length) partes.push('MAYOR del lado IZQUIERDO en: ' + izq.map(fmt).join('; '));
+    if (par.length) partes.push('diferencia menor a 3° (no es hallazgo de ningún lado) en: ' + par.map(fmt).join('; '));
+    movilidad.unshift({ em: der.length || izq.length ? '🟡' : '🟢', nom: 'RESUMEN DE COLAPSO MEDIAL DE CADERA (calculado por el sistema)',
+      det: partes.join(' · ') + ' · Copiar tal cual: cada prueba y cada componente con SU lado. Si un componente es mayor del otro lado, se dice aparte; nunca "todos del lado derecho/izquierdo" si la lista muestra los dos lados.',
       fuente: 'sistema', cat: 'Movilidad' });
   }
 
@@ -2788,6 +2807,21 @@ async function generar() {
     let out; try { out = JSON.parse(txt); } catch { out = { borrador: txt }; }
     if (!resp.ok || out.error) throw new Error(out.error || ('HTTP ' + resp.status));
     mostrarBorradores(out.informe || '', agregarClasificacionANota(out.nota || ''));
+    // 07/10/2026: resultado del VERIFICADOR DE LADOS (código). Rojo = frase que el sistema no pudo dejar coincidente
+    // con el dato medido: corregirla antes de firmar. Verde = todas las frases con lado coinciden con los datos.
+    {
+      const al = Array.isArray(out.alertas) ? out.alertas : [];
+      const box = document.createElement('div');
+      if (al.length) {
+        box.style.cssText = 'margin-bottom:10px; padding:10px 12px; border-radius:10px; font-size:13px; background:#fee2e2; color:#991b1b; border:2px solid #dc2626;';
+        box.innerHTML = '<b>⛔ REVISAR ANTES DE FIRMAR — lado que no coincide con lo medido:</b>' + al.map(x =>
+          '<div style="margin-top:8px;">• <i>' + escapeHtml(x.donde === 'nota' ? 'Nota para el profe' : 'Informe') + ':</i> «' + escapeHtml(x.frase) + '»<br><span style="font-size:12px;">Dato real: ' + escapeHtml(x.dato) + '</span></div>').join('');
+      } else if (out.verificados) {
+        box.style.cssText = 'margin-bottom:10px; padding:8px 12px; border-radius:10px; font-size:12.5px; background:#dcfce7; color:#166534;';
+        box.textContent = '✔ Control automático de lados: todas las frases con derecho/izquierdo coinciden con lo medido.';
+      }
+      if (box.style.cssText) cont.prepend(box);
+    }
     // Si los PDF fallaron, el informe salió SIN percentiles VALD Hub ni pisada: avisar (antes era silencioso).
     if (out.sin_documentos) {
       const av = document.createElement('div');
