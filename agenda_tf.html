@@ -1937,7 +1937,11 @@ async function cargarDatos(silencioso) {
     // 29/7/26 — PAGINADO: activo=true NO acota el tamaño (hoy ~574 activos de 852
     // filas). Cuando los activos crucen las 1000 esta lectura vendría truncada y
     // la grilla contaría DE MENOS la gente anotada → dejaría sobrecupar clases.
-    const alumnosTurno = await supabaseQueryAll('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,fecha_hasta,pendiente_fijo,personas(id,nombre,foto_perfil)&activo=eq.true', 'id.asc');
+    // 07/10/2026 · HISTORIA: además de los activos, se traen las filas dadas de baja que
+    // tienen fecha_hasta (ventana cerrada). Así un alumno que se dio de baja el 3/10 sigue
+    // apareciendo en las clases hasta el 2/10, que es cuando de verdad venía.
+    // fijosVigentes() es el que decide por fecha quién estaba en cada clase.
+    const alumnosTurno = await supabaseQueryAll('turno_alumnos', '?select=turno_id,persona_id,fecha_desde,fecha_hasta,pendiente_fijo,personas(id,nombre,foto_perfil)&or=(activo.eq.true,fecha_hasta.not.is.null)', 'id.asc');
 
     // Marca de ingreso real (NUEVO / REINGRESO) por persona, desde la inscripción TF (no de baja)
     const MARCA_INGRESO = {};
@@ -2185,10 +2189,27 @@ async function cargarAgregadosSemana() {
 // (compat con datos viejos). fecha_hasta = último día INCLUSIVE en que sigue en el turno.
 function fijosVigentes(key, fechaIso) {
   const todos = ALUMNOS_POR_TURNO[key] || [];
-  if (!fechaIso) return todos;
-  return todos.filter(a =>
-    (!a.fecha_desde || a.fecha_desde <= fechaIso) &&
-    (!a.fecha_hasta || a.fecha_hasta >= fechaIso));
+  const vistos = new Set();
+  return todos.filter(a => {
+    if (fechaIso && !((!a.fecha_desde || a.fecha_desde <= fechaIso) &&
+                      (!a.fecha_hasta || a.fecha_hasta >= fechaIso))) return false;
+    // una persona puede tener más de una ventana en el mismo turno: se cuenta una vez
+    if (vistos.has(String(a.id))) return false;
+    vistos.add(String(a.id));
+    return true;
+  });
+}
+// Fijos que OCUPAN el lugar fijo en una fecha (para la grilla "lugares fijos"):
+// igual que siempre, cuenta también a los que arrancan más adelante, pero NO a los
+// que ya terminaron (bajas con fecha_hasta anterior).
+function fijosQueOcupan(key, fechaIso) {
+  const vistos = new Set();
+  return (ALUMNOS_POR_TURNO[key] || []).filter(a => {
+    if (fechaIso && a.fecha_hasta && a.fecha_hasta < fechaIso) return false;
+    if (vistos.has(String(a.id))) return false;
+    vistos.add(String(a.id));
+    return true;
+  });
 }
 
 // Devuelve los alumnos de un turno = fijos vigentes + agregados puntuales de la fecha indicada.
@@ -2971,6 +2992,12 @@ function toggleEstado(dia, hora, servicio, id, nuevoEstado) {
         renderTurnos();
       });
     } else {
+      // REGLA 07/10/2026: si ya tiene evolución, avisar (la clase no se va a poder cerrar así)
+      if (EVO_ALUMNO[`${t.id}-${fechaClase}-${id}`] || (EVO_TURNO && EVO_TURNO[String(id)])) {
+        if (!confirm('⚠️ ' + nombrePersona(id) + ' YA TIENE EVOLUCIÓN CARGADA en esta clase.\n\n' +
+          'Si lo marcás ausente, la clase NO se va a poder cerrar hasta que Lu borre esa evolución.\n\n' +
+          '¿Seguro que no vino?')) return;
+      }
       // Abrir cartel de justificación.
       // OJO: hay que pasar el turno REAL (t, que tiene id) y no {dia,hora,servicio},
       // porque getAlumnos busca los agregados/puntuales por t.id. Sin el id, a un
@@ -4952,15 +4979,38 @@ async function cargarEvolucionesRecientes(servicio) {
   } catch (e) { EVO_RECIENTES = []; }
 }
 
+// ===================================================================
+// REGLA 07/10/2026 (Lu): A UN AUSENTE NO SE LO EVOLUCIONA.
+// La evolución cuenta para las métricas y los bonos del profe: si se
+// evoluciona a alguien que no vino, el profe suma una atención que no dio.
+// Si el alumno vino, primero se lo marca PRESENTE y después se evoluciona.
+// ===================================================================
+function esAusenteEnTurno(t, personaId) {
+  if (!t) return false;
+  const est = getEstadoAlumno(t.dia, t.hora, t.servicio, personaId);
+  return est === 'ausente' || est === 'ausente-justificada';
+}
+function avisoNoEvolucionarAusente(nombre) {
+  alert('🚫 NO SE PUEDE EVOLUCIONAR A UN AUSENTE\n\n' +
+    (nombre ? nombre + ' está marcado como ausente en esta clase.\n\n' : '') +
+    'Si vino, primero marcalo PRESENTE (✓) y después cargá la evolución.\n' +
+    'Si no vino, no lleva evolución.');
+}
+
 // Toggle de selección de un alumno para el lote
 window.evoToggleSel = (personaId) => {
   const k = String(personaId);
+  if (!evoSeleccion.has(k) && esAusenteEnTurno(evoTurnoActual, personaId)) {
+    avisoNoEvolucionarAusente(nombrePersona(personaId));
+    return;
+  }
   if (evoSeleccion.has(k)) evoSeleccion.delete(k); else evoSeleccion.add(k);
   pintarSeleccionEvo();
 };
 window.evoSelTodos = () => {
-  const alumnos = getAlumnos(evoTurnoActual);
-  const todos = alumnos.every(a => evoSeleccion.has(String(a.id)));
+  // Solo los que NO están ausentes
+  const alumnos = getAlumnos(evoTurnoActual).filter(a => !esAusenteEnTurno(evoTurnoActual, a.id));
+  const todos = alumnos.length > 0 && alumnos.every(a => evoSeleccion.has(String(a.id)));
   evoSeleccion = new Set(todos ? [] : alumnos.map(a => String(a.id)));
   pintarSeleccionEvo();
 };
@@ -4977,9 +5027,9 @@ function pintarSeleccionEvo() {
   }
   const bt = document.getElementById('evo-seltodos-btn');
   if (bt) {
-    const alumnos = getAlumnos(evoTurnoActual);
+    const alumnos = getAlumnos(evoTurnoActual).filter(a => !esAusenteEnTurno(evoTurnoActual, a.id));
     const todos = alumnos.length>0 && alumnos.every(a => evoSeleccion.has(String(a.id)));
-    bt.textContent = todos ? 'Quitar todos' : 'Seleccionar todos';
+    bt.textContent = todos ? 'Quitar todos' : 'Seleccionar todos (sin ausentes)';
   }
 }
 // ===== Módulos (chips acumulables) =====
@@ -5318,6 +5368,17 @@ window.evoAplicarLote = async () => {
       '(botón "Reabrir" abajo), hacer la evolución, y después volver a cerrarla.');
     return;
   }
+  // REGLA 07/10/2026: sacar de la selección a cualquiera que esté ausente
+  // (por si lo marcaron ausente después de tildarlo).
+  const _ausSel = [...evoSeleccion].filter(pid => esAusenteEnTurno(t, pid));
+  if (_ausSel.length) {
+    _ausSel.forEach(pid => evoSeleccion.delete(pid));
+    pintarSeleccionEvo();
+    alert('🚫 Se sacaron de la selección ' + _ausSel.length + ' ausente' + (_ausSel.length!==1?'s':'') + ':\n\n· ' +
+      _ausSel.map(nombrePersona).join('\n· ') +
+      '\n\nA un ausente no se lo evoluciona. Si vino, marcalo PRESENTE primero.');
+    if (evoSeleccion.size === 0) return;
+  }
   const datosBase = leerPanelEvo();
   if (!datosBase.modulo && !datosBase.contenido && !datosBase.observacion && !datosBase.como_se_sintio && !datosBase.dolor && !datosBase.sala) {
     toast('Escribí algo en la evolución antes de aplicar', 'err'); return;
@@ -5358,6 +5419,8 @@ window.cerrarClase = async () => {
   if (!t) return;
   const fecha = fechaRealDiaActivo();
   const alumnos = getAlumnos(t, fecha);
+  // REGLA 07/10/2026: no se cierra una clase con un AUSENTE EVOLUCIONADO.
+  if (!(await chequearAusentesEvolucionados(t, fecha))) return;
   // Pendientes = sin asistencia marcada Y sin evolución cargada
   const pendientes = alumnos.filter(a => {
     const key = `${fecha}-${t.hora}-${t.servicio}-${a.id}`;
@@ -5372,6 +5435,34 @@ window.cerrarClase = async () => {
   await cerrarClaseFinal(t, fecha);
 };
 
+// Devuelve true si se puede cerrar. Si hay alumnos AUSENTES con evolución cargada,
+// avisa con nombres y devuelve false. Relee asistencia y evoluciones de la base
+// para no decidir con datos viejos (otra compu pudo haber marcado algo).
+async function chequearAusentesEvolucionados(t, fecha) {
+  let asis = [], evos = [];
+  try {
+    [asis, evos] = await Promise.all([
+      supabaseQuery('asistencia', `?select=persona_id,estado&turno_id=eq.${t.id}&fecha=eq.${fecha}`),
+      supabaseQuery('evoluciones_tf', `?select=persona_id&origen=eq.profe&turno_id=eq.${t.id}&fecha=eq.${fecha}`)
+    ]);
+  } catch (e) {
+    alert('No se pudo verificar la clase antes de cerrarla (' + e.message + ').\nRevisá la conexión y probá de nuevo.');
+    return false;
+  }
+  const conEvo = new Set((evos || []).map(e => String(e.persona_id)));
+  const malos = (asis || [])
+    .filter(a => (a.estado === 'ausente' || a.estado === 'ausente-justificada') && conEvo.has(String(a.persona_id)))
+    .map(a => nombrePersona(a.persona_id));
+  if (!malos.length) return true;
+  alert('🚫 NO SE PUEDE CERRAR LA CLASE\n\n' +
+    `${t.servicio} · ${t.hora} · ${t.dia}\n\n` +
+    'Hay alumnos AUSENTES que tienen evolución cargada:\n\n· ' + malos.join('\n· ') +
+    '\n\nCorregilo antes de cerrar:\n' +
+    '· Si vino → marcalo PRESENTE (✓).\n' +
+    '· Si no vino → la evolución está mal: pedile a Lu que la borre.');
+  return false;
+}
+
 async function cerrarClaseFinal(t, fecha) {
   // NUEVO 19/08/2026 · en un feriado no hubo clase: cerrarla marcaría ausentes
   // a alumnos que no tenían nada a que venir.
@@ -5379,6 +5470,8 @@ async function cerrarClaseFinal(t, fecha) {
     toast('🟠 Es feriado (' + feriadoDe(fecha) + '): esta clase no se cierra.');
     return;
   }
+  // REGLA 07/10/2026: segundo control (por el camino de "revisar pendientes")
+  if (!(await chequearAusentesEvolucionados(t, fecha))) return;
   const btn = document.getElementById('cerrar-clase-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Cerrando...'; }
   try {
@@ -6361,12 +6454,12 @@ function renderGrillaSemana() {
   }
   // ¿Este turno tiene lugar fijo disponible? (para el filtro "solo disponibles")
   function tieneLugar(t, fecha) {
-    const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+    const fijos = fijosQueOcupan(`${t.dia}-${t.hora}-${t.servicio}`, fecha).length;
     return (capT(t, fecha) - fijos) > 0;
   }
   // Arma la celda de un turno con su color según lugares libres
   function celdaTurno(t, fecha) {
-    const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+    const fijos = fijosQueOcupan(`${t.dia}-${t.hora}-${t.servicio}`, fecha).length;
     // Lugar FIJO real: capacidad − alumnos fijos (lo que sirve para anotar permanente)
     const capDia = capT(t, fecha);
     const libreFijo = capDia - fijos;
@@ -6515,7 +6608,7 @@ function datosDisponibles() {
       .filter(t => t.dia === dia &&
         (compartirServicio === 'ambos' || t.servicio === compartirServicio))
       .filter(t => {
-        const fijos = (ALUMNOS_POR_TURNO[`${t.dia}-${t.hora}-${t.servicio}`] || []).length;
+        const fijos = fijosQueOcupan(`${t.dia}-${t.hora}-${t.servicio}`, fechas[i]).length;
         return (capT(t, fechas[i]) - fijos) > 0;   // hay lugar para anotar permanente
       })
       .sort((a, b) => parseInt(a.hora.replace(':','')) - parseInt(b.hora.replace(':','')) || a.servicio.localeCompare(b.servicio))
@@ -6903,6 +6996,22 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   if (claseEstaCerrada(t.id, fecha)) {
     throw new Error('La clase está cerrada. Reabrila para evolucionar.');
   }
+  // REGLA 07/10/2026: nunca evolucionar a un ausente. Se consulta la BASE (no solo la
+  // pantalla), por si la falta la avisó el alumno desde Mi Espacio o la marcó otra compu.
+  if (esAusenteEnTurno(t, personaId)) {
+    throw new Error(`${nombrePersona(personaId)} está ausente: no se evoluciona.`);
+  }
+  try {
+    const _asis = await supabaseQuery('asistencia',
+      `?select=estado&turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}&limit=1`);
+    const _est = _asis && _asis[0] ? _asis[0].estado : null;
+    if (_est === 'ausente' || _est === 'ausente-justificada') {
+      throw new Error(`${nombrePersona(personaId)} está ausente: no se evoluciona.`);
+    }
+  } catch (e) {
+    if (/está ausente/.test(e.message)) throw e;
+    throw new Error('No se pudo verificar la asistencia: ' + e.message);
+  }
   const fila = {
     turno_id: t.id,
     persona_id: parseInt(personaId),
@@ -6990,6 +7099,11 @@ window.borrarEvolucion = async (personaId, nombre) => {
 
 window.abrirEvoIndividual = (personaId) => {
   const ev = EVO_TURNO[String(personaId)];
+  // REGLA 07/10/2026: a un ausente no se le abre la carga de evolución
+  if (esAusenteEnTurno(evoTurnoActual, personaId)) {
+    avisoNoEvolucionarAusente(nombrePersona(personaId));
+    return;
+  }
   // Cargar al panel los datos del alumno (o vacío) y seleccionarlo solo a él
   evoModulosSel = (ev?.modulo || '').split(',').map(s=>s.trim()).filter(Boolean);
   // Si todavía no tiene evolución, arranca con la sala/área que se le repartió al entrar
@@ -7262,7 +7376,9 @@ function renderModalBody(dia, hora, servicio) {
             : '';
           return `
           <div class="alumno-item" style="background:${_cierreCentro?'#f3f4f6':est==='presente'?'#f0fdf4':esAusente?'#fef2f2':'transparent'};${_cierreCentro?'opacity:.85':''}">
-            <div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>
+            ${esAusente
+              ? `<div style="width:22px;flex-shrink:0;margin-right:4px" title="Ausente: no se evoluciona"></div>`
+              : `<div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>`}
             <div id="ag-avatar-${a.id}" style="width:32px;height:32px;border-radius:50%;background:var(--celeste);color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;overflow:hidden;flex-shrink:0;margin-right:8px">${inicialesDe(a.nombre)}</div>
             <div style="flex:1; min-width:0">
               <div class="alumno-nombre">${alertaDolor}${chipMsj}${chipDevoCompe}${chipBitaReciente}${chipFaltaMotivo}${chipFaltoDolor}${a.nombre}${etiquetaNuevo}</div>
