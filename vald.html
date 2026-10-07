@@ -2117,10 +2117,23 @@ function pintarEvaluacion(datos, normas) {
 
   // MOVILIDAD (solo Primary o magnitud real ≥10 → evita ruido de valores chicos; el ROM de DynaMo siempre entra)
   const movilidad = [];
+  const valgosPorPrueba = [];   // 06/10/2026: para el resumen de valgo calculado por el sistema
   for (const p of (datos.movilidad || [])) {
     const esDyn = p.origen === 'DynaMo';
     const fte = esDyn ? 'DynaMo (ROM)' : 'HumanTrak';
     const fteLSI = esDyn ? 'DynaMo (ROM) / LSI' : 'HumanTrak / LSI';
+    // 06/10/2026 (caso Ambar Arce): CAPTURA DUDOSA del drop jump. Un salto de menos de 10 cm desde el cajón
+    // es una toma fallida (no se registró el rebote): no se interpreta ninguna de sus métricas.
+    if (!esDyn && /drop jump/i.test(p.prueba || '')) {
+      const alt = (p.metricas || []).find(m => m.clasificacion === 'Primary' && /jump height/i.test(m.metrica || ''));
+      const vAlt = alt ? (alt.valor != null ? alt.valor : Math.max(alt.izquierda || 0, alt.derecha || 0)) : null;
+      if (vAlt != null && Math.abs(vAlt) < 10) {
+        cnt('⚠️');
+        movilidad.push({ em: '⚠️', nom: `${p.prueba} · captura dudosa`, det: `⚠️ altura de salto ${vAlt} cm desde el cajón: toma fallida probable. NO interpretar ninguna métrica de esta prueba; sugerir repetirla`, fuente: 'chequeo de toma', cat: 'Movilidad' });
+        continue;
+      }
+    }
+    const esUnipodal = !esDyn && /single leg|pistol|lunge|hop|squat-sl|single-leg/i.test(p.prueba || '');
     for (const m of (p.metricas || [])) {
       // Un solo lado (uno con dato, el otro nulo, sin valor unsided) = fallo de equipo.
       const unLado = ((m.izquierda == null) !== (m.derecha == null)) && (m.valor == null);
@@ -2161,9 +2174,41 @@ function pintarEvaluacion(datos, normas) {
       cnt(c);
       // El lado se resuelve EN CÓDIGO según el sentido de la métrica (nunca lo deduce la IA):
       // ROM → menor = restringido · equilibrio → MAYOR = peor control · flexión negativa = extensión.
-      const sufLado = ladoClinico(sent, m.izquierda, m.derecha);
-      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${m.asimetria_pct}% asim · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}${txtNorma}`, fuente: nHT ? (nHT.fuente_norma || fteLSI) : fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
+      let sufLado = ladoClinico(sent, m.izquierda, m.derecha);
+      // 06/10/2026: COLAPSO MEDIAL. Valgo, rotación interna y aducción de cadera en carga: MÁS valor = MÁS colapso.
+      // El lado lo resuelve el código (antes decía "lado con MENOR valor" y la IA invertía la lateralidad).
+      const esColapso = !esDyn && /valgus|hip internal rotation|hip adduction/i.test(m.metrica || '');
+      if (esColapso && m.izquierda != null && m.derecha != null && m.izquierda !== m.derecha) {
+        sufLado = ` · métrica de COLAPSO MEDIAL (más valor = más colapso) · lado con MÁS colapso medial: ${Math.abs(m.izquierda) > Math.abs(m.derecha) ? 'IZQUIERDO' : 'DERECHO'}`;
+      }
+      if (/valgus/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null) valgosPorPrueba.push({ prueba: p.prueba, L: m.izquierda, R: m.derecha });
+      // Pruebas unipodales: cada valor es del lado que APOYA (no del lado hacia el que se inclina el tronco).
+      const sufUni = esUnipodal ? ' · prueba unipodal: L = apoyo/pierna IZQUIERDA, R = apoyo/pierna DERECHA (un valor del lado L se mide apoyando el izquierdo)' : '';
+      // Ángulos chicos: el % de asimetría exagera (5° vs 1° = 80%). Se informa la diferencia en grados.
+      const angChico = sent.unidad === '°' && m.izquierda != null && m.derecha != null && Math.max(Math.abs(m.izquierda), Math.abs(m.derecha)) < 5;
+      const difG = (m.izquierda != null && m.derecha != null) ? Math.round(Math.abs(m.izquierda - m.derecha) * 10) / 10 : null;
+      if (angChico) {
+        movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `L ${m.izquierda} / R ${m.derecha}° · diferencia ${difG}° · ángulos menores a 5°: NO informar asimetría en porcentaje ni presentarlo como hallazgo${sufUni}`, fuente: fte, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
+        continue;
+      }
+      const asimTxt = (sent.unidad === '°' && difG != null) ? `diferencia ${difG}° (${m.asimetria_pct}% asim)` : `${m.asimetria_pct}% asim`;
+      movilidad.push({ em: c, nom: `${p.prueba} · ${m.metrica}`, det: `${asimTxt} · L ${m.izquierda} / R ${m.derecha} ${sent.unidad}${sufLado}${sufUni}${txtNorma}`, fuente: nHT ? (nHT.fuente_norma || fteLSI) : fteLSI, asim: m.asimetria_pct, L: m.izquierda, R: m.derecha, unidad: sent.unidad, cat: 'Movilidad' });
     }
+  }
+
+  // ---- RESUMEN DE VALGO DINÁMICO (calculado EN CÓDIGO: la IA lo copia, no lo generaliza) ----
+  if (valgosPorPrueba.length) {
+    const fmt = v => `${v.prueba.replace(/\s*\(TT_[^)]*\)/, '')} (L ${v.L}° / R ${v.R}°)`;
+    const der = valgosPorPrueba.filter(v => Math.abs(v.R) - Math.abs(v.L) >= 3);
+    const izq = valgosPorPrueba.filter(v => Math.abs(v.L) - Math.abs(v.R) >= 3);
+    const par = valgosPorPrueba.filter(v => Math.abs(Math.abs(v.R) - Math.abs(v.L)) < 3);
+    const partes = [];
+    if (der.length) partes.push('valgo DERECHO mayor (≥3°) en: ' + der.map(fmt).join('; '));
+    if (izq.length) partes.push('valgo IZQUIERDO mayor (≥3°) en: ' + izq.map(fmt).join('; '));
+    if (par.length) partes.push('diferencia menor a 3° en: ' + par.map(fmt).join('; '));
+    movilidad.unshift({ em: der.length || izq.length ? '🟡' : '🟢', nom: 'RESUMEN DE VALGO DINÁMICO (calculado por el sistema)',
+      det: partes.join(' · ') + ' · Copiar esta lista tal cual: no sumar pruebas que no figuren, no contar rotación/aducción de cadera ni flexión de rodilla como valgo. Valores = promedio de las repeticiones.',
+      fuente: 'sistema', cat: 'Movilidad' });
   }
 
   // ---- RATIOS calculados EN CÓDIGO (la IA solo los interpreta) ----
@@ -2180,7 +2225,7 @@ function pintarEvaluacion(datos, normas) {
         const hq = Math.round((i / c) * 100) / 100;
         const em = colorHQ(hq); cnt(em);
         const raro = (hq < 0.25 || hq > 1.2) ? ' · ⚠️ ratio fuera de lo fisiológicamente esperable: depende de que las tomas de isquios y cuádriceps sean válidas; no lo interpretes como hallazgo propio' : '';
-        fuerza.push({ em, nom: `Ratio H:Q (isquios:cuádriceps) · ${lado}`, det: `${hq} · isquios ${i} N / cuádriceps ${c} N${raro}`, fuente: 'H:Q convencional (ref. ~0,5–0,6)', cat: 'Fuerza' });
+        fuerza.push({ em, nom: `Ratio H:Q (isquios:cuádriceps) · ${lado}`, det: `${hq} · isquios ${i} N / cuádriceps ${c} N · medido con dinamometría ISOMÉTRICA (DynaMo): la referencia convencional 0,5–0,6 es isocinética, la comparación es orientativa y hay que aclararlo${raro}`, fuente: 'H:Q (referencia isocinética, orientativa)', cat: 'Fuerza' });
       };
       pushHQ('izquierda', isq.izquierda_N, cua.izquierda_N);
       pushHQ('derecha', isq.derecha_N, cua.derecha_N);
@@ -2363,6 +2408,90 @@ function renderEvaluacion(c, datos) {
   return html;
 }
 
+
+// ── 06/10/2026 (caso Ambar Arce): PERCENTILES Y BANDAS VALD LEÍDOS POR CÓDIGO ──
+// Antes la IA leía el PDF del Hub y asignaba ella los percentiles: los cruzaba de métrica (le puso el
+// percentil 7 de la desaceleración excéntrica unipodal a la RFD del IMTP). Ahora el sistema lee la posición
+// de cada etiqueta en el PDF, la pega a su prueba, métrica y lado, y la IA ya no recibe el PDF del Hub.
+let _pdfjsListo = null;
+function cargarPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsListo) return _pdfjsListo;
+  _pdfjsListo = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    sc.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      res(window.pdfjsLib);
+    };
+    sc.onerror = () => { _pdfjsListo = null; rej(new Error('no cargó pdf.js')); };
+    document.head.appendChild(sc);
+  });
+  return _pdfjsListo;
+}
+function b64ABytes(b64) {
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+// === extraerNormasVALD: lee el texto (con posición) de los PDF del Hub y de HumanTrak y pega cada
+// percentil / banda a su prueba, métrica y lado EXACTOS. Devuelve [{fuente,test,metrica,lado,valor}].
+async function extraerNormasVALD(pdfjsLib, bytes) {
+  const out = [];
+  const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const BANDA = /^(slightly|well|far)\s+(above|below)$|^within\s+normal$/i;
+  const PCT = /^(\d{1,3})(st|nd|rd|th)$/i;
+  for (let pn = 1; pn <= doc.numPages; pn++) {
+    const page = await doc.getPage(pn);
+    const H = page.getViewport({ scale: 1 }).height;
+    const tc = await page.getTextContent();
+    const its = tc.items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: H - i.transform[5] }));
+    const texto = its.map(i => i.s).join(' ');
+    const badges = [];
+    its.forEach((it, k) => {
+      if (PCT.test(it.s)) badges.push({ x: it.x, y: it.y, v: 'percentil ' + it.s.match(PCT)[1] + '°' });
+      else if (BANDA.test(it.s)) badges.push({ x: it.x, y: it.y, v: it.s.toLowerCase() });
+    });
+    if (!badges.length) continue;
+    if (/Report Date/.test(texto) && /powered by/.test(texto)) {
+      // ---- VALD Hub: grilla de tarjetas en 2 columnas ----
+      const mitad = page.getViewport({ scale: 1 }).width / 2;
+      for (const col of [0, 1]) {
+        const xt = col === 0 ? 71 : 358;
+        const lineas = its.filter(i => Math.abs(i.x - xt) < 4 && i.y > 150 && i.y < 790).sort((a, b) => a.y - b.y);
+        const cards = [];
+        for (const l of lineas) {
+          const ult = cards[cards.length - 1];
+          if (ult && l.y - ult.yFin < 20) { ult.lineas.push(l.s); ult.yFin = l.y; }
+          else cards.push({ y: l.y, yFin: l.y, lineas: [l.s] });
+        }
+        cards.forEach((c, ci) => {
+          const yHasta = ci + 1 < cards.length ? cards[ci + 1].y : 790;
+          const bs = badges.filter(b => (col === 0 ? b.x < mitad : b.x >= mitad) && b.y > c.y && b.y < yHasta).sort((a, b) => a.x - b.x);
+          if (!bs.length) return;
+          const test = c.lineas[0], metrica = c.lineas.slice(1).join(' ');
+          if (bs.length >= 2) { out.push({ fuente: 'VALD Hub', test, metrica, lado: 'izquierdo', valor: bs[0].v }); out.push({ fuente: 'VALD Hub', test, metrica, lado: 'derecho', valor: bs[1].v }); }
+          else out.push({ fuente: 'VALD Hub', test, metrica, lado: /left/i.test(metrica) ? 'sin lado (no atribuir)' : 'bilateral', valor: bs[0].v });
+        });
+      }
+    } else if (/Practitioner|Last test/.test(texto)) {
+      // ---- Reporte HumanTrak: una prueba por página; banda arriba de la barra = izquierdo, abajo = derecho ----
+      const titulo = its.filter(i => Math.abs(i.x - 71) < 4 && i.y < 108).sort((a, b) => a.y - b.y)[0];
+      const encab = its.filter(i => i.x > 280 && i.y > 130 && i.y < 150).sort((a, b) => a.x - b.x).map(i => i.s).join(' ');
+      const tieneLR = its.some(i => i.s === 'Left' && i.y > 150 && i.y < 170) && its.some(i => i.s === 'Right' && i.y > 150 && i.y < 170);
+      const bs = badges.filter(b => b.y > 200 && b.y < 300).sort((a, b) => a.y - b.y);
+      if (!titulo || !bs.length) continue;
+      if (tieneLR && bs.length >= 2) {
+        out.push({ fuente: 'HumanTrak', test: titulo.s, metrica: encab, lado: 'izquierdo', valor: bs[0].v });
+        out.push({ fuente: 'HumanTrak', test: titulo.s, metrica: encab, lado: 'derecho', valor: bs[bs.length - 1].v });
+      } else {
+        out.push({ fuente: 'HumanTrak', test: titulo.s, metrica: encab, lado: tieneLR ? 'sin lado (no atribuir)' : 'bilateral', valor: bs[0].v });
+      }
+    }
+  }
+  return out;
+}
+
 async function generar() {
   if (!ultimaEvaluacion) { toast('Primero traé la evaluación de VALD.'); return; }
   const candadoHub = motivoSinHub();
@@ -2486,6 +2615,24 @@ async function generar() {
       if (salteados.length) toast('⚠️ No entraron por peso (más de 20 MB juntos): ' + salteados.join(', '));
       if (documentos.length) toast('📎 Se envían ' + documentos.length + ' PDF a la IA.');
     } catch (_) { /* sin adjuntos o sin acceso: sigue sin documentos */ }
+    // Percentiles / bandas del Hub y de HumanTrak: los lee el CÓDIGO y la IA recibe la lista ya asignada.
+    // Si un PDF no se pudo leer, ese PDF sí viaja a la IA como antes (y queda avisado).
+    {
+      const normasPdf = [];
+      const quedan = [];
+      for (const d of documentos) {
+        if (d.tipo !== 'VALD_HUB') { quedan.push(d); continue; }
+        try {
+          const pj = await cargarPdfJs();
+          const r = await extraerNormasVALD(pj, b64ABytes(d.base64));
+          if (r.length) { normasPdf.push(...r); continue; }   // leído: no se manda el PDF
+        } catch (_) { /* cae al envío del PDF */ }
+        quedan.push(d);
+        toast('⚠️ No pude leer los percentiles de ' + d.nombre + ': va el PDF a la IA (revisar percentiles a mano).');
+      }
+      documentos.length = 0; documentos.push(...quedan);
+      if (normasPdf.length) sinExcluidos.percentiles = normasPdf;
+    }
     // Contexto clínico del paciente (de su HC): motivo real, dolor, antecedentes, cirugías. Es lo que diferencia a cada paciente.
     let contexto = null;
     if (!esSark()) try {
