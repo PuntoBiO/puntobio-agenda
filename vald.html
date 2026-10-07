@@ -2313,7 +2313,29 @@ function pintarEvaluacion(datos, normas) {
   // 06/10/2026: los RATIOS van SIEMPRE al informe (los médicos los miran). Se marcan acá, en un solo lugar.
   const RX_RATIO = /ratio|\brsi\b|rsi-mod|\bdsi\b|h:q|:concentric|ft:ct/i;
   for (const arr of [fuerza, forceDecks, movilidad]) for (const x of arr) if (RX_RATIO.test(x.nom || '')) x.esRatio = true;
-  return { fuerza, forceDecks, movilidad, postura: datos.postura, conteo };
+  // 07/10/2026: POSTURA CON NORMA. Los rangos de normalidad se cargan en biolab_normas (bloque 'POSTURA'):
+  // test = anteversion_pelvica | descenso_hombro | descenso_pelvis | flexion_cervical,
+  // rango_min / rango_max = rango normal, unidad, fuente_norma. Se clasifica EN CÓDIGO y la IA copia el resultado.
+  let postura = datos.postura ? { ...datos.postura } : null;
+  if (postura) {
+    const sx = (document.getElementById('f_sexo') && document.getElementById('f_sexo').value) || '';
+    const edadN = pacienteSel ? calcEdad(pacienteSel.fecha_nacimiento) : null;
+    const normaP = (clave) => (normas || []).find(n => n.bloque === 'POSTURA' && n.activo !== false && String(n.test || '').toLowerCase() === clave
+      && (!n.sexo || n.sexo === sx) && (n.edad_min == null || edadN == null || edadN >= n.edad_min) && (n.edad_max == null || edadN == null || edadN <= n.edad_max));
+    const clasifP = (clave, v, etiquetas) => {
+      const n = normaP(clave); if (!n || v == null) return null;
+      const a = Math.abs(Number(v)), mn = n.rango_min != null ? Number(n.rango_min) : null, mx = n.rango_max != null ? Number(n.rango_max) : null;
+      const txt = (mn != null && a < mn) ? etiquetas[0] : ((mx != null && a > mx) ? etiquetas[1] : 'dentro de lo normal');
+      return `${txt} (normal ${mn != null ? mn : ''}${mn != null && mx != null ? '–' : ''}${mx != null ? mx : ''} ${n.unidad || ''}${n.fuente_norma ? ', ' + n.fuente_norma : ''})`.replace(/\s+\)/, ')');
+    };
+    postura.clasificacion = {
+      anteversion_pelvica: clasifP('anteversion_pelvica', postura.anteversion_pelvica_grados, ['disminuida', 'aumentada']),
+      descenso_hombro: postura.descenso_hombro ? clasifP('descenso_hombro', postura.descenso_hombro.cm, ['dentro de lo normal', 'aumentado']) : null,
+      descenso_pelvis: postura.descenso_pelvis ? clasifP('descenso_pelvis', postura.descenso_pelvis.cm, ['dentro de lo normal', 'aumentado']) : null,
+      flexion_cervical: clasifP('flexion_cervical', postura.flexion_cervical_grados, ['disminuida', 'aumentada']),
+    };
+  }
+  return { fuerza, forceDecks, movilidad, postura, conteo };
 }
 
 function contarHallazgos(c) {
@@ -2447,7 +2469,7 @@ function renderEvaluacion(c, datos) {
     if (p.descenso_hombro) pl.push(`Descenso hombro ${p.descenso_hombro.cm} cm (${p.descenso_hombro.lado_descendido})`);
     if (p.descenso_pelvis) pl.push(`Descenso pelvis ${p.descenso_pelvis.cm} cm (${p.descenso_pelvis.lado_descendido})`);
     if (p.flexion_cervical_grados != null) pl.push(`Flexión cervical ${p.flexion_cervical_grados}°`);
-    if (p.anteversion_pelvica_grados != null) pl.push(`Anteversión pélvica ${p.anteversion_pelvica_grados}°`);
+    if (p.anteversion_pelvica_grados != null) pl.push(`Anteversión pélvica ${p.anteversion_pelvica_grados}°` + (p.clasificacion && p.clasificacion.anteversion_pelvica ? ` (${p.clasificacion.anteversion_pelvica})` : ''));
     html += `<div class="vr-section"><h4>Postura</h4><div class="det" style="font-size:12px">${pl.map(escapeHtml).join(' · ')}</div></div>`;
   }
 
