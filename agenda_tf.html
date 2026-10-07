@@ -4985,10 +4985,20 @@ async function cargarEvolucionesRecientes(servicio) {
 // evoluciona a alguien que no vino, el profe suma una atención que no dio.
 // Si el alumno vino, primero se lo marca PRESENTE y después se evoluciona.
 // ===================================================================
+// Ausencia que puso el CIERRE AUTOMÁTICO porque nadie marcó nada (no la decidió
+// ninguna persona). Esa SÍ se puede evolucionar: si lo evolucionás es porque vino,
+// y la evolución lo pasa a presente sola. (Lu, 07/10/2026)
+const MOTIVO_AUSENTE_AUTO = 'Sin asistencia registrada al cerrar la clase';
+function esAusenciaAutomatica(estado, motivo) {
+  return estado === 'ausente' && String(motivo || '').trim() === MOTIVO_AUSENTE_AUTO;
+}
+// ¿Está ausente de verdad? (marcado por una persona o avisado por el alumno)
 function esAusenteEnTurno(t, personaId) {
   if (!t) return false;
   const est = getEstadoAlumno(t.dia, t.hora, t.servicio, personaId);
-  return est === 'ausente' || est === 'ausente-justificada';
+  if (est !== 'ausente' && est !== 'ausente-justificada') return false;
+  const mot = asistenciaMotivos[`${fechaDelDia(t.dia)}-${t.hora}-${t.servicio}-${personaId}`];
+  return !esAusenciaAutomatica(est, mot);
 }
 function avisoNoEvolucionarAusente(nombre) {
   alert('🚫 NO SE PUEDE EVOLUCIONAR A UN AUSENTE\n\n' +
@@ -5573,7 +5583,8 @@ window.aplicarRevisarYCerrar = async function() {
       } else if (e === 'ausente') {
         // Ausente SIN JUSTIFICAR (regla Lu: si no avisó previo, no recupera).
         // Si más adelante hubo aviso/agregado en otro turno, el motivo viejo se respeta.
-        await guardarAsistencia(t, p.id, 'ausente', 'Sin asistencia registrada al cerrar la clase');
+        // Lo eligió una persona → ausencia firme (texto distinto al del cierre automático)
+        await guardarAsistencia(t, p.id, 'ausente', 'Marcado ausente al cerrar la clase');
       }
     }
     document.getElementById('rev-pend-overlay').classList.remove('activo');
@@ -7003,9 +7014,10 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   }
   try {
     const _asis = await supabaseQuery('asistencia',
-      `?select=estado&turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}&limit=1`);
+      `?select=estado,motivo&turno_id=eq.${t.id}&fecha=eq.${fecha}&persona_id=eq.${parseInt(personaId)}&limit=1`);
     const _est = _asis && _asis[0] ? _asis[0].estado : null;
-    if (_est === 'ausente' || _est === 'ausente-justificada') {
+    const _mot = _asis && _asis[0] ? _asis[0].motivo : null;
+    if ((_est === 'ausente' || _est === 'ausente-justificada') && !esAusenciaAutomatica(_est, _mot)) {
       throw new Error(`${nombrePersona(personaId)} está ausente: no se evoluciona.`);
     }
   } catch (e) {
@@ -7060,8 +7072,12 @@ async function guardarEvolucionAlumno(t, personaId, datos) {
   // evolución consistentes (no quedan "presentes sin marcar").
   // EXCEPCIÓN: si ya está AUSENTE o ausente-justificada NO lo pisamos, porque ahí
   // hay una decisión administrativa detrás (recuperatorio, aviso previo, etc).
+  // 07/10/2026: si la ausencia la había puesto el CIERRE AUTOMÁTICO, también se pisa
+  // con presente (la evolución es la prueba de que vino).
   const _estAsis = ASISTENCIA_SEMANA[`${t.id}-${fecha}-${personaId}`];
-  const _esAusente = (_estAsis === 'ausente' || _estAsis === 'ausente-justificada');
+  const _motAsis = asistenciaMotivos[`${fecha}-${t.hora}-${t.servicio}-${personaId}`];
+  const _esAusente = (_estAsis === 'ausente' || _estAsis === 'ausente-justificada')
+                     && !esAusenciaAutomatica(_estAsis, _motAsis);
   if (!_esAusente && _estAsis !== 'presente') {
     try { await guardarAsistencia(t, personaId, 'presente'); }
     catch (e) { console.warn('No se pudo marcar presente al evolucionar', e); }
@@ -7376,7 +7392,7 @@ function renderModalBody(dia, hora, servicio) {
             : '';
           return `
           <div class="alumno-item" style="background:${_cierreCentro?'#f3f4f6':est==='presente'?'#f0fdf4':esAusente?'#fef2f2':'transparent'};${_cierreCentro?'opacity:.85':''}">
-            ${esAusente
+            ${esAusenteEnTurno(t, a.id)
               ? `<div style="width:22px;flex-shrink:0;margin-right:4px" title="Ausente: no se evoluciona"></div>`
               : `<div class="evo-check" data-evo-check="${a.id}" onclick="evoToggleSel(${a.id})" title="Seleccionar para cargar evolución"></div>`}
             <div id="ag-avatar-${a.id}" style="width:32px;height:32px;border-radius:50%;background:var(--celeste);color:white;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;overflow:hidden;flex-shrink:0;margin-right:8px">${inicialesDe(a.nombre)}</div>
