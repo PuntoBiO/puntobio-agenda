@@ -225,6 +225,7 @@
 
     <div class="card" id="cardPoblacion">
       <p class="card-title">3 · Ingreso y clasificación de población</p>
+      <div id="autoHC" style="display:none; margin:0 0 10px; padding:10px 12px; border-radius:10px; background:#eff6ff; color:#1e3a8a; font-size:13px; line-height:1.5;"></div>
       <div class="pob-grid">
         <div class="pob-field">
           <label>Edad</label>
@@ -931,6 +932,8 @@ function seleccionar(p) {
     buscarBorrador();
     // ¿Es 1ª evaluación o reevaluación? (autodetecta si ya hay una anterior)
     detectarTipoEval();
+    // 07/10/2026: completa el ingreso con lo que ya está en la HC (y en la evaluación BiOLAB anterior)
+    autocompletarIngresoDesdeHC(p);
   }
 }
 
@@ -2184,6 +2187,11 @@ function pintarEvaluacion(datos, normas) {
       // 06/10/2026: COLAPSO MEDIAL. Valgo, rotación interna y aducción de cadera en carga: MÁS valor = MÁS colapso.
       // El lado lo resuelve el código (antes decía "lado con MENOR valor" y la IA invertía la lateralidad).
       const esColapso = !esDyn && /valgus|hip internal rotation|hip adduction/i.test(m.metrica || '');
+      // 07/10/2026: extensión de tronco/columna al elevar el brazo = COMPENSACIÓN: más valor = más compensación.
+      // Antes decía "lado con MENOR valor" y la nota invirtió el lado.
+      if (!esDyn && /(trunk|spinal) extension at peak shoulder/i.test(m.metrica || '') && m.izquierda != null && m.derecha != null && m.izquierda !== m.derecha) {
+        sufLado = ` · compensación con extensión de columna al elevar el brazo: MÁS valor = MÁS compensación · lado con MÁS extensión: ${Math.abs(m.izquierda) > Math.abs(m.derecha) ? 'IZQUIERDO' : 'DERECHO'} (al elevar el brazo de ese lado)`;
+      }
       const difColapso = (m.izquierda != null && m.derecha != null) ? Math.abs(Math.abs(m.izquierda) - Math.abs(m.derecha)) : null;
       if (esColapso && /valgus/i.test(m.metrica || '') && difColapso != null && difColapso < 3) {
         movilidad.push({ em: '⚪', nom: `${p.prueba} · ${m.metrica}`, det: `L ${m.izquierda} / R ${m.derecha}° · diferencia ${Math.round(difColapso * 10) / 10}°: menor a 3°, NO es colapso de un lado (no nombrarlo como hallazgo)`, fuente: fte, L: m.izquierda, R: m.derecha, unidad: '°', cat: 'Movilidad' });
@@ -3061,9 +3069,90 @@ const NOMBRE_POB = {
   DERIVACION_CLINICA: 'Derivación clínica (no apto aún)'
 };
 
+// ── 07/10/2026: AUTOCOMPLETAR EL INGRESO DESDE LA HC ──
+// Llena lo que se puede deducir de la historia clínica (y de la evaluación BiOLAB anterior del paciente)
+// y lo marca en azul. Solo SUGIERE: todo se puede cambiar a mano antes de "Clasificar población".
+// Las casillas clínicas (banderas rojas, lesión reciente, dolor crónico, alta, fragilidad) NO se tildan solas:
+// dependen del criterio del profesional; si la HC tiene algo relacionado, se avisa para revisarlas.
+async function autocompletarIngresoDesdeHC(p) {
+  const box = document.getElementById('autoHC');
+  if (!box || !p || esSark()) { if (box) box.style.display = 'none'; return; }
+  const hechos = [], revisar = [];
+  const marcar = (id) => { const e = document.getElementById(id); if (e) { e.style.outline = '2px solid #93c5fd'; e.style.outlineOffset = '1px'; e.addEventListener('change', () => { e.style.outline = ''; }, { once: true }); } };
+  const setSel = (id, v, texto) => { const e = document.getElementById(id); if (e && v != null && v !== '') { e.value = v; marcar(id); hechos.push(texto); } };
+  const setChk = (id, v, texto) => { const e = document.getElementById(id); if (e && v) { e.checked = true; const l = e.closest('label'); if (l) { l.style.background = '#dbeafe'; e.addEventListener('change', () => { l.style.background = ''; }, { once: true }); } hechos.push(texto); } };
+  let hc = null, previo = null;
+  try {
+    const { data } = await sb.from('historias_clinicas').select('*').eq('persona_id', p.id).is('fusionada_en', null)
+      .order('completado_en', { ascending: false }).limit(1);
+    hc = data && data[0];
+  } catch (_) {}
+  try {
+    const { data } = await sb.from('biolab_evaluaciones').select('ingreso, created_at').eq('persona_id', String(p.id))
+      .order('created_at', { ascending: false }).limit(1);
+    previo = data && data[0] && data[0].ingreso;
+  } catch (_) {}
+  if (pacienteSel !== p) return;   // se cambió de paciente mientras cargaba
+
+  // SEXO: padrón → evaluación BiOLAB anterior
+  const selSexo = document.getElementById('f_sexo');
+  if (selSexo && !selSexo.value) {
+    let sx = null;
+    try { const { data } = await sb.from('personas').select('sexo').eq('id', p.id).limit(1); sx = data && data[0] && data[0].sexo; } catch (_) {}
+    if (!sx && previo && previo.sexo) sx = previo.sexo;
+    sx = String(sx || '').toUpperCase().charAt(0);
+    if (sx === 'F' || sx === 'M') setSel('f_sexo', sx, 'sexo');
+    else revisar.push('sexo (no figura en la HC: elegilo a mano, hace falta para las normas)');
+  }
+
+  const txt = (v) => String(v || '').toLowerCase();
+  const edad = Number(document.getElementById('f_edad').value) || null;
+  if (hc) {
+    const federado = /federad/i.test(hc.nivel_deportivo || '');
+    const compet = Number(hc.competencias_mensuales) || 0;
+    const frec = hc.actividad_fisica_frecuencia != null && hc.actividad_fisica_frecuencia !== '' ? Number(hc.actividad_fisica_frecuencia) : null;
+    const motivo = txt(hc.motivo_consulta) + ' ' + txt(hc.objetivo_funcional);
+    const compite = federado || compet > 0;
+    // OBJETIVO
+    let obj = null;
+    if (compite || /rendimiento|competi|marca|performance|torneo/.test(motivo)) obj = 'rendimiento';
+    else if (/post.?(quir|op|lesi)|volver a entrenar|retorno|reintegr/.test(motivo)) obj = 'volver_a_entrenar';
+    else if (/bajar de peso|est[eé]tic|tonific|adelgaz|verse mejor/.test(motivo)) obj = 'estetica';
+    else if (edad != null && edad >= 65 && /independ|caminar|ca[ií]das|equilibrio|autonom/.test(motivo)) obj = 'independencia_AVD';
+    else if (motivo.trim()) obj = 'salud_cotidiana';
+    if (obj) setSel('f_objetivo', obj, 'objetivo (por motivo de consulta / deporte)');
+    // EXPERIENCIA
+    let exp = null;
+    if (federado || (frec != null && frec >= 4)) exp = 'avanzado';
+    else if (frec != null && frec >= 2) exp = 'intermedio';
+    else if (frec != null) exp = 'novato';
+    if (exp) setSel('f_exp', exp, 'experiencia (por frecuencia de actividad física' + (federado ? ' y nivel federado' : '') + ')');
+    // COMPITE / RENDIMIENTO
+    setChk('f_compite', compite, 'compite (' + (federado ? 'federado' : compet + ' competencias por mes') + ')');
+    setChk('f_rend', obj === 'rendimiento', 'objetivo de rendimiento');
+    // Lo clínico: solo aviso
+    if (hc.dolor_motivo_consulta) revisar.push('dolor' + (hc.dolor_zona ? ' en ' + hc.dolor_zona : '') + (hc.dolor_desde_cuando ? ' desde ' + hc.dolor_desde_cuando : '') + ' → ¿banderas rojas o dolor crónico?');
+    if ((hc.cirugias_descripcion || '').trim()) revisar.push('cirugías: ' + hc.cirugias_descripcion.trim().slice(0, 80) + ' → ¿lesión reciente / postquirúrgico?');
+    if (edad != null && edad >= 60) revisar.push('60+ → revisá signos de fragilidad');
+  } else {
+    revisar.push('el paciente no tiene HC cargada');
+  }
+  // Si no hubo dato de la HC, se usa lo elegido en la evaluación BiOLAB anterior
+  if (previo) {
+    const fo = document.getElementById('f_objetivo'), fe = document.getElementById('f_exp');
+    if (fe && !fe.value && previo.experiencia_entrenamiento) setSel('f_exp', previo.experiencia_entrenamiento, 'experiencia (de la evaluación anterior)');
+    if (fo && !hechos.some(h => h.startsWith('objetivo (')) && previo.objetivo) setSel('f_objetivo', previo.objetivo, 'objetivo (de la evaluación anterior)');
+  }
+  if (!hechos.length && !revisar.length) { box.style.display = 'none'; return; }
+  box.innerHTML = (hechos.length ? '🔵 <b>Completado desde la HC:</b> ' + hechos.map(escapeHtml).join(' · ') + '. Revisá antes de clasificar.' : '')
+    + (revisar.length ? '<div style="margin-top:4px">⚠️ <b>Para revisar a mano:</b> ' + revisar.map(escapeHtml).join(' · ') + '</div>' : '');
+  box.style.display = 'block';
+}
+
 function leerIngreso() {
   return {
     edad: Number(document.getElementById('f_edad').value) || 0,
+    sexo: (document.getElementById('f_sexo') && document.getElementById('f_sexo').value) || null,
     banderas_rojas: chk('f_banderas'),
     lesion_o_cirugia_reciente: chk('f_lesion'),
     dolor_cronico_en_readaptacion: chk('f_dolor'),
