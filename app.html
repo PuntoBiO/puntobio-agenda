@@ -1440,6 +1440,7 @@ async function init() {
   // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
   actualizarBadgeMensajes()
   try { actualizarBadgeSugerencias() } catch (e) {}
+  try { actualizarBadgeBajasProg() } catch (e) {}
   // Badge de Agenda Secretaría: pendientes míos o comunes (solo admin/operativo)
   actualizarBadgeAgendaSec()
 
@@ -1653,6 +1654,93 @@ async function actualizarBadgeMorososTF() {
   }
 }
 window.actualizarBadgeMorososTF = actualizarBadgeMorososTF
+
+// ============================================================
+// 📅 BAJAS PROGRAMADAS TF (8/10/26) — alumnos ACTIVOS que pasan a BAJA en una
+// fecha futura (fn_baja_tf). El día llegado los pasa a BAJA el cron de las 00:05.
+// ============================================================
+async function actualizarBadgeBajasProg() {
+  const b = document.getElementById('badge-bajas-prog')
+  if (!b) return
+  try {
+    const { count, error } = await supabase.from('inscripciones_tf')
+      .select('id', { count: 'exact', head: true })
+      .eq('estado', 'ACTIVO').not('baja_programada_el', 'is', null)
+    if (error) throw error
+    if (count > 0) { b.style.display = 'inline-block'; b.textContent = count > 99 ? '99+' : String(count) }
+    else b.style.display = 'none'
+  } catch (e) { b.style.display = 'none' }
+}
+window.actualizarBadgeBajasProg = actualizarBadgeBajasProg
+
+function _bpFecha(s) { if (!s) return '—'; const [y, m, d] = String(s).slice(0, 10).split('-'); return `${d}/${m}/${y}` }
+function _bpDiaMenos1(s) { const [y, m, d] = s.split('-').map(Number); const f = new Date(y, m - 1, d - 1); return `${f.getFullYear()}-${String(f.getMonth() + 1).padStart(2, '0')}-${String(f.getDate()).padStart(2, '0')}` }
+function _bpDiasHasta(s) { const [y, m, d] = s.split('-').map(Number); const h = new Date(); h.setHours(0, 0, 0, 0); return Math.round((new Date(y, m - 1, d) - h) / 86400000) }
+function _bpEsc(t) { return String(t == null ? '' : t).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c])) }
+const _BP_DIAS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb']
+function _bpDiaSem(s) { const [y, m, d] = s.split('-').map(Number); return _BP_DIAS[new Date(y, m - 1, d).getDay()] }
+
+async function renderBajasProgramadas() {
+  if (window.esProfeVistaAcotada && window.esProfeVistaAcotada()) { renderHome(); return }
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  contentEl.innerHTML = `
+    <div style="max-width:1000px; margin:0 auto;">
+      <div class="panel">
+        <div class="panel-header"><div class="panel-title">📅 Bajas programadas · Terapia Física</div></div>
+        <div class="panel-body">
+          <div style="font-size:13px; color:var(--text-dim); margin-bottom:10px;">Siguen ACTIVOS y vienen hasta el día anterior. El día programado pasan a BAJA solos (00:05) y su lugar ya figura libre. Se programan desde el botón <b>Baja</b> de la ficha.</div>
+          <div id="bp-lista" style="font-size:13px;">Cargando…</div>
+        </div>
+      </div>
+    </div>`
+  try { await supabase.rpc('fn_efectivizar_bajas_programadas') } catch (e) {}
+  const el = document.getElementById('bp-lista')
+  try {
+    const { data, error } = await supabase.from('inscripciones_tf')
+      .select('id, persona_id, plan, dia_vencimiento, baja_programada_el, baja_programada_motivo, baja_programada_por')
+      .eq('estado', 'ACTIVO').not('baja_programada_el', 'is', null)
+      .order('baja_programada_el', { ascending: true }).order('id', { ascending: true })
+    if (error) throw error
+    const filas = data || []
+    actualizarBadgeBajasProg()
+    if (!filas.length) { el.innerHTML = '<div style="padding:24px; text-align:center; color:var(--text-dim);">No hay bajas programadas 🎉</div>'; return }
+    const ids = [...new Set(filas.map(f => f.persona_id))]
+    const { data: pers } = await supabase.from('personas').select('id, nombre').in('id', ids)
+    const nom = {}; (pers || []).forEach(p => { nom[p.id] = p.nombre })
+    const quien = (m) => { const n = ({ 'liclucianavelaz@gmail.com': 'Lu', 'jimenahllorente@gmail.com': 'Jime', ...NOMBRES_AGENDA_SEC })[(m || '').toLowerCase()] || (m || '').split('@')[0]; return n || '—' }
+    el.innerHTML = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead><tr style="text-align:left; color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px;">
+        <th style="padding:8px;">Alumno</th><th style="padding:8px;">Plan</th><th style="padding:8px;">Último día</th>
+        <th style="padding:8px;">Pasa a baja</th><th style="padding:8px;">Motivo</th><th style="padding:8px; text-align:right;">Acciones</th>
+      </tr></thead><tbody>
+      ${filas.map(f => {
+        const d = _bpDiasHasta(f.baja_programada_el)
+        const cuando = d <= 0 ? 'hoy' : d === 1 ? 'mañana' : `en ${d} días`
+        return `<tr style="border-top:1px solid var(--border); vertical-align:top;">
+          <td style="padding:10px 8px;"><b>${_bpEsc(nom[f.persona_id] || ('#' + f.persona_id))}</b> <span style="color:var(--text-dim); font-size:11px;">#${f.persona_id}</span></td>
+          <td style="padding:10px 8px;">${_bpEsc(f.plan || '—')}</td>
+          <td style="padding:10px 8px; white-space:nowrap;">${_bpDiaSem(_bpDiaMenos1(f.baja_programada_el))} ${_bpFecha(_bpDiaMenos1(f.baja_programada_el))}</td>
+          <td style="padding:10px 8px; white-space:nowrap;"><span style="background:#ffedd5; color:#c2410c; border:1px solid #fdba74; padding:2px 8px; border-radius:10px; font-weight:700; font-size:12px;">${_bpDiaSem(f.baja_programada_el)} ${_bpFecha(f.baja_programada_el)}</span><div style="font-size:11px; color:var(--text-dim); margin-top:3px;">${cuando}</div></td>
+          <td style="padding:10px 8px; max-width:320px;">${_bpEsc(f.baja_programada_motivo || '—')}<div style="font-size:11px; color:var(--text-dim); margin-top:3px;">Programó: ${_bpEsc(quien(f.baja_programada_por))}</div></td>
+          <td style="padding:10px 8px; text-align:right; white-space:nowrap;">
+            <button onclick="bpVerFicha(${f.persona_id})" style="border:1px solid var(--border); background:#fff; border-radius:6px; padding:5px 9px; cursor:pointer; font-size:12px; font-weight:600;">Ver ficha</button>
+            <button onclick="bpCancelar(${f.id}, '${_bpEsc(nom[f.persona_id] || '').replace(/'/g, '')}')" style="border:1px solid #f97316; color:#c2410c; background:#fff; border-radius:6px; padding:5px 9px; cursor:pointer; font-size:12px; font-weight:700; margin-left:4px;">↩️ Cancelar baja</button>
+          </td>
+        </tr>`
+      }).join('')}
+      </tbody></table></div>`
+  } catch (e) {
+    el.textContent = 'No se pudieron leer las bajas programadas (¿ya corriste sql_bajas_programadas.sql?) — ' + (e.message || '')
+  }
+}
+window.bpVerFicha = function (pid) { window._padronAbrirPersonaId = pid; irA('padron') }
+window.bpCancelar = async function (inscId, nombre) {
+  if (!confirm(`¿Cancelar la baja programada${nombre ? ' de ' + nombre : ''}? Sigue activo y recupera sus horarios fijos tal como estaban.`)) return
+  const { error } = await supabase.rpc('fn_cancelar_baja_programada', { p_inscripcion_id: inscId })
+  if (error) { alert('No se pudo cancelar: ' + error.message); return }
+  renderBajasProgramadas()
+}
 
 // ============================================================
 // 📝 BADGE AGENDA SECRETARÍA: tareas pendientes o en curso que
@@ -2092,6 +2180,8 @@ function buildNavCore(permisos, usuario) {
       areas.push({ icon: '📈', label: 'Turnos libres TF', id: 'turnos-libres-tf', sub: true, badgeId: 'badge-espera-tf' })
       areas.push({ icon: '💵', label: 'Caja TF', id: 'caja-tf', sub: true })
       areas.push({ icon: '🔔', label: 'Morosos TF', id: 'morosos-tf', sub: true, badgeId: 'badge-morosos-tf' })
+      // 📅 Bajas programadas (8/10/26): quiénes pasan a baja en una fecha futura. Admin + operativas.
+      if (permisos.admin_total || permisos.operativo_general) areas.push({ icon: '📅', label: 'Bajas programadas', id: 'bajas-programadas', sub: true, badgeId: 'badge-bajas-prog', nuevoHtml: window.badgeNuevo('2026-10-08') })
       // 📥 Buzón de ALUMNOS (19/7/26, pedido de Lu): separado de la mensajería
       // interna. RLS ya escopa: cada uno ve solo lo dirigido a él; Lu/Jime todo.
       areas.push({ icon: '📥', label: 'Mensajes alumnos', id: 'mensajes-alumnos', sub: true, badgeId: 'badge-msj-alumnos' })
@@ -2378,6 +2468,7 @@ window.irA = function(modulo) {
   if (modulo === 'inicio') renderHome()
   else if (modulo === 'terapia-fisica') renderTerapiaFisica()
   else if (modulo === 'morosos-tf') renderMorososTF()
+  else if (modulo === 'bajas-programadas') renderBajasProgramadas()
   else if (modulo === 'altas-bajas-tf') renderAltasBajasTF()
   else if (modulo === 'turnos-libres-tf') renderTurnosLibresTF()
   else if (modulo === 'ausentes-tf') renderAusentesTF()
