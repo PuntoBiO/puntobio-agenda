@@ -251,6 +251,7 @@
   .wsp-opcion:hover { background: #dcfce7; border-color: #25D366; }
 </style>
 <script src="notas_paciente.js"></script>
+<script src="baja_tf.js"></script>
 </head>
 <body>
 
@@ -751,9 +752,10 @@
     </div>
     <div class="modal-body">
       <div class="modal-info" id="bajaInfo"></div>
+      <div id="bajaCuando"></div>
       <div class="modal-warning">
         <strong>⚠️ Esta acción va a:</strong>
-        1. Cambiar el estado a <strong style="color:var(--rojo)">BAJA</strong><br>
+        1. Cambiar el estado a <strong style="color:var(--rojo)">BAJA</strong> (hoy o el día programado)<br>
         2. Liberar los turnos asignados al alumno<br>
         3. Sacarlo del padrón activo
       </div>
@@ -1150,6 +1152,8 @@ async function efectivizarCambiosDePlanPadron(inscData) {
 
 async function cargarTodo() {
   $('#tabla-wrap').innerHTML = '<div class="loading">⏳ Cargando padrón...</div>';
+  // Bajas programadas que ya llegaron a su fecha → BAJA (también lo hace el cron a las 00:05)
+  if (window.BajaTF) await BajaTF.efectivizar(sb);
   try {
     const [perR, insR, pagosR, tarR, tratR, hcR, obsR, adjR, ecR] = await Promise.all([
       sb.from('personas').select('*'),
@@ -1682,6 +1686,11 @@ async function abrirModalVer() {
     <div class="modal-info" style="margin:0;">🚧 Consultorios, Especialidades, BioLab y Masoterapia se van a integrar cuando esas tablas estén cargadas.</div>
   `;
   // 📌 Notas del paciente (componente compartido: notas_paciente.js)
+  // 📅 Baja programada: cartel arriba de las notas
+  try {
+    const elN = document.getElementById('notasPacienteVer');
+    if (elN && window.BajaTF && i && i.baja_programada_el) elN.insertAdjacentHTML('beforebegin', BajaTF.htmlChip(i, 'cancelarBajaProgramada'));
+  } catch (e) { console.warn('Baja programada:', e.message); }
   try { if (window.NotasPaciente) window.NotasPaciente.montar(document.getElementById('notasPacienteVer'), { sb, personaId: p.id }); }
   catch (e) { console.warn('Notas del paciente:', e.message); }
   // Pintar la foto en el avatar grande si la tiene
@@ -3291,8 +3300,23 @@ function abrirModalBaja() {
   $('#bajaMotivo').value = 'FALTA_PAGO';
   $('#bajaObs').value = '';
   $('#bajaObligatorio').style.display = 'none';
+  // 8/10/26: baja HOY o PROGRAMADA (por defecto, el próximo vencimiento)
+  if (window.BajaTF) { $('#bajaCuando').innerHTML = BajaTF.htmlOpciones(f.inscripcion); BajaTF._marcar(); }
   $('#modalBaja').classList.add('activo');
 }
+
+// Cancelar una baja programada desde la ficha (se arrepintió / pagó)
+window.cancelarBajaProgramada = async (inscId) => {
+  if (!confirm('¿Cancelar la baja programada? El alumno sigue activo y recupera sus horarios fijos tal como estaban.')) return;
+  try {
+    await BajaTF.cancelar(sb, inscId);
+    toast('✓ Baja programada cancelada');
+    const pid = alumnoActivo && alumnoActivo.persona && alumnoActivo.persona.id;
+    await cargarTodo();
+    const fila = (personas || []).find(x => x.persona && String(x.persona.id) === String(pid));
+    if (fila) { alumnoActivo = fila; await abrirModalVer(); }
+  } catch (e) { toast('No se pudo cancelar: ' + e.message, true); }
+};
 
 $('#bajaMotivo').addEventListener('change', e => {
   $('#bajaObligatorio').style.display = e.target.value === 'OTRO' ? 'inline' : 'none';
@@ -3314,27 +3338,18 @@ window.confirmarBaja = async () => {
   const btn = $('#btnConfirmarBaja');
   btn.disabled = true; btn.textContent = 'Procesando...';
   try {
-    const hoyISO = HOY.toISOString().split('T')[0];
-    const { error: errIns } = await sb.from('inscripciones_tf').update({
-      estado: 'BAJA',
-      fecha_baja: hoyISO,
-      motivo_baja: motivoFinal,
-      actualizado_en: new Date().toISOString()
-    }).eq('id', alumnoActivo.inscripcion.id);
-    if (errIns) throw errIns;
-
-    // Liberar turnos
-    const { data: turnosLib, error: errTur } = await sb.from('turno_alumnos')
-      .update({ activo: false })
-      .eq('persona_id', alumnoActivo.persona.id)
-      .eq('activo', true)
-      .select();
-    if (errTur) throw errTur;
-
-    const cantTurnos = (turnosLib || []).length;
-    toast(`✓ Baja registrada. ${cantTurnos} turno(s) liberado(s)`);
+    // 8/10/26: la baja (hoy o programada) la hace la base con fn_baja_tf —
+    // mismo sellado seguro de turnos (último día = fecha − 1) en las tres pantallas.
+    const res = await BajaTF.ejecutar(sb, alumnoActivo.inscripcion.id, motivoFinal);
+    toast(BajaTF.mensaje(res));
     cerrarModal('modalBaja');
+    const pidB = alumnoActivo && alumnoActivo.persona && alumnoActivo.persona.id;
     await cargarTodo();
+    // Programada: el alumno sigue activo → refrescar la ficha abierta con el cartel nuevo
+    if (res.tipo === 'programada' && document.querySelector('#modalVer.activo')) {
+      const filaB = (personas || []).find(x => x.persona && String(x.persona.id) === String(pidB));
+      if (filaB) { alumnoActivo = filaB; await abrirModalVer(); }
+    }
   } catch (e) {
     console.error(e);
     toast('Error al dar de baja: ' + e.message, true);

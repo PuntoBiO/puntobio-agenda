@@ -98,6 +98,7 @@
   .toast.activo { display: block; }
   .toast.error { border-color: var(--rojo); }
 </style>
+<script src="baja_tf.js"></script>
 </head>
 <body>
 
@@ -193,9 +194,10 @@
     </div>
     <div class="modal-body">
       <div class="modal-info" id="bajaInfo"></div>
+      <div id="bajaCuando"></div>
       <div class="modal-warning">
         <strong>⚠️ Esta acción va a:</strong>
-        1. Cambiar el estado de la inscripción a <strong style="color:var(--rojo)">BAJA</strong><br>
+        1. Cambiar el estado de la inscripción a <strong style="color:var(--rojo)">BAJA</strong> (hoy o el día programado)<br>
         2. Liberar todos los turnos asignados al alumno<br>
         3. Sacarlo de la lista de morosos (la deuda deja de reclamarse)
       </div>
@@ -304,13 +306,15 @@
   async function cargarTodo() {
     await resolverPermisoTotal();
     $('tabla-wrap').innerHTML = '<div class="loading">Cargando...</div>';
+    // Bajas programadas que ya llegaron a su fecha → BAJA (también lo hace el cron a las 00:05)
+    if (window.BajaTF) await BajaTF.efectivizar(supa);
     // FUENTE ÚNICA (Fase 1a pagos, 18/7/26): la calculadora local (pagos +
     // tarifario + sorteos + calcularDeudaMes/clasificar) se reemplazó por
     // fn_estado_cuenta(null, mes), que trae el reglamento completo ya resuelto
     // desde la base. Acá solo quedan las inscripciones: hacen falta para
     // efectivizar cambios programados, para el modal de cobro y para el contacto.
     const { data: insData, error: insErr } = await supa.from('inscripciones_tf')
-      .select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso, pago_excepcion_hasta')
+      .select('id, persona_id, plan, plan_futuro, mes_aplica_plan, observaciones, actividad, descuento_libre, dia_vencimiento, estado, fecha_alta, fecha_reingreso, pago_excepcion_hasta, baja_programada_el, baja_programada_motivo')
       .eq('estado', 'ACTIVO').neq('plan', 'COD0BON');
     if (insErr) {
       $('tabla-wrap').innerHTML = '<div class="empty">❌ Error: ' + insErr.message + '</div>';
@@ -467,7 +471,8 @@
     // separar "vencidos" (morosos) de "por vencer" (cuota del mes que aún no venció).
     const todosClasif = inscripciones.map(clasificar).filter(c => !c._esPrueba);
     const clasif = todosClasif.filter(c => c.debeTotal > 0);          // morosos (ya vencidos)
-    const porVencerList = todosClasif.filter(c => c.porVencer > 0);   // falta pagar, aún no vence
+    // 8/10/26: con baja programada NO se le reclama la cuota que todavía no venció (se va antes).
+    const porVencerList = todosClasif.filter(c => c.porVencer > 0 && !c.baja_programada_el);   // falta pagar, aún no vence
 
     const modoPorVencer = filtroActivo === 'porvencer';
     let visibles;
@@ -599,7 +604,7 @@
         <button class="btn-accion btn-baja" onclick="abrirBaja(${c.id})" title="Dar de baja al alumno">❌ Dar de baja</button>
       </div>`;
       return `<tr class="row">
-        <td><strong>${c.nombre}</strong>${badgeProrroga} <span class="alumno-id">#${c.persona_id}</span></td>
+        <td><strong>${c.nombre}</strong>${badgeProrroga}${window.BajaTF ? BajaTF.htmlBadge(c) : ''} <span class="alumno-id">#${c.persona_id}</span></td>
         <td>${c.plan}</td>
         <td class="right">Día ${c.dia_vencimiento}</td>
         <td class="right"><strong class="${c.bucket === 'segundo_aviso' ? 'monto-rojo' : c.bucket === 'primer_aviso' ? 'monto-naranja' : ''}">${c.diasVencido} días</strong></td>
@@ -835,6 +840,8 @@
     $('bajaMotivo').value = 'FALTA_PAGO';
     $('bajaObs').value = '';
     $('bajaObligatorio').style.display = 'none';
+    // 8/10/26: baja HOY o PROGRAMADA (por defecto, el próximo vencimiento)
+    if (window.BajaTF) { $('bajaCuando').innerHTML = BajaTF.htmlOpciones(c, 'hoy'); BajaTF._marcar(); }
     $('modalBaja').classList.add('activo');
   };
 
@@ -858,31 +865,19 @@
       'OTRO': 'Otro'
     };
     const motivoFinal = etiquetas[motivo] + (obs ? ': ' + obs : '');
-    const hoy = new Date().toISOString().slice(0, 10);
     const btn = $('btnConfirmarBaja');
     btn.disabled = true; btn.textContent = 'Procesando...';
-
-    const { error: errInsc } = await supa.from('inscripciones_tf')
-      .update({ estado: 'BAJA', fecha_baja: hoy, motivo_baja: motivoFinal })
-      .eq('id', c.id);
-    if (errInsc) {
+    // 8/10/26: la baja (hoy o programada) la hace la base con fn_baja_tf — mismo sellado
+    // seguro de turnos que Administración TF (antes acá se apagaban sin guardar el último día).
+    try {
+      const res = await BajaTF.ejecutar(supa, c.id, motivoFinal);
+      mostrarToast(BajaTF.mensaje(res, c.nombre).replace(/^✓/, '✅'));
+    } catch (e) {
       btn.disabled = false; btn.textContent = 'Confirmar baja';
-      mostrarToast('❌ Error al dar de baja: ' + errInsc.message, 'error');
+      mostrarToast('❌ Error al dar de baja: ' + e.message, 'error');
       return;
     }
-
-    const { error: errTurnos, count: turnosLib } = await supa.from('turno_alumnos')
-      .update({ activo: false }, { count: 'exact' })
-      .eq('persona_id', c.persona_id)
-      .eq('activo', true);
-
     btn.disabled = false; btn.textContent = 'Confirmar baja';
-    if (errTurnos) {
-      mostrarToast(`⚠️ Inscripción dada de baja, pero error al liberar turnos: ${errTurnos.message}`, 'error');
-    } else {
-      const turnosTexto = turnosLib ? ` y ${turnosLib} turno(s) liberado(s)` : '';
-      mostrarToast(`✅ ${c.nombre} dado de baja${turnosTexto}`);
-    }
     cerrarModal('modalBaja');
     inscripcionEnAccion = null;
     await cargarTodo();
