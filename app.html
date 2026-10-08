@@ -3141,7 +3141,30 @@ async function cargarHomeData() {
     icon: '💸', texto: `${ctasVencidas.length} cuenta${ctasVencidas.length === 1 ? '' : 's'} a pagar vencida${ctasVencidas.length === 1 ? '' : 's'} (${fmtPesos(ctasVencidasTotal)})`, destino: 'cuentas-pagar'
   })
 
-  const totAlertas = (morosos || 0) + pagosOS + ctasVencidas.length
+  // 📨 Informes BiOLAB para firmar (8/10/26): los procesa Bruno/Santi y los firma
+  // quien tiene firma activa en biolab_firmas. Va PRIMERO para verlo apenas se entra.
+  let infFirmar = 0
+  try {
+    const { data: { session: ses } } = await supabase.auth.getSession()
+    const mailYo = ((ses && ses.user && ses.user.email) || '').toLowerCase().trim()
+    if (mailYo) {
+      const { data: fir } = await supabase.from('biolab_firmas').select('email')
+        .ilike('email', mailYo).eq('activo', true).limit(1)
+      if (fir && fir.length) {
+        const { count } = await supabase.from('biolab_informes_pendientes')
+          .select('id', { count: 'exact', head: true }).eq('estado', 'pendiente')
+        infFirmar = count || 0
+      }
+    }
+  } catch (e) { infFirmar = 0 }   // sin tabla todavía: no es alerta
+  if (infFirmar > 0) {
+    alertas.unshift({
+      icon: '📨', texto: `${infFirmar} informe${infFirmar === 1 ? '' : 's'} BiOLAB para revisar y firmar`, destino: 'vald'
+    })
+    try { notifCalc(`📨 Tenés ${infFirmar} informe${infFirmar === 1 ? '' : 's'} BiOLAB para firmar`) } catch (_) {}
+  }
+
+  const totAlertas = (morosos || 0) + pagosOS + ctasVencidas.length + infFirmar
   setText('kpi-home-alertas', totAlertas)
   setText('kpi-home-alertas-sub', alertas.length ? alertas.length + ' tema' + (alertas.length === 1 ? '' : 's') + ' para mirar' : 'todo en orden')
 
