@@ -1439,6 +1439,7 @@ async function init() {
   actualizarBadgeCumple()
   // Badge de Mensajes del equipo no leídos (lo ve todo el equipo)
   actualizarBadgeMensajes()
+  try { actualizarBadgeSugerencias() } catch (e) {}
   // Badge de Agenda Secretaría: pendientes míos o comunes (solo admin/operativo)
   actualizarBadgeAgendaSec()
 
@@ -1988,6 +1989,15 @@ function buildNavCore(permisos, usuario) {
     <span class="nav-badge" id="badgeMensajes" style="display:none"></span>
   </div>`)
 
+  // Sugerencias (8/10/26): lo ve TODO el equipo; cada uno lee lo que mandaron los demás
+  // (salvo las marcadas "solo Lu y Jime"). Badge = sugerencias pendientes.
+  items.push(`<div class="nav-item" onclick="irA('sugerencias')">
+    <span class="nav-icon">💡</span>
+    <span class="nav-label">Sugerencias</span>
+    <span class="nav-badge" id="badgeSugerencias" style="display:none"></span>
+    ${window.badgeNuevo('2026-10-08')}
+  </div>`)
+
   // Feriados: lo ve TODO el equipo (qué días cierra el centro).
   // La tabla de cobertura interna (quién se lo toma / quién cubre) solo se le
   // muestra a Santiago, Lean, Lautaro, Jime y Lu; lo controla la propia
@@ -2393,6 +2403,7 @@ window.irA = function(modulo) {
   else if (modulo === 'precios-moplex') renderPreciosMoplex()
   else if (modulo === 'biolab') renderBiolabHome()
   else if (modulo === 'mensajes') renderMensajes()
+  else if (modulo === 'sugerencias') renderSugerencias()
   else if (modulo === 'mensajes-alumnos') renderMensajesAlumnos()
   else if (modulo === 'entrenamiento-casa') renderEntrenamientoCasa()
   else if (modulo === 'uso-mi-espacio') renderUsoMiEspacio()
@@ -2880,38 +2891,14 @@ function renderHomeCore(permisos, usuario) {
     </div>
     `}
 
-    <div class="panel" style="margin-top:22px;">
-      <div class="panel-header">
-        <div class="panel-title">💡 Sugerencias para mejorar el sistema</div>
-      </div>
-      <div class="panel-body" style="display:flex; flex-direction:column; gap:10px;">
-        <div style="font-size:13px; color:var(--text-dim);">¿Algo que no funciona, que te confunde o una idea? Contanos: lo leemos todo.</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <select id="sug-tipo" style="padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:13px;">
-            <option value="idea">💡 Idea</option>
-            <option value="error">🐞 Algo no funciona</option>
-            <option value="confuso">🤔 Me confunde</option>
-          </select>
-        </div>
-        <textarea id="sug-texto" rows="3" placeholder="Escribí acá tu sugerencia…" style="width:100%; box-sizing:border-box; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:inherit; font-size:14px; resize:vertical;"></textarea>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <button onclick="enviarSugerencia()" ${esVistaPrevia ? 'disabled title="En vista previa no se envía"' : ''} style="background:var(--turquoise); color:#fff; border:0; border-radius:8px; padding:9px 18px; font-weight:700; cursor:pointer;">Enviar sugerencia</button>
-          <span id="sug-estado" style="font-size:13px;"></span>
-        </div>
-        ${EMAILS_DUENAS.includes(mailHome) && !esVistaPrevia ? `
-        <div style="margin-top:8px; border-top:1px solid var(--border); padding-top:10px;">
-          <div style="font-size:13px; font-weight:700; margin-bottom:6px;">📬 Sugerencias del equipo</div>
-          <div id="sug-lista" style="font-size:13px; color:var(--text-dim);">Cargando…</div>
-        </div>` : ''}
-      </div>
-    </div>
+    <div style="margin-top:22px;">${htmlPanelSugerencias(false, esVistaPrevia)}</div>
   `
 
   // Llenar KPIs y paneles con datos reales (no bloqueante)
   cargarHomeData()
   // Mensajes del equipo: globo rojo con los no leídos
   cargarHomeMensajes()
-  if (EMAILS_DUENAS.includes(mailHome) && !esVistaPrevia) cargarSugerencias()
+  cargarSugerencias(false)
   // Globito de Agenda Secretaría en el saludo (se pinta cada vez que se vuelve al inicio)
   actualizarBadgeAgendaSec()
 }
@@ -2937,48 +2924,123 @@ async function cargarHomeMensajes() {
   } catch (e) { sub.textContent = 'Entrá a ver los mensajes del equipo' }
 }
 
+// ======================
+// SUGERENCIAS DEL EQUIPO (4/10/26 · 8/10/26: las ve todo el equipo + página propia)
+// ======================
+const SUG_DUENAS = ['liclucianavelaz@gmail.com', 'jimenahllorente@gmail.com']
+const SUG_TIPOS = [
+  ['idea', '💡', 'Idea nueva'],
+  ['mejora', '✨', 'Mejorar algo que ya existe'],
+  ['error', '🐞', 'Algo no funciona'],
+  ['dato', '📊', 'Un dato está mal (turno, cobro, asistencia…)'],
+  ['lento', '🐢', 'Anda lento o se traba'],
+  ['confuso', '🤔', 'Me confunde / no sé cómo se usa'],
+  ['paciente', '🙋', 'Pedido o queja de un paciente'],
+  ['equipo', '🤝', 'Organización del equipo'],
+  ['otro', '💬', 'Otro']
+]
+let _sugFiltro = 'nueva'   // página: 'nueva' | 'resuelta' | 'todas'
+function sugMiMail() { return ((usuario && usuario.email) || '').toLowerCase().trim() }
+function sugEsc(t) { return String(t == null ? '' : t).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])) }
+
+// Panel compartido: Inicio (esPagina=false → últimas 5) y página Sugerencias (todas, con filtro)
+function htmlPanelSugerencias(esPagina, esVistaPrevia) {
+  return `
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">💡 Sugerencias para mejorar el sistema</div>
+        ${esPagina ? '' : `<div class="panel-link" onclick="irA('sugerencias')" style="cursor:pointer">Ver todas →</div>`}
+      </div>
+      <div class="panel-body" style="display:flex; flex-direction:column; gap:10px;">
+        <div style="font-size:13px; color:var(--text-dim);">¿Algo que no funciona, que te confunde o una idea? Contanos: lo leemos entre todos.</div>
+        <select id="sug-tipo" style="padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:13px; max-width:100%;">
+          ${SUG_TIPOS.map(([v, i, t]) => `<option value="${v}">${i} ${t}</option>`).join('')}
+        </select>
+        <textarea id="sug-texto" rows="3" placeholder="Escribí acá tu sugerencia…" style="width:100%; box-sizing:border-box; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:inherit; font-size:14px; resize:vertical;"></textarea>
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-dim); cursor:pointer;">
+          <input type="checkbox" id="sug-privada"> 🔒 Que la vean solo Lu y Jime
+        </label>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+          <button onclick="enviarSugerencia()" ${esVistaPrevia ? 'disabled title="En vista previa no se envía"' : ''} style="background:var(--turquoise); color:#fff; border:0; border-radius:8px; padding:9px 18px; font-weight:700; cursor:pointer;">Enviar sugerencia</button>
+          <span id="sug-estado" style="font-size:13px;"></span>
+        </div>
+        <div style="margin-top:8px; border-top:1px solid var(--border); padding-top:10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
+            <div style="font-size:13px; font-weight:700;">📬 ${esPagina ? 'Lo que mandó el equipo' : 'Últimas del equipo'}</div>
+            ${esPagina ? `<div style="display:flex; gap:6px;">
+              ${[['nueva','Pendientes'],['resuelta','Resueltas'],['todas','Todas']].map(([v,t]) =>
+                `<button class="sug-filtro" data-f="${v}" onclick="sugFiltrar('${v}')" style="border:1px solid var(--border); border-radius:999px; padding:4px 12px; font-size:12px; font-weight:700; cursor:pointer; background:${_sugFiltro===v?'var(--turquoise)':'#fff'}; color:${_sugFiltro===v?'#fff':'inherit'};">${t}</button>`).join('')}
+            </div>` : ''}
+          </div>
+          <div id="sug-lista" data-pagina="${esPagina ? '1' : ''}" style="font-size:13px; color:var(--text-dim);">Cargando…</div>
+        </div>
+      </div>
+    </div>`
+}
+
+function renderSugerencias() {
+  const contentEl = document.getElementById('content')
+  contentEl.classList.remove('module-embed')
+  contentEl.innerHTML = `<div style="max-width:860px; margin:0 auto;">${htmlPanelSugerencias(true, !!window.__verComo)}</div>`
+  cargarSugerencias(true)
+}
+window.sugFiltrar = function(f) { _sugFiltro = f; renderSugerencias() }
+
 window.enviarSugerencia = async function() {
   const txt = (document.getElementById('sug-texto').value || '').trim()
   const tipo = document.getElementById('sug-tipo').value
+  const privada = !!(document.getElementById('sug-privada') || {}).checked
   const est = document.getElementById('sug-estado')
   if (window.__verComo) { est.textContent = 'En vista previa no se envía.'; return }
   if (txt.length < 3) { est.style.color = '#b45309'; est.textContent = 'Escribí tu sugerencia primero.'; return }
   est.style.color = 'var(--text-dim)'; est.textContent = 'Enviando…'
   try {
     const { error } = await supabase.from('sugerencias_sistema').insert({
-      autor_email: (usuario.email || '').toLowerCase().trim(),
-      autor_nombre: usuario.nombre || '',
-      tipo, texto: txt
+      autor_email: sugMiMail(),
+      autor_nombre: (usuario && usuario.nombre) || '',
+      tipo, texto: txt, privada
     })
     if (error) throw error
     document.getElementById('sug-texto').value = ''
+    if (document.getElementById('sug-privada')) document.getElementById('sug-privada').checked = false
     est.style.color = '#065f46'; est.textContent = '¡Gracias! La recibimos 💙'
-    if (document.getElementById('sug-lista')) cargarSugerencias()
+    const lista = document.getElementById('sug-lista')
+    cargarSugerencias(!!(lista && lista.dataset.pagina))
   } catch (e) {
-    est.style.color = '#b91c1c'; est.textContent = 'No se pudo enviar. ' + (e.message || '')
+    est.style.color = '#b91c1c'; est.textContent = 'No se pudo enviar: ' + (e.message || '')
   }
 }
 
-async function cargarSugerencias() {
+async function cargarSugerencias(esPagina) {
   const el = document.getElementById('sug-lista')
+  actualizarBadgeSugerencias()
   if (!el) return
   try {
-    const { data, error } = await supabase.from('sugerencias_sistema')
-      .select('id, creado_en, autor_nombre, tipo, texto, estado')
-      .order('creado_en', { ascending: false }).limit(30)
+    let q = supabase.from('sugerencias_sistema')
+      .select('id, creado_en, autor_nombre, tipo, texto, estado, privada')
+      .order('creado_en', { ascending: false }).order('id', { ascending: false })
+    if (esPagina && _sugFiltro !== 'todas') q = q.eq('estado', _sugFiltro)
+    q = q.limit(esPagina ? 300 : 5)
+    const { data, error } = await q
     if (error) throw error
-    const ico = { idea: '💡', error: '🐞', confuso: '🤔' }
-    const filas = (data || [])
-    if (!filas.length) { el.textContent = 'Todavía no llegó ninguna.'; return }
+    const ico = Object.fromEntries(SUG_TIPOS.map(([v, i]) => [v, i]))
+    const tipoTxt = { idea: 'Idea nueva', mejora: 'Mejorar algo', error: 'No funciona', dato: 'Dato mal', lento: 'Lento', confuso: 'Me confunde', paciente: 'Pedido de paciente', equipo: 'Organización', otro: 'Otro' }
+    const puedeResolver = SUG_DUENAS.includes(sugMiMail()) && !window.__verComo
+    const filas = data || []
+    if (!filas.length) {
+      el.textContent = esPagina && _sugFiltro === 'nueva' ? 'No hay sugerencias pendientes 🎉' : 'Todavía no llegó ninguna.'
+      return
+    }
     el.innerHTML = filas.map(r => `
-      <div style="display:flex; gap:10px; padding:8px 0; border-top:1px solid var(--border); ${r.estado === 'resuelta' ? 'opacity:.5;' : ''}">
+      <div style="display:flex; gap:10px; padding:8px 0; border-top:1px solid var(--border); ${r.estado === 'resuelta' ? 'opacity:.55;' : ''}">
         <div>${ico[r.tipo] || '💡'}</div>
-        <div style="flex:1; color:var(--text);">
-          <div style="font-size:12px; color:var(--text-dim);">${(r.autor_nombre || '—')} · ${String(r.creado_en || '').slice(0,10).split('-').reverse().join('/')}</div>
-          <div style="white-space:pre-wrap;">${String(r.texto || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</div>
+        <div style="flex:1; color:var(--text); min-width:0;">
+          <div style="font-size:12px; color:var(--text-dim);"><b>${tipoTxt[r.tipo] || 'Idea'}</b> · ${sugEsc(r.autor_nombre || '—')} · ${String(r.creado_en || '').slice(0,10).split('-').reverse().join('/')}${r.privada ? ' · 🔒 solo Lu y Jime' : ''}</div>
+          <div style="white-space:pre-wrap; word-break:break-word;">${sugEsc(r.texto)}</div>
         </div>
-        ${r.estado === 'resuelta' ? '<span style="font-size:12px;">✅</span>'
-          : `<button onclick="marcarSugerencia(${r.id})" style="border:1px solid var(--border); background:#fff; border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; height:fit-content;">✓ Resuelta</button>`}
+        ${r.estado === 'resuelta' ? '<span style="font-size:12px;" title="Resuelta">✅</span>'
+          : (puedeResolver ? `<button onclick="marcarSugerencia(${r.id})" style="border:1px solid var(--border); background:#fff; border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; height:fit-content; white-space:nowrap;">✓ Resuelta</button>`
+          : '<span style="font-size:11px; color:var(--text-dim); white-space:nowrap;">⏳ Pendiente</span>')}
       </div>`).join('')
   } catch (e) {
     el.textContent = 'No se pudieron leer (¿ya corriste el SQL de sugerencias?) — ' + (e.message || '')
@@ -2987,7 +3049,21 @@ async function cargarSugerencias() {
 window.marcarSugerencia = async function(id) {
   const { error } = await supabase.from('sugerencias_sistema').update({ estado: 'resuelta' }).eq('id', id)
   if (error) { alert('No se pudo marcar: ' + error.message); return }
-  cargarSugerencias()
+  const lista = document.getElementById('sug-lista')
+  cargarSugerencias(!!(lista && lista.dataset.pagina))
+}
+
+// Globito del menú: cuántas sugerencias pendientes hay (las que cada uno puede ver)
+async function actualizarBadgeSugerencias() {
+  const b = document.getElementById('badgeSugerencias')
+  if (!b) return
+  try {
+    const { count, error } = await supabase.from('sugerencias_sistema')
+      .select('id', { count: 'exact', head: true }).eq('estado', 'nueva')
+    if (error) throw error
+    if (count > 0) { b.textContent = count > 99 ? '99+' : String(count); b.style.display = '' }
+    else b.style.display = 'none'
+  } catch (e) { b.style.display = 'none' }
 }
 
 // ======================
@@ -3141,30 +3217,7 @@ async function cargarHomeData() {
     icon: '💸', texto: `${ctasVencidas.length} cuenta${ctasVencidas.length === 1 ? '' : 's'} a pagar vencida${ctasVencidas.length === 1 ? '' : 's'} (${fmtPesos(ctasVencidasTotal)})`, destino: 'cuentas-pagar'
   })
 
-  // 📨 Informes BiOLAB para firmar (8/10/26): los procesa Bruno/Santi y los firma
-  // quien tiene firma activa en biolab_firmas. Va PRIMERO para verlo apenas se entra.
-  let infFirmar = 0
-  try {
-    const { data: { session: ses } } = await supabase.auth.getSession()
-    const mailYo = ((ses && ses.user && ses.user.email) || '').toLowerCase().trim()
-    if (mailYo) {
-      const { data: fir } = await supabase.from('biolab_firmas').select('email')
-        .ilike('email', mailYo).eq('activo', true).limit(1)
-      if (fir && fir.length) {
-        const { count } = await supabase.from('biolab_informes_pendientes')
-          .select('id', { count: 'exact', head: true }).eq('estado', 'pendiente')
-        infFirmar = count || 0
-      }
-    }
-  } catch (e) { infFirmar = 0 }   // sin tabla todavía: no es alerta
-  if (infFirmar > 0) {
-    alertas.unshift({
-      icon: '📨', texto: `${infFirmar} informe${infFirmar === 1 ? '' : 's'} BiOLAB para revisar y firmar`, destino: 'vald'
-    })
-    try { notifCalc(`📨 Tenés ${infFirmar} informe${infFirmar === 1 ? '' : 's'} BiOLAB para firmar`) } catch (_) {}
-  }
-
-  const totAlertas = (morosos || 0) + pagosOS + ctasVencidas.length + infFirmar
+  const totAlertas = (morosos || 0) + pagosOS + ctasVencidas.length
   setText('kpi-home-alertas', totAlertas)
   setText('kpi-home-alertas-sub', alertas.length ? alertas.length + ' tema' + (alertas.length === 1 ? '' : 's') + ' para mirar' : 'todo en orden')
 
