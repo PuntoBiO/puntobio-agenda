@@ -439,6 +439,8 @@ const TESTS = [
       <li>Brazo del lado del iPad <b>adelante a 90°</b>, puño cerrado. Tocás <b>Empezar</b>: toma la posición inicial, y a la señal se estira hacia adelante <b>lo más que pueda sin dar un paso</b> ni levantar los talones.</li>
       <li>Corta solo cuando vuelve. Si da un paso, ese intento no vale. Hacé <b>3 intentos</b>: se queda con el promedio y el mejor.</li></ol>
       <b>Cómo se lee (Duncan):</b> menos de ~15 cm = riesgo alto de caídas · 15 a 25 cm = riesgo moderado. Orientativo.` },
+  { id:'psfs', necesita:'Nada: lo responde el paciente (2 minutos)', modoMed:'✍️ Lo completa el paciente', ico:'🗣️', nombre:'Escala funcional específica del paciente (PSFS)', planilla: true,
+    desc:'El paciente elige hasta 3 actividades que hoy le cuestan por su problema y puntúa de 0 a 10 qué tan bien las puede hacer. Validada para cualquier zona; ideal para mostrar el cambio al médico.', pos:'Planilla · la responde el paciente' },
   { id:'escalon', necesita:'El escalón de 40 cm de PuntoBiO (el test original usa 41 cm: la diferencia no cambia el resultado) · oxímetro de dedo · iPad o celu en trípode de costado · se hace en el consultorio', modoMed:'🎥 La cámara cuenta las subidas y controla el ritmo', ico:'🪜', nombre:'Test del escalón (Queens College)', planilla: true,
     desc:'Cardio para jóvenes activos sin salir del consultorio: 3 minutos subiendo y bajando un escalón al ritmo del metrónomo; con la frecuencia del oxímetro al terminar estima el VO₂máx.', pos:'Planilla · metrónomo' },
   { id:'seismin', necesita:'Pasillo recto de 20 a 30 m con conos · iPad apoyado en el cono de salida · silla · oxímetro (opcional)', modoMed:'🎥 Cuenta las vueltas solo', ico:'🚶‍♀️', nombre:'Test de 6 minutos de marcha (6MWT)', planilla: true,
@@ -2048,6 +2050,22 @@ const PLANILLAS = {
       return { valor: hay ? h.length : null, unidad: 'hallazgos posturales', hallazgos: h,
         lectura: !hay ? null : h.length ? ['warn', `${h.length} hallazgo${h.length === 1 ? '' : 's'} postural${h.length === 1 ? '' : 'es'}`] : ['ok', 'Sin desvíos posturales relevantes'] }
     } },
+  psfs: {
+    info: `<b>Cómo se hace:</b> preguntale al paciente: <i>"Nombrá hasta 3 actividades importantes para vos que hoy te cuesta hacer, o no podés hacer, por tu problema"</i>. Para cada una, que puntúe de <b>0</b> (no la puedo hacer) a <b>10</b> (la hago como antes del problema).
+      En las reevaluaciones se usan <b>las mismas actividades</b> (se completan solas) y el paciente vuelve a puntuarlas.<br>
+      <b>Cómo se lee:</b> promedio de las actividades. Un cambio de unos <b>2 puntos en el promedio</b> se considera clínicamente importante (referencia orientativa de la literatura).`,
+    campos: [
+      { k: 'a1', n: 'Actividad 1', texto: true, ph: 'ej. subir escaleras' }, { k: 'p1', n: 'Puntaje actividad 1 (0–10)', num: true, unidad: '/10' },
+      { k: 'a2', n: 'Actividad 2', texto: true, ph: 'ej. estar sentado 1 hora' }, { k: 'p2', n: 'Puntaje actividad 2 (0–10)', num: true, unidad: '/10' },
+      { k: 'a3', n: 'Actividad 3', texto: true, ph: 'ej. correr' }, { k: 'p3', n: 'Puntaje actividad 3 (0–10)', num: true, unidad: '/10' },
+    ],
+    evaluar(g) {
+      const ps = ['p1', 'p2', 'p3'].map(k => g(k)).filter(v => v != null && v >= 0 && v <= 10)
+      const prom = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : null, h = []
+      ;[1, 2, 3].forEach(i => { const a = g('a' + i), p = g('p' + i); if (a && p != null) h.push(`${a}: ${p}/10`) })
+      return { valor: prom != null ? +prom.toFixed(1) : null, unidad: '/10 (promedio)', hallazgos: h, resultado: { promedio: prom, actividades: [1, 2, 3].map(i => ({ actividad: g('a' + i), puntaje: g('p' + i) })) },
+        lectura: prom == null ? null : prom < 4 ? ['bad', `Limitación funcional importante (${fmt(prom, 1)}/10)`] : prom < 7 ? ['warn', `Limitación moderada (${fmt(prom, 1)}/10)`] : ['ok', `Limitación leve (${fmt(prom, 1)}/10)`] }
+    } },
   escalon: {
     info: `<b>Para quién:</b> menores de 40 que no son sedentarios (activos o deportistas). Mide la capacidad aeróbica sin salir del consultorio.
       <ol class="pasos">
@@ -2850,6 +2868,7 @@ function abrirASLR(listo) {
 }
 
 function renderPlanilla(spec, def) {
+  dolorAhora = null
   const vals = {}; window._fotosPl = null
   const clave = (k, L) => L ? `${k}_${L}` : k
   def.campos.forEach(c => { if (!c.num) (c.lados ? ['D', 'I'] : [null]).forEach(L => { vals[clave(c.k, L)] = c.def }) })
@@ -2859,6 +2878,7 @@ function renderPlanilla(spec, def) {
     <button class="back" id="btnVolver">← Todos los tests</button>
     <div class="panel">
       <h2>${spec.ico} ${spec.nombre}</h2>
+      <div class="row" style="gap:10px;align-items:center;margin:2px 0 6px">${htmlDolor()}${lineaContexto() ? `<small style="color:#475569">${esc(lineaContexto())}</small>` : ''}</div>
       <div style="margin:4px 0 6px">${chipPaciente()}</div>
       <div class="ultima" id="ultima"></div>
       ${cajaPara(spec.id)}
@@ -2869,7 +2889,7 @@ function renderPlanilla(spec, def) {
       ${def.fotos ? `<div class="btns" style="margin:4px 0 10px">${def.fotos.map(f => `<button class="b pri" data-fgrupo="${f.cfg}">${f.label}</button>`).join('')}</div>` : ''}<div class="fotos" id="plFotos"></div>
       <div style="overflow-x:auto"><table class="rom pl"><tr><th></th><th class="${def.ladosNombres ? '' : 'ladoD'}">${(def.ladosNombres || ['D', 'I'])[0]}</th><th class="${def.ladosNombres ? '' : 'ladoI'}">${(def.ladosNombres || ['D', 'I'])[1]}</th></tr>
         ${def.campos.map(c => {
-          const celda = (L) => c.num
+          const celda = (L) => c.texto ? `<input type="text" data-k="${clave(c.k, L)}" placeholder="${c.ph || ''}" style="width:100%">` : c.num
             ? `<input type="number" inputmode="decimal" step="any" data-k="${clave(c.k, L)}" data-num="1">${c.unidad ? ' <small>' + c.unidad + '</small>' : ''}${c.crono ? `<button class="btnfoto" data-crono="${clave(c.k, L)}" data-limite="${c.limite || ''}" title="Cronómetro">▶ Empezar</button>` : ''}${c.contador ? `<button class="btnfoto" data-mas="${clave(c.k, L)}">+1 vuelta</button>` : ''}${c.vivo ? `<button class="btnfoto" data-vivo="${c.vivo}" data-para="${clave(c.k, L)}" data-lado="${L || 'D'}" title="Medir en vivo: toma el máximo">🎥</button>` : ''}${c.foto ? `<button class="btnfoto" data-foto="${c.foto}" data-para="${clave(c.k, L)}" data-lado="${L || 'D'}" title="Medir con foto">📷</button>` : ''}`
             : `<select data-k="${clave(c.k, L)}">${c.ops.map(o => `<option ${o === c.def ? 'selected' : ''}>${o}</option>`).join('')}</select>`
           return `<tr><td>${c.n}</td>${c.lados ? `<td>${celda('D')}</td><td>${celda('I')}</td>` : `<td colspan="2">${celda(null)}</td>`}</tr>` }).join('')}
@@ -2976,6 +2996,8 @@ function renderPlanilla(spec, def) {
         const { data } = await supabase.from('tests_biolab').select('detalle, creado_en').eq('paciente_dni', normDni(paciente.dni)).order('creado_en', { ascending: false }).limit(30)
         for (const k of ['sexo', 'talla', 'peso']) { const r = (data || []).find(x => x.detalle && x.detalle.campos && x.detalle.campos[k] != null && x.detalle.campos[k] !== '—')
           if (r) poner(k, r.detalle.campos[k]) }
+        // PSFS: en la reevaluación se repiten las mismas actividades
+        if (spec.id === 'psfs') { const r = (data || []).find(x => x.detalle && x.detalle.campos && x.detalle.campos.a1); if (r) ['a1', 'a2', 'a3'].forEach(k => poner(k, r.detalle.campos[k])) }
         // talla y peso de los datos del paciente / historia clínica
         await buscarTalla(); if (tallaPac) poner('talla', tallaPac)
         const pk = await buscarPeso(); if (pk) poner('peso', pk)
@@ -4496,6 +4518,7 @@ async function guardarResultado() {
     fila.detalle = { ...fila.detalle, fotos: rutas }
   }
   if (Object.keys(GIRO.toma).length) fila.detalle = { ...fila.detalle, rotacion_camara_grados: { ...GIRO.toma } }
+  fila.detalle = { ...fila.detalle, contexto: JSON.parse(JSON.stringify(contextoToma())) }   // lado afectado, semanas desde el evento, dolor, ortesis
   if (document.querySelector('.layout > .stage')) fila.detalle = { ...fila.detalle, setup: { ...setupActual(), talla_cm: tallaPac || undefined, distancia_estimada_m: distEstimada() ? +distEstimada().toFixed(2) : undefined, rotacion_grados: Object.keys(GIRO.toma).length ? { ...GIRO.toma } : undefined } }   // alineación registrada en la toma
   const { error } = await supabase.from('tests_biolab').insert(fila)
   if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se guardó: ' + error.message, 'err'); return false }
@@ -5517,6 +5540,7 @@ const PARA_QUE = {
 "silla30": "Medir fuerza y resistencia de piernas: cuántas veces puede repetir el esfuerzo. Muy útil para ver la mejora mes a mes.",
 "unipodal": "Medir el equilibrio en una pierna (caminar, escaleras, vestirse). Con ojos cerrados se ve cuánto depende de la vista.",
 "alcance": "Medir hasta dónde puede estirarse sin perder el equilibrio. Si llega poco, tiene más riesgo de caerse.",
+"psfs": "Saber qué le importa al paciente y cuánto le cuesta hoy, con sus propias palabras: es una escala validada para cualquier zona y la que mejor muestra el cambio en las reevaluaciones.",
 "escalon": "Medir el fondo aeróbico de jóvenes activos sin salir del consultorio: estima el VO₂máx con el pulso al terminar 3 minutos de escalón al ritmo del metrónomo.",
 "seismin": "Medir la capacidad aeróbica real: cuántos metros camina en 6 minutos, comparado con lo esperado para su edad, talla y peso.",
 "ohs": "Es la puerta de entrada: en un solo gesto se ve cómo trabaja todo el cuerpo junto. Lo que falla nos dice dónde mirar después y qué músculos trabajan de más o de menos.",
@@ -5703,18 +5727,18 @@ const EVAL_DIAS = 30
 const TIEMPO = { ohs: 4, adams: 3, rockback: 3, antropo: 9, thomas: 5, rom: 4, rotoracica: 3, sfma: 5, aslr: 3, puente: 5, tronco: 15, estocada: 3,
   squatmono: 3, fsd: 3, unipodal: 2, tug: 2, marcha4: 2, equilibrio: 2, silla5: 1, silla30: 1, marcha4r: 1, alcance: 2, step2: 3, seismin: 8, ybalance: 6,
   salto: 3, hop: 3, triplehop: 3, sidehop: 2, crossover: 3, sprint10: 3, pushup: 2, ckcuest: 2, pullup: 2, escalon: 5, postural: 4, shouldermob: 2,
-  wallangel: 3, cva: 2, rotcerv: 3, dnf: 3, hallux: 3, osteo: 0, pelvico: 40 }
+  wallangel: 3, cva: 2, rotcerv: 3, dnf: 3, hallux: 3, osteo: 0, pelvico: 40, psfs: 2 }
 const EXPRESS = {
-  lumbar: ['ohs', 'aslr', 'puente'], rodilla: ['ohs', 'squatmono', 'fsd'], cadera: ['ohs', 'thomas', 'squatmono'],
-  tobillo: ['ohs', 'rom/tobillo', 'unipodal'], hombro: ['ohs', 'shouldermob', 'wallangel'], cervical: ['cva', 'dnf', 'rotcerv'],
-  dorsal: ['ohs', 'rotoracica', 'adams'], general: ['ohs', 'squatmono', 'rockback'], deportista: ['ohs', 'squatmono', 'hop'],
+  lumbar: ['psfs', 'ohs', 'aslr', 'puente'], rodilla: ['psfs', 'ohs', 'squatmono', 'fsd'], cadera: ['psfs', 'ohs', 'thomas', 'squatmono'],
+  tobillo: ['psfs', 'ohs', 'rom/tobillo', 'unipodal'], hombro: ['psfs', 'ohs', 'shouldermob', 'wallangel'], cervical: ['psfs', 'cva', 'dnf', 'rotcerv'],
+  dorsal: ['psfs', 'ohs', 'rotoracica', 'adams'], general: ['psfs', 'ohs', 'squatmono', 'rockback'], deportista: ['psfs', 'ohs', 'squatmono', 'hop'],
   mayor: ['equilibrio', 'marcha4', 'silla5', 'tug'], osteo: ['osteo', 'postural'],
 }
 let modoRuta = (() => { try { return localStorage.getItem('testbiolab_modo_ruta') || 'express' } catch (e) { return 'express' } })()
 const tieneExpress = (m) => !!EXPRESS[m]
 function pasosActivos(m = motivo) {
   const R = RUTAS[m]; if (!R) return []
-  if (modoRuta !== 'express' || !tieneExpress(m)) return R.pasos
+  if (modoRuta !== 'express' || !tieneExpress(m)) return tieneExpress(m) && EXPRESS[m][0] === 'psfs' ? [{ id: 'psfs', por: 'lo que le importa al paciente (escala validada)' }, ...R.pasos] : R.pasos
   return EXPRESS[m].map(x => { const [id, sec] = x.split('/'); return R.pasos.find(p => p.id === id && (!sec || p.sec === sec)) || { id, sec, por: 'clave para el ingreso' } })
 }
 const minutosDe = (pasos) => pasos.reduce((t, p) => t + (TIEMPO[p.id] ?? 3), 0)
@@ -6089,6 +6113,7 @@ function altCuerpo(P, H) {    // nariz → talones, en fracción de la altura de
   return (Math.max(...pies.map(i => P[i].y)) - P[0].y) / H }
 function distEstimada() { const K = calCam(); if (!K || !tallaPac || altPx.length < 5) return null
   const m = altPx.slice().sort((a, b) => a - b)[Math.floor(altPx.length / 2)]; return m > 0.05 ? K * (tallaPac / 100) / m : null }
+window.medirTallaCamara = (...a) => medirTallaCamara(...a)
 async function calibrarDistancia() {
   const t = prompt('Calibrar esta cámara (una sola vez):\n1) Una persona parada derecha en una marca a distancia medida con cinta.\n2) Escribí su TALLA en cm:'); if (!t) return
   const d = prompt('¿A cuántos metros está de la cámara? (ej. 3 o 2,5)'); if (!d) return
@@ -6126,19 +6151,68 @@ async function buscarTalla() {
   try { if (paciente.dni) { const { data: tt } = await supabase.from('tests_biolab').select('detalle').eq('paciente_dni', normDni(paciente.dni)).order('creado_en', { ascending: false }).limit(30)
     const r = (tt || []).find(x => x.detalle && x.detalle.campos && cmDe(x.detalle.campos.talla) > 80); if (r) { tallaPac = cmDe(r.detalle.campos.talla); tallaOrigen = 'Antropometría' } } } catch (e) {}
 }
+async function guardarTallaHC(t) {
+  try { localStorage.setItem('testbiolab_talla_' + perfilKey(), String(t)) } catch (e) {}
+  if (!paciente || (paciente.origen === 'PRUEBA')) return false
+  try {
+    if (paciente.origen === 'PUNTOBIO') { const { data } = await supabase.from('historias_clinicas').select('id').eq('persona_id', paciente.id).is('fusionada_en', null).order('completado_en', { ascending: false }).limit(1)
+      if (data && data[0]) { const { error } = await supabase.from('historias_clinicas').update({ altura: t }).eq('id', data[0].id); return !error } }
+    if (paciente.origen === 'SARKMED') { const { data: hcs } = await supabase.from('hc_sarkmed').select('id').eq('paciente_id', paciente.id).order('id', { ascending: false }).limit(1)
+      if (hcs && hcs[0]) { const { error } = await supabase.from('hc_sarkmed_nutricion').upsert({ hc_id: hcs[0].id, talla_m: +(t / 100).toFixed(2) }, { onConflict: 'hc_id' }); return !error } }
+  } catch (e) {}
+  return false
+}
+let tallaPreguntada = ''
+async function pedirTallaSiFalta() {      // antes de la primera toma: si no hay talla, la pide UNA vez y la guarda en la HC
+  if (tallaPac || !paciente || tallaPreguntada === perfilKey()) return
+  tallaPreguntada = perfilKey()
+  const v = prompt('Falta la TALLA del paciente (en cm, ej. 165).\nSe guarda en la historia clínica y no se vuelve a pedir.\n(Si no la sabés, dejalo vacío y seguí.)')
+  const c = cmDe(v); if (!(c > 80 && c < 230)) return
+  tallaPac = c; const hc = await guardarTallaHC(c); tallaOrigen = hc ? 'historia clínica' : 'Test BiOLAB'
+  altPx = []; pintarTalla(); revisarSetup(); setEstado(`✓ Talla ${c} cm ${hc ? 'guardada en la historia clínica' : 'guardada'}.`, 'ok')
+}
+function medirTallaCamara() {     // estimación con la cámara calibrada y la distancia elegida: orientativa, verificá con tallímetro
+  const K = calCam(), d = parseFloat(String(setupToma.dist || '').replace(',', '.'))
+  if (!K) { alert('Primero calibrá esta cámara una vez (botón 📏 Calibrar distancia).'); return }
+  if (!(d > 0)) { alert('Elegí a qué distancia está el paciente (Distancia al paciente) y ponelo en esa marca del piso.'); return }
+  if (altPx.length < 5) { alert('Que el paciente esté parado derecho, de frente y entero en la imagen (de la cabeza a los pies), y probá de nuevo.'); return }
+  const m = altPx.slice().sort((a, b) => a - b)[Math.floor(altPx.length / 2)], t = Math.round(d * m / K * 100)
+  if (!(t > 80 && t < 230)) { alert('No salió una medida razonable: revisá la distancia elegida y que se vea entero.'); return }
+  if (!confirm(`Talla estimada por la cámara: ≈ ${t} cm (margen ± 3 cm).\n¿La guardo? Si tenés tallímetro, es mejor medirla y escribirla.`)) return
+  tallaPac = t; guardarTallaHC(t).then(hc => { tallaOrigen = 'cámara (estimada)' + (hc ? ' · en HC' : ''); pintarTalla() }); altPx = []
+}
 function pintarTalla() {
   const b = $('tallaBox'); if (!b) return
   b.innerHTML = `<label>Talla del paciente <input id="inTalla" type="number" inputmode="numeric" min="80" max="230" step="1" value="${tallaPac || ''}" placeholder="cm" style="width:80px"> cm</label>
-    <small style="color:#64748b">${tallaPac ? 'de ' + esc(tallaOrigen) + ' · si está mal, corregila' : 'no está cargada: escribila para estimar la distancia'}</small>`
+    <small style="color:${tallaPac ? '#64748b' : '#b45309'}">${tallaPac ? 'de ' + esc(tallaOrigen) + ' · si está mal, corregila' : '⚠️ no está en la HC: escribila (se guarda en la HC) o medila con la cámara'}</small>
+    <button class="b" type="button" onclick="medirTallaCamara()" style="padding:6px 10px;font-size:13px">📷 Medir talla con la cámara</button>`
   $('inTalla').onchange = (e) => { const v = cmDe(e.target.value); if (!(v > 80 && v < 230)) { e.target.style.outline = '2px solid #f87171'; return }
-    e.target.style.outline = ''; tallaPac = v; tallaOrigen = 'corregida en Test BiOLAB'
-    try { localStorage.setItem('testbiolab_talla_' + perfilKey(), String(v)) } catch (er) {}
+    e.target.style.outline = ''; tallaPac = v; tallaOrigen = 'cargada en Test BiOLAB'
+    guardarTallaHC(v).then(hc => { if (hc) { tallaOrigen = 'historia clínica'; pintarTalla() } })
     altPx = []; pintarTalla(); revisarSetup(); setEstado(`Talla: ${v} cm. Se usa para estimar la distancia de la cámara.`, 'ok') }
 }
 // ============================================================
 // DATOS BÁSICOS DEL PACIENTE (talla, peso, pierna dominante): se cargan UNA vez al elegir el paciente y quedan en
 // la historia clínica (PuntoBiO: altura y peso de la HC; SARKMED: ficha nutricional). Todos los tests los usan solos.
 // ============================================================
+let datosPac = {}, dolorAhora = null
+async function cargarDatosPac() {
+  datosPac = {}; if (!paciente || !paciente.dni) return datosPac
+  try { const { data } = await supabase.from('test_biolab_pacientes').select('*').eq('paciente_dni', normDni(paciente.dni)).maybeSingle(); if (data) datosPac = data } catch (e) {}
+  if (!datosPac.pierna_dominante) { try { const d = localStorage.getItem('testbiolab_dom_' + perfilKey()); if (d) datosPac.pierna_dominante = d } catch (e) {} }
+  return datosPac
+}
+const semanasDesde = (f) => { if (!f) return null; const d = (Date.now() - new Date(f + 'T12:00').getTime()) / 864e5; return d >= 0 ? Math.floor(d / 7) : null }
+function contextoToma() {
+  const dp = datosPac || {}, sem = semanasDesde(dp.evento_fecha)
+  return { lado_afectado: dp.lado_afectado || undefined, evento: dp.evento_tipo && dp.evento_tipo !== 'NINGUNO' ? dp.evento_tipo : undefined,
+    semanas_desde_evento: sem ?? undefined, diagnostico: dp.diagnostico || undefined, ortesis: dp.ortesis || undefined, dolor_actual: dolorAhora ?? undefined }
+}
+const lineaContexto = () => { const dp = datosPac || {}, sem = semanasDesde(dp.evento_fecha), L = { D: 'derecho', I: 'izquierdo', AMBOS: 'ambos lados' }
+  return [dp.diagnostico, dp.lado_afectado && dp.lado_afectado !== 'NINGUNO' ? 'lado afectado: ' + L[dp.lado_afectado] : null,
+    sem != null && dp.evento_tipo && dp.evento_tipo !== 'NINGUNO' ? `${sem} semana${sem === 1 ? '' : 's'} desde la ${dp.evento_tipo === 'CIRUGIA' ? 'cirugía' : dp.evento_tipo === 'LESION' ? 'lesión' : 'consulta'}` : null].filter(Boolean).join(' · ') }
+const htmlDolor = () => `<label>Dolor ahora <select class="selDolor"><option value="">—</option>${Array.from({ length: 11 }, (_, i) => `<option value="${i}" ${dolorAhora === i ? 'selected' : ''}>${i}</option>`).join('')}</select> /10</label>`
+document.addEventListener('change', (e) => { if (e.target.classList && e.target.classList.contains('selDolor')) dolorAhora = e.target.value === '' ? null : +e.target.value })
 async function buscarPeso() {
   try {
     if (paciente.origen === 'PUNTOBIO') { const { data } = await supabase.from('historias_clinicas').select('peso').eq('persona_id', paciente.id).is('fusionada_en', null).order('completado_en', { ascending: false }).limit(3)
@@ -6151,20 +6225,40 @@ async function buscarPeso() {
 async function pintarDatosBase() {
   const box = $('datosBox'); if (!box || !paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
   await buscarTalla(); const peso = paciente.demo ? null : await buscarPeso()
-  let dom = ''; try { dom = localStorage.getItem('testbiolab_dom_' + perfilKey()) || '' } catch (e) {}
-  const falta = !tallaPac || !peso
+  await cargarDatosPac(); const dp = datosPac, dom = dp.pierna_dominante || ''
+  const op = (v, cur, t) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${t}</option>`
+  const falta = !tallaPac || !peso || !dp.lado_afectado
   box.innerHTML = `<div class="ruta" style="margin-top:10px;${falta ? 'border-color:#fcd34d;background:#fffbeb' : ''}"><h3>📏 Datos del paciente <small>${falta ? 'cargalos una vez: los usan todos los tests' : 'se usan solos en todos los tests'}</small></h3>
     <div class="row" style="gap:12px;flex-wrap:wrap;align-items:center">
       <label>Talla <input id="dbTalla" type="number" inputmode="numeric" step="1" min="80" max="230" value="${tallaPac || ''}" placeholder="cm" style="width:84px"> cm</label>
       <label>Peso <input id="dbPeso" type="number" inputmode="decimal" step="0.1" min="15" max="250" value="${peso || ''}" placeholder="kg" style="width:84px"> kg</label>
-      <label>Pierna dominante <select id="dbDom"><option value="">—</option><option value="D" ${dom === 'D' ? 'selected' : ''}>Derecha</option><option value="I" ${dom === 'I' ? 'selected' : ''}>Izquierda</option></select></label>
-      <button class="b pri" id="dbGuardar">💾 Guardar en la historia clínica</button></div>
+      <label>Pierna dominante <select id="dbDom"><option value="">—</option>${op('D', dom, 'Derecha')}${op('I', dom, 'Izquierda')}</select></label>
+      <label>Mano dominante <select id="dbMano"><option value="">—</option>${op('D', dp.mano_dominante, 'Derecha')}${op('I', dp.mano_dominante, 'Izquierda')}</select></label></div>
+    <div class="row" style="gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <label>Lado afectado <select id="dbLado"><option value="">—</option>${op('D', dp.lado_afectado, 'Derecho')}${op('I', dp.lado_afectado, 'Izquierdo')}${op('AMBOS', dp.lado_afectado, 'Ambos')}${op('NINGUNO', dp.lado_afectado, 'Ninguno / central')}</select></label>
+      <label>Motivo <select id="dbEvento"><option value="">—</option>${op('CIRUGIA', dp.evento_tipo, 'Cirugía')}${op('LESION', dp.evento_tipo, 'Lesión')}${op('CRONICO', dp.evento_tipo, 'Cuadro crónico')}${op('NINGUNO', dp.evento_tipo, 'Ninguno (preventivo)')}</select></label>
+      <label>Fecha <input id="dbFecha" type="date" value="${dp.evento_fecha || ''}"></label>
+      <label style="flex:1;min-width:220px">Diagnóstico <input id="dbDx" type="text" value="${esc(dp.diagnostico || '')}" placeholder="ej. reconstrucción de LCA con HTR" style="width:100%"></label></div>
+    <div class="row" style="gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <label style="flex:1;min-width:200px">Médico derivante <input id="dbMed" type="text" value="${esc(dp.medico_derivante || '')}" placeholder="Dr./Dra." style="width:100%"></label>
+      <label style="flex:1;min-width:200px">Plantillas / ortesis / calzado <input id="dbOrt" type="text" value="${esc(dp.ortesis || '')}" placeholder="ej. plantillas Moplex, rodillera" style="width:100%"></label>
+      <label><input id="dbCons" type="checkbox" ${dp.consentimiento_imagenes ? 'checked' : ''}> Consentimiento de fotos y video${dp.consentimiento_fecha ? ` (${new Date(dp.consentimiento_fecha + 'T12:00').toLocaleDateString('es-AR')})` : ''}</label>
+      <button class="b pri" id="dbGuardar">💾 Guardar datos del paciente</button></div>
+    ${lineaContexto() ? `<div class="nota" style="margin:8px 0 0"><b>${esc(lineaContexto())}</b></div>` : ''}
     <div class="nota" id="dbNota" style="margin:6px 0 0">${tallaPac ? 'Talla de ' + esc(tallaOrigen) + '.' : ''} Medí la talla con tallímetro y el peso con balanza: es el dato que después usan las referencias y la distancia de la cámara.</div></div>`
   $('dbGuardar').onclick = async () => {
     const t = cmDe($('dbTalla').value), pk = parseFloat(String($('dbPeso').value).replace(',', '.')) || null, d = $('dbDom').value
     if (t && !(t > 80 && t < 230)) { alert('Revisá la talla (en cm).'); return }
     const nota = $('dbNota'), b = $('dbGuardar'); b.disabled = true; b.textContent = 'Guardando…'
     try { if (d) localStorage.setItem('testbiolab_dom_' + perfilKey(), d); if (t) localStorage.setItem('testbiolab_talla_' + perfilKey(), String(t)) } catch (e) {}
+    let okDatos = false
+    if (paciente.dni) { const cons = $('dbCons').checked
+      const fila = { paciente_dni: normDni(paciente.dni), origen: paciente.origen, paciente_id: String(paciente.id || ''),
+        pierna_dominante: d || null, mano_dominante: $('dbMano').value || null, lado_afectado: $('dbLado').value || null,
+        evento_tipo: $('dbEvento').value || null, evento_fecha: $('dbFecha').value || null, diagnostico: $('dbDx').value.trim() || null,
+        medico_derivante: $('dbMed').value.trim() || null, ortesis: $('dbOrt').value.trim() || null, consentimiento_imagenes: cons,
+        consentimiento_fecha: cons ? (datosPac.consentimiento_fecha || new Date().toISOString().slice(0, 10)) : null, actualizado_en: new Date().toISOString() }
+      try { const { error } = await supabase.from('test_biolab_pacientes').upsert(fila, { onConflict: 'paciente_dni' }); okDatos = !error; if (!error) datosPac = fila } catch (e) {} }
     let enHC = false, msg = ''
     try {
       if (paciente.origen === 'PUNTOBIO') {
@@ -6181,7 +6275,8 @@ async function pintarDatosBase() {
     } catch (e) { msg = e.message }
     b.disabled = false; b.textContent = '💾 Guardar en la historia clínica'
     if (t) { tallaPac = t; tallaOrigen = enHC ? 'historia clínica' : 'Test BiOLAB' }
-    nota.innerHTML = enHC ? '<span class="c-ok">✓ Guardado en la historia clínica. Ya no hace falta cargarlo de nuevo.</span>' : `<span class="c-warn">Quedó guardado en Test BiOLAB (${esc(msg)}). Cuando tenga historia clínica, volvé a tocar Guardar.</span>`
+    nota.innerHTML = (enHC ? '<span class="c-ok">✓ Talla y peso guardados en la historia clínica.</span>' : `<span class="c-warn">Talla y peso quedaron en Test BiOLAB (${esc(msg)}).</span>`)
+      + (okDatos ? ' <span class="c-ok">✓ Datos clínicos guardados: ya no hace falta cargarlos de nuevo.</span>' : paciente.dni ? ' <span class="c-warn">Los datos clínicos no se guardaron: falta correr tests_biolab_07_datos_paciente.sql.</span>' : '')
     try { sonidoCorrecto() } catch (e) {}
   }
 }
@@ -6250,6 +6345,7 @@ function ubicacionHTML(t) {
 function ubicacionCorta(t) { const u = ubicacionDe(t); return `📱 ${esc(u.ipad)}${u.paciente ? ' · 🧍 ' + esc(u.paciente) : ''}` }
 
 function renderTest(id, opts = {}) {
+  dolorAhora = null; if (paciente && paciente.dni && datosPac.paciente_dni !== normDni(paciente.dni)) cargarDatosPac()
   GIRO.h = []; GIRO.toma = {}
   if (nivelOn) alternarNivel()
   setTimeout(aplicarModoTV, 0)
@@ -6293,6 +6389,7 @@ function renderTest(id, opts = {}) {
         <div class="info">${actual.info}</div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
+          ${htmlDolor()}
           <label>Distancia al paciente <select id="selSetDist"><option value="">— elegir —</option>${SETUP_DIST.map(x => `<option value="${x}" ${setupToma.dist === x ? 'selected' : ''}>${x} m</option>`).join('')}</select></label>
           <label>Altura de la cámara <select id="selSetAlt"><option value="">— elegir —</option>${SETUP_ALT.map(x => `<option value="${x}" ${setupToma.alt === x ? 'selected' : ''}>${x} m</option>`).join('')}</select></label>
           <span id="tallaBox" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></span>
@@ -6385,14 +6482,14 @@ function renderTest(id, opts = {}) {
         : 'No se pudo prender la cámara o el detector: ' + (e && e.message ? e.message : e), 'err')
     }
   }
-  $('btnSolo').onclick = () => {
-    manosLibres = true; armadoFrames = 0; ultimoConsejo = ''; tUltimoConsejo = 0
+  $('btnSolo').onclick = async () => {
+    await pedirTallaSiFalta(); manosLibres = true; armadoFrames = 0; ultimoConsejo = ''; tUltimoConsejo = 0
     if (!['marcha4', 'marcha4r', 'sprint10', 'equilibrio', 'fsd', 'ohs', 'squatmono', 'puente', 'estocada', 'salto', 'hop', 'triplehop', 'crossover', 'alcance', 'sidehop', 'ckcuest', 'unipodal'].includes(id)) $('res').innerHTML = ''
     det.armado = true
     setEstado('Manos libres: ubicate en posición. Arranca solo cuando todo esté en verde.', 'warn')
     decir('Ubicate en posición')
   }
-  $('btnEmpezar').onclick = () => { manosLibres = false; if (det) det.armado = false; $('res').innerHTML = ['marcha4', 'marcha4r', 'sprint10', 'equilibrio', 'fsd', 'ohs', 'squatmono', 'puente', 'estocada', 'salto', 'hop', 'triplehop', 'crossover', 'alcance', 'sidehop', 'ckcuest', 'unipodal'].includes(id) ? $('res').innerHTML : ''; det.empezar() }
+  $('btnEmpezar').onclick = async () => { await pedirTallaSiFalta(); manosLibres = false; if (det) det.armado = false; $('res').innerHTML = ['marcha4', 'marcha4r', 'sprint10', 'equilibrio', 'fsd', 'ohs', 'squatmono', 'puente', 'estocada', 'salto', 'hop', 'triplehop', 'crossover', 'alcance', 'sidehop', 'ckcuest', 'unipodal'].includes(id) ? $('res').innerHTML : ''; det.empezar() }
   $('btnDetener').onclick = () => det.terminar && det.terminar()
   if ($('btnManual')) $('btnManual').onclick = () => det.manual()
   $('btnForzar').onclick = () => { $('res').innerHTML = ['marcha4', 'marcha4r', 'sprint10', 'equilibrio', 'fsd', 'ohs', 'squatmono', 'puente', 'estocada', 'salto', 'hop', 'triplehop', 'crossover', 'alcance', 'sidehop', 'ckcuest', 'unipodal'].includes(id) ? $('res').innerHTML : ''; det.empezar() }
