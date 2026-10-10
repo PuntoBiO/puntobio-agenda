@@ -692,6 +692,7 @@ async function llenarCamaras() {
     const actualId = stream && stream.getVideoTracks()[0].getSettings().deviceId
     sel.innerHTML = camaras.map((c, i) => `<option value="${i}">${c.label.replace(/</g, '')}</option>`).join('')
     const i = camaras.findIndex(c => c.deviceId === (camId || actualId)); if (i >= 0) sel.value = String(i)
+    try { revisarSetup() } catch (e) {}
   } catch (e) {}
 }
 
@@ -863,6 +864,11 @@ function chequearPosicion() {
   if (tipo === 'espalda') { oriOk = tronco && ancho > 0.45; items.push({ ok: oriOk, txt: 'De espaldas a la cámara' }); if (tronco && !oriOk) consejos.push('Que se ponga de espaldas al iPad') }
   zona = { x0: W * 0.33, x1: W * 0.67, y0: H * 0.02, y1: H * 0.98 }
   const giroBloquea = giro != null && GIRO.ult[tipo] > 15                 // más de 15° no deja empezar; de 10° a 15° solo avisa
+  if (cabeza && pies && (tipo === 'frente' || tipo === 'costado' || tipo === 'espalda')) { const a = altCuerpo(pose, H); if (a) { altPx.push(a); if (altPx.length > 20) altPx.shift() } }
+  const dEst = distEstimada()
+  if (dEst) { const elegida = setupToma.dist ? parseFloat(setupToma.dist.replace(',', '.')) : null, okD = !elegida || Math.abs(dEst - elegida) / elegida <= 0.12
+    items.push({ ok: okD, txt: `Distancia estimada ≈ ${dEst.toFixed(1).replace('.', ',')} m${elegida ? ` (elegida ${setupToma.dist} m)` : ''}` })
+    if (!okD) consejos.push(dEst > elegida ? `Está a ≈ ${dEst.toFixed(1).replace('.', ',')} m: acercá la cámara a ${setupToma.dist} m` : `Está a ≈ ${dEst.toFixed(1).replace('.', ',')} m: alejá la cámara a ${setupToma.dist} m`) }
   const ok = cabeza && pies && distOk && centOk && oriOk && !giroBloquea && items.every(i => i.txt !== 'Manos arriba en cuadro' || i.ok)
   return { ok, items, consejo: consejos[0] || '' }
 }
@@ -2970,6 +2976,9 @@ function renderPlanilla(spec, def) {
         const { data } = await supabase.from('tests_biolab').select('detalle, creado_en').eq('paciente_dni', normDni(paciente.dni)).order('creado_en', { ascending: false }).limit(30)
         for (const k of ['sexo', 'talla', 'peso']) { const r = (data || []).find(x => x.detalle && x.detalle.campos && x.detalle.campos[k] != null && x.detalle.campos[k] !== '—')
           if (r) poner(k, r.detalle.campos[k]) }
+        // talla y peso de los datos del paciente / historia clínica
+        await buscarTalla(); if (tallaPac) poner('talla', tallaPac)
+        const pk = await buscarPeso(); if (pk) poner('peso', pk)
       }
     } catch (e) {}
     recalcular()
@@ -4486,7 +4495,8 @@ async function guardarResultado() {
     }
     fila.detalle = { ...fila.detalle, fotos: rutas }
   }
-  if (Object.keys(GIRO.toma).length) fila.detalle = { ...fila.detalle, rotacion_camara_grados: { ...GIRO.toma } }   // alineación registrada en la toma
+  if (Object.keys(GIRO.toma).length) fila.detalle = { ...fila.detalle, rotacion_camara_grados: { ...GIRO.toma } }
+  if (document.querySelector('.layout > .stage')) fila.detalle = { ...fila.detalle, setup: { ...setupActual(), talla_cm: tallaPac || undefined, distancia_estimada_m: distEstimada() ? +distEstimada().toFixed(2) : undefined, rotacion_grados: Object.keys(GIRO.toma).length ? { ...GIRO.toma } : undefined } }   // alineación registrada en la toma
   const { error } = await supabase.from('tests_biolab').insert(fila)
   if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se guardó: ' + error.message, 'err'); return false }
   sinGuardar = false; borrarBorrador(actual.id); borrarProgreso(actual.id)
@@ -5896,7 +5906,7 @@ function renderCatalogo() {
         ${htmlPerfilesPrueba()}
       </div>
       ${paciente ? `<label style="margin-top:14px">Perfil del paciente <small style="font-weight:600;color:var(--dim)">(para sugerir solo los tests que puede hacer)</small></label>
-        <div class="perfil" id="perfilBox"></div>` : ''}
+        <div class="perfil" id="perfilBox"></div><div id="datosBox"></div>` : ''}
       ${paciente ? `<label style="margin-top:14px">¿Qué vamos a hacer?</label>
         <div id="bateriasBox"></div>
         <div id="rutaBox"></div>` : ''}
@@ -5909,6 +5919,7 @@ function renderCatalogo() {
     <div id="gridWrap" style="${paciente && !verTodos && !busqTest ? 'display:none' : ''}"></div>`
   pintarGrid()
   pintarPerfil()
+  pintarDatosBase()
   if (paciente && !(paciente.origen === 'PRUEBA' && !paciente.demo)) { try { const bk = localStorage.getItem(claveBat()); if (bk && !bateria) bateria = bk } catch (e) {} }
   if (!bateria && motivo) { const b = BATERIAS.find(x => x.motivo === motivo); bateria = b ? b.k : (ZONAS_BAT.includes(motivo) ? (modoRuta === 'express' ? 'ingreso' : 'full') : null) }
   pintarBaterias()
@@ -6052,6 +6063,161 @@ async function alternarNivel() {
     txt.innerHTML = 'Esta cámara no tiene sensor de nivel: alineá la línea vertical celeste con el marco de una puerta o una esquina, y la horizontal con el zócalo. Para más precisión, poné un nivel físico sobre la cámara.' } }, 1500)
 }
 window.alternarNivel = alternarNivel
+// ============================================================
+// CONDICIONES DE LA TOMA (para reproducir la medición): distancia cámara–paciente, altura de la cámara, qué cámara,
+// si estaba girada y el encuadre. Se guardan con cada toma; al reevaluar, el sistema muestra cómo se hizo la anterior
+// y avisa si algo cambió → menos error intra e interevaluador.
+// ============================================================
+const SETUP_DIST = ['1', '1,5', '2', '2,5', '3', '3,5', '4', '5'], SETUP_ALT = ['0,5', '0,8', '1', '1,2', '1,5']
+let setupToma = (() => { try { return JSON.parse(localStorage.getItem('testbiolab_setup') || '{}') } catch (e) { return {} } })()
+const guardarSetup = () => { try { localStorage.setItem('testbiolab_setup', JSON.stringify(setupToma)) } catch (e) {} }
+const nombreCam = () => { const c = (camaras || []).find(x => x.deviceId === camId); return c && c.label ? c.label.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)/i, '') : (ES_COMPU ? 'cámara por defecto' : facing === 'user' ? 'frontal' : 'trasera') }
+function setupActual() {
+  return { distancia_m: setupToma.dist || null, altura_camara_m: setupToma.alt || null, camara: nombreCam(), girada: camGiro || 0,
+    encuadre: distCam, orientacion: ES_COMPU ? 'webcam' : orientDe() === 'h' ? 'horizontal' : 'vertical' }
+}
+const txtSetup = (u) => [u.distancia_m ? `a ${u.distancia_m} m` : null, u.altura_camara_m ? `cámara a ${u.altura_camara_m} m de altura` : null, u.camara, u.girada ? `girada ${u.girada}°` : null, u.orientacion && u.orientacion !== 'webcam' ? u.orientacion : null].filter(Boolean).join(' · ')
+let setupAnterior = null
+// DISTANCIA ESTIMADA POR EL SISTEMA: con la talla del paciente y una calibración única de cada cámara.
+// Calibrar = una persona de talla conocida parada en una marca a distancia conocida (se hace una sola vez por cámara).
+// Después, distancia ≈ K × talla / altura del cuerpo en la imagen. Error esperable: ±10% aprox.
+let tallaPac = null, altPx = []
+const claveCal = () => 'testbiolab_cal_' + nombreCam() + '_' + (camGiro || 0)
+const calCam = () => { try { return +(localStorage.getItem(claveCal()) || 0) } catch (e) { return 0 } }
+function altCuerpo(P, H) {    // nariz → talones, en fracción de la altura de la imagen
+  const pies = [29, 30, 27, 28].filter(i => P[i] && P[i].v > 0.4); if (!P[0] || P[0].v < 0.4 || !pies.length) return null
+  return (Math.max(...pies.map(i => P[i].y)) - P[0].y) / H }
+function distEstimada() { const K = calCam(); if (!K || !tallaPac || altPx.length < 5) return null
+  const m = altPx.slice().sort((a, b) => a - b)[Math.floor(altPx.length / 2)]; return m > 0.05 ? K * (tallaPac / 100) / m : null }
+async function calibrarDistancia() {
+  const t = prompt('Calibrar esta cámara (una sola vez):\n1) Una persona parada derecha en una marca a distancia medida con cinta.\n2) Escribí su TALLA en cm:'); if (!t) return
+  const d = prompt('¿A cuántos metros está de la cámara? (ej. 3 o 2,5)'); if (!d) return
+  const talla = parseFloat(String(t).replace(',', '.')), dist = parseFloat(String(d).replace(',', '.'))
+  if (!(talla > 80 && talla < 230 && dist > 0.5 && dist < 10)) { alert('Revisá los números.'); return }
+  altPx = []; setEstado('Calibrando: que la persona se quede quieta y derecha 2 segundos…', 'warn')
+  await new Promise(r => setTimeout(r, 2200))
+  if (altPx.length < 5) { setEstado('No se vio bien a la persona entera: probá de nuevo.', 'err'); return }
+  const m = altPx.slice().sort((a, b) => a - b)[Math.floor(altPx.length / 2)]
+  try { localStorage.setItem(claveCal(), String(dist * m / (talla / 100))) } catch (e) {}
+  setEstado(`✓ Cámara calibrada (${nombreCam()}). Desde ahora el sistema estima la distancia con la talla de cada paciente.`, 'ok'); try { sonidoCorrecto() } catch (e) {}
+}
+window.calibrarDistancia = calibrarDistancia
+// TALLA del paciente: 1) la que se corrigió a mano en Test BiOLAB, 2) la de la historia clínica (PuntoBiO: altura;
+// SARKMED: talla de la ficha nutricional), 3) la última Antropometría. Siempre se puede corregir.
+let tallaOrigen = ''
+const cmDe = (x) => { const n = parseFloat(String(x ?? '').replace(',', '.')); return !n ? null : n < 3 ? Math.round(n * 100) : Math.round(n) }
+async function buscarTalla() {
+  tallaPac = null; tallaOrigen = ''
+  if (!paciente) return
+  try { const man = localStorage.getItem('testbiolab_talla_' + perfilKey()); if (man) { tallaPac = +man; tallaOrigen = 'corregida en Test BiOLAB'; return } } catch (e) {}
+  if (paciente.talla) { tallaPac = +paciente.talla; tallaOrigen = 'perfil'; return }
+  if (paciente.origen === 'PRUEBA') return
+  try {
+    if (paciente.origen === 'PUNTOBIO' && paciente.id) {
+      const { data } = await supabase.from('historias_clinicas').select('altura, completado_en').eq('persona_id', paciente.id).is('fusionada_en', null).order('completado_en', { ascending: false }).limit(5)
+      const r = (data || []).find(x => cmDe(x.altura) > 80); if (r) { tallaPac = cmDe(r.altura); tallaOrigen = 'historia clínica'; return }
+    }
+    if (paciente.origen === 'SARKMED' && paciente.id) {
+      const { data: hcs } = await supabase.from('hc_sarkmed').select('id').eq('paciente_id', paciente.id).order('id', { ascending: false }).limit(3)
+      for (const h of (hcs || [])) { const { data: n } = await supabase.from('hc_sarkmed_nutricion').select('talla_m').eq('hc_id', h.id).maybeSingle()
+        if (n && cmDe(n.talla_m) > 80) { tallaPac = cmDe(n.talla_m); tallaOrigen = 'historia clínica SARKMED'; return } }
+    }
+  } catch (e) {}
+  try { if (paciente.dni) { const { data: tt } = await supabase.from('tests_biolab').select('detalle').eq('paciente_dni', normDni(paciente.dni)).order('creado_en', { ascending: false }).limit(30)
+    const r = (tt || []).find(x => x.detalle && x.detalle.campos && cmDe(x.detalle.campos.talla) > 80); if (r) { tallaPac = cmDe(r.detalle.campos.talla); tallaOrigen = 'Antropometría' } } } catch (e) {}
+}
+function pintarTalla() {
+  const b = $('tallaBox'); if (!b) return
+  b.innerHTML = `<label>Talla del paciente <input id="inTalla" type="number" inputmode="numeric" min="80" max="230" step="1" value="${tallaPac || ''}" placeholder="cm" style="width:80px"> cm</label>
+    <small style="color:#64748b">${tallaPac ? 'de ' + esc(tallaOrigen) + ' · si está mal, corregila' : 'no está cargada: escribila para estimar la distancia'}</small>`
+  $('inTalla').onchange = (e) => { const v = cmDe(e.target.value); if (!(v > 80 && v < 230)) { e.target.style.outline = '2px solid #f87171'; return }
+    e.target.style.outline = ''; tallaPac = v; tallaOrigen = 'corregida en Test BiOLAB'
+    try { localStorage.setItem('testbiolab_talla_' + perfilKey(), String(v)) } catch (er) {}
+    altPx = []; pintarTalla(); revisarSetup(); setEstado(`Talla: ${v} cm. Se usa para estimar la distancia de la cámara.`, 'ok') }
+}
+// ============================================================
+// DATOS BÁSICOS DEL PACIENTE (talla, peso, pierna dominante): se cargan UNA vez al elegir el paciente y quedan en
+// la historia clínica (PuntoBiO: altura y peso de la HC; SARKMED: ficha nutricional). Todos los tests los usan solos.
+// ============================================================
+async function buscarPeso() {
+  try {
+    if (paciente.origen === 'PUNTOBIO') { const { data } = await supabase.from('historias_clinicas').select('peso').eq('persona_id', paciente.id).is('fusionada_en', null).order('completado_en', { ascending: false }).limit(3)
+      const r = (data || []).find(x => +String(x.peso || '').replace(',', '.') > 0); if (r) return +String(r.peso).replace(',', '.') }
+    if (paciente.origen === 'SARKMED') { const { data: hcs } = await supabase.from('hc_sarkmed').select('id').eq('paciente_id', paciente.id).order('id', { ascending: false }).limit(1)
+      if (hcs && hcs[0]) { const { data: n } = await supabase.from('hc_sarkmed_nutricion').select('peso_kg').eq('hc_id', hcs[0].id).maybeSingle(); if (n && +n.peso_kg) return +n.peso_kg } }
+  } catch (e) {}
+  return null
+}
+async function pintarDatosBase() {
+  const box = $('datosBox'); if (!box || !paciente || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
+  await buscarTalla(); const peso = paciente.demo ? null : await buscarPeso()
+  let dom = ''; try { dom = localStorage.getItem('testbiolab_dom_' + perfilKey()) || '' } catch (e) {}
+  const falta = !tallaPac || !peso
+  box.innerHTML = `<div class="ruta" style="margin-top:10px;${falta ? 'border-color:#fcd34d;background:#fffbeb' : ''}"><h3>📏 Datos del paciente <small>${falta ? 'cargalos una vez: los usan todos los tests' : 'se usan solos en todos los tests'}</small></h3>
+    <div class="row" style="gap:12px;flex-wrap:wrap;align-items:center">
+      <label>Talla <input id="dbTalla" type="number" inputmode="numeric" step="1" min="80" max="230" value="${tallaPac || ''}" placeholder="cm" style="width:84px"> cm</label>
+      <label>Peso <input id="dbPeso" type="number" inputmode="decimal" step="0.1" min="15" max="250" value="${peso || ''}" placeholder="kg" style="width:84px"> kg</label>
+      <label>Pierna dominante <select id="dbDom"><option value="">—</option><option value="D" ${dom === 'D' ? 'selected' : ''}>Derecha</option><option value="I" ${dom === 'I' ? 'selected' : ''}>Izquierda</option></select></label>
+      <button class="b pri" id="dbGuardar">💾 Guardar en la historia clínica</button></div>
+    <div class="nota" id="dbNota" style="margin:6px 0 0">${tallaPac ? 'Talla de ' + esc(tallaOrigen) + '.' : ''} Medí la talla con tallímetro y el peso con balanza: es el dato que después usan las referencias y la distancia de la cámara.</div></div>`
+  $('dbGuardar').onclick = async () => {
+    const t = cmDe($('dbTalla').value), pk = parseFloat(String($('dbPeso').value).replace(',', '.')) || null, d = $('dbDom').value
+    if (t && !(t > 80 && t < 230)) { alert('Revisá la talla (en cm).'); return }
+    const nota = $('dbNota'), b = $('dbGuardar'); b.disabled = true; b.textContent = 'Guardando…'
+    try { if (d) localStorage.setItem('testbiolab_dom_' + perfilKey(), d); if (t) localStorage.setItem('testbiolab_talla_' + perfilKey(), String(t)) } catch (e) {}
+    let enHC = false, msg = ''
+    try {
+      if (paciente.origen === 'PUNTOBIO') {
+        const { data } = await supabase.from('historias_clinicas').select('id').eq('persona_id', paciente.id).is('fusionada_en', null).order('completado_en', { ascending: false }).limit(1)
+        if (data && data[0]) { const upd = {}; if (t) upd.altura = t; if (pk) upd.peso = pk
+          const { error } = await supabase.from('historias_clinicas').update(upd).eq('id', data[0].id); enHC = !error; if (error) msg = error.message }
+        else msg = 'el paciente todavía no tiene historia clínica'
+      } else if (paciente.origen === 'SARKMED') {
+        const { data: hcs } = await supabase.from('hc_sarkmed').select('id').eq('paciente_id', paciente.id).order('id', { ascending: false }).limit(1)
+        if (hcs && hcs[0]) { const fila = { hc_id: hcs[0].id }; if (t) fila.talla_m = +(t / 100).toFixed(2); if (pk) fila.peso_kg = pk
+          const { error } = await supabase.from('hc_sarkmed_nutricion').upsert(fila, { onConflict: 'hc_id' }); enHC = !error; if (error) msg = error.message }
+        else msg = 'el paciente todavía no tiene ficha SARKMED'
+      } else msg = 'perfil de prueba'
+    } catch (e) { msg = e.message }
+    b.disabled = false; b.textContent = '💾 Guardar en la historia clínica'
+    if (t) { tallaPac = t; tallaOrigen = enHC ? 'historia clínica' : 'Test BiOLAB' }
+    nota.innerHTML = enHC ? '<span class="c-ok">✓ Guardado en la historia clínica. Ya no hace falta cargarlo de nuevo.</span>' : `<span class="c-warn">Quedó guardado en Test BiOLAB (${esc(msg)}). Cuando tenga historia clínica, volvé a tocar Guardar.</span>`
+    try { sonidoCorrecto() } catch (e) {}
+  }
+}
+async function cargarSetupAnterior(testId) {
+  setupAnterior = null; const box = $('setupPrev'); if (box) box.innerHTML = ''
+  altPx = []
+  await buscarTalla(); pintarTalla()
+  if (!paciente || !paciente.dni || (paciente.origen === 'PRUEBA' && !paciente.demo)) return
+  try {
+    const { data } = await supabase.from('tests_biolab').select('detalle, creado_en').eq('paciente_dni', normDni(paciente.dni)).eq('test', testId).order('creado_en', { ascending: false }).limit(10)
+    const r = (data || []).find(x => x.detalle && x.detalle.setup); if (!r || !$('setupPrev')) return
+    setupAnterior = r.detalle.setup
+    const f = new Date(r.creado_en).toLocaleDateString('es-AR')
+    $('setupPrev').innerHTML = `<div class="estado ok" style="margin:6px 0"><b>📏 La toma anterior (${f}) se hizo:</b> ${esc(txtSetup(setupAnterior))}.
+      <button class="b" id="btnMismoSetup" style="margin-left:6px;padding:6px 10px">Usar las mismas condiciones</button></div>`
+    $('btnMismoSetup').onclick = () => {
+      if (setupAnterior.distancia_m) setupToma.dist = setupAnterior.distancia_m
+      if (setupAnterior.altura_camara_m) setupToma.alt = setupAnterior.altura_camara_m
+      guardarSetup(); if ($('selSetDist')) $('selSetDist').value = setupToma.dist || ''; if ($('selSetAlt')) $('selSetAlt').value = setupToma.alt || ''
+      if (setupAnterior.girada != null && $('selGiro')) { $('selGiro').value = String(setupAnterior.girada); $('selGiro').onchange({ target: $('selGiro') }) }
+      if (setupAnterior.encuadre && $('selDist')) { $('selDist').value = setupAnterior.encuadre; $('selDist').onchange({ target: $('selDist') }) }
+      revisarSetup(); setEstado(`Mismas condiciones que la toma anterior: ${txtSetup(setupAnterior)}. Medí la distancia con cinta desde la cámara hasta la marca de los pies.`, 'ok') }
+    revisarSetup()
+  } catch (e) {}
+}
+function revisarSetup() {
+  const w = $('setupAviso'); if (!w) return
+  const extra = !calCam() ? ' · <span style="color:#64748b">Calibrá la cámara una vez para que el sistema estime la distancia solo.</span>' : !tallaPac ? ' · <span style="color:#64748b">Sin talla del paciente: escribila arriba para estimar la distancia.</span>' : ''
+  if (!setupAnterior) { w.innerHTML = (setupToma.dist ? '' : '<span style="color:#b45309">Elegí la distancia de la toma: queda guardada para reevaluar igual.</span>') + extra; return }
+  const a = setupAnterior, u = setupActual(), dif = []
+  if (a.distancia_m && u.distancia_m && a.distancia_m !== u.distancia_m) dif.push(`distancia (antes ${a.distancia_m} m, ahora ${u.distancia_m} m)`)
+  if (a.altura_camara_m && u.altura_camara_m && a.altura_camara_m !== u.altura_camara_m) dif.push(`altura de la cámara (antes ${a.altura_camara_m} m)`)
+  if (a.camara && a.camara !== u.camara) dif.push(`cámara (antes ${a.camara})`)
+  if ((a.girada || 0) !== (u.girada || 0)) dif.push('cámara girada')
+  w.innerHTML = (dif.length ? `<span style="color:#b91c1c">⚠️ Distinto a la toma anterior: ${esc(dif.join(', '))}. Para comparar bien, conviene igualarlo.</span>` : '<span style="color:#15803d">✓ Mismas condiciones que la toma anterior.</span>') + extra
+}
 // DISTANCIA de la cámara: Cerca (el paciente llena casi toda la imagen) · Normal · Lejos (el paciente se ve más chico)
 let distCam = (() => { try { return localStorage.getItem('testbiolab_dist') || 'normal' } catch (e) { return 'normal' } })()
 const RANGO_DIST = { cerca: { frente: [0.62, 0.97], costado: [0.40, 0.97] }, normal: { frente: [0.55, 0.88], costado: [0.30, 0.85] }, lejos: { frente: [0.35, 0.80], costado: [0.20, 0.75] } }
@@ -6127,6 +6293,11 @@ function renderTest(id, opts = {}) {
         <div class="info">${actual.info}</div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
+          <label>Distancia al paciente <select id="selSetDist"><option value="">— elegir —</option>${SETUP_DIST.map(x => `<option value="${x}" ${setupToma.dist === x ? 'selected' : ''}>${x} m</option>`).join('')}</select></label>
+          <label>Altura de la cámara <select id="selSetAlt"><option value="">— elegir —</option>${SETUP_ALT.map(x => `<option value="${x}" ${setupToma.alt === x ? 'selected' : ''}>${x} m</option>`).join('')}</select></label>
+          <span id="tallaBox" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></span>
+          <button class="b" type="button" onclick="calibrarDistancia()" style="padding:6px 10px;font-size:13px">📏 Calibrar distancia de esta cámara</button>
+          <div id="setupAviso" style="flex-basis:100%;font-size:13px"></div><div id="setupPrev" style="flex-basis:100%"></div>
           <label>Cámara girada <select id="selGiro"><option value="0" ${camGiro === 0 ? 'selected' : ''}>No (normal)</option><option value="90" ${camGiro === 90 ? 'selected' : ''}>90° → (girada a la derecha)</option><option value="270" ${camGiro === 270 ? 'selected' : ''}>90° ← (girada a la izquierda)</option></select></label>
           <label>Distancia <select id="selDist"><option value="cerca" ${distCam === 'cerca' ? 'selected' : ''}>Cerca (el paciente llena la imagen)</option><option value="normal" ${distCam === 'normal' ? 'selected' : ''}>Normal</option><option value="lejos" ${distCam === 'lejos' ? 'selected' : ''}>Lejos (se ve más chico)</option></select></label>
           ${ES_COMPU ? '<label style="color:#64748b">Orientación: la cámara de la compu filma siempre apaisada (horizontal). Lo que cambia es dónde ponés la cámara, no la imagen.</label>' : ''}<label style="${ES_COMPU ? 'display:none' : ''}">Orientación <select id="selOrient"><option value="h" ${orientDe() === 'h' ? 'selected' : ''}>Horizontal (TV)</option><option value="v" ${orientDe() === 'v' ? 'selected' : ''}>Vertical</option></select></label>
@@ -6186,6 +6357,9 @@ function renderTest(id, opts = {}) {
     try { localStorage.setItem('testbiolab_cam', camId) } catch (er) {}
     if (stream) await prenderCamara()
   }
+  if ($('selSetDist')) $('selSetDist').onchange = (e) => { setupToma.dist = e.target.value || null; guardarSetup(); revisarSetup() }
+  if ($('selSetAlt')) $('selSetAlt').onchange = (e) => { setupToma.alt = e.target.value || null; guardarSetup(); revisarSetup() }
+  setTimeout(() => cargarSetupAnterior(id), 0)
   if ($('selGiro')) $('selGiro').onchange = async (e) => { camGiro = +e.target.value; try { localStorage.setItem('testbiolab_giro', camGiro) } catch (er) {}
     setEstado(camGiro ? 'Cámara girada: la imagen se endereza sola. Si el paciente se ve cabeza abajo, elegí el otro sentido.' : 'Cámara normal.', 'ok')
     if (stream) await prenderCamara() }
