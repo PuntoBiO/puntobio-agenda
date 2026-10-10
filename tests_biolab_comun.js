@@ -35,6 +35,13 @@ export const EVO = {
   unipodal:   { titulo: 'Apoyo unipodal (peor lado)', unidad: 's', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 10, txt: '10 s' }] },
   alcance:    { titulo: 'Alcance funcional', unidad: 'cm', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [{ y: 15, txt: '15 cm · riesgo alto' }, { y: 25, txt: '25 cm' }] },
   seismin:    { titulo: '6 minutos de marcha', unidad: 'm', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, bandas: [] },
+  faam:       { titulo: 'FAAM (pie y tobillo, vida diaria)', unidad: '%', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 100, bandas: [] },
+  ndi:        { titulo: 'NDI (cervical)', unidad: '%', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 100, bandas: [{ y: 30, txt: '30% · moderada' }] },
+  tsk11:      { titulo: 'Tampa (miedo al movimiento)', unidad: '/44', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 11, max: 44, bandas: [] },
+  cait:       { titulo: 'CAIT (peor tobillo)', unidad: '/30', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 30, bandas: [{ y: 27, txt: '27' }] },
+  pfdi20:     { titulo: 'PFDI-20 (suelo pélvico)', unidad: '/300', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 300, bandas: [] },
+  lefs:       { titulo: 'LEFS (miembro inferior)', unidad: '/80', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 80, bandas: [] },
+  aclrsi:     { titulo: 'ACL-RSI (vuelta al deporte)', unidad: '/100', mejor: 'mas', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 100, bandas: [{ y: 56, txt: '56' }] },
   rmdq:       { titulo: 'Roland-Morris (lumbar)', unidad: '/24', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 24, bandas: [{ y: 5, txt: '5' }, { y: 15, txt: '15 · alta' }] },
   spadi:      { titulo: 'SPADI (hombro)', unidad: '/100', mejor: 'menos', dec: 0, val: r => r.valor != null ? +r.valor : null, min: 0, max: 100, bandas: [] },
   psfs:       { titulo: 'Escala funcional del paciente (PSFS)', unidad: '/10', mejor: 'mas', dec: 1, val: r => r.valor != null ? +r.valor : null, bandas: [] },
@@ -113,6 +120,13 @@ export const INFO = {
   unipodal:   { ico: '🦩', nombre: 'Apoyo unipodal', pac: 'Equilibrio en una pierna', pacUnidad: 'segundos' },
   alcance:    { ico: '🫳', nombre: 'Alcance funcional', pac: 'Cuánto llegás estirándote', pacUnidad: 'cm' },
   seismin:    { ico: '🚶‍♀️', nombre: '6 minutos de marcha', pac: 'Lo que caminás en 6 minutos', pacUnidad: 'metros' },
+  faam:       { ico: '📋', nombre: 'FAAM (pie y tobillo)', pac: 'Cómo funciona tu pie y tobillo', pacUnidad: '% (más es mejor)' },
+  ndi:        { ico: '📋', nombre: 'Índice de discapacidad cervical (NDI)', pac: 'Cuánto te limita el dolor de cuello', pacUnidad: '% (menos es mejor)' },
+  tsk11:      { ico: '📋', nombre: 'Escala Tampa de kinesiofobia', pac: 'Tu miedo a moverte o lesionarte', pacUnidad: 'de 44 (menos es mejor)' },
+  cait:       { ico: '📋', nombre: 'Inestabilidad de tobillo (CAIT)', pac: 'La estabilidad de tu tobillo', pacUnidad: 'de 30 (más es mejor)' },
+  pfdi20:     { ico: '📋', nombre: 'PFDI-20 (suelo pélvico)', pac: 'Tus síntomas de suelo pélvico', pacUnidad: 'de 300 (menos es mejor)' },
+  lefs:       { ico: '📋', nombre: 'Escala funcional de la extremidad inferior (LEFS)', pac: 'Cómo usás la pierna en tu día a día', pacUnidad: 'de 80 (más es mejor)' },
+  aclrsi:     { ico: '📋', nombre: 'ACL-RSI', pac: 'Qué tan listo/a te sentís para volver al deporte', pacUnidad: 'de 100 (más es mejor)' },
   rmdq:       { ico: '📋', nombre: 'Cuestionario Roland-Morris', pac: 'Cuánto te limita el dolor de espalda', pacUnidad: 'de 24 (menos es mejor)' },
   spadi:      { ico: '📋', nombre: 'SPADI (hombro)', pac: 'Dolor y limitación del hombro', pacUnidad: 'de 100 (menos es mejor)' },
   psfs:       { ico: '🗣️', nombre: 'Escala funcional específica del paciente (PSFS)', pac: 'Qué tan bien podés hacer tus actividades', pacUnidad: 'de 10' },
@@ -138,7 +152,7 @@ export const INFO = {
   dnf:        { ico: '⏱️', nombre: 'Flexores profundos de cuello', pac: 'Resistencia de tu cuello', pacUnidad: 'segundos' },
   estocada:   { ico: '🤺', nombre: 'Estocada con cambio', pac: 'Estocadas', pacUnidad: 'ajustes a trabajar' },
 }
-export const ORDEN = ['psfs', 'rmdq', 'spadi', 'osteo', 'pelvico', 'postural', 'adams', 'antropo', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin', 'escalon']
+export const ORDEN = ['psfs', 'rmdq', 'spadi', 'lefs', 'aclrsi', 'pfdi20', 'ndi', 'tsk11', 'cait', 'faam', 'osteo', 'pelvico', 'postural', 'adams', 'antropo', 'ohs', 'rockback', 'rom', 'thomas', 'hallux', 'rotoracica', 'wallangel', 'shouldermob', 'squatmono', 'fsd', 'puente', 'estocada', 'cva', 'rotcerv', 'dnf', 'sfma', 'tronco', 'ybalance', 'salto', 'hop', 'triplehop', 'pushup', 'pullup', 'sidehop', 'crossover', 'sprint10', 'ckcuest', 'aslr', 'equilibrio', 'unipodal', 'alcance', 'silla5', 'silla30', 'tug', 'marcha4', 'marcha4r', 'step2', 'seismin', 'escalon']
 
 // Lectura clínica (solo para el profesional; al paciente no se le muestra)
 export function interpretar(test, v) {
