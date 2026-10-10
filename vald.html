@@ -194,9 +194,6 @@
     para el profe y vos firmás y guardás en la HC.
   </div>
 
-  <!-- 8/10/26: bandeja de informes que mandaron a firma (solo la ve quien firma) -->
-  <div class="card" id="pendientesFirma" style="display:none"></div>
-
   <div class="card">
     <p class="card-title">1 · Buscar paciente</p>
     <div class="search-row">
@@ -984,7 +981,6 @@ function resetEvaluacion() {
     if (pq) { pq.checked = false; ['f_qx_tipo','f_qx_detalle','f_qx_lado','f_qx_fecha'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; }); togglePostqx(); }
   } catch (_) {}
   ultimaEvaluacion = null;
-  pendienteActual = null;
   protocoloItems = []; tildados = {}; noRealizado = {}; protocoloAutoGuardado = false; valoresManual = {}; calcData = {};
   const pp = document.getElementById('protocoloPanel');
   if (pp) { pp.style.display = 'none'; pp.innerHTML = ''; }
@@ -2653,7 +2649,8 @@ async function generar() {
     const col = ultimaEvaluacion.colored;
     const sinExcluidos = {
       fuerza: (col.fuerza || []).filter(x => !x.excluido),
-      forceDecks: (col.forceDecks || []).filter(x => !x.excluido),
+      // 09/10/2026: la referencia de élite viaja solo si la población clasificada AHORA es A (si se trajo VALD con otra clasificación, no se cuela)
+      forceDecks: (col.forceDecks || []).filter(x => !x.excluido && (poblacionEsPerformance() || !/vs norma de élite/i.test(x.nom || ''))),
       movilidad: (col.movilidad || []).filter(x => !x.excluido),
       postura: col.postura,
     };
@@ -2988,7 +2985,6 @@ function mostrarBorradores(informe, nota) {
   document.getElementById('valdInformeTxt').value = informe || '';
   document.getElementById('valdNotaTxt').value = nota || '';
   controlNumeros(informe, nota);
-  if (!esSark()) ajustarBotonFirma();
 }
 
 // CONTROL DE NÚMEROS: todo número del texto tiene que existir en lo que se le mandó a la IA.
@@ -3100,8 +3096,7 @@ async function guardarInformeYNota() {
   if (!usuarioActual) await detectarUsuario();
   if (!usuarioActual) { toast('No detectamos tu usuario. Iniciá sesión para guardar.'); return; }
   const firma = await firmaDelUsuario();
-  // 8/10/26: quien no tiene firma NO guarda en la HC: manda el informe a firma.
-  if (!firma) { toast('Este informe no lo firmás vos: tocá «📨 Enviar a firma».'); ajustarBotonFirma(); return; }
+  if (!firma && !window.confirm('No hay firma cargada para ' + (usuarioActual.email || 'tu usuario') + ' en biolab_firmas. ¿Guardar el informe sin firma?')) return;
   const btn = document.getElementById('btnGuardarHC');
   btn.disabled = true; btn.textContent = 'Guardando…';
   try {
@@ -3154,15 +3149,6 @@ async function guardarInformeYNota() {
       }
     } catch (_) { /* sin tabla de evolución: no pasa nada, el informe ya quedó guardado */ }
     btn.textContent = '✅ Guardado en la HC';
-    if (pendienteActual) {
-      try {
-        await sb.from('biolab_informes_pendientes')
-          .update({ estado: 'firmado', resuelto_en: new Date().toISOString(), resuelto_por_email: usuarioActual.email })
-          .eq('id', pendienteActual.id);
-      } catch (_) { /* el informe ya quedó en la HC; la bandeja se puede limpiar a mano */ }
-      pendienteActual = null;
-      cargarPendientesFirma();
-    }
     const que = (informe && nota) ? 'Informe y nota guardados' : (informe ? 'Informe guardado' : 'Nota guardada');
     toast(que + ' en la HC del paciente.');
   } catch (e) {
@@ -3580,126 +3566,7 @@ async function detectarUsuario() {
       : { id: null, nombre: user.email, email: user.email };
   } catch (e) { console.warn('No se pudo detectar usuario:', e.message); }
 }
-// ═══════════ INFORMES PENDIENTES DE FIRMA (8/10/26) ═══════════
-// Quien evalúa sin firma (Bruno, Santi) procesa todo y manda el informe a la bandeja.
-// Quien firma (fila activa en biolab_firmas) lo abre, lo lee, lo corrige y lo firma:
-// recién ahí va a la HC, por el mismo camino de siempre (guardarInformeYNota).
-let pendienteActual = null;
-
-async function ajustarBotonFirma() {
-  const btn = document.getElementById('btnGuardarHC');
-  if (!btn) return;
-  if (!usuarioActual) await detectarUsuario();
-  const f = await firmaDelUsuario();
-  if (f) return;   // firma: queda «Firmar y guardar en la HC»
-  btn.id = 'btnEnviarFirma';
-  btn.textContent = '📨 Enviar a firma';
-  btn.onclick = enviarAFirma;
-  const hint = btn.parentElement && btn.parentElement.querySelector('.hint');
-  if (hint) hint.innerHTML = 'Revisá el informe y las consideraciones y mandalos. <b>No se guardan en la HC hasta que se firmen.</b>';
-}
-
-async function enviarAFirma() {
-  if (!pacienteSel || esSark()) { toast('Seleccioná un paciente de PuntoBiO.'); return; }
-  const informe = ((document.getElementById('valdInformeTxt') || {}).value || '').trim();
-  const nota = ((document.getElementById('valdNotaTxt') || {}).value || '').trim();
-  if (!informe && !nota) { toast('No hay nada para enviar.'); return; }
-  if (!usuarioActual) await detectarUsuario();
-  if (!usuarioActual || !usuarioActual.email) { toast('No detectamos tu usuario. Iniciá sesión.'); return; }
-  const btn = document.getElementById('btnEnviarFirma');
-  if (btn) { btn.disabled = true; btn.textContent = 'Enviando…'; }
-  try {
-    const gen = (ultimaGeneracion && ultimaGeneracion.persona_id === String(pacienteSel.id)) ? ultimaGeneracion : null;
-    const { error } = await sb.from('biolab_informes_pendientes').insert({
-      persona_id: pacienteSel.id,
-      paciente_nombre: pacienteSel.nombre || null,
-      informe, nota,
-      fecha_vald: (ultimaEvaluacion && ultimaEvaluacion.datos && ultimaEvaluacion.datos.fechaEvaluacion) || null,
-      generacion: gen,
-      cuerpo_ia: ultimoCuerpoIA || null,
-      texto_docs: ultimoTextoDocs || null,
-      autor_id: usuarioActual.id,
-      autor_nombre: usuarioActual.nombre,
-      autor_email: usuarioActual.email,
-      estado: 'pendiente'
-    });
-    if (error) throw error;
-    if (btn) btn.textContent = '✅ Enviado a firma';
-    toast('Informe enviado a firma. Cuando se firme queda en la HC del paciente.');
-  } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = '📨 Enviar a firma'; }
-    toast('No se pudo enviar: ' + (e.message || e));
-  }
-}
-
-async function cargarPendientesFirma() {
-  const box = document.getElementById('pendientesFirma');
-  if (!box) return;
-  const f = await firmaDelUsuario();
-  if (!f) { box.style.display = 'none'; return; }   // la bandeja es solo para quien firma
-  try {
-    const { data, error } = await sb.from('biolab_informes_pendientes')
-      .select('id, persona_id, paciente_nombre, autor_nombre, fecha_vald, creado_en')
-      .eq('estado', 'pendiente').order('creado_en', { ascending: true });
-    if (error) throw error;
-    if (!data || !data.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
-    const fch = (s) => { try { return new Date(s).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; } };
-    box.innerHTML = '<p class="card-title">📨 Informes para firmar (' + data.length + ')</p>' +
-      data.map(r => '<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-top:1px solid var(--border); flex-wrap:wrap;">' +
-        '<div style="flex:1; min-width:200px;"><b>' + escapeHtml(r.paciente_nombre || ('#' + r.persona_id)) + '</b>' +
-        '<div class="hint" style="margin:0;">Lo procesó ' + escapeHtml(r.autor_nombre || '—') + ' · ' + fch(r.creado_en) +
-        (r.fecha_vald ? ' · evaluación VALD ' + escapeHtml(r.fecha_vald) : '') + '</div></div>' +
-        '<button class="btn" onclick="abrirPendiente(' + r.id + ')">Revisar y firmar</button>' +
-        '<button class="btn ghost" onclick="descartarPendiente(' + r.id + ')">Descartar</button></div>').join('');
-    box.style.display = 'block';
-  } catch (e) {
-    box.style.display = 'block';
-    box.innerHTML = '<div class="hint">⚠️ No pude leer los informes para firmar: ' + escapeHtml(e.message || e) + '</div>';
-  }
-}
-
-async function abrirPendiente(id) {
-  try {
-    const { data: r, error } = await sb.from('biolab_informes_pendientes').select('*').eq('id', id).maybeSingle();
-    if (error) throw error;
-    if (!r || r.estado !== 'pendiente') { toast('Ese informe ya no está pendiente.'); cargarPendientesFirma(); return; }
-    const { data: p, error: e2 } = await sb.from('personas')
-      .select('id, dni, nombre, fecha_nacimiento, vald_profile_id').eq('id', r.persona_id).maybeSingle();
-    if (e2) throw e2;
-    if (!p) { toast('No encontré al paciente de ese informe.'); return; }
-    seleccionar({ id: p.id, dni: p.dni, nombre: p.nombre, fecha_nacimiento: p.fecha_nacimiento,
-                  vald_profile_id: p.vald_profile_id, origen: 'puntobio', sexo: null });
-    // Lo que se guardó al enviarlo: así al firmar va la evolución y el control de números
-    ultimaGeneracion = r.generacion || null;
-    ultimaEvaluacion = { datos: { fechaEvaluacion: r.fecha_vald || '' } };
-    ultimoCuerpoIA = r.cuerpo_ia || '';
-    ultimoTextoDocs = r.texto_docs || '';
-    pendienteActual = r;
-    mostrarBorradores(r.informe || '', r.nota || '');
-    const cont = document.getElementById('valdBorrador');
-    const aviso = document.createElement('div');
-    aviso.style.cssText = 'margin-bottom:10px; padding:10px 12px; border-radius:10px; background:#eff6ff; color:#1e3a8a; font-size:13px;';
-    aviso.innerHTML = '📨 Informe procesado por <b>' + escapeHtml(r.autor_nombre || '—') + '</b>. Leelo, corregí lo que haga falta y firmalo: recién ahí se guarda en la HC.';
-    cont.prepend(aviso);
-    cont.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } catch (e) {
-    toast('No se pudo abrir: ' + (e.message || e));
-  }
-}
-
-async function descartarPendiente(id) {
-  if (!confirm('¿Descartar este informe? No se guarda en la HC. Queda registrado como descartado.')) return;
-  if (!usuarioActual) await detectarUsuario();
-  const { error } = await sb.from('biolab_informes_pendientes')
-    .update({ estado: 'descartado', resuelto_en: new Date().toISOString(), resuelto_por_email: (usuarioActual && usuarioActual.email) || null })
-    .eq('id', id);
-  if (error) { toast('No se pudo descartar: ' + error.message); return; }
-  if (pendienteActual && pendienteActual.id === id) pendienteActual = null;
-  toast('Informe descartado.');
-  cargarPendientesFirma();
-}
-
-detectarUsuario().then(cargarPendientesFirma);
+detectarUsuario();
 
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
 </script>
