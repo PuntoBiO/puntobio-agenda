@@ -37,6 +37,7 @@ h1{font-size:28px;font-weight:800;margin:0 0 4px}
 .stage video,.stage canvas{width:100%;height:auto;display:block}
 .stage canvas{position:absolute;inset:0;width:100%;height:100%}
 .stage .vbox{position:relative;width:100%}
+@media (min-width:901px){ .layout > .stage{align-self:start;position:sticky;top:12px;min-height:0} }
 .stage .empty{color:#94a3b8;text-align:center;padding:30px;font-size:14px}
 .hud{position:absolute;left:12px;top:12px;right:12px;display:flex;justify-content:space-between;gap:8px;pointer-events:none}
 .pill{background:rgba(15,23,42,.78);color:#fff;border-radius:999px;padding:6px 12px;font-size:13px;font-weight:600}
@@ -789,15 +790,15 @@ function chequearPosicion() {
   const torso = Math.max(dist(cad, hom), 1)
   const ancho = Math.abs(pose[11].x - pose[12].x) / torso
   const xRel = cad.x / W
-  const [aMin, aMax] = tipo === 'costado' ? [0.30, 0.85] : [0.55, 0.88]
+  const [aMin, aMax] = (RANGO_DIST[distCam] || RANGO_DIST.normal)[tipo === 'costado' ? 'costado' : 'frente']
 
   const items = [], consejos = []
   items.push({ ok: cabeza, txt: 'Cabeza en cuadro' }); if (!cabeza) consejos.push('Se corta la cabeza: alejá el iPad o bajalo un poco')
   items.push({ ok: pies, txt: 'Pies en cuadro' }); if (!pies) consejos.push(zoomMin() < 1 && zoomActual() > zoomMin() + 0.05 ? 'No veo los pies: bajá el zoom a ' + String(zoomMin()).replace('.', ',') + '× o alejá el iPad' : 'No veo los pies: alejá el iPad (2,5–3 m) o inclinalo hacia abajo')
   const distOk = cabeza && pies && alto >= aMin && alto <= aMax
   items.push({ ok: distOk, txt: 'Distancia' })
-  if (cabeza && pies && alto < aMin) consejos.push('Está muy lejos: acercá el iPad')
-  if (cabeza && pies && alto > aMax) consejos.push('Está muy cerca: alejá el iPad')
+  if (cabeza && pies && alto < aMin) consejos.push(distCam === 'lejos' ? 'Está muy lejos: acercá la cámara' : 'Está muy lejos: acercá la cámara o elegí Distancia "Lejos"')
+  if (cabeza && pies && alto > aMax) consejos.push(distCam === 'cerca' ? 'Está muy cerca: alejá la cámara' : 'Está muy cerca: alejá la cámara o elegí Distancia "Cerca"')
   const centOk = xRel > 0.33 && xRel < 0.67
   items.push({ ok: centOk, txt: 'Centrado' })
   if (!centOk) {
@@ -1124,13 +1125,13 @@ function chequeoEncuadre(P, W, H, idx, opts = {}) {
   if (vis.length >= 2) {
     const xs = vis.map(i => P[i].x), ys = vis.map(i => P[i].y), cx = (Math.min(...xs) + Math.max(...xs)) / 2
     const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) / Math.max(W, H)
-    const cerca = span >= (idx ? 0.12 : 0.35), lejos = span <= 0.97
+    const cerca = span >= (idx ? 0.12 : (distCam === 'lejos' ? 0.22 : 0.35)), lejos = span <= 0.98
     items.push({ ok: cerca && lejos, txt: 'Distancia correcta' })
     if (!cerca) consejo = consejo || 'Acercá el iPad: el paciente se ve muy chico'
     if (!lejos) consejo = consejo || 'Alejá el iPad: está muy cerca'
     const centrado = cx > W * 0.2 && cx < W * 0.8
     items.push({ ok: centrado, txt: 'Centrado' })
-    const ideal = idx ? 0.45 : 0.68, tol = idx ? 0.33 : 0.29
+    const ideal = idx ? 0.45 : (distCam === 'cerca' ? 0.80 : distCam === 'lejos' ? 0.55 : 0.68), tol = idx ? 0.33 : 0.29
     var geo = { dx: (cx / W - 0.5) / 0.3, dd: (span - ideal) / tol }
     if (!centrado) consejo = consejo || (cx < W * 0.2 ? 'Corré el iPad hacia la izquierda del paciente' : 'Corré el iPad hacia la derecha del paciente')
   }
@@ -5928,9 +5929,13 @@ const ORIENT_OPC = {
   triplehop: { v: 'lejos, con la cámara 0,5×, que entre toda la alfombra', h: 'a 3–4 m: que entre toda la alfombra' },
   crossover: { v: 'lejos, con la cámara 0,5×, que entre toda la alfombra', h: 'a 3–4 m: que entre toda la alfombra' },
 }
+// DISTANCIA de la cámara: Cerca (el paciente llena casi toda la imagen) · Normal · Lejos (el paciente se ve más chico)
+let distCam = (() => { try { return localStorage.getItem('testbiolab_dist') || 'normal' } catch (e) { return 'normal' } })()
+const RANGO_DIST = { cerca: { frente: [0.62, 0.97], costado: [0.40, 0.97] }, normal: { frente: [0.55, 0.88], costado: [0.30, 0.85] }, lejos: { frente: [0.35, 0.80], costado: [0.20, 0.75] } }
+const ES_COMPU = !/iPhone|iPad|Android/i.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent))
 // orientación de TODO Test BiOLAB: por defecto HORIZONTAL (apaisado), así se ve completo en el TV con el adaptador HDMI.
 // Se puede pasar a VERTICAL desde cualquier test (queda recordado en ese iPad / celu).
-const orientDe = () => { try { return localStorage.getItem('testbiolab_orient_global') || 'h' } catch (e) { return 'h' } }
+const orientDe = () => { if (ES_COMPU) return 'h'; try { return localStorage.getItem('testbiolab_orient_global') || 'h' } catch (e) { return 'h' } }
 // "Cómo se ubica": dónde va el iPad y cómo se pone el paciente, sacado de los pasos del propio test
 function pasosDe(t) { return [...String(t.info || '').matchAll(/<li>([\s\S]*?)<\/li>/g)].map(m => m[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()) }
 function ubicacionDe(t) {
@@ -5994,7 +5999,8 @@ function renderTest(id, opts = {}) {
         <div class="info">${actual.info}</div>
         <div class="row">
           <label>Cámara <select id="selCam"><option value="environment">Trasera</option><option value="user">Frontal</option></select></label>
-          <label>Orientación <select id="selOrient"><option value="h" ${orientDe() === 'h' ? 'selected' : ''}>Horizontal (TV)</option><option value="v" ${orientDe() === 'v' ? 'selected' : ''}>Vertical</option></select></label>
+          <label>Distancia <select id="selDist"><option value="cerca" ${distCam === 'cerca' ? 'selected' : ''}>Cerca (el paciente llena la imagen)</option><option value="normal" ${distCam === 'normal' ? 'selected' : ''}>Normal</option><option value="lejos" ${distCam === 'lejos' ? 'selected' : ''}>Lejos (se ve más chico)</option></select></label>
+          ${ES_COMPU ? '<label style="color:#64748b">Orientación: la cámara de la compu filma siempre apaisada (horizontal). Lo que cambia es dónde ponés la cámara, no la imagen.</label>' : ''}<label style="${ES_COMPU ? 'display:none' : ''}">Orientación <select id="selOrient"><option value="h" ${orientDe() === 'h' ? 'selected' : ''}>Horizontal (TV)</option><option value="v" ${orientDe() === 'v' ? 'selected' : ''}>Vertical</option></select></label>
           <label id="zoomBox" style="display:none">Zoom <input id="zoom" type="range" style="width:110px;vertical-align:middle"> <span id="zoomVal" class="mono"></span></label>
           ${['salto', 'hop', 'triplehop', 'crossover'].includes(id) ? `<label>Metros entre las dos marcas <input id="distRef" type="number" step="0.5" min="0.5" value="1"> m</label>` : ''}
           ${['hop', 'triplehop', 'crossover', 'sidehop'].includes(id) ? `<label>Pierna que salta <select id="selLado"><option value="D">Derecha</option><option value="I">Izquierda</option></select></label>` : ''}
@@ -6046,6 +6052,8 @@ function renderTest(id, opts = {}) {
     try { localStorage.setItem('testbiolab_cam', camId) } catch (er) {}
     if (stream) await prenderCamara()
   }
+  if ($('selDist')) $('selDist').onchange = (e) => { distCam = e.target.value; try { localStorage.setItem('testbiolab_dist', distCam) } catch (er) {}; posOkFrames = 0
+    setEstado(distCam === 'cerca' ? 'Distancia CERCA: el paciente puede llenar casi toda la imagen (cabeza y pies tienen que seguir viéndose).' : distCam === 'lejos' ? 'Distancia LEJOS: acepta al paciente más chico en la imagen.' : 'Distancia NORMAL.', 'ok') }
   if ($('selOrient')) $('selOrient').onchange = (e) => { try { localStorage.setItem('testbiolab_orient_global', e.target.value) } catch (er) {}
     if ($('vempty')) $('vempty').innerHTML = ubicacionHTML(actual); const tip = $('ubitip'); if (tip) tip.innerHTML = ubicacionCorta(actual) + ' <span style="opacity:.7">(tocá para ocultar)</span>'
     setEstado(e.target.value === 'h' ? 'Orientación HORIZONTAL (vale para todos los tests): poné el iPad apaisado y tocá Preparar cámara (o reiniciá si ya estaba prendida).' : 'Orientación VERTICAL (vale para todos los tests).', 'ok') }
