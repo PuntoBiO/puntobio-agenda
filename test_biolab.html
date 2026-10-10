@@ -234,8 +234,18 @@ body.modoTV .mando .estado{font-size:clamp(18px,2vw,28px) !important}
 body.modoTV .mando .btns > button{font-size:clamp(15px,1.5vw,22px) !important;padding:10px 16px !important}
 body.modoTV .dianaBox{transform:scale(1.35);transform-origin:top right}
 .logosTV{display:none}
-body.modoTV .logosTV{display:flex;position:fixed;left:16px;bottom:calc(var(--mandoH,78px) + 12px);z-index:46;gap:14px;align-items:center;background:rgba(255,255,255,.92);border-radius:16px;padding:8px 16px;pointer-events:none}
-body.modoTV .logosTV img{height:clamp(30px,3.6vw,54px);width:auto;display:block}
+.nivelBox{position:absolute;inset:0;z-index:5;pointer-events:none}
+.nivelBox .nivGrid{position:absolute;inset:0;width:100%;height:100%}
+.nivBurbuja{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:rgba(8,20,40,.82);color:#fff;border-radius:16px;padding:10px 14px;display:flex;align-items:center;gap:12px;font:700 14px Manrope,sans-serif;max-width:86%}
+.nivBurbuja.sinSensor .nivAro{display:none}
+.nivAro{width:64px;height:64px;border:2px solid #f8fafc;border-radius:50%;position:relative;flex:none;background:radial-gradient(circle,rgba(255,255,255,.08) 0 30%,transparent 31%)}
+.nivAro::before,.nivAro::after{content:'';position:absolute;background:rgba(255,255,255,.35)}
+.nivAro::before{left:50%;top:6px;bottom:6px;width:1px}.nivAro::after{top:50%;left:6px;right:6px;height:1px}
+.nivPunto{position:absolute;left:50%;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fbbf24;transition:transform .08s linear}
+body.modoTV .nivBurbuja{font-size:clamp(16px,1.8vw,26px)}
+body.modoTV .logosTV{display:flex;flex-direction:column;position:fixed;left:24px;bottom:130px;z-index:46;gap:16px;align-items:flex-start;pointer-events:none;opacity:.75}
+body.modoTV .logosTV img{height:clamp(22px,2.4vw,36px);width:auto;display:block;filter:brightness(0) invert(1)}
+body.modoTV .stage .pill{display:none}
 /* celular acostado (apaisado): el video manda */
 @media (max-height:500px) and (orientation:landscape){
   .layout > .stage.fija{max-height:78vh}
@@ -673,7 +683,12 @@ try { navigator.mediaDevices.addEventListener('devicechange', () => llenarCamara
 async function llenarCamaras() {
   try {
     camaras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput')
-    const sel = $('selCam'); if (!sel || !camaras.length || !camaras[0].label) return
+    const sel = $('selCam'); if (!sel || !camaras.length) return
+    if (!camaras[0].label) {        // Safari no da los nombres hasta pedir permiso: se ofrece buscarlas
+      sel.innerHTML = (ES_COMPU ? '<option value="environment">Cámara por defecto</option>' : '<option value="environment">Trasera</option><option value="user">Frontal</option>')
+        + `<option value="buscar">🔍 Ver todas las cámaras (${camaras.length})…</option>`
+      sel.value = ES_COMPU ? 'environment' : facing; return
+    }
     const actualId = stream && stream.getVideoTracks()[0].getSettings().deviceId
     sel.innerHTML = camaras.map((c, i) => `<option value="${i}">${c.label.replace(/</g, '')}</option>`).join('')
     const i = camaras.findIndex(c => c.deviceId === (camId || actualId)); if (i >= 0) sel.value = String(i)
@@ -5976,6 +5991,48 @@ let camGiro = (() => { try { return +(localStorage.getItem('testbiolab_giro') ||
     return out
   }
 })()
+// ============================================================
+// NIVEL DE CÁMARA: en iPad / celu usa el sensor de inclinación (nivel de burbuja: de costado y adelante-atrás).
+// En la compu (webcam sin sensor) muestra una grilla para alinear con un marco de puerta o una línea del piso.
+// ============================================================
+let nivelOn = false, nivelEl = null, nivelOk = false, nivelEscucha = null
+async function alternarNivel() {
+  nivelOn = !nivelOn
+  document.querySelectorAll('.btnNivel').forEach(b => b.textContent = nivelOn ? '✕ Ocultar nivel' : '📐 Nivel')
+  if (nivelEl) { nivelEl.remove(); nivelEl = null }
+  if (nivelEscucha) { window.removeEventListener('deviceorientation', nivelEscucha); nivelEscucha = null }
+  if (!nivelOn) return
+  const cont = document.querySelector('.layout > .stage .vbox') || document.querySelector('.layout > .stage'); if (!cont) return
+  nivelEl = document.createElement('div'); nivelEl.className = 'nivelBox'
+  nivelEl.innerHTML = `<svg class="nivGrid" viewBox="0 0 100 100" preserveAspectRatio="none"><g stroke="rgba(255,255,255,.35)" stroke-width=".25" vector-effect="non-scaling-stroke">
+      <line x1="33.3" y1="0" x2="33.3" y2="100"/><line x1="66.6" y1="0" x2="66.6" y2="100"/><line x1="0" y1="33.3" x2="100" y2="33.3"/><line x1="0" y1="66.6" x2="100" y2="66.6"/></g>
+      <g stroke="rgba(125,211,252,.9)" stroke-width=".5" vector-effect="non-scaling-stroke"><line x1="50" y1="0" x2="50" y2="100"/><line x1="0" y1="50" x2="100" y2="50"/></g></svg>
+    <div class="nivBurbuja"><div class="nivAro"><div class="nivPunto"></div></div><div class="nivTxt">Buscando el sensor…</div></div>`
+  cont.appendChild(nivelEl)
+  const txt = nivelEl.querySelector('.nivTxt'), punto = nivelEl.querySelector('.nivPunto'), aro = nivelEl.querySelector('.nivAro')
+  let hayDato = false
+  nivelEscucha = (e) => {
+    if (e.beta == null || e.gamma == null) return
+    hayDato = true
+    const ang = (screen.orientation && screen.orientation.angle) || window.orientation || 0
+    const apaisado = Math.abs(ang) === 90 || ang === 270
+    // inclinación de costado (roll) y hacia adelante/atrás (pitch) con el aparato parado mirando al paciente
+    const roll = apaisado ? (ang === 90 ? e.beta : -e.beta) : e.gamma
+    const pitch = apaisado ? Math.abs(e.gamma) - 90 : e.beta - 90
+    const ok = Math.abs(roll) < 1.5 && Math.abs(pitch) < 3
+    const cl = (v) => Math.max(-1, Math.min(1, v / 10))
+    punto.style.transform = `translate(${cl(roll) * 26}px, ${cl(-pitch) * 26}px)`
+    aro.style.borderColor = ok ? '#22c55e' : '#f8fafc'; punto.style.background = ok ? '#22c55e' : '#fbbf24'
+    txt.innerHTML = ok ? '✓ Cámara nivelada' : `De costado ${roll > 0 ? '→' : '←'} ${Math.abs(roll).toFixed(1).replace('.', ',')}° · ${pitch > 0 ? 'mira hacia arriba' : 'mira hacia abajo'} ${Math.abs(pitch).toFixed(1).replace('.', ',')}°`
+    if (ok && !nivelOk) { try { sonidoCorrecto() } catch (er) {} }
+    nivelOk = ok
+  }
+  try { if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') await DeviceOrientationEvent.requestPermission() } catch (e) {}
+  window.addEventListener('deviceorientation', nivelEscucha)
+  setTimeout(() => { if (!hayDato && txt.isConnected) { nivelEl.querySelector('.nivBurbuja').classList.add('sinSensor')
+    txt.innerHTML = 'Esta cámara no tiene sensor de nivel: alineá la línea vertical celeste con el marco de una puerta o una esquina, y la horizontal con el zócalo. Para más precisión, poné un nivel físico sobre la cámara.' } }, 1500)
+}
+window.alternarNivel = alternarNivel
 // DISTANCIA de la cámara: Cerca (el paciente llena casi toda la imagen) · Normal · Lejos (el paciente se ve más chico)
 let distCam = (() => { try { return localStorage.getItem('testbiolab_dist') || 'normal' } catch (e) { return 'normal' } })()
 const RANGO_DIST = { cerca: { frente: [0.62, 0.97], costado: [0.40, 0.97] }, normal: { frente: [0.55, 0.88], costado: [0.30, 0.85] }, lejos: { frente: [0.35, 0.80], costado: [0.20, 0.75] } }
@@ -6008,6 +6065,7 @@ function ubicacionHTML(t) {
 function ubicacionCorta(t) { const u = ubicacionDe(t); return `📱 ${esc(u.ipad)}${u.paciente ? ' · 🧍 ' + esc(u.paciente) : ''}` }
 
 function renderTest(id, opts = {}) {
+  if (nivelOn) alternarNivel()
   setTimeout(aplicarModoTV, 0)
   resetSeguimiento(); sinGuardar = false; tocado = false
   if (!puedeEvaluar()) {
@@ -6072,6 +6130,7 @@ function renderTest(id, opts = {}) {
           <button class="b dan" id="btnDetener" disabled>${id === 'equilibrio' ? 'Se apoyó / cortar' : id === 'fsd' ? 'Cerrar esta pierna' : id === 'ohs' ? 'Cerrar esta vista' : id === 'squatmono' ? 'Cerrar esta pierna' : id === 'puente' ? 'Bajó / cortar' : id === 'estocada' ? 'Terminar' : ['pushup', 'pullup', 'sidehop', 'ckcuest', 'alcance'].includes(id) ? 'Terminar' : id === 'unipodal' ? 'Cortar' : 'Detener a mano'}</button>
           ${['marcha4', 'marcha4r', 'sprint10', 'salto', 'hop', 'triplehop', 'crossover', 'alcance', 'sidehop'].includes(id) ? `<button class="b" id="btnLineas" disabled>Marcar líneas de nuevo</button>` : ''}
           <button class="b" id="btnReiniciar">Reiniciar test</button>
+          <button class="b btnNivel" onclick="alternarNivel()">📐 Nivel</button>
           <button class="b btnModoTV" onclick="alternarModoTV()">${modoTV ? '✕ Salir del modo TV' : '📺 Modo TV'}</button>
         </div>
         <button class="lnk" id="btnForzar" style="display:none">Empezar sin verificar la posición</button>
@@ -6098,6 +6157,10 @@ function renderTest(id, opts = {}) {
   }
   $('selCam').onchange = async (e) => {
     const val = e.target.value
+    if (val === 'buscar') {                 // pide permiso un instante para conocer los nombres de todas las cámaras
+      try { const t = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); t.getTracks().forEach(x => x.stop()) } catch (er) { alert('No se pudo acceder a las cámaras: revisá el permiso de cámara del navegador.') }
+      await llenarCamaras(); setEstado('Elegí la cámara de la lista.', 'ok'); return
+    }
     if (val === 'environment' || val === 'user') { facing = val; camId = '' }
     else { const c = camaras[parseInt(val)]; if (c) camId = c.deviceId }
     try { localStorage.setItem('testbiolab_cam', camId) } catch (er) {}
