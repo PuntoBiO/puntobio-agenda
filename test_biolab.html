@@ -3425,7 +3425,7 @@ const DETECTORES = {
     d.empezar = async () => {
       if (d.idx >= NV) return
       d.autoArmar = true                       // las vistas siguientes arrancan solas
-      d.muestras = []; d.base = null; d.reps = 0; d.abajo = false; d.maxBaja = 0
+      d.muestras = []; d.base = null; d.reps = 0; d.abajo = false; d.maxBaja = 0; d.hBaja = []; d.flexMax = 0; d.tUltRep = 0; d.malos = 0
       const vid = vistaId()
       d.mx = vid === 'frente' ? { valgoD: 0, valgoI: 0, varoD: 0, varoI: 0, abdD: 0, abdI: 0, pesoD: 0, pesoI: 0 }
            : vid === 'perfil' ? { tibia: 0, brazos: 0 } : { retroD: 0, retroI: 0, pesoD: 0, pesoI: 0 }
@@ -3451,8 +3451,17 @@ const DETECTORES = {
         return
       }
       if (d.fase !== 'midiendo') return
+      // solo cuenta si se ve bien la pierna (de perfil, la que da a la cámara): un cuadro dudoso no suma nada
+      const [hh, kk, aa] = ladoVisible()
+      const verPierna = vistaId() === 'perfil' ? [hh, kk, aa].every(i => pose[i].v > 0.6) : [23, 24, 25, 26, 27, 28].every(i => pose[i].v > 0.5)
+      if (!verPierna) { d.malos = (d.malos || 0) + 1; if (d.malos > 20 && d.abajo) { d.abajo = false; d.flexMax = 0 } return }
+      d.malos = 0
       const m = medir(), b = d.base
-      const baja = (m.cadY - b.cadY) / b.pierna
+      const bajaCruda = (m.cadY - b.cadY) / b.pierna
+      d.hBaja = (d.hBaja || []).concat(bajaCruda).slice(-5)                    // mediana de 5 cuadros: saca los saltos del detector
+      const baja = d.hBaja.slice().sort((x, y) => x - y)[Math.floor(d.hBaja.length / 2)]
+      const flexRod = 180 - angulo3(pose[hh], pose[kk], pose[aa])               // flexión real de rodilla
+      if (d.abajo) d.flexMax = Math.max(d.flexMax || 0, flexRod)
       if (baja > d.maxBaja + 0.01 && baja > U.abajo) { d.maxBaja = baja; sacarFoto(VISTAS[d.idx]) }   // foto en lo más profundo
       if (baja > U.abajo) {                       // parte baja de la sentadilla: acá se juzga
         if (vistaId() === 'posterior') {
@@ -3473,9 +3482,15 @@ const DETECTORES = {
           d.mx.brazos = Math.max(d.mx.brazos, m.brazo)
         }
       }
-      if (!d.abajo && baja > U.abajo) d.abajo = true
+      if (!d.abajo && baja > U.abajo) { d.abajo = true; d.tAbajo = performance.now(); d.flexMax = flexRod }
       if (d.abajo && baja < U.arriba) {
-        d.abajo = false; d.reps++; avisarConteo(d.reps)
+        d.abajo = false
+        // una sentadilla vale solo si la rodilla se flexionó de verdad (más de 40°), duró más de medio segundo
+        // y pasó al menos 1 s desde la anterior: así no cuenta saltos del detector ni movimientos chicos
+        const dur = performance.now() - (d.tAbajo || 0), desdeUlt = performance.now() - (d.tUltRep || 0)
+        if ((d.flexMax || 0) < 40 || dur < 500 || desdeUlt < 1000) { d.flexMax = 0; return }
+        d.tUltRep = performance.now(); d.flexMax = 0
+        d.reps++; avisarConteo(d.reps)
         setEstado(`${VISTAS[d.idx].etq}: sentadillas ${d.reps} de 5`, 'ok')
         if (d.reps >= 5) d.cerrarVista()
       }
@@ -3514,6 +3529,12 @@ const DETECTORES = {
       d.idx++; guardarProgreso(d)
       if (d.idx < NV) {
         const sig = VISTAS[d.idx]
+        setTimeout(() => { const box = document.querySelector('#mando .btns'); if (!box) return
+          document.querySelectorAll('.btnRepVista').forEach(x => x.remove())
+          const b = document.createElement('button'); b.className = 'b btnRepVista'; b.textContent = `↺ Repetir ${hecha.etq}`
+          b.onclick = () => { if (d.fase === 'midiendo') return; d.idx = Math.max(0, d.idx - 1); d.encuadre = VISTAS[d.idx].enc; delete d.fotos[VISTAS[d.idx].id]
+            b.remove(); prox(); setEstado(`Repetimos ${VISTAS[d.idx].etq}: paciente ${VISTAS[d.idx].nombre} al iPad y tocá Empezar.`, 'warn'); decir(`Repetimos ${VISTAS[d.idx].voz}`) }
+          box.appendChild(b) }, 50)
         prox(); setEstado(`${hecha.etq} lista ✓. Ahora ${sig.voz.toUpperCase()} al iPad: ${inicioAuto ? 'arranca solo cuando esté bien ubicado' : 'tocá Empezar cuando esté listo'}.`, 'ok')
         setTimeout(() => decir(`${hecha.etq} lista. Ahora ${sig.voz}.`), 900)
         setTimeout(() => { if (d.fase === 'quieto' && d.idx < NV) d.armado = true }, 4500)
