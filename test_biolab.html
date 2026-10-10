@@ -841,16 +841,34 @@ function chequearPosicion() {
     const izq = facing === 'user' ? xRel > 0.67 : xRel < 0.33
     consejos.push(izq ? 'Corré al paciente hacia el centro (está a la izquierda de la imagen)' : 'Corré al paciente hacia el centro (está a la derecha de la imagen)')
   }
+  // ROTACIÓN del paciente respecto de la cámara (grados): de frente / espaldas, por la profundidad de hombros y caderas;
+  // de perfil, por cuánto se ve el ancho de los hombros. 0° = perfecto. Se registra con la toma.
+  let giro = null
+  if (tronco && (tipo === 'frente' || tipo === 'espalda')) {
+    const g = (a, b) => Math.atan2((pose[b].z ?? 0) - (pose[a].z ?? 0), Math.abs(pose[b].x - pose[a].x) || 1) * 180 / Math.PI
+    giro = (g(11, 12) + g(23, 24)) / 2
+  } else if (tronco && tipo === 'costado') giro = Math.asin(Math.min(1, ancho / 0.8)) * 180 / Math.PI
+  if (giro != null) {
+    GIRO.h.push(giro); if (GIRO.h.length > 15) GIRO.h.shift()
+    const gm = GIRO.h.slice().sort((x, y) => x - y)[Math.floor(GIRO.h.length / 2)]
+    GIRO.ult[tipo] = Math.round(Math.abs(gm))
+    if (det && (det.fase === 'midiendo' || det.fase === 'calibrando')) GIRO.toma[tipo] = Math.round(Math.abs(gm))
+    const gOk = Math.abs(gm) <= 10
+    items.push({ ok: gOk, txt: (tipo === 'costado' ? 'Perfil a 90°' : 'Alineado con la cámara') + ` · ${Math.round(Math.abs(gm))}° de rotación` })
+    if (!gOk) consejos.push(tipo === 'costado' ? 'Está medio girado: que quede bien de perfil, a 90° de la cámara' : 'Está medio girado: que quede bien de frente a la cámara (pies y hombros mirando al lente)')
+  }
   let oriOk = tronco
   if (tipo === 'frente') { oriOk = tronco && ancho > 0.45; items.push({ ok: oriOk, txt: 'De frente a la cámara' }); if (tronco && !oriOk) consejos.push('Que se ponga de frente al iPad') }
   if (tipo === 'costado') { oriOk = tronco && ancho < 0.35; items.push({ ok: oriOk, txt: 'De perfil a la cámara' }); if (tronco && !oriOk) consejos.push(actual.id === 'tug' ? 'Ubicá la silla de costado al iPad' : 'Que se ponga de perfil al iPad') }
   if (tipo === 'espalda') { oriOk = tronco && ancho > 0.45; items.push({ ok: oriOk, txt: 'De espaldas a la cámara' }); if (tronco && !oriOk) consejos.push('Que se ponga de espaldas al iPad') }
   zona = { x0: W * 0.33, x1: W * 0.67, y0: H * 0.02, y1: H * 0.98 }
-  const ok = cabeza && pies && distOk && centOk && oriOk && items.every(i => i.txt !== 'Manos arriba en cuadro' || i.ok)
+  const giroBloquea = giro != null && GIRO.ult[tipo] > 15                 // más de 15° no deja empezar; de 10° a 15° solo avisa
+  const ok = cabeza && pies && distOk && centOk && oriOk && !giroBloquea && items.every(i => i.txt !== 'Manos arriba en cuadro' || i.ok)
   return { ok, items, consejo: consejos[0] || '' }
 }
 
 let dianaPpal = null
+const GIRO = { h: [], ult: {}, toma: {} }
 function actualizarCalibrador() {
   const chk = $('chk'), cons = $('consejo'), btn = $('btnEmpezar')
   if (!chk || !det) return
@@ -4468,6 +4486,7 @@ async function guardarResultado() {
     }
     fila.detalle = { ...fila.detalle, fotos: rutas }
   }
+  if (Object.keys(GIRO.toma).length) fila.detalle = { ...fila.detalle, rotacion_camara_grados: { ...GIRO.toma } }   // alineación registrada en la toma
   const { error } = await supabase.from('tests_biolab').insert(fila)
   if (error) { b.disabled = false; b.textContent = '💾 Reintentar guardar'; setEstado('No se guardó: ' + error.message, 'err'); return false }
   sinGuardar = false; borrarBorrador(actual.id); borrarProgreso(actual.id)
@@ -6065,6 +6084,7 @@ function ubicacionHTML(t) {
 function ubicacionCorta(t) { const u = ubicacionDe(t); return `📱 ${esc(u.ipad)}${u.paciente ? ' · 🧍 ' + esc(u.paciente) : ''}` }
 
 function renderTest(id, opts = {}) {
+  GIRO.h = []; GIRO.toma = {}
   if (nivelOn) alternarNivel()
   setTimeout(aplicarModoTV, 0)
   resetSeguimiento(); sinGuardar = false; tocado = false
