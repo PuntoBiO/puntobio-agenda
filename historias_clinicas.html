@@ -3149,11 +3149,17 @@ async function abrirSelectorPDF() {
   const adjCheckboxes = adjActual.length
     ? adjActual.map(a => {
         const fIso = fechaAdj(a);
+        // 10/10/2026: cada adjunto se puede subir o bajar; el orden de la lista es el orden en que salen en el PDF
         return `
-        <label style="display:flex; gap:10px; align-items:center; padding:8px 10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:6px; cursor:pointer;">
-          <input type="checkbox" class="pdf-adj-check" data-adj-id="${a.id}" data-fecha="${fIso}" checked>
-          <span style="flex:1; font-size:13px;">${iconoArchivo(a.tipo_mime, a.nombre_original)} ${escapeHtml(a.nombre_original)} <span style="color:var(--gris-texto); font-size:12px;">(${formatTamano(a.tamano_bytes)})</span>${fIso ? ` <span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;margin-left:4px;">📅 ${dispDia(fIso)}</span>` : ''}</span>
-        </label>`;
+        <div class="pdf-adj-row" data-fecha="${fIso}" data-creado="${escapeHtml(String(a.creado_en || ''))}" style="display:flex; gap:6px; align-items:center; padding:8px 10px; border:1px solid var(--gris-borde); border-radius:8px; margin-bottom:6px; background:#fff;">
+          <span class="pdf-adj-pos" style="min-width:22px; font-size:12px; font-weight:700; color:#0369a1;"></span>
+          <label style="display:flex; gap:10px; align-items:center; flex:1; cursor:pointer;">
+            <input type="checkbox" class="pdf-adj-check" data-adj-id="${a.id}" data-fecha="${fIso}" checked>
+            <span style="flex:1; font-size:13px;">${iconoArchivo(a.tipo_mime, a.nombre_original)} ${escapeHtml(a.nombre_original)} <span style="color:var(--gris-texto); font-size:12px;">(${formatTamano(a.tamano_bytes)})</span>${fIso ? ` <span style="display:inline-block;background:#e0f2fe;color:#0369a1;font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;margin-left:4px;">📅 ${dispDia(fIso)}</span>` : ''}</span>
+          </label>
+          <button type="button" class="btn btn-sm" title="Subir" onclick="pdfMoverAdj(this,-1)" style="padding:2px 9px;">▲</button>
+          <button type="button" class="btn btn-sm" title="Bajar" onclick="pdfMoverAdj(this,1)" style="padding:2px 9px;">▼</button>
+        </div>`;
       }).join('')
     : '<div class="obs-empty">Sin archivos adjuntos.</div>';
 
@@ -3249,8 +3255,16 @@ async function abrirSelectorPDF() {
           </div>
 
           <div class="hc-section">
-            <div class="hc-section-header">📎 Archivos adjuntos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(se incluyen dentro del mismo PDF)</span></div>
-            <div class="hc-section-body">${adjCheckboxes}</div>
+            <div class="hc-section-header">📎 Archivos adjuntos <span style="font-weight:400; font-size:12px; color:var(--gris-texto);">(se incluyen dentro del mismo PDF, en este orden)</span></div>
+            <div class="hc-section-body">
+              ${adjActual.length > 1 ? `<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:12px; color:#475569;">
+                <span>Ordenar:</span>
+                <button type="button" class="btn btn-sm" onclick="pdfOrdenarAdj('viejo')">Del más viejo al más nuevo</button>
+                <button type="button" class="btn btn-sm" onclick="pdfOrdenarAdj('nuevo')">Del más nuevo al más viejo</button>
+                <span>· o movelos uno por uno con ▲ ▼</span>
+              </div>` : ''}
+              <div id="pdfAdjLista">${adjCheckboxes}</div>
+            </div>
           </div>
 
           <div class="hc-section" style="border:2px solid #1e9fe0; background:#f0f9ff;">
@@ -3276,6 +3290,30 @@ async function abrirSelectorPDF() {
   cont.id = 'selectorPDFWrap';
   cont.innerHTML = html;
   document.body.appendChild(cont);
+  pdfNumerarAdj();
+}
+
+// 10/10/2026: orden de los adjuntos dentro del PDF (Lu elige qué ve primero el paciente)
+function pdfNumerarAdj() {
+  document.querySelectorAll('#pdfAdjLista .pdf-adj-row').forEach((r, i) => {
+    const p = r.querySelector('.pdf-adj-pos'); if (p) p.textContent = (i + 1) + '.';
+  });
+}
+function pdfMoverAdj(btn, dir) {
+  const row = btn.closest('.pdf-adj-row'); if (!row) return;
+  const lista = row.parentElement;
+  if (dir < 0 && row.previousElementSibling) lista.insertBefore(row, row.previousElementSibling);
+  else if (dir > 0 && row.nextElementSibling) lista.insertBefore(row.nextElementSibling, row);
+  pdfNumerarAdj();
+}
+function pdfOrdenarAdj(modo) {
+  const lista = document.getElementById('pdfAdjLista'); if (!lista) return;
+  const rows = Array.from(lista.querySelectorAll('.pdf-adj-row'));
+  const clave = (r) => (r.dataset.fecha || '') + '|' + (r.dataset.creado || '');
+  rows.sort((a, b) => clave(a) < clave(b) ? -1 : clave(a) > clave(b) ? 1 : 0);
+  if (modo === 'nuevo') rows.reverse();
+  rows.forEach((r) => lista.appendChild(r));
+  pdfNumerarAdj();
 }
 
 // Selección rápida en el selector de PDF: por evaluación (fecha) o todas.
@@ -3465,7 +3503,8 @@ async function generarPDF(conWhatsApp = false) {
   for (const o of obsElegidas) {
     if (o.firmado_por_email && firmasPDF[o.firmado_por_email] === undefined) firmasPDF[o.firmado_por_email] = await traerFirma(o.firmado_por_email);
   }
-  const adjElegidos = adjActual.filter(a => adjIds.includes(a.id));
+  // 10/10/2026: en el orden que quedó en la lista (▲ ▼), no en el de carga
+  const adjElegidos = adjIds.map(id => adjActual.find(a => a.id === id)).filter(Boolean);
 
   // ¿Subir esta evaluación a Mi Espacio del paciente?
   const subirEspacio = document.getElementById('pdfSubirEspacio') ? document.getElementById('pdfSubirEspacio').checked : false;
